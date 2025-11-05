@@ -30,7 +30,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [vllm, sglang, trtllm, operator]
+    needs: [vllm, sglang, trtllm, operator, deploy-test-fault-tolerance, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -290,6 +290,226 @@ jobs:
           framework: "trtllm"
           test_type: "e2e, gpu_1"
           platform_arch: ${{ matrix.platform.arch }}
+
+  deploy-operator-fault-tolerance:
+    runs-on: cpu-amd-m5-2xlarge
+    if: needs.changed-files.outputs.has_code_changes == 'true'
+    needs: [changed-files, operator]
+    env:
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+    outputs:
+      NAMESPACE: ${{ steps.deploy-operator-ft-step.outputs.namespace }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Deploy Operator
+      id: deploy-operator-ft-step
+      env:
+        BRANCH: ${{ github.ref_name }}
+      run: |
+        set -x
+
+        # Set namespace for fault tolerance tests
+        BRANCH_SANITIZED="${BRANCH/\//-}"
+        NAMESPACE="gh-job-id-${{ github.run_id }}-${BRANCH_SANITIZED}-ft-tests"
+        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+
+        # Setup kubeconfig
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+        kubectl config current-context
+
+        # Create a namespace for this job
+        echo "Creating an ephemeral namespace..."
+        kubectl create namespace $NAMESPACE
+        echo "Attaching the labels for secrets and cleanup"
+        kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+
+        # Set the namespace as default
+        kubectl config set-context --current --namespace=$NAMESPACE
+
+        # Check if Istio is installed
+        kubectl get pods -n istio-system
+        # Check if default storage class exists
+        kubectl get storageclass
+
+        # Install Helm chart
+        export VIRTUAL_ENV=/opt/dynamo/venv
+        export KUBE_NS=$NAMESPACE
+        export ISTIO_ENABLED=true
+        export ISTIO_GATEWAY=istio-system/ingress-alb
+        export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
+        export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
+
+        # Install dynamo env secrets
+        kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
+        # Create docker pull secret for operator image
+        kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
+        # Install helm dependencies
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        cd deploy/cloud/helm/platform/
+        helm dep build .
+
+        # Give namespace time to fully initialize
+        sleep 5
+
+        # Install platform with namespace restriction for single profile testing
+        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+          --timeout 10m \
+          --wait \
+          --set dynamo-operator.namespaceRestriction.enabled=true \
+          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+          --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
+          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+
+        # Wait for all deployments to be ready
+        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+
+  deploy-test-fault-tolerance:
+    runs-on: cpu-amd-m5-2xlarge
+    if: needs.changed-files.outputs.has_code_changes == 'true'
+    needs: [changed-files, deploy-operator-fault-tolerance, vllm, trtllm, sglang]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      # Run matrix jobs sequentially since they share a namespace
+      max-parallel: 1
+      matrix:
+        framework:
+          - { name: vllm, test_scenario: vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
+          - { name: trtllm, test_scenario: trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
+          - { name: sglang, test_scenario: sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
+    name: deploy-test-fault-tolerance (${{ matrix.framework.name }})
+    env:
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Setup Kubeconfig
+        env:
+          NAMESPACE: ${{ needs.deploy-operator-fault-tolerance.outputs.NAMESPACE }}
+        run: |
+          set -x
+          # Setup kubeconfig
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+          chmod 600 .kubeconfig
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+          kubectl config get-contexts
+      - name: Run Fault Tolerance Tests
+        env:
+          NAMESPACE: ${{ needs.deploy-operator-fault-tolerance.outputs.NAMESPACE }}
+        run: |
+          set -x
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE
+          export FRAMEWORK=${{ matrix.framework.name }}
+          export IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
+
+          echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
+          echo "Using namespace: $NAMESPACE"
+          echo "Using image: $IMAGE"
+
+          # Create a test pod with the framework image
+          kubectl run fault-tolerance-test-${FRAMEWORK} \
+            --image=${IMAGE} \
+            --restart=Never \
+            --namespace=${NAMESPACE} \
+            --overrides='{"spec":{"containers":[{"name":"test","image":"'${IMAGE}'","command":["sleep","infinity"],"volumeMounts":[{"name":"kubeconfig","mountPath":"/root/.kube"}]}],"volumes":[{"name":"kubeconfig","emptyDir":{}}]}}' \
+            --timeout=5m
+
+          # Wait for pod to be ready
+          kubectl wait --for=condition=Ready pod/fault-tolerance-test-${FRAMEWORK} -n ${NAMESPACE} --timeout=300s
+
+          # Copy kubeconfig and test code to the pod
+          kubectl cp .kubeconfig ${NAMESPACE}/fault-tolerance-test-${FRAMEWORK}:/root/.kube/config
+          kubectl cp tests ${NAMESPACE}/fault-tolerance-test-${FRAMEWORK}:/workspace/tests
+
+          # Set proper permissions on kubeconfig
+          kubectl exec -n ${NAMESPACE} fault-tolerance-test-${FRAMEWORK} -- chmod 600 /root/.kube/config
+
+          # Run pytest inside the container
+          kubectl exec -n ${NAMESPACE} fault-tolerance-test-${FRAMEWORK} -- bash -c "
+            export KUBECONFIG=/root/.kube/config && \
+            cd /workspace && \
+            pytest tests/fault_tolerance/deploy/ \
+              -m 'k8s and fault_tolerance' \
+              -k '${{ matrix.framework.test_scenario }}' \
+              -s -v \
+              --namespace ${NAMESPACE} \
+              --image ${IMAGE} \
+              --client-type legacy
+          "
+
+          TEST_EXIT_CODE=$?
+
+          # Cleanup test pod
+          kubectl delete pod fault-tolerance-test-${FRAMEWORK} -n ${NAMESPACE} || true
+
+          exit $TEST_EXIT_CODE
+      - name: Cleanup DynamoGraphDeployments
+        if: always()
+        timeout-minutes: 5
+        env:
+          NAMESPACE: ${{ needs.deploy-operator-fault-tolerance.outputs.NAMESPACE }}
+        run: |
+          set -x
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE
+
+          # For debugging purposes, list all the resources before we delete
+          kubectl get all
+
+          echo "Deleting DynamoGraphDeployments for this test in namespace $NAMESPACE..."
+          kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+
+  cleanup-fault-tolerance:
+    runs-on: cpu-amd-m5-2xlarge
+    if: always()
+    needs: [changed-files, deploy-operator-fault-tolerance, deploy-test-fault-tolerance]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup Kubeconfig
+      env:
+        NAMESPACE: ${{ needs.deploy-operator-fault-tolerance.outputs.NAMESPACE }}
+      run: |
+        set -x
+        # Setup kubeconfig
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+        kubectl config current-context
+    - name: Cleanup
+      timeout-minutes: 5
+      env:
+        NAMESPACE: ${{ needs.deploy-operator-fault-tolerance.outputs.NAMESPACE }}
+      run: |
+        set -x
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE
+
+        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+        chmod 600 .kubeconfig
+        export KUBECONFIG=$(pwd)/.kubeconfig
+        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+
+        # For debugging purposes, list all the resources before we uninstall
+        kubectl get all
+
+        echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
+        kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+
+        # Uninstall the helm chart
+        helm ls
+        helm uninstall dynamo-platform --namespace $NAMESPACE || true
+
+        echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
+        kubectl delete namespace $NAMESPACE || true
+        echo "Namespace $NAMESPACE completed."
 
   # Upload metrics for this workflow and all its jobs
   upload-workflow-metrics:
