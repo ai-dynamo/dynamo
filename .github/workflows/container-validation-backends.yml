@@ -395,7 +395,7 @@ jobs:
 
           # Install core dependencies needed for tests (without full project install)
           pip install -r container/deps/requirements.test.txt
-          pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
+          pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic prometheus_client
 
           # Add project source to PYTHONPATH for test imports
           export PYTHONPATH=$(pwd):$(pwd)/components/src:$PYTHONPATH
