@@ -55,6 +55,7 @@ runs:
         set +e  # Don't exit on test failures
 
         docker run --runtime=nvidia --rm --gpus all -w /workspace \
+          --user "$(id -u):$(id -g)" \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \

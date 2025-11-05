@@ -358,7 +358,7 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && [ `id -u dynamo` -eq 1000 ] \
     && [ `id -g dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache \
-    && chown -R dynamo:dynamo /opt/dynamo /home/dynamo \
+    && chown -R dynamo:dynamo /opt/dynamo /home/dynamo /workspace \
     && chmod 2775 /home/dynamo/.cache
 
 # Switch to dynamo user
