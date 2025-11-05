@@ -17,6 +17,7 @@ from tests.utils.payload_builder import (
     chat_payload_default,
     completion_payload_default,
     metric_payload_default,
+    multimodal_payload_default,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,17 @@ trtllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+        ],
+    ),
+    "disaggregated_multimodal": TRTLLMConfig(
+        name="disaggregated_multimodal",
+        directory=trtllm_dir,
+        script_name="disagg_multimodal.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm_marker, pytest.mark.multimodal],
+        model="Qwen/Qwen2-VL-7B-Instruct",
+        models_port=8000,
+        request_payloads=[
+            multimodal_payload_default()
         ],
     ),
 }
