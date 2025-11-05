@@ -37,9 +37,9 @@ set -e
 # Warmup the model with a sweep of concurrencies
 warmup_isl=$chosen_isl
 warmup_osl=$chosen_osl
-warmup_prompts=10
+warmup_prompts=5
 warmup_req_rate=250
-warmup_concurrency_list=(1 4 8 32 64 128)
+warmup_concurrency_list=(1 4 8 32 64 128 256 1024 4096)
 
 for warmup_concurrency in "${warmup_concurrency_list[@]}"
 do
