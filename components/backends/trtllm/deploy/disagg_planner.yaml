@@ -57,7 +57,7 @@ spec:
             - --environment=kubernetes
             - --backend=trtllm
             - --adjustment-interval=60
-            - --profile-results-dir=/data/profiling_results
+            - --profile-results-dir=/data
             - --prometheus-port=9085
     TRTLLMDecodeWorker:
       dynamoNamespace: trtllm-disagg-planner
