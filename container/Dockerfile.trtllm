@@ -133,20 +133,20 @@ RUN cd /opt/dynamo/wheelhouse/ && \
     ls -lah  && \
     ls -lah nixl/ && \
     pip list &&\
+    # TRTLLM's NIXL installaion doesn't include NIXL python package, so install it from wheelhouse
     pip install --break-system-packages --no-cache \
         ai_dynamo_runtime-*.whl \
         ai_dynamo-*.whl \
         nixl/nixl-*.whl &&\
-    # TRTLLM has its own NIXL
-    # /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     pip list
+    # TODO: install benchmarks
     # && cd /opt/dynamo/benchmarks \
     # && UV_GIT_LFS=1 uv pip install --no-cache --system --break-system-packages . \
     # && uv pip list \
     # && cd - \
     # && rm -rf /opt/dynamo/benchmarks
 
-# Install common and test dependencies
+# TODO: Install common and test dependencies
 # RUN uv pip list
 # RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
 #     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
