@@ -40,6 +40,7 @@ futures-util = { version = "0.3", optional = true }
 
 # Etcd dependencies (optional)
 etcd-client = { version = "0.17", optional = true }
+tonic = { version = "0.14", optional = true }
 
 # Libp2p dependencies (optional) - Match am-core versions
 libp2p = { version = "0.56", default-features = false, features = [
@@ -65,7 +66,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
 default = ["p2p", "etcd"]
-etcd = ["dep:etcd-client"]
+etcd = ["dep:etcd-client", "dep:tonic"]
 p2p = ["dep:libp2p", "dep:libp2p-kad", "dep:libp2p-mdns", "dep:libp2p-swarm", "dep:libp2p-identity", "dep:blake2"]
 full = ["etcd", "p2p"]
 testing-etcd = []  # Enable etcd tests (default on, disable with --no-default-features)

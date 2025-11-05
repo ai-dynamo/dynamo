@@ -25,6 +25,7 @@
 
 use anyhow::{Context, Result};
 use std::time::{Duration, Instant};
+use tonic::Code;
 
 /// Result of checking lease validity.
 ///
@@ -146,22 +147,29 @@ impl LeaseState {
         let resp = match client.lease_time_to_live(lease_id, None).await {
             Ok(resp) => resp,
             Err(e) => {
-                let err_str = e.to_string().to_lowercase();
-                // Check if error indicates lease not found or revoked
-                // Common etcd error patterns for missing/revoked leases:
-                // - "lease not found"
-                // - "requested lease not found"
-                // - "lease <id> already expired"
-                // - "etcdserver: requested lease not found"
-                if err_str.contains("not found")
-                    || err_str.contains("lease not found")
-                    || err_str.contains("already expired")
-                    || err_str.contains("requested lease not found")
-                {
-                    return LeaseValidityState::NotFound;
+                // Use structured error matching instead of fragile string matching
+                match e {
+                    etcd_client::Error::GRpcStatus(status) => {
+                        match status.code() {
+                            Code::NotFound => {
+                                // Lease not found on the server
+                                return LeaseValidityState::NotFound;
+                            }
+                            _ => {
+                                // Other gRPC errors
+                                return LeaseValidityState::CheckFailed(format!(
+                                    "gRPC error: {} (code: {:?})",
+                                    status.message(),
+                                    status.code()
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        // Non-gRPC errors (transport, IO, etc.)
+                        return LeaseValidityState::CheckFailed(e.to_string());
+                    }
                 }
-                // Other errors are check failures
-                return LeaseValidityState::CheckFailed(e.to_string());
             }
         };
 

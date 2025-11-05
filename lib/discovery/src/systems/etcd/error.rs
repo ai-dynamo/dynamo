@@ -7,6 +7,7 @@
 //! to enable smart retry logic.
 
 use std::fmt;
+use tonic::Code;
 
 /// Errors that indicate a connection issue requiring reconnection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,45 +52,50 @@ pub(crate) enum EtcdErrorClass {
 /// - **NotFound**: Key doesn't exist (expected condition for queries)
 /// - **Fatal**: All other errors (permissions, invalid request, etc.)
 pub(crate) fn classify_error(err: etcd_client::Error) -> EtcdErrorClass {
-    // Convert error to string for pattern matching
-    // etcd_client::Error doesn't expose structured error types,
-    // so we use string matching on the error message
-    let err_str = err.to_string().to_lowercase();
-
-    // Check for connection/transport errors
-    if err_str.contains("unavailable")
-        || err_str.contains("connection refused")
-        || err_str.contains("connection reset")
-        || err_str.contains("broken pipe")
-        || err_str.contains("not connected")
-    {
-        return EtcdErrorClass::Reconnectable(ReconnectableError::Unavailable);
+    // Use structured error matching instead of fragile string matching
+    match err {
+        etcd_client::Error::GRpcStatus(status) => {
+            // Classify based on gRPC status code
+            match status.code() {
+                Code::NotFound => {
+                    // Check if it's a lease not found or key not found
+                    let msg = status.message().to_lowercase();
+                    if msg.contains("lease") {
+                        EtcdErrorClass::Reconnectable(ReconnectableError::LeaseNotFound)
+                    } else {
+                        // Key not found is expected, not an error
+                        EtcdErrorClass::NotFound
+                    }
+                }
+                Code::Unavailable => EtcdErrorClass::Reconnectable(ReconnectableError::Unavailable),
+                Code::DeadlineExceeded => {
+                    EtcdErrorClass::Reconnectable(ReconnectableError::Timeout)
+                }
+                Code::Cancelled | Code::Aborted => {
+                    // Connection-related cancellations
+                    EtcdErrorClass::Reconnectable(ReconnectableError::ConnectionClosed)
+                }
+                _ => {
+                    // All other gRPC errors are fatal
+                    EtcdErrorClass::Fatal(anyhow::anyhow!(
+                        "gRPC error: {} (code: {:?})",
+                        status.message(),
+                        status.code()
+                    ))
+                }
+            }
+        }
+        etcd_client::Error::TransportError(_) => {
+            // Transport errors are reconnectable
+            EtcdErrorClass::Reconnectable(ReconnectableError::Unavailable)
+        }
+        etcd_client::Error::IoError(_) => {
+            // I/O errors are reconnectable
+            EtcdErrorClass::Reconnectable(ReconnectableError::ConnectionClosed)
+        }
+        _ => {
+            // All other errors (LeaseKeepAliveError, etc.) are fatal
+            EtcdErrorClass::Fatal(err.into())
+        }
     }
-
-    // Check for connection closed
-    if err_str.contains("connection closed")
-        || err_str.contains("connection error")
-        || err_str.contains("stream closed")
-        || err_str.contains("channel closed")
-    {
-        return EtcdErrorClass::Reconnectable(ReconnectableError::ConnectionClosed);
-    }
-
-    // Check for timeout
-    if err_str.contains("timeout") || err_str.contains("deadline exceeded") {
-        return EtcdErrorClass::Reconnectable(ReconnectableError::Timeout);
-    }
-
-    // Check for lease not found
-    if err_str.contains("lease not found") || err_str.contains("requested lease not found") {
-        return EtcdErrorClass::Reconnectable(ReconnectableError::LeaseNotFound);
-    }
-
-    // Check for key not found (this is expected, not an error)
-    if err_str.contains("key not found") {
-        return EtcdErrorClass::NotFound;
-    }
-
-    // Everything else is considered fatal
-    EtcdErrorClass::Fatal(err.into())
 }
