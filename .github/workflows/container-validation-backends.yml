@@ -409,32 +409,47 @@ jobs:
           export FRAMEWORK=${{ matrix.framework.name }}
           export IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
 
-          # Install python3-venv package if not already installed
-          sudo apt-get update && sudo apt-get install -y python3-venv
-
-          # Set up Python virtual environment and install dependencies
-          python3 -m venv venv
-          source venv/bin/activate
-          pip install --upgrade pip
-
-          # Install core dependencies needed for tests
-          pip install -r container/deps/requirements.txt
-          pip install -r container/deps/requirements.test.txt
-          pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
-
-          # Add project source to PYTHONPATH for test imports
-          export PYTHONPATH=$(pwd):$(pwd)/components/src:$PYTHONPATH
-
           echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
           echo "Using namespace: $NAMESPACE"
           echo "Using image: $IMAGE"
 
-          # Run the pytest command (note: must run from deploy/ directory where conftest.py is located)
-          pytest tests/fault_tolerance/deploy/ -m "k8s and fault_tolerance" -k "${{ matrix.framework.test_scenario }}" \
-            -s -v \
-            --namespace ${NAMESPACE} \
-            --image ${IMAGE} \
-            --client-type legacy
+          # Create a test pod with the framework image
+          kubectl run fault-tolerance-test-${FRAMEWORK} \
+            --image=${IMAGE} \
+            --restart=Never \
+            --namespace=${NAMESPACE} \
+            --overrides='{"spec":{"containers":[{"name":"test","image":"'${IMAGE}'","command":["sleep","infinity"],"volumeMounts":[{"name":"kubeconfig","mountPath":"/root/.kube"}]}],"volumes":[{"name":"kubeconfig","emptyDir":{}}]}}' \
+            --timeout=5m
+
+          # Wait for pod to be ready
+          kubectl wait --for=condition=Ready pod/fault-tolerance-test-${FRAMEWORK} -n ${NAMESPACE} --timeout=300s
+
+          # Copy kubeconfig and test code to the pod
+          kubectl cp .kubeconfig ${NAMESPACE}/fault-tolerance-test-${FRAMEWORK}:/root/.kube/config
+          kubectl cp tests ${NAMESPACE}/fault-tolerance-test-${FRAMEWORK}:/workspace/tests
+
+          # Set proper permissions on kubeconfig
+          kubectl exec -n ${NAMESPACE} fault-tolerance-test-${FRAMEWORK} -- chmod 600 /root/.kube/config
+
+          # Run pytest inside the container
+          kubectl exec -n ${NAMESPACE} fault-tolerance-test-${FRAMEWORK} -- bash -c "
+            export KUBECONFIG=/root/.kube/config && \
+            cd /workspace && \
+            pytest tests/fault_tolerance/deploy/ \
+              -m 'k8s and fault_tolerance' \
+              -k '${{ matrix.framework.test_scenario }}' \
+              -s -v \
+              --namespace ${NAMESPACE} \
+              --image ${IMAGE} \
+              --client-type legacy
+          "
+
+          TEST_EXIT_CODE=$?
+
+          # Cleanup test pod
+          kubectl delete pod fault-tolerance-test-${FRAMEWORK} -n ${NAMESPACE} || true
+
+          exit $TEST_EXIT_CODE
       - name: Cleanup DynamoGraphDeployments
         if: always()
         timeout-minutes: 5
