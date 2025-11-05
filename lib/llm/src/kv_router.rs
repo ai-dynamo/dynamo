@@ -30,6 +30,7 @@ pub mod scheduler;
 pub mod scoring;
 pub mod sequence;
 pub mod subscriber;
+mod mm_hash;
 
 pub use prefill_router::PrefillRouter;
 
