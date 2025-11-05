@@ -212,23 +212,8 @@ spec:
 
 TensorRT-LLM workers are configured through command-line arguments in the deployment YAML. Key configuration areas include:
 
-- **Disaggregation Strategy**: Control request flow with `DISAGGREGATION_STRATEGY` environment variable
 - **KV Cache Transfer**: Choose between UCX (default) or NIXL for disaggregated serving
 - **Request Migration**: Enable graceful failure handling with `--migration-limit`
-
-### Disaggregation Strategy
-
-The disaggregation strategy controls how requests are distributed between prefill and decode workers:
-
-- **`decode_first`** (default): Requests routed to decode worker first, then forwarded to prefill worker
-- **`prefill_first`**: Requests routed directly to prefill worker (used with KV routing)
-
-Set via environment variable:
-```yaml
-envs:
-  - name: DISAGGREGATION_STRATEGY
-    value: "prefill_first"
-```
 
 ## Testing the Deployment
 
