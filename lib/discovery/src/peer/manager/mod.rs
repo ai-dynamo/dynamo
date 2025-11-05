@@ -13,7 +13,7 @@ use local::LocalPeerDiscovery;
 use crate::peer::{DiscoveryQueryError, InstanceId, PeerDiscovery, PeerInfo, WorkerId};
 
 type QueryResult = Result<PeerInfo, DiscoveryQueryError>;
-type MaybeAsyncQuery = Either<Ready<QueryResult>, Shared<BoxFuture<'static, QueryResult>>>;
+type MaybeAsyncQueryResult = Either<Ready<QueryResult>, Shared<BoxFuture<'static, QueryResult>>>;
 
 /// Cache of shared query futures to deduplicate concurrent remote lookups.
 ///
@@ -67,7 +67,7 @@ impl PeerDiscoveryManager {
         })
     }
 
-    pub async fn discover_by_worker_id(&self, worker_id: WorkerId) -> MaybeAsyncQuery {
+    pub async fn discover_by_worker_id(&self, worker_id: WorkerId) -> MaybeAsyncQueryResult {
         // Fast path: check local cache
         if let Ok(peer) = self.local.discover_by_worker_id(worker_id) {
             return Either::Left(future::ready(Ok(peer)));
@@ -128,7 +128,7 @@ impl PeerDiscoveryManager {
         Either::Right(shared_future)
     }
 
-    pub async fn discover_by_instance_id(&self, instance_id: InstanceId) -> MaybeAsyncQuery {
+    pub async fn discover_by_instance_id(&self, instance_id: InstanceId) -> MaybeAsyncQueryResult {
         // Fast path: check local cache
         if let Ok(peer) = self.local.discover_by_instance_id(instance_id) {
             return Either::Left(future::ready(Ok(peer)));
@@ -185,89 +185,6 @@ impl PeerDiscoveryManager {
         Either::Right(shared_future)
     }
 }
-
-// TODO: Implement Drop for PeerDiscoveryManager
-// impl Drop for PeerDiscoveryManager {
-//     fn drop(&mut self) {
-//         if let Some(instance_id) = self.instance_id.take() {
-//             if self.local.unregister_instance(instance_id).is_err() {
-//                 tracing::error!("Failed to unregister local peer: {}", instance_id);
-//             }
-
-//             for remote in &self.remotes {
-//                 if remote.unregister_instance(instance_id).await.is_err() {
-//                     tracing::error!("Failed to unregister local peer: {}", instance_id);
-//                 }
-//             }
-//         }
-//     }
-// }
-
-// /// Simple in-memory discovery implementation for testing and single-node deployments.
-// ///
-// /// This is a thin async wrapper around `LocalPeerDiscovery` that implements the
-// /// `PeerDiscovery` trait. It's useful as a simple discovery backend or as a mock
-// /// for testing other components.
-// #[derive(Debug, Clone, Default)]
-// pub struct InMemoryDiscovery {
-//     inner: LocalPeerDiscovery,
-// }
-
-// impl InMemoryDiscovery {
-//     /// Create a new in-memory discovery instance.
-//     pub fn new() -> Self {
-//         Self::default()
-//     }
-
-//     /// Register a peer (convenience method).
-//     pub async fn register(
-//         &self,
-//         instance_id: InstanceId,
-//         worker_address: WorkerAddress,
-//     ) -> Result<(), DiscoveryError> {
-//         self.inner.register_instance(instance_id, worker_address)
-//     }
-
-//     /// Unregister a peer (convenience method).
-//     pub async fn unregister(&self, instance_id: InstanceId) -> Result<(), DiscoveryError> {
-//         self.inner.unregister_instance(instance_id)
-//     }
-// }
-
-// impl PeerDiscovery for InMemoryDiscovery {
-//     fn discover_by_worker_id(
-//         &self,
-//         worker_id: WorkerId,
-//     ) -> BoxFuture<'static, Result<PeerInfo, DiscoveryQueryError>> {
-//         let result = self.inner.discover_by_worker_id(worker_id);
-//         Box::pin(async move { result })
-//     }
-
-//     fn discover_by_instance_id(
-//         &self,
-//         instance_id: InstanceId,
-//     ) -> BoxFuture<'static, Result<PeerInfo, DiscoveryQueryError>> {
-//         let result = self.inner.discover_by_instance_id(instance_id);
-//         Box::pin(async move { result })
-//     }
-
-//     fn register_instance(
-//         &self,
-//         instance_id: InstanceId,
-//         worker_address: WorkerAddress,
-//     ) -> BoxFuture<'static, Result<(), DiscoveryError>> {
-//         let result = self.inner.register_instance(instance_id, worker_address);
-//         Box::pin(async move { result })
-//     }
-
-//     fn unregister_instance(
-//         &self,
-//         instance_id: InstanceId,
-//     ) -> BoxFuture<'static, Result<(), DiscoveryError>> {
-//         let result = self.inner.unregister_instance(instance_id);
-//         Box::pin(async move { result })
-//     }
-// }
 
 #[cfg(test)]
 mod tests {

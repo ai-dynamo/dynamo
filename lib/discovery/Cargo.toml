@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 [package]
 name = "dynamo-discovery"
 version.workspace = true
@@ -66,20 +69,11 @@ features = ["env-filter"]
 optional = true
 
 [features]
-default = ["p2p", "etcd", "testing-etcd"]
+default = ["p2p", "etcd"]
 etcd = ["dep:etcd-client"]
-p2p = ["dep:libp2p", "dep:libp2p-kad", "dep:libp2p-mdns", "dep:libp2p-swarm", "dep:libp2p-identity", "dep:blake2", ]
-http-service = ["dep:axum", "dep:tower", "dep:tower-http", "dep:hyper", "dep:reqwest", "dep:tracing-subscriber", "dep:tokio-stream", "dep:futures-util"]
-full = ["etcd", "p2p", "http-service"]
+p2p = ["dep:libp2p", "dep:libp2p-kad", "dep:libp2p-mdns", "dep:libp2p-swarm", "dep:libp2p-identity", "dep:blake2"]
+full = ["etcd", "p2p"]
 testing-etcd = []  # Enable etcd tests (default on, disable with --no-default-features)
 integration-etcd = []  # Feature flag for integration tests with real etcd (requires Docker)
+# http-service = ["dep:axum", "dep:tower", "dep:tower-http", "dep:hyper", "dep:reqwest", "dep:tracing-subscriber", "dep:tokio-stream", "dep:futures-util"]
 
-#[[bin]]
-#name = "am-discovery-service"
-#path = "src/bin/discovery_service.rs"
-#required-features = ["http-service"]
-
-#[[example]]
-#name = "worker_dev"
-#path = "examples/worker_dev.rs"
-#required-features = ["p2p"]
