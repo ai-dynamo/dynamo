@@ -1,13 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import base64
 import logging
 import os
 from dataclasses import dataclass, field
 
 import pytest
-import requests
 
 from tests.serve.common import (
     WORKSPACE_DIR,
@@ -23,12 +21,6 @@ from tests.utils.payload_builder import (
 )
 
 logger = logging.getLogger(__name__)
-
-# COCO bus image URL used for multimodal testing
-BUS_IMAGE_URL = "http://images.cocodataset.org/test2017/000000155781.jpg"
-
-# Convert COCO bus image to base64 for data URL testing (fetched once at module load)
-BUS_IMAGE_B64 = base64.b64encode(requests.get(BUS_IMAGE_URL).content).decode()
 
 
 @dataclass
@@ -125,7 +117,9 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": BUS_IMAGE_URL},
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
                     },
                 ],
                 repeat_count=1,
@@ -149,7 +143,9 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": BUS_IMAGE_URL},
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
                     },
                 ],
                 repeat_count=1,
@@ -167,29 +163,33 @@ vllm_configs = {
         delayed_start=0,
         timeout=360,
         request_payloads=[
-            # Test 1: HTTP URL (via Rust preprocessor)
+            # HTTP URL test
             chat_payload(
                 [
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": BUS_IMAGE_URL},
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
                     },
                 ],
                 repeat_count=1,
                 expected_response=["bus"],
             ),
-            # Test 2: Base64 data URL (via Rust preprocessor)
+            # Base64 data URL test (1x1 PNG inline, avoids network fetch)
             chat_payload(
                 [
-                    {"type": "text", "text": "What is in this image?"},
+                    {"type": "text", "text": "What do you see in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{BUS_IMAGE_B64}"},
+                        "image_url": {
+                            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
+                        },
                     },
                 ],
                 repeat_count=1,
-                expected_response=["bus"],
+                expected_response=[],  # Just validate no error
             ),
         ],
     ),

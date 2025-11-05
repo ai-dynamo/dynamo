@@ -6,7 +6,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Final
 
 from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
@@ -17,6 +17,12 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.image_loader import ImageLoader
+
+# Multimodal data dictionary keys
+IMAGE_URL_KEY: Final = "image_url"
+VIDEO_URL_KEY: Final = "video_url"
+URL_VARIANT_KEY: Final = "Url"
+DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -127,18 +133,18 @@ class BaseWorkerHandler(ABC):
 
         # Process image_url entries
         images = []
-        for item in mm_map.get("image_url", []):
-            if isinstance(item, dict) and "Url" in item:
-                url = item["Url"]
+        for item in mm_map.get(IMAGE_URL_KEY, []):
+            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                url = item[URL_VARIANT_KEY]
                 try:
                     # ImageLoader supports both data: and http(s): URLs with caching
                     image = await self.image_loader.load_image(url)
                     images.append(image)
                     logger.debug(f"Loaded image from URL: {url[:80]}...")
-                except Exception as e:
-                    logger.error(f"Failed to load image from {url[:80]}...: {e}")
+                except Exception:
+                    logger.exception(f"Failed to load image from {url[:80]}...")
                     raise
-            elif isinstance(item, dict) and "Decoded" in item:
+            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 # Decoded support from PRs #3971/#3988 (frontend decoding + NIXL transfer)
                 # Will contain NIXL metadata for direct memory access
                 # TODO: Implement NIXL read when PRs merge
@@ -152,7 +158,7 @@ class BaseWorkerHandler(ABC):
             logger.debug(f"Extracted {len(images)} image(s) for multimodal processing")
 
         # Handle video_url entries (future expansion)
-        if "video_url" in mm_map:
+        if VIDEO_URL_KEY in mm_map:
             logger.warning("Video multimodal data not yet supported in standard worker")
 
         return vllm_mm_data if vllm_mm_data else None
