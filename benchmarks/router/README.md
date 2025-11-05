@@ -138,9 +138,7 @@ When you launch prefill workers using `run_engines.sh --prefill`, the frontend a
 No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [KV Cache Routing documentation](../../docs/router/kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for more details.
 
 > [!Note]
-> The unified frontend with automatic prefill routing is currently only enabled for vLLM backends. For SGLang and TensorRT-LLM (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example scripts:
-> - SGLang: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh)
-> - TensorRT-LLM: [`examples/backends/trtllm/launch/disagg_router.sh`](../../examples/backends/trtllm/launch/disagg_router.sh)
+> The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh)
 
 ### Step 3: Verify Setup
 

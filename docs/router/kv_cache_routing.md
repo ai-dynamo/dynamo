@@ -94,7 +94,7 @@ await register_llm(
 ```
 
 > [!Note]
-> The unified frontend with automatic prefill routing is currently only enabled for vLLM backends. For SGLang and TensorRT-LLM (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example scripts in [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh) and [`examples/backends/trtllm/launch/disagg_router.sh`](../../examples/backends/trtllm/launch/disagg_router.sh).
+> The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh).
 
 ## Overview
 
