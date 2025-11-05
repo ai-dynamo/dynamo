@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import logging
 import os
 from dataclasses import dataclass, field
 
 import pytest
+import requests
 
 from tests.serve.common import (
     WORKSPACE_DIR,
@@ -21,6 +23,12 @@ from tests.utils.payload_builder import (
 )
 
 logger = logging.getLogger(__name__)
+
+# COCO bus image URL used for multimodal testing
+BUS_IMAGE_URL = "http://images.cocodataset.org/test2017/000000155781.jpg"
+
+# Convert COCO bus image to base64 for data URL testing (fetched once at module load)
+BUS_IMAGE_B64 = base64.b64encode(requests.get(BUS_IMAGE_URL).content).decode()
 
 
 @dataclass
@@ -104,10 +112,10 @@ vllm_configs = {
             completion_payload_default(expected_response=["joke"]),
         ],
     ),
-    "multimodal_agg_llava": VLLMConfig(
-        name="multimodal_agg_llava",
+    "multimodal_agg_llava_epd": VLLMConfig(
+        name="multimodal_agg_llava_epd",
         directory=vllm_dir,
-        script_name="agg_multimodal.sh",
+        script_name="agg_multimodal_epd.sh",
         marks=[pytest.mark.gpu_2],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
@@ -117,9 +125,7 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                        },
+                        "image_url": {"url": BUS_IMAGE_URL},
                     },
                 ],
                 repeat_count=1,
@@ -128,10 +134,10 @@ vllm_configs = {
             )
         ],
     ),
-    "multimodal_agg_qwen": VLLMConfig(
-        name="multimodal_agg_qwen",
+    "multimodal_agg_qwen_epd": VLLMConfig(
+        name="multimodal_agg_qwen_epd",
         directory=vllm_dir,
-        script_name="agg_multimodal.sh",
+        script_name="agg_multimodal_epd.sh",
         marks=[pytest.mark.gpu_2],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
@@ -143,14 +149,48 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                        },
+                        "image_url": {"url": BUS_IMAGE_URL},
                     },
                 ],
                 repeat_count=1,
                 expected_response=["bus"],
             )
+        ],
+    ),
+    "multimodal_agg_qwen": VLLMConfig(
+        name="multimodal_agg_qwen",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[pytest.mark.gpu_2],
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
+        delayed_start=0,
+        timeout=360,
+        request_payloads=[
+            # Test 1: HTTP URL (via Rust preprocessor)
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": BUS_IMAGE_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["bus"],
+            ),
+            # Test 2: Base64 data URL (via Rust preprocessor)
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{BUS_IMAGE_B64}"},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["bus"],
+            ),
         ],
     ),
     # TODO: Update this test case when we have video multimodal support in vllm official components
