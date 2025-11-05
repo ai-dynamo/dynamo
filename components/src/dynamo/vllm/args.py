@@ -326,6 +326,12 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     if not config.engine_args.enable_prefix_caching:
         return None
 
+    # There is a bug with KV events publishing when LORA is enabled.
+    # This is fixed in https://github.com/vllm-project/vllm/pull/27728 but not released yet.
+    # remove below check once newcomponents/src/dynamo/vllm/args.py vLLM version is released with the fix.
+    if config.engine_args.enable_lora:
+        return None
+
     # If user provided their own config, use that
     if c := getattr(config.engine_args, "kv_events_config"):
         logger.info(f"Using user-provided kv_events_config {c}")
