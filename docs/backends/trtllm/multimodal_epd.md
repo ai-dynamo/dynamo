@@ -57,23 +57,21 @@ The EPD flow implements a **3-worker architecture** for high-performance multimo
 - **Prefill Worker**: Handles initial context processing and KV-cache generation
 - **Decode Worker**: Performs streaming token generation
 
-## Request Flow Diagrams
-
-### Prefill-First Disaggregation Strategy
+## Request Flow Diagram
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Gateway
-    participant PrefillWorker as "Prefill Worker<br/>(AggregatedHandler)"
+    participant Frontend
+    participant PrefillWorker as "Prefill Worker<br/>(PrefillHandler)"
     participant EncodeWorker as "Encode Worker<br/>(EncodeHandler)"
     participant DecodeWorker as "Decode Worker<br/>(DecodeHandler)"
     participant NIXL as "NIXL<br/>(RDMA Transfer)"
 
-    Note over Client,NIXL: Prefill-First Strategy: Context processing first, then streaming generation
+    Note over Client,NIXL: Unified Frontend: Context processing followed by streaming generation
 
-    Client->>Gateway: POST /v1/chat/completions<br/>(multimodal request)
-    Gateway->>PrefillWorker: Route request
+    Client->>Frontend: POST /v1/chat/completions<br/>(multimodal request)
+    Frontend->>PrefillWorker: Route to prefill worker
 
     Note over PrefillWorker: Check for multimodal content
     PrefillWorker->>EncodeWorker: Send request<br/>(contains embedding paths)
@@ -90,74 +88,24 @@ sequenceDiagram
     Note over PrefillWorker: Process full context<br/>(text + multimodal embeddings)
     Note over PrefillWorker: Generate KV-cache<br/>(max_tokens=1 in prefill mode)
 
-    PrefillWorker->>DecodeWorker: Transfer KV-cache + disaggregated_params<br/>(generation_only mode)
+    PrefillWorker->>Frontend: Return prefill response<br/>(disaggregated_params)
+
+    Frontend->>DecodeWorker: Route to decode worker<br/>with disaggregated_params
 
     Note over DecodeWorker: Continue generation<br/>(streaming tokens)
-    DecodeWorker->>Gateway: Stream response chunk 1
-    Gateway->>Client: Response chunk 1
-    DecodeWorker->>Gateway: Stream response chunk 2
-    Gateway->>Client: Response chunk 2
-    DecodeWorker->>Gateway: ... (continue streaming)
-    Gateway->>Client: ... (continue streaming)
-    DecodeWorker->>Gateway: Final response + [DONE]
-    Gateway->>Client: Final response + [DONE]
-```
-
-### Decode-First Disaggregation Strategy
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Gateway
-    participant DecodeWorker as "Decode Worker<br/>(DecodeHandler)<br/>PRIMARY"
-    participant PrefillWorker as "Prefill Worker<br/>(PrefillHandler)"
-    participant EncodeWorker as "Encode Worker<br/>(EncodeHandler)"
-    participant NIXL as "NIXL<br/>(RDMA Transfer)"
-
-    Note over Client,NIXL: Decode-First Strategy: DecodeWorker orchestrates prefill then handles generation
-
-    Client->>Gateway: POST /v1/chat/completions<br/>(multimodal request)
-    Gateway->>DecodeWorker: Route request<br/>(primary worker)
-
-    Note over DecodeWorker: Check disaggregation_strategy == DECODE_FIRST
-    Note over DecodeWorker: Call remote_prefill() to trigger prefill
-
-    DecodeWorker->>PrefillWorker: Send request via remote_prefill()
-
-    Note over PrefillWorker: Check for multimodal content
-    PrefillWorker->>EncodeWorker: Send request<br/>(contains embedding paths)
-
-    Note over EncodeWorker: Load embeddings from file<br/>
-    EncodeWorker->>NIXL: Create readable operation<br/>
-    EncodeWorker->>PrefillWorker: Send metadata + NIXL info<br/>(JSON: shape, dtype, aux_data)
-
-    Note over PrefillWorker: Allocate tensor with dynamic shape
-    PrefillWorker->>NIXL: Begin read operation
-    NIXL-->>PrefillWorker: Zero-copy transfer complete<br/>
-
-    Note over PrefillWorker: Reconstruct embeddings<br/>(mm_embeddings + special_tokens + offsets)
-    Note over PrefillWorker: Process full context<br/>(text + multimodal embeddings)
-    Note over PrefillWorker: Generate prefill response<br/>(max_tokens=1 in prefill mode)
-
-    PrefillWorker->>DecodeWorker: Return prefill response<br/>(disaggregated_params)
-
-    Note over DecodeWorker: Extract disaggregated_params<br/>from prefill_response
-    Note over DecodeWorker: Update request with params<br/>request["disaggregated_params"] = response_data["disaggregated_params"]
-    Note over DecodeWorker: Begin local generation<br/>(generate_locally with prefill state)
-
-    DecodeWorker->>Gateway: Stream response chunk 1
-    Gateway->>Client: Response chunk 1
-    DecodeWorker->>Gateway: Stream response chunk 2
-    Gateway->>Client: Response chunk 2
-    DecodeWorker->>Gateway: ... (continue streaming)
-    Gateway->>Client: ... (continue streaming)
-    DecodeWorker->>Gateway: Final response + [DONE]
-    Gateway->>Client: Final response + [DONE]
+    DecodeWorker->>Frontend: Stream response chunk 1
+    Frontend->>Client: Response chunk 1
+    DecodeWorker->>Frontend: Stream response chunk 2
+    Frontend->>Client: Response chunk 2
+    DecodeWorker->>Frontend: ... (continue streaming)
+    Frontend->>Client: ... (continue streaming)
+    DecodeWorker->>Frontend: Final response + [DONE]
+    Frontend->>Client: Final response + [DONE]
 ```
 
 ## How the System Works
 
-1. **Request Processing**: Multimodal requests containing embedding file paths OR urls are routed based on disaggregation strategy
+1. **Request Processing**: Multimodal requests containing embedding file paths or URLs are routed by the frontend to prefill workers
 2. **Multimodal Loading**: EncodeWorker loads large embedding files and extracts auxiliary metadata
 3. **NIXL Transfer**: Main tensors transferred via zero-copy RDMA, small metadata via JSON for efficiency
 4. **Dynamic Allocation**: Consumer workers allocate tensors with exact shapes received from EncodeWorker
