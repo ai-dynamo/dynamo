@@ -309,6 +309,11 @@ impl Client {
         self.watch_internal(prefix, true).await
     }
 
+    /// Core watch implementation that sets up a resilient watcher for a key prefix.
+    ///
+    /// Creates a background task that maintains a watch stream with automatic reconnection
+    /// on recoverable errors. If `include_existing` is true, existing keys are included
+    /// in the initial watch events.
     async fn watch_internal(
         &self,
         prefix: impl AsRef<str> + std::fmt::Display,
@@ -350,6 +355,10 @@ impl Client {
         })
     }
 
+    /// Fetch the initial revision for watching and optionally send existing key-values.
+    ///
+    /// Returns the next revision to watch from. If `existing_kvs_tx` is provided,
+    /// all existing keys with the prefix are sent through the channel first.
     async fn get_start_revision(
         &self,
         prefix: impl AsRef<str> + std::fmt::Display,
@@ -380,6 +389,10 @@ impl Client {
         Ok(start_revision)
     }
 
+    /// Establish a new watch stream with automatic retry and reconnection.
+    ///
+    /// Attempts to create a watch stream, reconnecting to ETCD if necessary.
+    /// Retries indefinitely until successful or an unrecoverable error occurs.
     async fn new_watch_stream(
         connector: &Arc<Connector>,
         prefix: &String,
@@ -421,6 +434,11 @@ impl Client {
         }
     }
 
+    /// Monitor a watch stream and forward events to receivers.
+    ///
+    /// Returns `true` for recoverable errors (network issues, stream closure) that warrant
+    /// reconnection attempts. Returns `false` for permanent failures (protocol violations,
+    /// channel errors, no receivers) where watching should stop.
     async fn monitor_watch_stream(
         mut watch_stream: WatchStream,
         prefix: &String,
@@ -465,6 +483,10 @@ impl Client {
         }
     }
 
+    /// Process etcd events and forward them as Put/Delete watch events.
+    ///
+    /// Filters out events without key-values and transforms etcd events into
+    /// appropriate WatchEvent types for channel transmission.
     async fn process_watch_events(
         events: &[etcd_client::Event],
         tx: &mpsc::Sender<WatchEvent>,
