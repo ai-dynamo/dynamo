@@ -19,7 +19,6 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
-from enum import Enum
 from typing import AsyncGenerator, Optional, Union
 
 import torch
@@ -31,6 +30,7 @@ from dynamo._core import Context
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.trtllm.constants import DisaggregationMode, DisaggregationStrategy
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -39,7 +39,6 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
 )
-from dynamo.trtllm.constants import DisaggregationMode, DisaggregationStrategy
 
 configure_dynamo_logging()
 
@@ -165,28 +164,39 @@ class HandlerBase:
             request["stop_conditions"] = {}
         if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
             request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
-            logging.info(f"Normalized OpenAI max_tokens to stop_conditions: {request['stop_conditions']['max_tokens']}")
-        
+            logging.info(
+                f"Normalized OpenAI max_tokens to stop_conditions: {request['stop_conditions']['max_tokens']}"
+            )
+
         if "sampling_options" not in request:
             request["sampling_options"] = {}
-        if "temperature" in request and "temperature" not in request["sampling_options"]:
+        if (
+            "temperature" in request
+            and "temperature" not in request["sampling_options"]
+        ):
             request["sampling_options"]["temperature"] = request.pop("temperature")
 
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             # Save original max_tokens before modifying for prefill
             # Store original max_tokens so decode worker can restore it
             if "max_tokens" in request["stop_conditions"]:
-                request["_original_max_tokens"] = request["stop_conditions"]["max_tokens"]
-                logging.info(f"PREFILL: Saved original max_tokens: {request['_original_max_tokens']}")
+                request["_original_max_tokens"] = request["stop_conditions"][
+                    "max_tokens"
+                ]
+                logging.info(
+                    f"PREFILL: Saved original max_tokens: {request['_original_max_tokens']}"
+                )
             else:
-                logging.info(f"PREFILL: No max_tokens in request stop_conditions")
+                logging.info("PREFILL: No max_tokens in request stop_conditions")
             request["stop_conditions"]["max_tokens"] = 1
             if ep_disaggregated_params:
                 ep_disaggregated_params.request_type = "context_only"
                 disaggregated_params = ep_disaggregated_params
             else:
-                disaggregated_params = LlmDisaggregatedParams(request_type="context_only")
-            
+                disaggregated_params = LlmDisaggregatedParams(
+                    request_type="context_only"
+                )
+
         if "disaggregated_params" in request:
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 raise ValueError("Cannot provide disaggregated_params in prefill mode")
@@ -213,25 +223,36 @@ class HandlerBase:
             if "_original_max_tokens" in request:
                 if "stop_conditions" not in request:
                     request["stop_conditions"] = {}
-                request["stop_conditions"]["max_tokens"] = request["_original_max_tokens"]
-                logging.info(f"DECODE: Restored original max_tokens: {request['_original_max_tokens']}")
+                request["stop_conditions"]["max_tokens"] = request[
+                    "_original_max_tokens"
+                ]
+                logging.info(
+                    f"DECODE: Restored original max_tokens: {request['_original_max_tokens']}"
+                )
             else:
-                logging.info(f"DECODE: No _original_max_tokens in request. Current max_tokens: {request.get('stop_conditions', {}).get('max_tokens', 'NOT SET')}")
-            
+                logging.info(
+                    f"DECODE: No _original_max_tokens in request. Current max_tokens: {request.get('stop_conditions', {}).get('max_tokens', 'NOT SET')}"
+                )
+
             # Decode worker with generation_only mode
             # Pass the same inputs format as prefill
             if "_epd_processed_prompt" in request:
                 processed_prompt = request["_epd_processed_prompt"]
                 # Use pre-computed token IDs from encoder for consistency
-                if "_epd_prompt_token_ids" in request and request["_epd_prompt_token_ids"]:
+                if (
+                    "_epd_prompt_token_ids" in request
+                    and request["_epd_prompt_token_ids"]
+                ):
                     prompt_token_ids = request["_epd_prompt_token_ids"]
                 else:
                     # Fallback: tokenize if token IDs not provided
-                    prompt_token_ids = self.engine.llm.tokenizer.encode(processed_prompt, add_special_tokens=False)
-                
+                    prompt_token_ids = self.engine.llm.tokenizer.encode(
+                        processed_prompt, add_special_tokens=False
+                    )
+
                 processed_input = {
                     "prompt": processed_prompt,
-                    "prompt_token_ids": prompt_token_ids
+                    "prompt_token_ids": prompt_token_ids,
                 }
             else:
                 # Fallback for text-only requests
@@ -299,11 +320,11 @@ class HandlerBase:
             adapters = create_trtllm_adapters(processors)
             sampling_params.logits_processor = adapters
         if self.disaggregation_mode == DisaggregationMode.DECODE:
-            logging.info(f"Generate Called for DECODE mode")
+            logging.info("Generate Called for DECODE mode")
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
-            logging.info(f"Generate Called for PREFILL mode")
+            logging.info("Generate Called for PREFILL mode")
         else:
-            logging.info(f"Generate Called for ENCODE mode")
+            logging.info("Generate Called for ENCODE mode")
         logging.info(f"Generate locally: processed_input: {processed_input}")
         logging.info(f"Generate locally: sampling_params: {sampling_params}")
         logging.info(f"Generate locally: disaggregated_params: {disaggregated_params}")
@@ -358,9 +379,11 @@ class HandlerBase:
                     out["stop_reason"] = output.stop_reason
                 if self.disaggregation_mode == DisaggregationMode.PREFILL:
                     # Return the disaggregated params only when operating in prefill mode
-                    encoded_params = DisaggregatedParamsCodec.encode(output.disaggregated_params)
+                    encoded_params = DisaggregatedParamsCodec.encode(
+                        output.disaggregated_params
+                    )
                     out["disaggregated_params"] = asdict(encoded_params)
-                    
+
                     # Pass the processed prompt and token IDs for decode worker
                     # Use the actual prompt and token IDs from the RequestOutput (res)
                     # which includes all the image placeholder tokens processed by TRTLLM
@@ -368,7 +391,7 @@ class HandlerBase:
                         out["_epd_processed_prompt"] = res.prompt
                     if "_epd_prompt_token_ids" in request and res.prompt_token_ids:
                         out["_epd_prompt_token_ids"] = res.prompt_token_ids
-                    
+
                     # Pass the original max_tokens to decode worker
                     if "_original_max_tokens" in request:
                         out["_original_max_tokens"] = request["_original_max_tokens"]

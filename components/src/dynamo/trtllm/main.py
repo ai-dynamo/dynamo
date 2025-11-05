@@ -208,8 +208,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     disable_overlap_scheduler = True
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
         disable_overlap_scheduler = False
-    
-    logging.info(f"disable_overlap_scheduler: {disable_overlap_scheduler} for config.disaggregation_mode: {config.disaggregation_mode}")
+
+    logging.info(
+        f"disable_overlap_scheduler: {disable_overlap_scheduler} for config.disaggregation_mode: {config.disaggregation_mode}"
+    )
     arg_map = {
         "model": model_path,
         "scheduler_config": scheduler_config,
@@ -270,7 +272,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # Populate default sampling params from the model
     tokenizer = tokenizer_factory(arg_map["model"])
-    
+
     # Load HF model config and generation config for SamplingParams._setup()
     hf_model_config = AutoConfig.from_pretrained(
         arg_map["model"], trust_remote_code=True
@@ -278,7 +280,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     generation_config = GenerationConfig.from_pretrained(
         arg_map["model"], trust_remote_code=True
     )
-    
+
     default_sampling_params = SamplingParams()
     default_sampling_params._setup(tokenizer, hf_model_config, generation_config)
     default_sampling_params.stop = None

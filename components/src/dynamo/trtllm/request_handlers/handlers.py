@@ -5,6 +5,7 @@ import copy
 import logging
 
 from tensorrt_llm.llmapi import DisaggregatedParams
+
 from dynamo._core import Context
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
@@ -96,7 +97,13 @@ class EncodeHandler(HandlerBase):
         if self.connector:
             # Use helper method to process embedding request
             async for response in EncodeHelper.process_encode_request(
-                request, self.multimodal_processor, self.connector, self.tokenizer, self.model_dir, self.model_type, self.engine, 
+                request,
+                self.multimodal_processor,
+                self.connector,
+                self.tokenizer,
+                self.model_dir,
+                self.model_type,
+                self.engine,
             ):
                 yield response
             return
@@ -150,12 +157,18 @@ class PrefillHandler(HandlerBase):
 
     async def generate(self, request: dict, context: Context):
         logging.debug(f"New Request ID: {context.id()}")
-        logging.info(f"PrefillHandler.generate received request with stop_conditions: {request.get('stop_conditions', 'NOT SET')}")
+        logging.info(
+            f"PrefillHandler.generate received request with stop_conditions: {request.get('stop_conditions', 'NOT SET')}"
+        )
         embeddings_tensor = None
         ep_disaggregated_params = None
 
         if self.multimodal_processor:
-            _, image_urls, embedding_paths = self.multimodal_processor.extract_prompt_and_media(
+            (
+                _,
+                image_urls,
+                embedding_paths,
+            ) = self.multimodal_processor.extract_prompt_and_media(
                 request.get("messages", [])
             )
             # Handle embedding paths (NIXL transfer of pre-computed embeddings)
@@ -169,7 +182,7 @@ class PrefillHandler(HandlerBase):
             elif image_urls:
                 if self.encode_client and self.connector:
                     encode_response = await self.remote_encode_full_epd(request)
-                    
+
                     # Check if encode worker returned disaggregated params (full EPD flow)
                     if "ep_disaggregated_params" in encode_response:
                         params_dict = encode_response["ep_disaggregated_params"]
@@ -177,15 +190,22 @@ class PrefillHandler(HandlerBase):
                             # Reconstruct DisaggregatedParams object from dict
                             ep_disaggregated_params = DisaggregatedParams(**params_dict)
                             ep_disaggregated_params.request_type = "context_only"
-                            
+
                             # Get the processed prompt from encoder (includes <image> tokens)
                             # Store it in the request so multimodal_processor can access it
                             if "processed_prompt" in encode_response:
-                                request["_epd_processed_prompt"] = encode_response["processed_prompt"]
-                            
+                                request["_epd_processed_prompt"] = encode_response[
+                                    "processed_prompt"
+                                ]
+
                             # Store prompt_token_ids from encoder for consistency with decode worker
-                            if "prompt_token_ids" in encode_response and encode_response["prompt_token_ids"]:
-                                request["_epd_prompt_token_ids"] = encode_response["prompt_token_ids"]
+                            if (
+                                "prompt_token_ids" in encode_response
+                                and encode_response["prompt_token_ids"]
+                            ):
+                                request["_epd_prompt_token_ids"] = encode_response[
+                                    "prompt_token_ids"
+                                ]
         # Normal flow: Generate the prefill response locally with embeddings
         prefill_request = copy.deepcopy(request)
         prefill_response = None
@@ -296,13 +316,22 @@ class DecodeHandler(HandlerBase):
                 request["disaggregated_params"] = response_data["disaggregated_params"]
                 # Also extract the processed prompt for full EPD flow
                 if "_epd_processed_prompt" in response_data:
-                    request["_epd_processed_prompt"] = response_data["_epd_processed_prompt"]
+                    request["_epd_processed_prompt"] = response_data[
+                        "_epd_processed_prompt"
+                    ]
                 # Extract pre-computed token IDs from encoder for consistency
-                if "_epd_prompt_token_ids" in response_data and response_data["_epd_prompt_token_ids"]:
-                    request["_epd_prompt_token_ids"] = response_data["_epd_prompt_token_ids"]
+                if (
+                    "_epd_prompt_token_ids" in response_data
+                    and response_data["_epd_prompt_token_ids"]
+                ):
+                    request["_epd_prompt_token_ids"] = response_data[
+                        "_epd_prompt_token_ids"
+                    ]
                 # Extract original max_tokens for decode phase
                 if "_original_max_tokens" in response_data:
-                    request["_original_max_tokens"] = response_data["_original_max_tokens"]
+                    request["_original_max_tokens"] = response_data[
+                        "_original_max_tokens"
+                    ]
 
         async for res in self.generate_locally(request, context):
             yield res
