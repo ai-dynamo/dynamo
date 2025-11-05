@@ -14,10 +14,15 @@ from dynamo.trtllm.request_handlers.handler_base import DisaggregationMode
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
 
-# Default endpoint for TensorRT-LLM workers
-DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.tensorrt_llm.generate"
+# Default endpoints for TensorRT-LLM workers
+DEFAULT_ENDPOINT = (
+    f"dyn://{DYN_NAMESPACE}.tensorrt_llm.generate"  # Decode/aggregated workers
+)
+DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"  # Prefill workers
+DEFAULT_ENCODE_ENDPOINT = (
+    f"dyn://{DYN_NAMESPACE}.tensorrt_llm_encode.generate"  # Encode workers
+)
 DEFAULT_MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-DEFAULT_ENCODE_ENDPOINT = f"dyn://{DYN_NAMESPACE}.tensorrt_llm_encode.generate"
 DEFAULT_DISAGGREGATION_MODE = DisaggregationMode.AGGREGATED
 
 
@@ -117,7 +122,7 @@ def cmd_line_args():
         "--endpoint",
         type=str,
         default="",
-        help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: {DEFAULT_ENDPOINT} (or {DEFAULT_ENCODE_ENDPOINT} for encode workers)",
+        help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: {DEFAULT_ENDPOINT} for decode/aggregated, {DEFAULT_PREFILL_ENDPOINT} for prefill workers, or {DEFAULT_ENCODE_ENDPOINT} for encode workers",
     )
     parser.add_argument(
         "--model-path",
@@ -288,11 +293,14 @@ def cmd_line_args():
     # Set the disaggregation mode.
     config.disaggregation_mode = DisaggregationMode(args.disaggregation_mode)
 
-    # Set the appropriate default for the endpoint
+    # Set the appropriate default for the endpoint based on disaggregation mode
     if args.endpoint == "":
         if config.disaggregation_mode == DisaggregationMode.ENCODE:
             args.endpoint = DEFAULT_ENCODE_ENDPOINT
+        elif config.disaggregation_mode == DisaggregationMode.PREFILL:
+            args.endpoint = DEFAULT_PREFILL_ENDPOINT
         else:
+            # Decode and aggregated workers use "tensorrt_llm" component
             args.endpoint = DEFAULT_ENDPOINT
     endpoint = args.endpoint
     parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(

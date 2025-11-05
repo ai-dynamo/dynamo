@@ -205,10 +205,14 @@ Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disag
 You can enable [request migration](../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
 ```bash
+# For decode and aggregated workers
 python3 -m dynamo.trtllm ... --migration-limit=3
 ```
 
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/fault_tolerance/request_migration.md) documentation for details on how this works.
+> [!IMPORTANT]
+> **Prefill workers do not support request migration** and must use `--migration-limit=0` (the default). Prefill workers only process prompts and return KV cache state - they don't maintain long-running generation requests that would benefit from migration.
+
+See the [Request Migration Architecture](../../../docs/fault_tolerance/request_migration.md) documentation for details on how this works.
 
 ## Request Cancellation
 
