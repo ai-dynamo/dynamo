@@ -417,7 +417,8 @@ jobs:
           source venv/bin/activate
           pip install --upgrade pip
 
-          # Install core dependencies needed for tests (without full project install)
+          # Install core dependencies needed for tests
+          pip install -r container/deps/requirements.txt
           pip install -r container/deps/requirements.test.txt
           pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
 
