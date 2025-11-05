@@ -646,9 +646,8 @@ impl PeerDiscovery for P2pDiscovery {
                             ));
                         }
 
-                        return Err(DiscoveryError::Backend(anyhow!(
-                            "Instance {instance_id} already registered"
-                        )));
+                        // Identical record already exists, treat as success (idempotent)
+                        return Ok(());
                     }
                     Err(GetRecordError::NotFound) => {}
                     Err(GetRecordError::Backend(err)) => return Err(DiscoveryError::Backend(err)),
