@@ -25,15 +25,17 @@ logger = logging.getLogger(__name__)
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with TensorRT-LLM backend"""
 
-    def __init__(self, request, mode: str = "prefill_and_decode", strategy: str = ""):
+    def __init__(self, request, mode: str = "prefill_and_decode"):
         """
         Initialize TensorRT-LLM worker process.
 
         Args:
             request: pytest request object
             mode: One of "prefill_and_decode", "prefill", "decode"
-            strategy: One of "decode_first", "prefill_first"
         """
+        # Prefill workers require migration_limit=0 (no KV cache migration support)
+        migration_limit = "0" if mode == "prefill" else "3"
+
         command = [
             "python3",
             "-m",
@@ -47,7 +49,7 @@ class DynamoWorkerProcess(ManagedProcess):
             "--max-seq-len",
             "8192",
             "--migration-limit",
-            "3",
+            migration_limit,
         ]
         if mode != "prefill_and_decode":
             with open("test_request_cancellation_trtllm_config.yaml", "w") as f:
@@ -56,8 +58,6 @@ class DynamoWorkerProcess(ManagedProcess):
             command += [
                 "--extra-engine-args",
                 "test_request_cancellation_trtllm_config.yaml",
-                "--disaggregation-strategy",
-                strategy,
             ]
 
         health_check_urls = [
@@ -207,15 +207,15 @@ def test_request_cancellation_trtllm_aggregated(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_cancellation_trtllm_decode_first_decode_cancel(
+def test_request_cancellation_trtllm_disagg_decode_cancel(
     request, runtime_services, predownload_models
 ):
     """
-    End-to-end test for request cancellation during decode phase with decode_first strategy.
+    End-to-end test for request cancellation during decode phase with unified frontend.
 
     This test verifies that when a request is cancelled by the client during the decode phase,
     the system properly handles the cancellation and cleans up resources
-    on the decode worker side in a disaggregated setup using decode_first strategy.
+    on the decode worker side in a disaggregated setup.
     """
 
     # Step 1: Start the frontend
@@ -223,15 +223,11 @@ def test_request_cancellation_trtllm_decode_first_decode_cancel(
         logger.info("Frontend started successfully")
 
         # Step 2: Start the prefill worker
-        with DynamoWorkerProcess(
-            request, mode="prefill", strategy="decode_first"
-        ) as prefill_worker:
+        with DynamoWorkerProcess(request, mode="prefill") as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
             # Step 3: Start the decode worker
-            with DynamoWorkerProcess(
-                request, mode="decode", strategy="decode_first"
-            ) as decode_worker:
+            with DynamoWorkerProcess(request, mode="decode") as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
                 # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
@@ -245,17 +241,17 @@ def test_request_cancellation_trtllm_decode_first_decode_cancel(
                 # Send streaming request (non-blocking)
                 cancellable_req = send_cancellable_request("chat_completion_stream")
 
-                # Poll for "New Request ID" pattern in decode worker
-                request_id, decode_log_offset = poll_for_pattern(
-                    process=decode_worker,
-                    pattern="New Request ID: ",
+                # Poll for "Prefill Request ID" pattern in prefill worker (frontend routes here first)
+                request_id, prefill_log_offset = poll_for_pattern(
+                    process=prefill_worker,
+                    pattern="Prefill Request ID: ",
                     match_type="contains",
                 )
 
-                # Verify same request ID reached prefill worker
-                _, prefill_log_offset = poll_for_pattern(
-                    process=prefill_worker,
-                    pattern=f"New Request ID: {request_id}",
+                # Verify same request ID reached decode worker (after prefill completes)
+                _, decode_log_offset = poll_for_pattern(
+                    process=decode_worker,
+                    pattern=f"Decode Request ID: {request_id}",
                 )
 
                 # Read 5 streaming responses (decode phase)
@@ -287,15 +283,15 @@ def test_request_cancellation_trtllm_decode_first_decode_cancel(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_cancellation_trtllm_decode_first_remote_prefill_cancel(
+def test_request_cancellation_trtllm_disagg_prefill_cancel(
     request, runtime_services, predownload_models
 ):
     """
-    End-to-end test for request cancellation during remote prefill phase with decode_first strategy.
+    End-to-end test for request cancellation during prefill phase with unified frontend.
 
-    This test verifies that when a request is cancelled by the client during the remote prefill phase,
-    the system properly handles the cancellation and cleans up resources
-    on both the decode and prefill workers in a disaggregated setup using decode_first strategy.
+    This test verifies that when a request is cancelled by the client during the prefill phase,
+    the system properly handles the cancellation and cleans up resources on the prefill worker.
+    Since the request is cancelled before prefill completes, the decode worker never receives it.
     """
 
     # Step 1: Start the frontend
@@ -303,102 +299,12 @@ def test_request_cancellation_trtllm_decode_first_remote_prefill_cancel(
         logger.info("Frontend started successfully")
 
         # Step 2: Start the prefill worker
-        with DynamoWorkerProcess(
-            request, mode="prefill", strategy="decode_first"
-        ) as prefill_worker:
+        with DynamoWorkerProcess(request, mode="prefill") as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
             # Step 3: Start the decode worker
-            with DynamoWorkerProcess(
-                request, mode="decode", strategy="decode_first"
-            ) as decode_worker:
+            with DynamoWorkerProcess(request, mode="decode") as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
-
-                # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
-                time.sleep(2)
-
-                # Step 4: Test request cancellation during remote prefill phase
-                logger.info(
-                    "Testing completion request cancellation during remote prefill phase..."
-                )
-
-                # Send request with long prompt (non-blocking)
-                cancellable_req = send_cancellable_request(
-                    "completion", use_long_prompt=True
-                )
-
-                # Poll for "New Request ID" pattern in decode worker
-                request_id, decode_log_offset = poll_for_pattern(
-                    process=decode_worker,
-                    pattern="New Request ID: ",
-                    match_type="contains",
-                )
-
-                # Poll for same request ID in prefill worker (remote prefill)
-                _, prefill_log_offset = poll_for_pattern(
-                    process=prefill_worker,
-                    pattern=f"New Request ID: {request_id}",
-                )
-
-                # Cancel during prefill phase
-                cancellable_req.cancel()
-                logger.info(f"Cancelled request ID: {request_id} during remote prefill")
-
-                # Poll for "Aborted Request ID" in prefill worker first (where cancellation happens)
-                _, prefill_log_offset = poll_for_pattern(
-                    process=prefill_worker,
-                    pattern=f"Aborted Request ID: {request_id}",
-                    log_offset=prefill_log_offset,
-                )
-
-                # Then poll for "Aborted Remote Request ID" in decode worker
-                _, decode_log_offset = poll_for_pattern(
-                    process=decode_worker,
-                    pattern=f"Aborted Remote Request ID: {request_id}",
-                    log_offset=decode_log_offset,
-                )
-
-                # Verify frontend log has kill message
-                _, frontend_log_offset = poll_for_pattern(
-                    process=frontend,
-                    pattern="issued control message Kill to sender",
-                )
-
-                logger.info(
-                    "Completion request cancellation during remote prefill phase detected successfully"
-                )
-
-
-@pytest.mark.trtllm_marker
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_cancellation_trtllm_prefill_first_prefill_cancel(
-    request, runtime_services, predownload_models
-):
-    """
-    End-to-end test for request cancellation during prefill phase with prefill_first strategy.
-
-    This test verifies that when a request is cancelled by the client during the prefill phase,
-    the system properly handles the cancellation and cleans up resources
-    on the prefill worker side in a disaggregated setup using prefill_first strategy.
-    """
-
-    # Step 1: Start the frontend
-    with DynamoFrontendProcess(request) as frontend:
-        logger.info("Frontend started successfully")
-
-        # Step 2: Start the decode worker
-        with DynamoWorkerProcess(
-            request, mode="decode", strategy="prefill_first"
-        ) as decode_worker:
-            logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
-
-            # Step 3: Start the prefill worker
-            with DynamoWorkerProcess(
-                request, mode="prefill", strategy="prefill_first"
-            ) as prefill_worker:
-                logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
                 # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
                 time.sleep(2)
@@ -413,18 +319,18 @@ def test_request_cancellation_trtllm_prefill_first_prefill_cancel(
                     "completion", use_long_prompt=True
                 )
 
-                # Poll for "New Request ID" pattern in prefill worker
+                # Poll for "Prefill Request ID" pattern in prefill worker (frontend routes here first)
                 request_id, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
-                    pattern="New Request ID: ",
+                    pattern="Prefill Request ID: ",
                     match_type="contains",
                 )
 
-                # Cancel during prefill phase (before reaching decode worker)
+                # Cancel during prefill phase
                 cancellable_req.cancel()
-                logger.info(f"Cancelled request ID: {request_id} during prefill phase")
+                logger.info(f"Cancelled request ID: {request_id} during prefill")
 
-                # Poll for "Aborted Request ID" in prefill worker
+                # Poll for "Aborted Request ID" in prefill worker (where cancellation happens)
                 _, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
                     pattern=f"Aborted Request ID: {request_id}",
@@ -439,91 +345,4 @@ def test_request_cancellation_trtllm_prefill_first_prefill_cancel(
 
                 logger.info(
                     "Completion request cancellation during prefill phase detected successfully"
-                )
-
-
-@pytest.mark.trtllm_marker
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_cancellation_trtllm_prefill_first_remote_decode_cancel(
-    request, runtime_services, predownload_models
-):
-    """
-    End-to-end test for request cancellation during remote decode phase with prefill_first strategy.
-
-    This test verifies that when a request is cancelled by the client during the remote decode phase,
-    the system properly handles the cancellation and cleans up resources
-    on both the prefill and decode workers in a disaggregated setup using prefill_first strategy.
-    """
-
-    # Step 1: Start the frontend
-    with DynamoFrontendProcess(request) as frontend:
-        logger.info("Frontend started successfully")
-
-        # Step 2: Start the decode worker
-        with DynamoWorkerProcess(
-            request, mode="decode", strategy="prefill_first"
-        ) as decode_worker:
-            logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
-
-            # Step 3: Start the prefill worker
-            with DynamoWorkerProcess(
-                request, mode="prefill", strategy="prefill_first"
-            ) as prefill_worker:
-                logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
-
-                # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
-                time.sleep(2)
-
-                # Step 4: Test request cancellation during remote decode phase
-                logger.info(
-                    "Testing chat completion stream request cancellation during remote decode phase..."
-                )
-
-                # Send streaming request (non-blocking)
-                cancellable_req = send_cancellable_request("chat_completion_stream")
-
-                # Poll for "New Request ID" pattern in prefill worker
-                request_id, prefill_log_offset = poll_for_pattern(
-                    process=prefill_worker,
-                    pattern="New Request ID: ",
-                    match_type="contains",
-                )
-
-                # Poll for same request ID in decode worker (remote decode)
-                _, decode_log_offset = poll_for_pattern(
-                    process=decode_worker,
-                    pattern=f"New Request ID: {request_id}",
-                )
-
-                # Read 5 streaming responses (remote decode phase)
-                read_streaming_responses(cancellable_req, expected_count=5)
-
-                # Now cancel the request
-                cancellable_req.cancel()
-                logger.info(f"Cancelled request ID: {request_id} during remote decode")
-
-                # Poll for "Aborted Request ID" in decode worker first (where cancellation happens)
-                _, decode_log_offset = poll_for_pattern(
-                    process=decode_worker,
-                    pattern=f"Aborted Request ID: {request_id}",
-                    log_offset=decode_log_offset,
-                )
-
-                # Then poll for "Aborted Remote Request ID" in prefill worker
-                _, prefill_log_offset = poll_for_pattern(
-                    process=prefill_worker,
-                    pattern=f"Aborted Remote Request ID: {request_id}",
-                    log_offset=prefill_log_offset,
-                )
-
-                # Verify frontend log has kill message
-                _, frontend_log_offset = poll_for_pattern(
-                    process=frontend,
-                    pattern="issued control message Kill to sender",
-                )
-
-                logger.info(
-                    "Chat completion stream cancellation during remote decode phase detected successfully"
                 )

@@ -19,7 +19,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
       replicas: 1
     VllmPrefillWorker:
       componentType: worker
@@ -33,13 +33,15 @@ spec:
       extraPodSpec:
         affinity:
           podAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              - labelSelector:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
                   matchExpressions:
-                    - key: nvidia.com/dynamo-component-type
-                      operator: In
-                      values:
-                        - worker
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                    - worker
                 topologyKey: kubernetes.io/hostname
         mainContainer:
           env:
@@ -53,7 +55,7 @@ spec:
           - /bin/sh
           - -c
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
       replicas: 2
       resources:
         limits:
@@ -72,13 +74,15 @@ spec:
       extraPodSpec:
         affinity:
           podAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              - labelSelector:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
                   matchExpressions:
-                    - key: nvidia.com/dynamo-component-type
-                      operator: In
-                      values:
-                        - worker
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                    - worker
                 topologyKey: kubernetes.io/hostname
         mainContainer:
           env:
@@ -92,7 +96,7 @@ spec:
           - /bin/sh
           - -c
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
         limits:

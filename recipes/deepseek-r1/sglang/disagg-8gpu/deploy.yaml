@@ -7,7 +7,7 @@ metadata:
   name: sgl-dsr1-8gpu
 spec:
   pvcs:
-    - name: model-cache
+    - name: model-cache-pvc
       create: false
   services:
     Frontend:
@@ -32,8 +32,8 @@ spec:
         limits:
           gpu: "8"
       volumeMounts:
-        - name: model-cache
-          mountPoint: /root/.cache/huggingface
+        - name: model-cache-pvc
+          mountPoint: /model-cache
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -46,14 +46,14 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 600
           image: my-registry/sglang-wideep-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
+          workingDir: /sgl-workspace/dynamo
           command:
             - python3
             - -m
             - dynamo.sglang
           args:
             - --model-path
-            - deepseek-ai/DeepSeek-R1
+            - /model-cache/deepseek-r1
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --tp
@@ -67,12 +67,11 @@ spec:
             - --skip-tokenizer-init
             - --disaggregation-mode
             - decode
-            - --disaggregation-transfer-backend
-            - nixl
             - --disaggregation-bootstrap-port
             - "30001"
             - --host
             - 0.0.0.0
+            - --prefill-round-robin-balance
     prefill:
       dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
@@ -81,8 +80,8 @@ spec:
         limits:
           gpu: "8"
       volumeMounts:
-        - name: model-cache
-          mountPoint: /root/.cache/huggingface
+        - name: model-cache-pvc
+          mountPoint: /model-cache
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -95,14 +94,14 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 600
           image: my-registry/sglang-wideep-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
+          workingDir: /sgl-workspace/dynamo
           command:
             - python3
             - -m
             - dynamo.sglang
           args:
             - --model-path
-            - deepseek-ai/DeepSeek-R1
+            - /model-cache/deepseek-r1
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --tp
@@ -113,9 +112,9 @@ spec:
             - --skip-tokenizer-init
             - --disaggregation-mode
             - prefill
-            - --disaggregation-transfer-backend
-            - nixl
             - --disaggregation-bootstrap-port
             - "30001"
             - --host
             - 0.0.0.0
+            - --load-balance-method
+            - round_robin

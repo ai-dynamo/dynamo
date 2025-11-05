@@ -263,7 +263,7 @@ impl KvEventPublisher {
     #[pyo3(signature = (event_id, token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None))]
     fn publish_stored(
         &mut self,
-        _py: Python,
+        py: Python,
         event_id: u64,
         token_ids: Vec<u32>,
         num_block_tokens: Vec<u64>,
@@ -271,38 +271,50 @@ impl KvEventPublisher {
         lora_id: u64,
         parent_hash: Option<i64>,
     ) -> PyResult<()> {
-        let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
-        let event = KvCacheEvent {
-            event_id,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
-                blocks: create_stored_blocks(
-                    self.kv_block_size as u32,
-                    &token_ids,
-                    &num_block_tokens,
-                    &block_hashes_u64,
-                    lora_id,
-                    &self.warning_count,
-                ),
-            }),
-            dp_rank: self.dp_rank,
-        };
+        let kv_block_size = self.kv_block_size as u32;
+        let dp_rank = self.dp_rank;
+        let warning_count = self.warning_count.clone();
+        let inner = self.inner.clone();
 
-        self.inner.publish(event).map_err(to_pyerr)
+        py.allow_threads(|| {
+            let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                    blocks: create_stored_blocks(
+                        kv_block_size,
+                        &token_ids,
+                        &num_block_tokens,
+                        &block_hashes_u64,
+                        lora_id,
+                        &warning_count,
+                    ),
+                }),
+                dp_rank,
+            };
+
+            inner.publish(event).map_err(to_pyerr)
+        })
     }
 
-    fn publish_removed(&self, _py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
-        let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
-            .into_iter()
-            .map(ExternalSequenceBlockHash::from)
-            .collect();
-        let event = KvCacheEvent {
-            event_id,
-            data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
-            dp_rank: self.dp_rank,
-        };
+    fn publish_removed(&self, py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
+        let dp_rank = self.dp_rank;
+        let inner = self.inner.clone();
 
-        self.inner.publish(event).map_err(to_pyerr)
+        py.allow_threads(|| {
+            let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
+                .into_iter()
+                .map(ExternalSequenceBlockHash::from)
+                .collect();
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+                dp_rank,
+            };
+
+            inner.publish(event).map_err(to_pyerr)
+        })
     }
 }
 
@@ -1103,47 +1115,36 @@ impl KvPushRouter {
         extra_args: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
-        let (stop_conditions, sampling_options, output_options, router_config_override, extra_args) =
-            Python::with_gil(|py| {
-                let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?
-                } else {
-                    StopConditions::default()
-                };
+        let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
+            depythonize(obj.bind(py)).map_err(to_pyerr)?
+        } else {
+            StopConditions::default()
+        };
 
-                let sampling_options: SamplingOptions = if let Some(obj) = sampling_options {
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?
-                } else {
-                    SamplingOptions::default()
-                };
+        let sampling_options: SamplingOptions = if let Some(obj) = sampling_options {
+            depythonize(obj.bind(py)).map_err(to_pyerr)?
+        } else {
+            SamplingOptions::default()
+        };
 
-                let output_options: OutputOptions = if let Some(obj) = output_options {
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?
-                } else {
-                    OutputOptions::default()
-                };
+        let output_options: OutputOptions = if let Some(obj) = output_options {
+            depythonize(obj.bind(py)).map_err(to_pyerr)?
+        } else {
+            OutputOptions::default()
+        };
 
-                let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
-                    if let Some(obj) = router_config_override {
-                        Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-                    } else {
-                        None
-                    };
+        let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
+            if let Some(obj) = router_config_override {
+                Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+            } else {
+                None
+            };
 
-                let extra_args: Option<serde_json::Value> = if let Some(obj) = extra_args {
-                    Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-                } else {
-                    None
-                };
-
-                Ok::<_, PyErr>((
-                    stop_conditions,
-                    sampling_options,
-                    output_options,
-                    router_config_override,
-                    extra_args,
-                ))
-            })?;
+        let extra_args: Option<serde_json::Value> = if let Some(obj) = extra_args {
+            Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+        } else {
+            None
+        };
 
         // Build the PreprocessedRequest
         let mut request_builder =
@@ -1176,7 +1177,7 @@ impl KvPushRouter {
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the request directly into PreprocessedRequest
         let request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
-            Python::with_gil(|py| depythonize(request.bind(py)).map_err(to_pyerr))?;
+            depythonize(request.bind(py)).map_err(to_pyerr)?;
 
         // Use the helper method to process the request
         Self::process_request_to_stream(py, self.inner.clone(), request)
@@ -1191,11 +1192,9 @@ impl KvPushRouter {
         request_id: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
-            Python::with_gil(|py| {
-                let override_config: llm_rs::kv_router::RouterConfigOverride =
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?;
-                Ok::<_, PyErr>(Some(override_config))
-            })?
+            let override_config: llm_rs::kv_router::RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
         } else {
             None
         };
@@ -1238,11 +1237,9 @@ impl KvPushRouter {
         )?;
 
         let router_config_override = if let Some(obj) = router_config_override {
-            Python::with_gil(|py| {
-                let override_config: llm_rs::kv_router::RouterConfigOverride =
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?;
-                Ok::<_, PyErr>(Some(override_config))
-            })?
+            let override_config: llm_rs::kv_router::RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
         } else {
             None
         };
