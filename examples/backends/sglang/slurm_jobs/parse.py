@@ -188,19 +188,21 @@ def analyze(p):
 paths = [x for x in os.listdir(".") if ".py" not in x and os.path.isdir(x)]
 format_key_order()
 
+
 def extract_job_id(dirname):
     """Extract job ID from directory name for sorting.
-    
+
     Handles formats like:
     - 12345_3P_1D_20250104_123456 (disaggregated)
     - 12345_4A_20250104_123456 (aggregated)
     - 12345 (legacy format)
     """
     try:
-        return int(dirname.split('_')[0])
+        return int(dirname.split("_")[0])
     except (ValueError, IndexError):
         # If directory name doesn't match expected format, return -1
         return -1
+
 
 for path in sorted(paths, key=extract_job_id, reverse=True):
     result = analyze(path)
