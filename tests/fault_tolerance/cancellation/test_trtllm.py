@@ -241,17 +241,17 @@ def test_request_cancellation_trtllm_disagg_decode_cancel(
                 # Send streaming request (non-blocking)
                 cancellable_req = send_cancellable_request("chat_completion_stream")
 
-                # Poll for "New Request ID" pattern in decode worker
-                request_id, decode_log_offset = poll_for_pattern(
-                    process=decode_worker,
-                    pattern="New Request ID: ",
+                # Poll for "Prefill Request ID" pattern in prefill worker (frontend routes here first)
+                request_id, prefill_log_offset = poll_for_pattern(
+                    process=prefill_worker,
+                    pattern="Prefill Request ID: ",
                     match_type="contains",
                 )
 
-                # Verify same request ID reached prefill worker
-                _, prefill_log_offset = poll_for_pattern(
-                    process=prefill_worker,
-                    pattern=f"New Request ID: {request_id}",
+                # Verify same request ID reached decode worker (after prefill completes)
+                _, decode_log_offset = poll_for_pattern(
+                    process=decode_worker,
+                    pattern=f"Decode Request ID: {request_id}",
                 )
 
                 # Read 5 streaming responses (decode phase)
@@ -309,9 +309,9 @@ def test_request_cancellation_trtllm_disagg_prefill_cancel(
                 # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
                 time.sleep(2)
 
-                # Step 4: Test request cancellation during remote prefill phase
+                # Step 4: Test request cancellation during prefill phase
                 logger.info(
-                    "Testing completion request cancellation during remote prefill phase..."
+                    "Testing completion request cancellation during prefill phase..."
                 )
 
                 # Send request with long prompt (non-blocking)
@@ -319,35 +319,22 @@ def test_request_cancellation_trtllm_disagg_prefill_cancel(
                     "completion", use_long_prompt=True
                 )
 
-                # Poll for "New Request ID" pattern in decode worker
-                request_id, decode_log_offset = poll_for_pattern(
-                    process=decode_worker,
-                    pattern="New Request ID: ",
-                    match_type="contains",
-                )
-
-                # Poll for same request ID in prefill worker (remote prefill)
-                _, prefill_log_offset = poll_for_pattern(
+                # Poll for "Prefill Request ID" pattern in prefill worker (frontend routes here first)
+                request_id, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
-                    pattern=f"New Request ID: {request_id}",
+                    pattern="Prefill Request ID: ",
+                    match_type="contains",
                 )
 
                 # Cancel during prefill phase
                 cancellable_req.cancel()
-                logger.info(f"Cancelled request ID: {request_id} during remote prefill")
+                logger.info(f"Cancelled request ID: {request_id} during prefill")
 
-                # Poll for "Aborted Request ID" in prefill worker first (where cancellation happens)
+                # Poll for "Aborted Request ID" in prefill worker (where cancellation happens)
                 _, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=prefill_log_offset,
-                )
-
-                # Then poll for "Aborted Remote Request ID" in decode worker
-                _, decode_log_offset = poll_for_pattern(
-                    process=decode_worker,
-                    pattern=f"Aborted Remote Request ID: {request_id}",
-                    log_offset=decode_log_offset,
                 )
 
                 # Verify frontend log has kill message
@@ -357,5 +344,5 @@ def test_request_cancellation_trtllm_disagg_prefill_cancel(
                 )
 
                 logger.info(
-                    "Completion request cancellation during remote prefill phase detected successfully"
+                    "Completion request cancellation during prefill phase detected successfully"
                 )

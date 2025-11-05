@@ -97,5 +97,5 @@ pytest tests/fault_tolerance/cancellation/test_sglang.py::test_request_cancellat
 
 **Verification patterns:**
 - Aggregated mode: "Aborted Request ID" in worker logs
-- Disaggregated - prefill cancellation: "Aborted Request ID" in prefill, "Aborted Remote Request ID" in decode
-- Disaggregated - decode cancellation: "Aborted Request ID" in decode
+- Disaggregated - prefill cancellation: "Aborted Request ID" in prefill worker (cancellation during prefill)
+- Disaggregated - decode cancellation: "Aborted Request ID" in decode worker (cancellation during decode)
