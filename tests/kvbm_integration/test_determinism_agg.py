@@ -365,18 +365,29 @@ class TestDeterminismAgg(BaseTestDeterminism):
         ],
         indirect=True,
     )
-    @pytest.mark.parametrize("use_v2", [True, False])
     def test_determinism_agg_with_cache_reset(
-        self, tester, llm_server, runtime_services, monkeypatch, use_v2
+        self, tester, llm_server, runtime_services
     ):
         """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
         # Call the base class implementation
+        super().base_test_determinism_with_cache_reset(
+            tester, llm_server, runtime_services
+        )
 
-        if use_v2:
-            monkeypatch.setenv("DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL", "1")
-        else:
-            monkeypatch.delenv("DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL", raising=False)
-
+    @pytest.mark.parametrize(
+        "llm_server",
+        [
+            {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000"))},
+        ],
+        indirect=True,
+    )
+    @pytest.mark.kvbm_v2
+    def test_determinism_agg_with_cache_reset_v2(
+        self, tester, llm_server, runtime_services, monkeypatch
+    ):
+        """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
+        monkeypatch.setenv("DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL", "1")
+        # Call the base class implementation
         super().base_test_determinism_with_cache_reset(
             tester, llm_server, runtime_services
         )
