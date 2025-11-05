@@ -473,7 +473,6 @@ async def run_profile(args):
         if decode_results:
             plot_decode_performance(decode_results, args.itl, args.output_dir)
 
-        # Plot two graphs at the same time
         if prefill_results and decode_results:
             plot_pd_joint_results(
                 args.isl, args.osl, prefill_results, decode_results, args.output_dir
