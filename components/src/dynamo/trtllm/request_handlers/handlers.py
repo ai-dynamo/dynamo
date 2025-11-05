@@ -150,7 +150,7 @@ class PrefillHandler(HandlerBase):
 
     async def generate(self, request: dict, context: Context):
         logging.debug(f"New Request ID: {context.id()}")
-        logging.debug(f"PrefillHandler.generate received request: {request}")
+        logging.info(f"PrefillHandler.generate received request with stop_conditions: {request.get('stop_conditions', 'NOT SET')}")
         embeddings_tensor = None
         ep_disaggregated_params = None
 
@@ -190,11 +190,13 @@ class PrefillHandler(HandlerBase):
         prefill_request = copy.deepcopy(request)
         prefill_response = None
         response_count = 0
+        logging.info(f"PrefillHandler: Local generate request: {prefill_request}")
         async for res in self.generate_locally(
             prefill_request, context, embeddings_tensor, ep_disaggregated_params
         ):
             prefill_response = res
             response_count += 1
+            logging.info(f"PrefillHandler: Local generate response: {res}")
             if response_count > 1:
                 raise ValueError("Prefill response should be generated only once.")
 
@@ -298,6 +300,9 @@ class DecodeHandler(HandlerBase):
                 # Extract pre-computed token IDs from encoder for consistency
                 if "_epd_prompt_token_ids" in response_data and response_data["_epd_prompt_token_ids"]:
                     request["_epd_prompt_token_ids"] = response_data["_epd_prompt_token_ids"]
+                # Extract original max_tokens for decode phase
+                if "_original_max_tokens" in response_data:
+                    request["_original_max_tokens"] = response_data["_original_max_tokens"]
 
         async for res in self.generate_locally(request, context):
             yield res

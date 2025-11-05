@@ -205,10 +205,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
     modality = getattr(config, "modality", None) or "text"
     # Prefill worker needs overlap scheduler disabled for disaggregation
-    disable_overlap_scheduler = False
+    disable_overlap_scheduler = True
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
-        disable_overlap_scheduler = True
+        disable_overlap_scheduler = False
     
+    logging.info(f"disable_overlap_scheduler: {disable_overlap_scheduler} for config.disaggregation_mode: {config.disaggregation_mode}")
     arg_map = {
         "model": model_path,
         "scheduler_config": scheduler_config,

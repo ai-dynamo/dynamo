@@ -51,6 +51,12 @@ class TensorRTLLMEngine:
 
 @asynccontextmanager
 async def get_llm_engine(engine_args, disaggregation_mode=None) -> AsyncGenerator[TensorRTLLMEngine, None]:
+    if disaggregation_mode == DisaggregationMode.DECODE:
+        logging.info(f"Disaggregation mode: {disaggregation_mode}, setting disable_overlap_scheduler to False")
+        engine_args["disable_overlap_scheduler"] = False
+    elif disaggregation_mode == DisaggregationMode.PREFILL:
+        logging.info(f"Disaggregation mode: {disaggregation_mode}, setting disable_overlap_scheduler to True")
+        engine_args["disable_overlap_scheduler"] = True
     engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
     try:
         await engine.initialize()

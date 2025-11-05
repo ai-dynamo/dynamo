@@ -159,9 +159,27 @@ class HandlerBase:
         # is available for full EPD flow
         disaggregated_params = None
 
+        # Normalize OpenAI request format BEFORE processing
+        # This ensures max_tokens is in stop_conditions when we need to save it
+        if "stop_conditions" not in request:
+            request["stop_conditions"] = {}
+        if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
+            request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
+            logging.info(f"Normalized OpenAI max_tokens to stop_conditions: {request['stop_conditions']['max_tokens']}")
+        
+        if "sampling_options" not in request:
+            request["sampling_options"] = {}
+        if "temperature" in request and "temperature" not in request["sampling_options"]:
+            request["sampling_options"]["temperature"] = request.pop("temperature")
+
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            if "stop_conditions" not in request:
-                request["stop_conditions"] = {}
+            # Save original max_tokens before modifying for prefill
+            # Store original max_tokens so decode worker can restore it
+            if "max_tokens" in request["stop_conditions"]:
+                request["_original_max_tokens"] = request["stop_conditions"]["max_tokens"]
+                logging.info(f"PREFILL: Saved original max_tokens: {request['_original_max_tokens']}")
+            else:
+                logging.info(f"PREFILL: No max_tokens in request stop_conditions")
             request["stop_conditions"]["max_tokens"] = 1
             if ep_disaggregated_params:
                 ep_disaggregated_params.request_type = "context_only"
@@ -191,6 +209,15 @@ class HandlerBase:
         # Check for multimodal request and process it
         # Now ep_disaggregated_params is properly set for both prefill and decode modes
         if self.disaggregation_mode == DisaggregationMode.DECODE:
+            # Restore original max_tokens for decode phase
+            if "_original_max_tokens" in request:
+                if "stop_conditions" not in request:
+                    request["stop_conditions"] = {}
+                request["stop_conditions"]["max_tokens"] = request["_original_max_tokens"]
+                logging.info(f"DECODE: Restored original max_tokens: {request['_original_max_tokens']}")
+            else:
+                logging.info(f"DECODE: No _original_max_tokens in request. Current max_tokens: {request.get('stop_conditions', {}).get('max_tokens', 'NOT SET')}")
+            
             # Decode worker with generation_only mode
             # Pass the same inputs format as prefill
             if "_epd_processed_prompt" in request:
@@ -271,13 +298,23 @@ class HandlerBase:
             processors = [HelloWorldLogitsProcessor(self.engine.llm.tokenizer)]
             adapters = create_trtllm_adapters(processors)
             sampling_params.logits_processor = adapters
-
+        if self.disaggregation_mode == DisaggregationMode.DECODE:
+            logging.info(f"Generate Called for DECODE mode")
+        elif self.disaggregation_mode == DisaggregationMode.PREFILL:
+            logging.info(f"Generate Called for PREFILL mode")
+        else:
+            logging.info(f"Generate Called for ENCODE mode")
+        logging.info(f"Generate locally: processed_input: {processed_input}")
+        logging.info(f"Generate locally: sampling_params: {sampling_params}")
+        logging.info(f"Generate locally: disaggregated_params: {disaggregated_params}")
+        logging.info(f"Generate locally: streaming: {streaming}")
         generation_result = self.engine.llm.generate_async(
             inputs=processed_input,
             sampling_params=sampling_params,
             disaggregated_params=disaggregated_params,
             streaming=streaming,
         )
+        logging.info(f"Generate locally: generation_result: {generation_result}")
 
         # Use the context manager to handle cancellation monitoring
         async with self._cancellation_monitor(generation_result, context):
@@ -325,10 +362,16 @@ class HandlerBase:
                     out["disaggregated_params"] = asdict(encoded_params)
                     
                     # Pass the processed prompt and token IDs for decode worker
-                    if "_epd_processed_prompt" in request:
-                        out["_epd_processed_prompt"] = request["_epd_processed_prompt"]
-                    if "_epd_prompt_token_ids" in request and request["_epd_prompt_token_ids"]:
-                        out["_epd_prompt_token_ids"] = request["_epd_prompt_token_ids"]
+                    # Use the actual prompt and token IDs from the RequestOutput (res)
+                    # which includes all the image placeholder tokens processed by TRTLLM
+                    if "_epd_processed_prompt" in request and res.prompt:
+                        out["_epd_processed_prompt"] = res.prompt
+                    if "_epd_prompt_token_ids" in request and res.prompt_token_ids:
+                        out["_epd_prompt_token_ids"] = res.prompt_token_ids
+                    
+                    # Pass the original max_tokens to decode worker
+                    if "_original_max_tokens" in request:
+                        out["_original_max_tokens"] = request["_original_max_tokens"]
 
                 if res.finished and not out.get("finish_reason"):
                     out["finish_reason"] = "unknown"
