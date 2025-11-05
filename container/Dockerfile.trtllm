@@ -260,14 +260,13 @@ COPY --from=framework /bin/uv /bin/uvx /bin/
 COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
 COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
-# Create dynamo user
+# Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash dynamo \
+    && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
-    && [ `id -g dynamo` -eq 1000 ] \
     && mkdir -p /workspace /home/dynamo/.cache \
-    && chown -R dynamo:dynamo /workspace /home/dynamo \
-    && chmod 2775 /home/dynamo/.cache
+    && chown -R dynamo: /workspace /home/dynamo \
+    && chmod -R g+w /workspace /home/dynamo/.cache
 
 # Switch to dynamo user
 USER dynamo
@@ -277,8 +276,8 @@ ENV DYNAMO_HOME=/workspace
 # Copy UCX from framework image as plugin for NIXL
 # Copy NIXL source from framework image
 # Copy dynamo wheels for gitlab artifacts
-COPY --chown=dynamo:dynamo --from=dynamo_base /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo:dynamo --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo: --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
 
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 ENV LD_LIBRARY_PATH=\
@@ -291,14 +290,14 @@ $LD_LIBRARY_PATH
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 # Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage
-COPY --chown=dynamo:dynamo --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+COPY --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
 ENV LD_LIBRARY_PATH=${TENSORRT_LIB_DIR}:${LD_LIBRARY_PATH}
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
-COPY --chown=dynamo:dynamo benchmarks/ /opt/dynamo/benchmarks/
-COPY --chown=dynamo:dynamo --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
+COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -320,15 +319,15 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.test.txt
 
 # Copy tests, benchmarks, deploy and components for CI with correct ownership
-COPY --chown=dynamo:dynamo tests /workspace/tests
-COPY --chown=dynamo:dynamo examples /workspace/examples
-COPY --chown=dynamo:dynamo benchmarks /workspace/benchmarks
-COPY --chown=dynamo:dynamo deploy /workspace/deploy
-COPY --chown=dynamo:dynamo components/ /workspace/components/
-COPY --chown=dynamo:dynamo recipes/ /workspace/recipes/
+COPY --chown=dynamo: tests /workspace/tests
+COPY --chown=dynamo: examples /workspace/examples
+COPY --chown=dynamo: benchmarks /workspace/benchmarks
+COPY --chown=dynamo: deploy /workspace/deploy
+COPY --chown=dynamo: components/ /workspace/components/
+COPY --chown=dynamo: recipes/ /workspace/recipes/
 
 # Copy attribution files with correct ownership
-COPY --chown=dynamo:dynamo ATTRIBUTION* LICENSE /workspace/
+COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 
 # Setup launch banner (running as dynamo, automatically owned by dynamo)
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
@@ -405,14 +404,14 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
 # Switch back to dynamo for development operations
 USER dynamo
 
-COPY --chown=dynamo:dynamo --from=dynamo_base /usr/local/rustup /usr/local/rustup
-COPY --chown=dynamo:dynamo --from=dynamo_base /usr/local/cargo /usr/local/cargo
+COPY --chown=dynamo: --from=dynamo_base /usr/local/rustup /usr/local/rustup
+COPY --chown=dynamo: --from=dynamo_base /usr/local/cargo /usr/local/cargo
 
 # Install maturin, for maturin develop
 RUN uv pip install maturin[patchelf]
 
 # Editable install of dynamo
-COPY --chown=dynamo:dynamo pyproject.toml README.md hatch_build.py /workspace/
+COPY --chown=dynamo: pyproject.toml README.md hatch_build.py /workspace/
 RUN uv pip install --no-deps -e .
 
 CMD []

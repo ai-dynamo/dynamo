@@ -229,21 +229,20 @@ ENV CPATH=/usr/local/cuda/include
 # Copy uv to system /bin
 COPY --from=framework /bin/uv /bin/uvx /bin/
 
-# Create dynamo user
+# Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash dynamo \
+    && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
-    && [ `id -g dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache \
-    && chown -R dynamo:dynamo /workspace /home/dynamo \
-    && chmod 2775 /home/dynamo/.cache
+    && chown -R dynamo: /workspace /home/dynamo \
+    && chmod -R g+w /workspace /home/dynamo/.cache
 
 USER dynamo
 ENV HOME=/home/dynamo
 
 # Copy UCX and NIXL to system directories
-COPY --chown=dynamo:dynamo --from=dynamo_base /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo:dynamo --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo: --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
 ENV PATH=/usr/local/ucx/bin:$PATH
 
 ENV LD_LIBRARY_PATH=\
@@ -257,14 +256,14 @@ $LD_LIBRARY_PATH
 ### VIRTUAL ENVIRONMENT SETUP ###
 
 # Copy entire virtual environment from framework container with correct ownership
-COPY --chown=dynamo:dynamo --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+COPY --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 # Copy vllm with correct ownership
-COPY --chown=dynamo:dynamo --from=framework /opt/vllm /opt/vllm
+COPY --chown=dynamo: --from=framework /opt/vllm /opt/vllm
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
-COPY --chown=dynamo:dynamo benchmarks/ /opt/dynamo/benchmarks/
-COPY --chown=dynamo:dynamo --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
+COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -286,10 +285,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.test.txt
 
 # Copy benchmarks, examples, and tests for CI with correct ownership
-COPY --chown=dynamo:dynamo . /workspace/
+COPY --chown=dynamo: . /workspace/
 
 # Copy attribution files
-COPY --chown=dynamo:dynamo ATTRIBUTION* LICENSE /workspace/
+COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
@@ -363,8 +362,8 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
 
 USER dynamo
 
-COPY --chown=dynamo:dynamo --from=dynamo_base /usr/local/rustup /usr/local/rustup
-COPY --chown=dynamo:dynamo --from=dynamo_base /usr/local/cargo /usr/local/cargo
+COPY --chown=dynamo: --from=dynamo_base /usr/local/rustup /usr/local/rustup
+COPY --chown=dynamo: --from=dynamo_base /usr/local/cargo /usr/local/cargo
 
 # Install maturin, for maturin develop
 # Editable install of dynamo

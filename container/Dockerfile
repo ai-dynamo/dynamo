@@ -352,14 +352,13 @@ RUN apt-get update -y \
     && echo "dynamo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dynamo \
     && chmod 0440 /etc/sudoers.d/dynamo
 
-# Create dynamo user
+# Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash dynamo \
+    && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
-    && [ `id -g dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache \
-    && chown -R dynamo:dynamo /opt/dynamo /home/dynamo /workspace \
-    && chmod 2775 /home/dynamo/.cache
+    && chown -R dynamo: /opt/dynamo /home/dynamo /workspace \
+    && chmod -R g+w /opt/dynamo /home/dynamo/.cache /workspace
 
 # Switch to dynamo user
 USER dynamo
@@ -387,17 +386,17 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
 
 # Copy ucx and nixl libs
-COPY --chown=dynamo:dynamo --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
-COPY --chown=dynamo:dynamo --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
-COPY --chown=dynamo:dynamo --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
+COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
+COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 
 # Copy built artifacts
-COPY --chown=dynamo:dynamo --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo:dynamo --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-COPY --chown=dynamo:dynamo --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
-COPY --chown=dynamo:dynamo --from=wheel_builder $CARGO_HOME $CARGO_HOME
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
+COPY --chown=dynamo: --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
-COPY --chown=dynamo:dynamo benchmarks/ /opt/dynamo/benchmarks/
+COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
 
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
