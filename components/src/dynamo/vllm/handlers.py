@@ -126,31 +126,30 @@ class BaseWorkerHandler(ABC):
         vllm_mm_data = {}
 
         # Process image_url entries
-        if "image_url" in mm_map:
-            images = []
-            for item in mm_map["image_url"]:
-                if isinstance(item, dict) and "Url" in item:
-                    url = item["Url"]
-                    try:
-                        # ImageLoader supports both data: and http(s): URLs with caching
-                        image = await self.image_loader.load_image(url)
-                        images.append(image)
-                        logger.debug(f"Loaded image from URL: {url[:80]}...")
-                    except Exception as e:
-                        logger.error(f"Failed to load image from {url[:80]}...: {e}")
-                        raise
-                elif isinstance(item, dict) and "Decoded" in item:
-                    # TODO: NIXL-based read to gather decoded data from frontend
-                    logger.warning(
-                        "Decoded multimodal data not yet supported in standard worker"
-                    )
-
-            if images:
-                # vLLM expects single image or list
-                vllm_mm_data["image"] = images[0] if len(images) == 1 else images
-                logger.debug(
-                    f"Extracted {len(images)} image(s) for multimodal processing"
+        images = []
+        for item in mm_map.get("image_url", []):
+            if isinstance(item, dict) and "Url" in item:
+                url = item["Url"]
+                try:
+                    # ImageLoader supports both data: and http(s): URLs with caching
+                    image = await self.image_loader.load_image(url)
+                    images.append(image)
+                    logger.debug(f"Loaded image from URL: {url[:80]}...")
+                except Exception as e:
+                    logger.error(f"Failed to load image from {url[:80]}...: {e}")
+                    raise
+            elif isinstance(item, dict) and "Decoded" in item:
+                # Decoded support from PRs #3971/#3988 (frontend decoding + NIXL transfer)
+                # Will contain NIXL metadata for direct memory access
+                # TODO: Implement NIXL read when PRs merge
+                logger.warning(
+                    "Decoded multimodal data not yet supported in standard worker"
                 )
+
+        if images:
+            # vLLM expects single image or list
+            vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+            logger.debug(f"Extracted {len(images)} image(s) for multimodal processing")
 
         # Handle video_url entries (future expansion)
         if "video_url" in mm_map:
