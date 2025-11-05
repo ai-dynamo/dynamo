@@ -290,8 +290,8 @@ def test_request_cancellation_trtllm_disagg_prefill_cancel(
     End-to-end test for request cancellation during prefill phase with unified frontend.
 
     This test verifies that when a request is cancelled by the client during the prefill phase,
-    the system properly handles the cancellation and cleans up resources
-    on both the decode and prefill workers in a disaggregated setup.
+    the system properly handles the cancellation and cleans up resources on the prefill worker.
+    Since the request is cancelled before prefill completes, the decode worker never receives it.
     """
 
     # Step 1: Start the frontend
