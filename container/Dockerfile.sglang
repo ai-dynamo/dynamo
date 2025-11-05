@@ -213,7 +213,7 @@ RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.3 setuptool
     && FLASHINFER_LOGGING_LEVEL=warning python3 -m flashinfer --download-cubin
 
 # Download and extract NVSHMEM source, clone DeepEP (use Tom's fork for GB200)
-RUN --mount=type=cache,target=/var/cache/curl,uid=1001,gid=1001 \
+RUN --mount=type=cache,target=/var/cache/curl,uid=1000,gid=0 \
     curl --retry 3 --retry-delay 2 -fsSL -o /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz https://developer.download.nvidia.com/compute/redist/nvshmem/${NVSHMEM_VERSION}/source/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
     && tar -xf /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
     && mv nvshmem_src nvshmem \
