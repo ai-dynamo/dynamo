@@ -264,7 +264,7 @@ COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /workspace /home/dynamo/.cache /opt/dynamo \
+    && mkdir -p /home/dynamo/.cache /opt/dynamo \
     && chown -R dynamo: /workspace /home/dynamo /opt/dynamo \
     && chmod -R g+w /workspace /home/dynamo/.cache /opt/dynamo
 
