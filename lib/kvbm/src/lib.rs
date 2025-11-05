@@ -20,9 +20,16 @@ mod block_manager;
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    logging::init();
-
+    // Create tokio runtime first - required for OTEL OTLP exporter
     init_pyo3_tokio_rt();
+
+    // Initialize logging after tokio runtime is available
+    // This prevents "no reactor running" panic when OTEL_EXPORT_ENABLED=1
+    let handle = get_current_tokio_handle();
+    handle.block_on(async {
+        logging::init();
+    });
+
     #[cfg(feature = "block-manager")]
     block_manager::add_to_module(m)?;
 
