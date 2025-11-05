@@ -134,7 +134,6 @@ def main():
         print("🔍 Common patterns:")
         print("  /configs/file.yaml     → /data/configs/file.yaml")
         print("  /results/data.yaml     → /data/results/data.yaml")
-        print("  /profiling_results/... → /data/profiling_results/...")
         print("=" * 60)
         sys.exit(1)
 
