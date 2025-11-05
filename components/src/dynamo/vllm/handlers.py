@@ -118,15 +118,6 @@ class BaseWorkerHandler(ABC):
     ) -> Dict[str, Any] | None:
         """
         Extract and decode multimodal data from PreprocessedRequest.
-
-        Converts Dynamo's multi_modal_data format to vLLM's expected format.
-        Supports both Url (data: and http:) and future Decoded (NIXL) formats.
-
-        Args:
-            request: PreprocessedRequest dict containing optional multi_modal_data field
-
-        Returns:
-            Dictionary in vLLM's multimodal format or None if no multimodal data present
         """
         if "multi_modal_data" not in request or request["multi_modal_data"] is None:
             return None
@@ -149,7 +140,7 @@ class BaseWorkerHandler(ABC):
                         logger.error(f"Failed to load image from {url[:80]}...: {e}")
                         raise
                 elif isinstance(item, dict) and "Decoded" in item:
-                    # Future: NIXL-based decoded data from frontend
+                    # TODO: NIXL-based read to gather decoded data from frontend
                     logger.warning(
                         "Decoded multimodal data not yet supported in standard worker"
                     )
