@@ -369,7 +369,8 @@ jobs:
             --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
             --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
             --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
-            --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+            --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
+            --timeout 10m --wait
           # Wait for all deployments to be ready
           timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
           cd -
