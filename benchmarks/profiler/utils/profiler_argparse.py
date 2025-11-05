@@ -158,14 +158,20 @@ def create_profiler_parser() -> argparse.Namespace:
     parser.add_argument(
         "--min-num-gpus-per-engine",
         type=int,
-        default=config.get("hardware", {}).get("min_num_gpus_per_engine", 1),
+        default=config.get("hardware", {}).get("min_num_gpus_per_engine", 0),
         help="minimum number of GPUs per engine",
     )
     parser.add_argument(
         "--max-num-gpus-per-engine",
         type=int,
-        default=config.get("hardware", {}).get("max_num_gpus_per_engine", 8),
+        default=config.get("hardware", {}).get("max_num_gpus_per_engine", 0),
         help="maximum number of GPUs per engine",
+    )
+    parser.add_argument(
+        "--num-gpus-per-node",
+        type=int,
+        default=config.get("hardware", {}).get("num_gpus_per_node", 0),
+        help="Number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size",
     )
     parser.add_argument(
         "--skip-existing-results",
@@ -236,19 +242,6 @@ def create_profiler_parser() -> argparse.Namespace:
         help="Dry run the profile job",
     )
     parser.add_argument(
-        "--is-moe-model",
-        action="store_true",
-        dest="is_moe_model",
-        default=config.get("engine", {}).get("is_moe_model", False),
-        help="Enable MoE (Mixture of Experts) model support, use TEP for prefill and DEP for decode",
-    )
-    parser.add_argument(
-        "--num-gpus-per-node",
-        type=int,
-        default=config.get("hardware", {}).get("num_gpus_per_node", 8),
-        help="Number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size",
-    )
-    parser.add_argument(
         "--enable-gpu-discovery",
         action="store_true",
         default=config.get("hardware", {}).get("enable_gpu_discovery", False),
@@ -311,9 +304,5 @@ def create_profiler_parser() -> argparse.Namespace:
     if not args.model and not args.config:
         parser.error("--model or --config is required (provide at least one)")
 
-    # Run auto-generation if GPU discovery is enabled
-    # This will override any manually specified hardware parameters
-    if args.enable_gpu_discovery:
-        auto_generate_search_space(args)
-
+    auto_generate_search_space(args)
     return args

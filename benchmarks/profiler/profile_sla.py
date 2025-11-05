@@ -72,7 +72,7 @@ async def run_profile(args):
 
     try:
         # Log MoE model support
-        if args.is_moe_model:
+        if args.model_info["is_moe"]:
             logger.info(
                 "MoE (Mixture of Experts) model profiling, sweeping TEP size for prefill and DEP size for decode"
             )
@@ -101,7 +101,7 @@ async def run_profile(args):
             for i in range(int(math.log2(args.max_num_gpus_per_engine)) + 1)
             if args.min_num_gpus_per_engine <= 2**i <= args.max_num_gpus_per_engine
         ]
-        if args.is_moe_model:
+        if args.model_info["is_moe"]:
             # Filter GPU counts to only include divisors of num_experts
             if hasattr(args, "num_experts") and args.num_experts is not None:
                 original_counts = profile_num_gpus.copy()
@@ -177,7 +177,7 @@ async def run_profile(args):
         prefill_thpt_per_gpu = []
         logger.info("Profiling prefill...")
         prefill_config = config_modifier.convert_config(
-            config, "prefill", is_moe_model=args.is_moe_model
+            config, "prefill", is_moe_model=args.model_info["is_moe"]
         )
         frontend_port = config_modifier.get_port(config)
         itl: float | None = None
@@ -206,7 +206,7 @@ async def run_profile(args):
                     )
                 continue
 
-            if args.is_moe_model:
+            if args.model_info["is_moe"]:
                 prefill_config = config_modifier.set_config_tep_size(
                     prefill_config, num_gpus, args.num_gpus_per_node
                 )
@@ -298,7 +298,7 @@ async def run_profile(args):
         decode_results = []  # Store partial results for plotting later
         logger.info("Profiling decode...")
         decode_config = config_modifier.convert_config(
-            config, "decode", is_moe_model=args.is_moe_model
+            config, "decode", is_moe_model=args.model_info["is_moe"]
         )
         for num_gpus in profile_num_gpus:
             logger.info(f"Profiling decode with {num_gpus} GPUs...")
@@ -343,7 +343,7 @@ async def run_profile(args):
                     )
                 continue
 
-            if args.is_moe_model:
+            if args.model_info["is_moe"]:
                 decode_config = config_modifier.set_config_dep_size(
                     decode_config, num_gpus, args.num_gpus_per_node
                 )
@@ -395,7 +395,7 @@ async def run_profile(args):
                 # Compute max_concurrency and max_kv_tokens to know which
                 # num_request to sweep over.
                 # For MoE models, attention_dp_size = DEP size (num_gpus), for dense models = 1
-                attention_dp_size = num_gpus if args.is_moe_model else 1
+                attention_dp_size = num_gpus if args.model_info["is_moe"] else 1
                 max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
                     f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
                     attention_dp_size=attention_dp_size,
@@ -403,7 +403,7 @@ async def run_profile(args):
                 max_concurrency = max_kv_tokens // (args.isl + args.osl)
 
             if not args.dry_run:
-                attention_dp_size = num_gpus if args.is_moe_model else 1
+                attention_dp_size = num_gpus if args.model_info["is_moe"] else 1
                 sweep_num_request = get_num_request_range(
                     attention_dp_size,
                     max_concurrency,
@@ -565,9 +565,9 @@ async def run_profile(args):
             f"Profiling prefill under best {best_prefill_gpus} GPU(s) with different ISL..."
         )
         prefill_config = config_modifier.convert_config(
-            config, "prefill", is_moe_model=args.is_moe_model
+            config, "prefill", is_moe_model=args.model_info["is_moe"]
         )
-        if args.is_moe_model:
+        if args.model_info["is_moe"]:
             prefill_config = config_modifier.set_config_tep_size(
                 prefill_config, best_prefill_gpus, args.num_gpus_per_node
             )
@@ -590,7 +590,7 @@ async def run_profile(args):
             profile_prefill_aiconfigurator(
                 work_dir,
                 best_prefill_gpus,  # num_gpus
-                args.max_context_length,
+                args.model_info["max_context_length"],
                 args.prefill_interpolation_granularity,
                 ai_configurator_perf_estimator,
                 tp_size=best_prefill_gpus,
@@ -633,7 +633,7 @@ async def run_profile(args):
                 model_name,
                 base_url,
                 best_prefill_gpus,
-                args.max_context_length,
+                args.model_info["max_context_length"],
                 args.prefill_interpolation_granularity,
             )
 
@@ -645,7 +645,7 @@ async def run_profile(args):
         # interpolate ITL - Active_KV_Cache - Decode_Context_Length with best decode GPU count
         best_decode_gpus = decode_num_gpus[selected_decode_idx]
         logger.info(f"Profiling decode with {best_decode_gpus} GPUs...")
-        if args.is_moe_model:
+        if args.model_info["is_moe"]:
             decode_config = config_modifier.set_config_dep_size(
                 decode_config, best_decode_gpus, args.num_gpus_per_node
             )
@@ -666,7 +666,7 @@ async def run_profile(args):
             logger.info("Skipping deployment creation in dry run mode")
         elif args.use_ai_configurator:
             # For MoE models, attention_dp_size = DEP size (best_decode_gpus), for dense models = 1
-            attention_dp_size = best_decode_gpus if args.is_moe_model else 1
+            attention_dp_size = best_decode_gpus if args.model_info["is_moe"] else 1
             max_kv_tokens = ai_configurator_perf_estimator.get_max_kv_tokens(
                 args.isl, args.osl, tp_size=best_decode_gpus
             )
@@ -674,7 +674,7 @@ async def run_profile(args):
                 work_dir,
                 best_decode_gpus,  # num_gpus
                 max_kv_tokens,
-                args.max_context_length,
+                args.model_info["max_context_length"],
                 args.decode_interpolation_granularity,
                 ai_configurator_perf_estimator,
                 attention_dp_size,
@@ -702,7 +702,7 @@ async def run_profile(args):
             )
 
             # For MoE models, attention_dp_size = DEP size (best_decode_gpus), for dense models = 1
-            attention_dp_size = best_decode_gpus if args.is_moe_model else 1
+            attention_dp_size = best_decode_gpus if args.model_info["is_moe"] else 1
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
                 f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
                 attention_dp_size=attention_dp_size,
@@ -717,7 +717,7 @@ async def run_profile(args):
                 base_url,
                 best_decode_gpus,
                 max_kv_tokens,
-                args.max_context_length,
+                args.model_info["max_context_length"],
                 args.decode_interpolation_granularity,
                 attention_dp_size,
             )
@@ -735,7 +735,7 @@ async def run_profile(args):
             best_decode_gpus=best_decode_gpus,
             output_dir=args.output_dir,
             args=args,
-            is_moe_model=args.is_moe_model,
+            is_moe_model=args.model_info["is_moe"],
             num_gpus_per_node=args.num_gpus_per_node,
         )
         logger.info(f"Final DGD config with planner: {config}")

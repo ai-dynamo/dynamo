@@ -145,11 +145,68 @@ def get_model_info(
                     num_experts = value
                     break
 
+    # Detect intermediate size (FFN hidden dimension)
+    intermediate_size = None
+    intermediate_attrs = [
+        "intermediate_size",  # Most common (BERT, LLaMA, etc.)
+        "ffn_dim",  # Some transformer models
+    ]
+    for attr in intermediate_attrs:
+        if hasattr(config, attr):
+            value = getattr(config, attr)
+            if value is not None:
+                intermediate_size = value
+                break
+
+    # Detect number of key-value heads (for GQA)
+    num_kv_heads = None
+    kv_head_attrs = [
+        "num_key_value_heads",  # LLaMA 2/3, Mistral, etc.
+        "num_kv_heads",  # Alternative name
+    ]
+    for attr in kv_head_attrs:
+        if hasattr(config, attr):
+            value = getattr(config, attr)
+            if value is not None:
+                num_kv_heads = value
+                break
+    # If not found, check if it equals num_attention_heads (standard MHA)
+    if num_kv_heads is None and hasattr(config, "num_attention_heads"):
+        num_kv_heads = config.num_attention_heads
+
+    # Detect quantization block size
+    quantization_block_size = None
+    if hasattr(config, "quantization_config"):
+        quant_config = config.quantization_config
+        if isinstance(quant_config, dict):
+            # Check for common quantization block size attributes
+            quantization_block_size = (
+                quant_config.get("weight_block_size")
+                or quant_config.get("block_size")
+                or quant_config.get("group_size")
+                or quant_config.get("q_group_size")
+            )
+        elif quant_config is not None:
+            # Handle object-based quantization config
+            for attr in ["weight_block_size", "block_size", "group_size", "q_group_size"]:
+                if hasattr(quant_config, attr):
+                    value = getattr(quant_config, attr)
+                    if value is not None:
+                        quantization_block_size = value
+                        break
+        
+        # Handle case where block size is a list (e.g., [128, 128] for [input, output] block sizes)
+        if isinstance(quantization_block_size, list) and len(quantization_block_size) > 0:
+            quantization_block_size = max(quantization_block_size)
+
     return {
         "model_size": model_size,
         "is_moe": config.is_moe,
         "max_context_length": max_context_length,
         "num_experts": num_experts,
+        "intermediate_size": intermediate_size,
+        "num_kv_heads": num_kv_heads,
+        "quantization_block_size": quantization_block_size,
     }
 
 
