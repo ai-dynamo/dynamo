@@ -418,8 +418,8 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
-        max-parallel: 2
         profile:
           - agg
           - agg_router
@@ -568,8 +568,8 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
-        max-parallel: 1
         profile:
           - agg
           - agg_router
@@ -589,8 +589,8 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
-        max-parallel: 2
         profile:
           - agg
           - agg_router
