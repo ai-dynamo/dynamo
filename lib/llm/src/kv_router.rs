@@ -70,7 +70,6 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for radix tree snapshot storage
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
-pub const ROUTER_SNAPSHOT_LOCK: &str = "router-snapshot-lock";
 
 /// A trait that users can implement to define custom selection logic
 pub trait WorkerSelector {
