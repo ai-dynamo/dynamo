@@ -64,10 +64,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
 	SubComponentType string `json:"subComponentType,omitempty"`
 
-	// Deprecated: DynamoNamespace is deprecated and will be removed in a future version.
+	// DynamoNamespace is deprecated and will be removed in a future version.
 	// The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="dynamoNamespace is deprecated and will be removed in a future version; avoid using this field"
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
 
 	// GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
