@@ -36,7 +36,7 @@ type DynamoGraphDeploymentSpec struct {
 	PVCs []PVC `json:"pvcs,omitempty"`
 	// Services are the services to deploy as part of this deployment.
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:MaxProperties=100
+	// +kubebuilder:validation:MaxProperties=25
 	Services map[string]*DynamoComponentDeploymentSharedSpec `json:"services,omitempty"`
 	// Envs are environment variables applied to all services in the deployment unless
 	// overridden by service-specific configuration.
