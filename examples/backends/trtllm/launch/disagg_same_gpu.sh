@@ -32,7 +32,6 @@ echo "GPU memory check passed: ${FREE_GPU_GB}GB available (required: ${REQUIRED_
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-0.6B"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-0.6B"}
-export DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"decode_first"}
 export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/tests/serve/configs/trtllm/prefill.yaml"}
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/tests/serve/configs/trtllm/decode.yaml"}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0"}
@@ -59,7 +58,6 @@ python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
-  --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
   --modality "$MODALITY" \
   --publish-events-and-metrics \
   --disaggregation-mode prefill &
@@ -72,7 +70,6 @@ python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \
-  --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
   --modality "$MODALITY" \
   --publish-events-and-metrics \
   --disaggregation-mode decode
