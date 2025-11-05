@@ -261,9 +261,13 @@ COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
 COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
 # Create dynamo user
-RUN groupadd dynamo && \
-    useradd -g dynamo -m -s /bin/bash dynamo && \
-    chown -R dynamo:dynamo /workspace
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -m -s /bin/bash dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && [ `id -g dynamo` -eq 1000 ] \
+    && mkdir -p /workspace /home/dynamo/.cache \
+    && chown -R dynamo:dynamo /workspace /home/dynamo \
+    && chmod 2775 /home/dynamo/.cache
 
 # Switch to dynamo user
 USER dynamo
@@ -381,7 +385,12 @@ RUN apt-get update -y && \
     # Rust build dependencies
     clang \
     libclang-dev \
-    protobuf-compiler && \
+    protobuf-compiler \
+    # sudo for dev stage
+    sudo && \
+    # Add sudo privileges to dynamo user
+    echo "dynamo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dynamo && \
+    chmod 0440 /etc/sudoers.d/dynamo && \
     rm -rf /var/lib/apt/lists/*
 
 # Set workspace directory variable

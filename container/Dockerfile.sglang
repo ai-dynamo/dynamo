@@ -188,10 +188,13 @@ RUN git clone --depth 1 --branch ${GDRCOPY_COMMIT} https://github.com/NVIDIA/gdr
 RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
 
 # Create dynamo user EARLY - before copying files
-RUN groupadd dynamo && \
-    useradd -g dynamo -m -s /bin/bash dynamo && \
-    mkdir -p /workspace && \
-    chown -R dynamo:dynamo /sgl-workspace /workspace
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -m -s /bin/bash dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && [ `id -g dynamo` -eq 1000 ] \
+    && mkdir -p /workspace /home/dynamo/.cache \
+    && chown -R dynamo:dynamo /sgl-workspace /workspace /home/dynamo \
+    && chmod 2775 /home/dynamo/.cache
 
 USER dynamo
 ENV HOME=/home/dynamo
@@ -462,8 +465,13 @@ RUN apt-get update -y && \
     silversearcher-ag \
     cloc \
     locales \
+    # sudo for dev stage
+    sudo \
     # NVIDIA tools dependencies
     gnupg && \
+    # Add sudo privileges to dynamo user
+    echo "dynamo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dynamo && \
+    chmod 0440 /etc/sudoers.d/dynamo && \
     echo "deb https://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64 /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
     apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub && \
     apt-get update -y && \

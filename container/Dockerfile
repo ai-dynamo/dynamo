@@ -344,14 +344,22 @@ RUN apt-get update -y \
         clang \
         libclang-dev \
         protobuf-compiler \
+        # sudo for dev stage
+        sudo \
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # Add sudo privileges to dynamo user
+    && echo "dynamo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dynamo \
+    && chmod 0440 /etc/sudoers.d/dynamo
 
 # Create dynamo user
-RUN groupadd dynamo && \
-    useradd -g dynamo -m -s /bin/bash dynamo && \
-    mkdir -p /home/dynamo && \
-    chown -R dynamo:dynamo /opt/dynamo
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -m -s /bin/bash dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && [ `id -g dynamo` -eq 1000 ] \
+    && mkdir -p /home/dynamo/.cache \
+    && chown -R dynamo:dynamo /opt/dynamo /home/dynamo \
+    && chmod 2775 /home/dynamo/.cache
 
 # Switch to dynamo user
 USER dynamo
