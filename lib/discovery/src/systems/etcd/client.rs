@@ -86,11 +86,15 @@ impl Client {
     /// Returns Ok(()) if connected, Err if reconnection failed.
     pub async fn ensure_connected(&self, deadline: std::time::Instant, force: bool) -> Result<()> {
         // Check if reconnection already in progress
-        if let Some(shared_future) = self.reconnect_pending.get(&()) {
-            return shared_future
-                .clone()
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e));
+        if let Some(shared_future_ref) = self.reconnect_pending.get(&()) {
+            let shared = shared_future_ref.clone();
+            drop(shared_future_ref); // Release DashMap lock before await
+            let result = shared.await.map_err(|e| anyhow::anyhow!("{}", e));
+            if result.is_err() {
+                // Clean up failed future so subsequent calls can retry
+                self.reconnect_pending.remove(&());
+            }
+            return result;
         }
 
         // If not forced, assume we're connected (lightweight path)
@@ -117,7 +121,12 @@ impl Client {
             }
         };
 
-        shared_future.await.map_err(|e| anyhow::anyhow!("{}", e))
+        let result = shared_future.await.map_err(|e| anyhow::anyhow!("{}", e));
+        if result.is_err() {
+            // Clean up failed future so subsequent calls can retry
+            self.reconnect_pending.remove(&());
+        }
+        result
     }
 
     /// Internal implementation of reconnection with retry logic.

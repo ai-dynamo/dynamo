@@ -29,6 +29,10 @@ pub enum DiscoveryError {
     #[error("Address checksum mismatch for instance {0}: existing=0x{1:016x}, new=0x{2:016x}")]
     ChecksumMismatch(InstanceId, u64, u64),
 
+    /// Instance already registered - duplicate registration detected
+    #[error("Instance {0} is already registered")]
+    InstanceAlreadyRegistered(InstanceId),
+
     /// Backend-specific error
     #[error("Backend error: {0}")]
     Backend(#[from] anyhow::Error),

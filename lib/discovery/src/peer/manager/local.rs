@@ -67,13 +67,14 @@ impl LocalPeerDiscovery {
             ));
         }
 
-        // Early return for duplicate registration (same instance with same address)
+        // Fail-fast for any duplicate registration attempt
         if let Some(existing_peer_info) = state.by_instance_id.get(&instance_id) {
+            // Check if it's the same address (idempotent attempt) or different
             if existing_peer_info.address_checksum() == worker_address.checksum() {
-                // Already registered with same address, no-op
-                return Ok(());
+                // Duplicate registration with same address - fail to detect bugs
+                return Err(DiscoveryError::InstanceAlreadyRegistered(instance_id));
             } else {
-                // Re-registration with different address
+                // Re-registration with different address - fail with checksum mismatch
                 return Err(DiscoveryError::ChecksumMismatch(
                     instance_id,
                     existing_peer_info.address_checksum(),
