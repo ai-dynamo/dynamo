@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Decode worker config for disaggregated mode (shares GPU with prefill worker)
+# This is for testing. Do not use this for production.
+
+tensor_parallel_size: 1
+moe_expert_parallel_size: 1
+enable_attention_dp: false
+max_num_tokens: 1024
+trust_remote_code: true
+backend: pytorch
+# Enable chunked prefill to process large contexts in smaller chunks
+enable_chunked_prefill: true
+# Overlap scheduler enabled - decode workers can overlap multiple decode operations
+disable_overlap_scheduler: false
+
+cuda_graph_config:
+  max_batch_size: 4
+
+kv_cache_config:
+  free_gpu_memory_fraction: 0.24
+
+# Cache transceiver receives KV cache from prefill worker
+# Required for disaggregated mode - decode worker needs KV cache from prefill
+cache_transceiver_config:
+  backend: DEFAULT

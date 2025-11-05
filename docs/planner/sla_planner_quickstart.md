@@ -345,14 +345,18 @@ DGDRs are **immutable** - if you need to update SLAs or configuration:
 
 ### Manual Deployment Control
 
-Disable auto-deployment to review configurations before deploying:
+There are two ways to manually control deployment after profiling:
+
+#### Option 1: Use DGDR-Generated Configuration (Recommended)
+
+Disable auto-deployment to review the generated DGD before applying:
 
 ```yaml
 spec:
   autoApply: false
 ```
 
-Then manually apply the generated DGD:
+Then manually extract and apply the generated DGD:
 
 ```bash
 # Extract generated config
@@ -364,6 +368,27 @@ vi my-dgd.yaml
 # Deploy manually
 kubectl apply -f my-dgd.yaml -n $NAMESPACE
 ```
+
+The generated DGD includes optimized configurations and the SLA planner component.
+
+#### Option 2: Use Standalone Planner Templates (Advanced)
+
+For advanced use cases, you can manually deploy using the standalone planner templates in `examples/backends/*/deploy/disagg_planner.yaml`:
+
+```bash
+# After profiling completes, profiling data is stored on the PVC at /data
+
+# Optional: Download profiling results for local inspection
+python3 -m deploy.utils.download_pvc_results \
+  --namespace $NAMESPACE \
+  --output-dir ./profiling_data \
+  --folder /data
+
+# Update backend planner manifest as needed, then deploy
+kubectl apply -f examples/backends/<backend>/deploy/disagg_planner.yaml -n $NAMESPACE
+```
+
+> **Note**: The standalone templates are provided as examples and may need customization for your model and requirements. The DGDR-generated configuration (Option 1) is recommended as it's automatically tuned to your profiling results and SLA targets.
 
 ### Relationship to DynamoGraphDeployment (DGD)
 
