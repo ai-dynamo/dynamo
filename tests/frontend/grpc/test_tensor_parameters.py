@@ -88,6 +88,7 @@ def extract_params(param_map) -> dict:
 
 @pytest.mark.e2e
 @pytest.mark.pre_merge
+@pytest.mark.gpu_1
 @pytest.mark.parametrize(
     "request_params",
     [

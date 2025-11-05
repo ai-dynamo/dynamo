@@ -130,6 +130,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_request_cancellation_trtllm_aggregated(
     request, runtime_services, predownload_models
 ):
@@ -207,6 +208,7 @@ def test_request_cancellation_trtllm_aggregated(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_request_cancellation_trtllm_decode_first_decode_cancel(
     request, runtime_services, predownload_models
 ):
@@ -287,6 +289,7 @@ def test_request_cancellation_trtllm_decode_first_decode_cancel(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_request_cancellation_trtllm_decode_first_remote_prefill_cancel(
     request, runtime_services, predownload_models
 ):
@@ -372,6 +375,7 @@ def test_request_cancellation_trtllm_decode_first_remote_prefill_cancel(
 @pytest.mark.trtllm_marker
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 def test_request_cancellation_trtllm_prefill_first_prefill_cancel(
     request, runtime_services, predownload_models
@@ -445,6 +449,7 @@ def test_request_cancellation_trtllm_prefill_first_prefill_cancel(
 @pytest.mark.trtllm_marker
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 def test_request_cancellation_trtllm_prefill_first_remote_decode_cancel(
     request, runtime_services, predownload_models

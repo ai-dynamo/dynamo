@@ -102,6 +102,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_request_migration_vllm_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -152,6 +153,7 @@ def test_request_migration_vllm_worker_failure(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_request_migration_vllm_graceful_shutdown(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -203,6 +205,7 @@ def test_request_migration_vllm_graceful_shutdown(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_no_request_migration_vllm_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -267,6 +270,7 @@ def test_no_request_migration_vllm_worker_failure(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_no_request_migration_vllm_graceful_shutdown(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):

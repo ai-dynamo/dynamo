@@ -17,7 +17,11 @@ from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.integration,
+]
 
 logger = logging.getLogger(__name__)
 
@@ -450,6 +454,8 @@ async def wait_for_mockers_ready(
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.model(MODEL_NAME)
 def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
     """
@@ -502,6 +508,8 @@ def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.model(MODEL_NAME)
 def test_mocker_two_kv_router(request, runtime_services, predownload_tokenizers):
     """
@@ -641,6 +649,8 @@ def test_mocker_two_kv_router(request, runtime_services, predownload_tokenizers)
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
 def test_mocker_kv_router_overload_503(
@@ -809,6 +819,8 @@ def test_mocker_kv_router_overload_503(
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.model(MODEL_NAME)
 def test_kv_push_router_bindings(request, runtime_services, predownload_tokenizers):
     """
@@ -941,6 +953,8 @@ def test_kv_push_router_bindings(request, runtime_services, predownload_tokenize
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.model(MODEL_NAME)
 def test_indexers_sync(request, runtime_services, predownload_tokenizers):
     """
@@ -1183,6 +1197,8 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.model(MODEL_NAME)
 def test_query_instance_id_returns_worker_and_tokens(
     request, runtime_services, predownload_tokenizers
@@ -1372,6 +1388,8 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.model(MODEL_NAME)
 def test_router_decisions(request, runtime_services, predownload_tokenizers):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.

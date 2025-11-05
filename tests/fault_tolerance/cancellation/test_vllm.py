@@ -119,6 +119,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_request_cancellation_vllm_aggregated(
     request, runtime_services, predownload_models
 ):
@@ -196,6 +197,7 @@ def test_request_cancellation_vllm_aggregated(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_request_cancellation_vllm_decode_cancel(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -269,6 +271,7 @@ def test_request_cancellation_vllm_decode_cancel(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_request_cancellation_vllm_remote_prefill_cancel(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):

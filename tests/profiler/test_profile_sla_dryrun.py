@@ -113,6 +113,8 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.integration
     async def test_vllm_dryrun(self, vllm_args):
         """Test that profile_sla dry-run works for vllm backend with disagg.yaml config."""
         # Run the profile in dry-run mode - should complete without errors
@@ -120,6 +122,8 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.integration
     async def test_sglang_dryrun(self, sglang_args):
         """Test that profile_sla dry-run works for sglang backend with disagg.yaml config."""
         # Run the profile in dry-run mode - should complete without errors
@@ -163,6 +167,8 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.integration
     async def test_trtllm_dryrun(self, trtllm_args):
         """Test that profile_sla dry-run works for trtllm backend with disagg.yaml config."""
         # Run the profile in dry-run mode - should complete without errors
@@ -206,6 +212,8 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.integration
     async def test_sglang_moe_dryrun(self, sglang_moe_args):
         """Test that profile_sla dry-run works for sglang backend with MoE config."""
         # Run the profile in dry-run mode - should complete without errors
@@ -272,6 +280,8 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.asyncio
+    @pytest.mark.integration
+    @pytest.mark.gpu_0
     @patch("benchmarks.profiler.utils.search_space_autogen.get_gpu_summary")
     @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
     async def test_profile_with_autogen_search_space_h100(
@@ -338,6 +348,8 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.integration
     @patch("benchmarks.profiler.utils.search_space_autogen.get_gpu_summary")
     @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
     async def test_sglang_profile_with_autogen_search_space_h100(
@@ -404,6 +416,8 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.asyncio
+    @pytest.mark.gpu_0
+    @pytest.mark.integration
     @patch("benchmarks.profiler.utils.search_space_autogen.get_gpu_summary")
     @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
     async def test_trtllm_profile_with_autogen_search_space_h100(

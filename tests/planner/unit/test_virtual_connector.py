@@ -13,7 +13,12 @@ import pytest
 from dynamo._core import DistributedRuntime, VirtualConnectorClient
 from dynamo.planner import SubComponentType, TargetReplica, VirtualConnector
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
 logger = logging.getLogger(__name__)
 
 NAMESPACE = "test_virtual_connector"
