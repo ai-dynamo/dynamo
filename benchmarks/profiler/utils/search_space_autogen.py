@@ -32,7 +32,7 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
     ]  # args.backend is already validated in argparse
 
     # first check if config file exists
-    if args.model is not None:
+    if args.model:
         if not args.config:
             # modify config file from default config file
             logger.info("DGD config file not provided, using default config file")
@@ -56,9 +56,10 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         args.config = config_fn
 
     # now determine the search space
-    if args.model is not None:
+    model_info = None
+    if args.model:
+        logger.info(f"Getting model info for {args.model}...")
         model_info = get_model_info(args.model)
-        gpu_info = get_gpu_summary()
 
         num_experts_str = (
             f", num_experts={model_info['num_experts']}"
@@ -68,9 +69,28 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         logger.info(
             f"Model {args.model} has size {model_info['model_size']}, is_moe={model_info['is_moe']}, and max_context_length={model_info['max_context_length']}{num_experts_str}"
         )
+        args.is_moe_model = model_info["is_moe"]  # type: ignore[assignment]
+        args.max_context_length = model_info["max_context_length"]  # type: ignore[assignment]
+
+    if (
+        args.min_num_gpus_per_engine == 0
+        or args.max_num_gpus_per_engine == 0
+        or args.num_gpus_per_node == 0
+    ):
+        if not args.model:
+            # TODO: get model info provided DGD config
+            error_msg = "No model provided, cannot auto-generate GPU search space. Please provide `--model` or GPU info"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        logger.info("Getting GPU info from k8s cluster...")
+        gpu_info = get_gpu_summary()
         logger.info(
             f"Cluster has {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node with {gpu_info['vram']} VRAM"
         )
+
+        # model_info should be set by now (checked above), but mypy needs explicit verification
+        assert model_info is not None, "model_info must be set when model is provided"
 
         min_gpu = math.ceil(
             model_info["model_size"] / MODEL_GPU_MEM_FRAC_MAX / gpu_info["vram"]  # type: ignore[operator]
@@ -90,8 +110,6 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         )
         args.min_num_gpus_per_engine = min_gpu
         args.max_num_gpus_per_engine = max_gpu
-        args.is_moe_model = model_info["is_moe"]  # type: ignore[assignment]
-        args.max_context_length = model_info["max_context_length"]  # type: ignore[assignment]
         args.num_gpus_per_node = gpu_info["gpus_per_node"]  # type: ignore[assignment]
         args.num_experts = model_info.get("num_experts")  # type: ignore[assignment]
 
