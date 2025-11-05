@@ -134,9 +134,9 @@ RUN cd /opt/dynamo/wheelhouse/ && \
     ls -lah nixl/ && \
     pip list &&\
     pip install --break-system-packages --no-cache \
-        ai_dynamo_runtime-0.6.0-cp310-abi3-manylinux_2_28_x86_64.whl \
-        ai_dynamo-0.6.0-py3-none-any.whl \
-        nixl/nixl-0.7.0-cp312-cp312-linux_x86_64.whl &&\
+        ai_dynamo_runtime-*.whl \
+        ai_dynamo-*.whl \
+        nixl/nixl-*.whl &&\
     # TRTLLM has its own NIXL
     # /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     pip list
