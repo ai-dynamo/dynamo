@@ -27,8 +27,6 @@ This guide demonstrates how to deploy Llama 4 Maverick Instruct with Eagle Specu
     - One node runs the decode worker.
     - The other node runs the prefill worker.
 
-For advanced control over how requests are routed between prefill and decode workers in disaggregated mode, refer to the [Disaggregation Strategy](./README.md#disaggregation-strategy) section.
-
 ## Notes
 * Make sure the (`eagle3_one_model: true`) is set in the LLM API config inside the `recipes/llama4/trtllm/eagle` folder.
 
@@ -39,7 +37,7 @@ inside an interactive shell on one of the allocated nodes, set the
 following environment variables based:
 
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 
 export IMAGE="<dynamo_trtllm_image>"
 # export MOUNTS="${PWD}/:/mnt,/lustre:/lustre"

@@ -128,7 +128,7 @@ You can use the provided launch script or run the components manually:
 #### Option A: Using the Launch Script
 
 ```bash
-cd /workspace/components/backends/trtllm
+cd /workspace/examples/backends/trtllm
 ./launch/gpt_oss_disagg.sh
 ```
 
@@ -136,8 +136,6 @@ cd /workspace/components/backends/trtllm
 
 1. **Start frontend**:
 ```bash
-cd /workspace/dynamo/components/backends/trtllm
-
 # Start frontend with round-robin routing
 python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
 ```
@@ -151,7 +149,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --dyn-reasoning-parser gpt_oss \
   --dyn-tool-call-parser harmony \
   --disaggregation-mode prefill \
-  --disaggregation-strategy prefill_first \
   --max-num-tokens 20000 \
   --max-batch-size 32 \
   --free-gpu-memory-fraction 0.9 \
@@ -168,7 +165,6 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --dyn-reasoning-parser gpt_oss \
   --dyn-tool-call-parser harmony \
   --disaggregation-mode decode \
-  --disaggregation-strategy prefill_first \
   --max-num-tokens 16384 \
   --free-gpu-memory-fraction 0.9 \
   --tensor-parallel-size 4 \
@@ -187,7 +183,7 @@ Make sure that both of the endpoints are available before sending an inference r
 {
   "endpoints": [
     "dyn://dynamo.tensorrt_llm.generate",
-    "dyn://dynamo.tensorrt_llm_next.generate"
+    "dyn://dynamo.prefill.generate"
   ],
   "status": "healthy"
 }

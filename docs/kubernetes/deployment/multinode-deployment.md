@@ -281,8 +281,8 @@ To enable compilation cache, add a volume mount with `useAsCompilationCache: tru
 
 For additional support and examples, see the working multinode configurations in:
 
-- **SGLang**: [components/backends/sglang/deploy/](../../../components/backends/sglang/deploy/)
-- **TensorRT-LLM**: [components/backends/trtllm/deploy/](../../../components/backends/trtllm/deploy/)
-- **vLLM**: [components/backends/vllm/deploy/](../../../components/backends/vllm/deploy/)
+- **SGLang**: [examples/backends/sglang/deploy/](../../../examples/backends/sglang/deploy/)
+- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](../../../examples/backends/trtllm/deploy/)
+- **vLLM**: [examples/backends/vllm/deploy/](../../../examples/backends/vllm/deploy/)
 
 These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.

@@ -23,7 +23,6 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }
