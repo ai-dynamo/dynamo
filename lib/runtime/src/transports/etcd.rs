@@ -392,7 +392,7 @@ impl Client {
     /// Establish a new watch stream with automatic retry and reconnection.
     ///
     /// Attempts to create a watch stream, reconnecting to ETCD if necessary.
-    /// Retries indefinitely until successful or an unrecoverable error occurs.
+    /// Uses a 10-second timeout for reconnection attempts before giving up.
     async fn new_watch_stream(
         connector: &Arc<Connector>,
         prefix: &String,
@@ -422,7 +422,7 @@ impl Client {
                     let deadline = std::time::Instant::now() + Duration::from_secs(10);
                     if let Err(err) = connector.reconnect(deadline).await {
                         tracing::error!(
-                            "Failed to reconnect to ETCD for watching prefix '{}': {}",
+                            "Failed to reconnect to ETCD within 10 secs for watching prefix '{}': {}",
                             prefix,
                             err
                         );
