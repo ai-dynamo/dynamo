@@ -53,6 +53,9 @@ fn _vllm_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // TODO: use TRTLLM own integration module
     m.add_class::<connector::trtllm_worker::PyTrtllmKvConnectorWorker>()?;
     m.add_class::<connector::trtllm_leader::PyTrtllmKvConnectorLeader>()?;
+    // TODO: use SGLang own integration module
+    m.add_class::<connector::sglang_worker::PySglangKvConnectorWorker>()?;
+    m.add_class::<connector::sglang_leader::PySglangKvConnectorLeader>()?;
     Ok(())
 }
 

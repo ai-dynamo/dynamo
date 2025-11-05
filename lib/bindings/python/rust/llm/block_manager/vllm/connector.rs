@@ -6,6 +6,8 @@ use dynamo_llm::block_manager::{
 };
 
 pub mod leader;
+pub mod sglang_leader;
+pub mod sglang_worker;
 pub mod trtllm_leader;
 pub mod trtllm_worker;
 pub mod worker;

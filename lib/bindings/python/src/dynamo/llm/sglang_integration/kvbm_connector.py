@@ -164,7 +164,7 @@ class KVBMLayerwiseConnector:
         leader = KvbmLeader(world_size, drt=self.drt)
 
         # Generate a unique worker ID for this connector
-        worker_id = f"sglang-worker-{rank}"
+        worker_id = f"sglang-leader-{rank}"
         logger.info(f"Initializing KvConnectorLeader with worker_id: {worker_id}")
         self._leader = RustKvConnectorLeader(worker_id, self.drt, page_size, leader)
 
@@ -332,21 +332,7 @@ class KVBMLayerwiseConnector:
                 salt_hash=None,  # TODO(ziqif): Add salt hash support if needed
             )
 
-        # Note: KVBM's store operation works differently from LMCache:
-        # - KVBM uses slot-based block management
-        # - The actual data transfer happens through update_state_after_alloc
-        #   when blocks are provided by SGLang
-        # - The layerwise offloading is handled by KVBM's transfer engine
-        # - We mainly need to ensure the slot exists and is tracked
-        #
-        # For a complete implementation, we would:
-        # 1. Call update_state_after_alloc with the allocated block IDs
-        # 2. KVBM's slot manager will handle offloading to host/disk
-        # 3. Use request_finished when done to release resources
-
-        # TODO(ziqif): Need to map kv_indices (SGLang slots) to KVBM block IDs
-        # This mapping depends on how SGLang's memory pool interacts with KVBM
-        # For now, we just ensure the slot exists for future operations
+        self._leader.offload_tokens(request_id, token_ids)
 
         logger.debug(
             f"KVBM slot created and tracked for request_id={request_id}. "

@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod recorder;
-pub mod slot;
-
 use super::*;
+
 use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
 use dynamo_runtime::DistributedRuntime;
 use crate::llm::block_manager::vllm::connector::leader::slot::{
@@ -36,13 +34,7 @@ use tokio::sync::oneshot;
 
 type VllmLocality = Logical<DistributedLeaderWorkerResources>;
 
-impl From<SlotError> for PyErr {
-    fn from(err: SlotError) -> Self {
-        to_pyerr(err)
-    }
-}
 use anyhow;
-use dynamo_llm::recorder::Recorder;
 use tokio_util::sync::CancellationToken;
 
 pub trait Leader: Send + Sync + std::fmt::Debug {
@@ -52,29 +44,13 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
         num_computed_tokens: usize,
     ) -> anyhow::Result<usize>;
 
-    fn update_state_after_alloc(
-        &mut self,
-        request_id: String,
-        block_ids: Vec<BlockId>,
-        num_external_tokens: usize,
-    ) -> anyhow::Result<()>;
-
-    fn build_connector_metadata(
-        &mut self,
-        scheduler_output: SchedulerOutput,
-    ) -> anyhow::Result<Vec<u8>>;
-
-    fn request_finished(
-        &mut self,
-        request_id: String,
-        block_ids: Vec<BlockId>,
-    ) -> anyhow::Result<bool>;
-
-    fn has_slot(&self, request_id: String) -> bool;
+    fn offload_tokens(&mut self, request_id: String, tokens: Vec<u32>) -> anyhow::Result<()>;
 
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
 
     fn slot_manager(&self) -> &ConnectorSlotManager<String>;
+
+    fn block_manager(&self) -> &VllmBlockManager;
 }
 
 #[derive(Debug)]
@@ -310,6 +286,22 @@ impl Leader for KvConnectorLeader {
 
         Ok(())
     }
+
+    fn offload_tokens(&mut self, request_id: String, tokens: Vec<u32>) -> anyhow::Result<()> {
+        let shared_slot = self.slot_manager()
+            .get_slot(&request_id)?;
+
+        let mut slot = shared_slot
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
+
+        // TODO(ziqif): set correct values
+        let num_computed_tokens = 0;
+        let num_scheduled_tokens = 0;
+        let block_ids: Vec<BlockId> = (0..(tokens.len()/self.block_size)).map(|i| i as BlockId).collect();
+        slot.apply_scheduler_output(&tokens, &block_ids, num_computed_tokens, num_scheduled_tokens)
+            .map_err(|e| anyhow::anyhow!("failed to apply scheduler output: {}", e))
+    }
 }
 
 #[pyclass]
@@ -327,17 +319,7 @@ impl PySglangKvConnectorLeader {
         page_size: usize,
         leader: PyKvbmLeader,
     ) -> Self {
-        let enable_kvbm_record = std::env::var("ENABLE_KVBM_RECORD")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
-        let connector_leader: Box<dyn Leader> = if enable_kvbm_record {
-            Box::new(recorder::KvConnectorLeaderRecorder::new(
-                worker_id, drt, page_size, leader,
-            ))
-        } else {
-            Box::new(KvConnectorLeader::new(worker_id, drt, page_size, leader))
-        };
+        let connector_leader: Box<dyn Leader> = Box::new(KvConnectorLeader::new(worker_id, drt, page_size, leader));
         Self { connector_leader }
     }
 
@@ -351,44 +333,19 @@ impl PySglangKvConnectorLeader {
             .map_err(to_pyerr)
     }
 
-    fn create_slot(
+    fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()> {
+        self.connector_leader
+            .create_slot(request, tokens)
+            .map_err(to_pyerr)
+    }
+
+    fn offload_tokens(
         &mut self,
         request_id: String,
         token_ids: Vec<u32>,
-        salt_hash: Option<u64>,
-    ) -> PyResult<()> {
-        let salt = SaltHash::from(salt_hash.unwrap_or(0));
-        let request = KvbmRequest {
-            request_id: request_id.clone(),
-            salt_hash: salt,
-        };
-        self.connector_leader
-            .create_slot(request, token_ids)
-            .map_err(to_pyerr)
-    }
-
-    fn has_slot(&self, request_id: String) -> bool {
-        self.connector_leader.has_slot(request_id)
-    }
-
-    fn update_state_after_alloc(
-        &mut self,
-        request_id: String,
-        block_ids: Vec<BlockId>,
-        num_external_tokens: usize,
     ) -> PyResult<()> {
         self.connector_leader
-            .update_state_after_alloc(request_id, block_ids, num_external_tokens)
-            .map_err(to_pyerr)
-    }
-
-    fn request_finished(
-        &mut self,
-        request_id: String,
-        block_ids: Vec<BlockId>,
-    ) -> PyResult<bool> {
-        self.connector_leader
-            .request_finished(request_id, block_ids)
+            .offload_tokens(request_id, token_ids)
             .map_err(to_pyerr)
     }
 }
