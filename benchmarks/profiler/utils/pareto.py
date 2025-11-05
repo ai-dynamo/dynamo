@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-def compute_parato(x, y):
+def compute_pareto(x, y):
     """
     compute the pareto front (top-left is better) for the given x and y values
     return sorted lists of the x and y values for the pareto front

@@ -20,7 +20,7 @@ import numpy as np
 from matplotlib import cm
 from scipy.interpolate import griddata
 
-from benchmarks.profiler.utils.parato import compute_parato
+from benchmarks.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -256,15 +256,15 @@ def plot_decode_3d_surface(
 def plot_pd_joint_results(isl, osl, prefill_results, decode_results, output_dir):
     GPU_COST_PER_HOUR = 3.0  # $3/hour
 
-    # compute parato front for prefill
-    p_ttft, p_thpt = compute_parato(prefill_results[1], prefill_results[2])
+    # compute pareto front for prefill
+    p_ttft, p_thpt = compute_pareto(prefill_results[1], prefill_results[2])
 
-    # compute parato front for decode
+    # compute pareto front for decode
     _d_itl, _d_thpt = [], []
     for _d_result in decode_results:
         _d_itl.extend(_d_result[1])
         _d_thpt.extend(_d_result[2])
-    d_itl, d_thpt = compute_parato(_d_itl, _d_thpt)
+    d_itl, d_thpt = compute_pareto(_d_itl, _d_thpt)
 
     # convert to cost per thousand requests
     p_ttft = np.array(p_ttft)
