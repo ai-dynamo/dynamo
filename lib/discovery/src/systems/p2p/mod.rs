@@ -95,7 +95,7 @@ impl P2pConfigBuilder {
             .provider_publication_interval_secs
             .get_or_insert(default_interval);
 
-        P2pDiscoverySystem::new(config).await
+        P2pDiscoverySystem::from_config(config).await
     }
 }
 
@@ -115,7 +115,7 @@ impl std::fmt::Debug for P2pDiscoverySystem {
 }
 
 impl P2pDiscoverySystem {
-    async fn new(config: P2pConfig) -> Result<Arc<dyn DiscoverySystem>, anyhow::Error> {
+    async fn from_config(config: P2pConfig) -> Result<Arc<dyn DiscoverySystem>, anyhow::Error> {
         let peer_discovery = Arc::new(
             swarm::P2pDiscovery::new(
                 config.cluster_id.clone(),

@@ -498,10 +498,7 @@ impl P2pDiscovery {
             .await
             .map_err(|_| GetRecordError::Backend(anyhow!("Get record timed out")))?;
 
-        let response = response
-            .map_err(|_| GetRecordError::Backend(anyhow!("Get record command cancelled")))?;
-
-        response
+        response.map_err(|_| GetRecordError::Backend(anyhow!("Get record command cancelled")))?
     }
 
     /// Start providing a content key in the DHT.
@@ -537,9 +534,7 @@ impl P2pDiscovery {
             .await
             .context("Get providers timed out")?;
 
-        let response = response.context("Get providers command cancelled")?;
-
-        response
+        response.context("Get providers command cancelled")?
     }
 
     pub(super) fn shutdown(&self) {
