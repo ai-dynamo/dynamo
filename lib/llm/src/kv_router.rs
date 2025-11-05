@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod approx;
 pub mod indexer;
+pub mod mm_hash;
 pub mod prefill_router;
 pub mod protocols;
 pub mod publisher;
@@ -30,8 +31,6 @@ pub mod scheduler;
 pub mod scoring;
 pub mod sequence;
 pub mod subscriber;
-mod mm_hash;
-
 pub use prefill_router::PrefillRouter;
 
 use crate::{
