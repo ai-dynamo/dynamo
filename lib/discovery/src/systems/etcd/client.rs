@@ -139,6 +139,8 @@ impl Client {
         loop {
             backoff_state.apply_backoff(deadline).await;
             if std::time::Instant::now() >= deadline {
+                // Clear the pending reconnection before returning error
+                self.reconnect_pending.remove(&());
                 return Err(error!(
                     "Unable to reconnect to ETCD cluster: deadline exceeded"
                 ));

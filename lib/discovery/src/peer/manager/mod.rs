@@ -85,6 +85,7 @@ impl PeerDiscoveryManager {
         // Create a new shared future for this query
         let local = self.local.clone();
         let remotes = self.remotes.clone();
+        let pending = self.pending.clone();
 
         use dashmap::mapref::entry::Entry;
         let shared_future = match self.pending.by_worker_id.entry(worker_id) {
@@ -112,9 +113,15 @@ impl PeerDiscoveryManager {
                                 return Ok(peer_info);
                             }
                             Err(DiscoveryQueryError::NotFound) => continue,
-                            Err(e) => return Err(e),
+                            Err(e) => {
+                                // Clean up failed future from cache to allow retry
+                                pending.by_worker_id.remove(&worker_id);
+                                return Err(e);
+                            }
                         }
                     }
+                    // Clean up NotFound result from cache to allow retry
+                    pending.by_worker_id.remove(&worker_id);
                     Err(DiscoveryQueryError::NotFound)
                 }
                 .boxed()
@@ -142,6 +149,7 @@ impl PeerDiscoveryManager {
         // Create a new shared future for this query
         let local = self.local.clone();
         let remotes = self.remotes.clone();
+        let pending = self.pending.clone();
 
         use dashmap::mapref::entry::Entry;
         let shared_future = match self.pending.by_instance_id.entry(instance_id) {
@@ -169,9 +177,15 @@ impl PeerDiscoveryManager {
                                 return Ok(peer_info);
                             }
                             Err(DiscoveryQueryError::NotFound) => continue,
-                            Err(e) => return Err(e),
+                            Err(e) => {
+                                // Clean up failed future from cache to allow retry
+                                pending.by_instance_id.remove(&instance_id);
+                                return Err(e);
+                            }
                         }
                     }
+                    // Clean up NotFound result from cache to allow retry
+                    pending.by_instance_id.remove(&instance_id);
                     Err(DiscoveryQueryError::NotFound)
                 }
                 .boxed()

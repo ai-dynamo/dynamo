@@ -241,7 +241,7 @@ impl EtcdDiscoverySystem {
 
         tracing::info!("Etcd discovery system initialized successfully");
 
-        Ok(system as Arc<dyn DiscoverySystem>)
+        Ok(system)
     }
 }
 
@@ -256,11 +256,12 @@ impl DiscoverySystem for EtcdDiscoverySystem {
                         self.config.max_retries,
                     );
 
-                    Arc::new(EtcdPeerDiscovery::new(
+                    let discovery: Arc<dyn PeerDiscovery> = Arc::new(EtcdPeerDiscovery::new(
                         executor,
                         self.lease_state.clone(),
                         self.config.cluster_id.clone(),
-                    )) as Arc<dyn PeerDiscovery>
+                    ));
+                    discovery
                 })
                 .clone(),
         )

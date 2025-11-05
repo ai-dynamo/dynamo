@@ -68,7 +68,7 @@ impl From<GetRecordError> for DiscoveryQueryError {
 #[behaviour(to_swarm = "DynamoBehaviourEvent")]
 struct DynamoBehaviour {
     kad: Kademlia<MemoryStore>,
-    mdns: mdns::tokio::Behaviour,
+    mdns: libp2p::swarm::behaviour::toggle::Toggle<mdns::tokio::Behaviour>,
 }
 
 #[derive(Debug)]
@@ -152,7 +152,7 @@ impl P2pDiscovery {
     fn create_behaviour(
         key: &identity::Keypair,
         replication_factor: usize,
-        _enable_mdns: bool,
+        enable_mdns: bool,
         record_ttl_secs: u64,
         publication_interval_secs: Option<u64>,
         provider_publication_interval_secs: Option<u64>,
@@ -180,8 +180,14 @@ impl P2pDiscovery {
         let mut kad = Kademlia::with_config(local_peer_id, store, kad_config);
         kad.set_mode(Some(Mode::Server));
 
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
-            .expect("Failed to create mDNS behaviour");
+        // Conditionally enable mDNS based on configuration
+        let mdns = if enable_mdns {
+            let behaviour = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
+                .expect("Failed to create mDNS behaviour");
+            libp2p::swarm::behaviour::toggle::Toggle::from(Some(behaviour))
+        } else {
+            libp2p::swarm::behaviour::toggle::Toggle::from(None)
+        };
 
         DynamoBehaviour { kad, mdns }
     }
@@ -211,8 +217,9 @@ impl P2pDiscovery {
             .with_tokio()
             .with_other_transport(move |key| {
                 let tcp = tcp::tokio::Transport::default();
-                let pnet_tcp = tcp.and_then(move |socket, _| async move {
-                    PnetConfig::new(psk).handshake(socket).await
+                let pnet_tcp = tcp.and_then(move |socket, _| {
+                    let psk_clone = psk;
+                    async move { PnetConfig::new(psk_clone).handshake(socket).await }
                 });
 
                 pnet_tcp

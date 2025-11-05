@@ -5,6 +5,23 @@
 //!
 //! Handles lease creation, validation, and renewal. Attempts to reuse
 //! existing leases when reconnecting to avoid unnecessary re-registration.
+//!
+//! # Lease Revocation Limitation
+//!
+//! **IMPORTANT**: If an etcd lease is revoked (either manually or due to
+//! network partition), all keys associated with that lease are automatically
+//! deleted by etcd. This is an **unrecoverable** state in the current
+//! implementation because:
+//!
+//! 1. The system does not track which keys were published under a lease
+//! 2. When a lease is revoked, we create a new lease but cannot republish
+//!    the deleted keys
+//! 3. All peer registrations made with the old lease are permanently lost
+//!
+//! **Mitigation**: The keep-alive mechanism maintains the lease actively,
+//! reducing the chance of expiration. However, extended network partitions
+//! or manual lease revocation will result in lost registrations that require
+//! application-level re-registration.
 
 use anyhow::{Context, Result};
 use std::time::{Duration, Instant};
@@ -91,8 +108,14 @@ impl LeaseState {
                     tracing::debug!("Existing lease {} expired, creating new lease", lease_id);
                 }
                 LeaseValidityState::NotFound => {
+                    // CRITICAL: When a lease is not found (revoked), all keys associated
+                    // with it are already deleted by etcd. Creating a new lease will NOT
+                    // restore those keys. This is an unrecoverable state - the caller
+                    // must re-register all instances.
                     tracing::warn!(
-                        "Existing lease {} not found on server, creating new lease",
+                        "Existing lease {} not found on server (revoked). All keys associated \
+                         with this lease have been deleted. Creating new lease - caller must \
+                         re-register instances.",
                         lease_id
                     );
                 }
@@ -124,8 +147,17 @@ impl LeaseState {
             Ok(resp) => resp,
             Err(e) => {
                 let err_str = e.to_string().to_lowercase();
-                // Check if error indicates lease not found
-                if err_str.contains("not found") || err_str.contains("lease not found") {
+                // Check if error indicates lease not found or revoked
+                // Common etcd error patterns for missing/revoked leases:
+                // - "lease not found"
+                // - "requested lease not found"
+                // - "lease <id> already expired"
+                // - "etcdserver: requested lease not found"
+                if err_str.contains("not found")
+                    || err_str.contains("lease not found")
+                    || err_str.contains("already expired")
+                    || err_str.contains("requested lease not found")
+                {
                     return LeaseValidityState::NotFound;
                 }
                 // Other errors are check failures
@@ -133,9 +165,15 @@ impl LeaseState {
             }
         };
 
+        let remaining_ttl = resp.ttl();
+
+        // TTL of 0 or negative means the lease is already gone
+        if remaining_ttl <= 0 {
+            return LeaseValidityState::NotFound;
+        }
+
         // Consider lease valid if it has more than 1/3 of original TTL remaining
         let min_ttl = (self.ttl.as_secs() as i64) / 3;
-        let remaining_ttl = resp.ttl();
 
         if remaining_ttl > min_ttl {
             LeaseValidityState::Valid { remaining_ttl }

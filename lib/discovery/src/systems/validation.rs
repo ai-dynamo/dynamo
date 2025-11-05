@@ -12,5 +12,13 @@ pub(crate) fn validate_cluster_id(cluster_id: &str) -> Result<(), ValidationErro
         err.add_param("value".into(), &cluster_id);
         return Err(err);
     }
+
+    // Reject cluster IDs with leading or trailing whitespace
+    if cluster_id.trim() != cluster_id {
+        let mut err = ValidationError::new("cluster_id_has_whitespace");
+        err.add_param("value".into(), &cluster_id);
+        return Err(err);
+    }
+
     Ok(())
 }
