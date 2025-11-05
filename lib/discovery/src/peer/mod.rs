@@ -13,7 +13,7 @@ mod identity;
 mod manager;
 
 pub use address::{PeerInfo, WorkerAddress};
-pub use identity::{InstanceFactory, InstanceId, WorkerId};
+pub use identity::{InstanceId, WorkerId};
 pub use manager::PeerDiscoveryManager;
 
 /// Error type for discovery operations.

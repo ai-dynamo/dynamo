@@ -36,40 +36,6 @@ use std::fmt;
 use uuid::Uuid;
 use xxhash_rust::xxh3::xxh3_64;
 
-/// Factory for creating InstanceIds.
-///
-/// This provides a clean abstraction for creating instance IDs, which can be
-/// useful for testing or for creating mock instances.
-///
-/// # Example
-///
-/// ```
-/// use dynamo_am_discovery::InstanceFactory;
-///
-/// let factory = InstanceFactory::new();
-/// let instance_id = factory.create();
-/// ```
-#[derive(Clone, Debug, Default)]
-pub struct InstanceFactory;
-
-impl InstanceFactory {
-    /// Create a new InstanceFactory.
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Create a new InstanceId.
-    pub fn create(&self) -> InstanceId {
-        InstanceId::new_v4()
-    }
-
-    /// Deprecated alias for `create()`.
-    #[deprecated(since = "0.1.0", note = "Use create() instead")]
-    pub fn create_instance_id(&self) -> InstanceId {
-        self.create()
-    }
-}
-
 /// Unique identifier for a runtime instance.
 ///
 /// This is a UUID-based identifier that uniquely identifies a running instance
@@ -330,22 +296,6 @@ mod tests {
 
         let instance_id = InstanceId::from_bytes(bytes);
         assert_eq!(instance_id.as_uuid(), &uuid);
-    }
-
-    #[test]
-    fn test_instance_factory() {
-        let factory = InstanceFactory::new();
-
-        let id1 = factory.create();
-        let id2 = factory.create();
-
-        // Each call creates a unique ID
-        assert_ne!(id1, id2);
-
-        // Each ID has a corresponding worker_id
-        let worker_id1 = id1.worker_id();
-        let worker_id2 = id2.worker_id();
-        assert_ne!(worker_id1, worker_id2);
     }
 
     #[test]

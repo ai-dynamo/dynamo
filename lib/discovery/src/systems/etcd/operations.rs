@@ -211,15 +211,3 @@ impl OperationExecutor {
         &self.client
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_operation_executor_creation() {
-        // Smoke test to ensure the struct compiles
-        let timeout = Duration::from_secs(30);
-        assert_eq!(timeout.as_secs(), 30);
-    }
-}
