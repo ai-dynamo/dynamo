@@ -54,6 +54,7 @@ fi
 
 sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_${prefix}${gen_tp_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
 
+enable_pdl=true
 echo "concurrency_list: ${concurrency_list}"
 
 ctx_gpus=$((num_ctx_servers * ctx_tp_size))
