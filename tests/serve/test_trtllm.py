@@ -113,9 +113,7 @@ trtllm_configs = {
         marks=[pytest.mark.gpu_2, pytest.mark.trtllm_marker, pytest.mark.multimodal],
         model="Qwen/Qwen2-VL-7B-Instruct",
         models_port=8000,
-        request_payloads=[
-            multimodal_payload_default()
-        ],
+        request_payloads=[multimodal_payload_default()],
     ),
 }
 

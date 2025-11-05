@@ -61,6 +61,7 @@ def completion_payload_default(
         expected_response=expected_response or ["AI"],
     )
 
+
 def multimodal_payload_default(
     image_url: str = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png",
     text: str = "Describe the image",
@@ -72,7 +73,7 @@ def multimodal_payload_default(
     stream: bool = False,
 ) -> ChatPayload:
     """Create a multimodal chat payload with image and text content.
-    
+
     Args:
         image_url: URL of the image to include in the request
         text: Text prompt to accompany the image
@@ -82,7 +83,7 @@ def multimodal_payload_default(
         max_tokens: Maximum tokens to generate
         temperature: Sampling temperature (optional)
         stream: Whether to stream the response
-    
+
     Returns:
         ChatPayload configured for multimodal requests
     """
