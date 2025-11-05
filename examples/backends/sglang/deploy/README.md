@@ -99,7 +99,7 @@ Note: If your cluster requires a specific storage class, edit `model_cache_pvc.y
 We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd prefer to use your own registry, build and push your own image:
 
 ```bash
-./container/build.sh --framework SGLANG
+./container/build.sh --framework sglang
 # Tag and push to your container registry
 # Update the image references in the YAML files
 ```

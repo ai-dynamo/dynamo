@@ -9,6 +9,12 @@ spec:
   envs:
   - name: DYN_LOGGING_JSONL
     value: "1"
+  - name: MODEL_EXPRESS_CACHE_DIRECTORY
+    value: "/model/.model-express/cache"
+  - name: HF_HUB_CACHE
+    value: "/model/.model-express/cache"
+  - name: MODEL_EXPRESS_URL
+    value: "http://sglang-agg-modelexpress:8000"
   pvcs:
     - name: model-cache-pvc
       create: false
@@ -50,10 +56,6 @@ spec:
               value: "info"
             - name: MODEL_EXPRESS_DATABASE_PATH
               value: "/model/models.db"
-            - name: MODEL_EXPRESS_CACHE_DIRECTORY
-              value: "/model/.model-express/cache"
-            - name: HF_HUB_CACHE
-              value: "/model/.model-express/cache"
           command:
             - /bin/sh
             - -c
@@ -84,18 +86,10 @@ spec:
       resources:
         limits:
           gpu: "1"
-      envs:
-        - name: MODEL_EXPRESS_URL
-          value: http://sglang-agg-modelexpress:8000
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/examples/backends/sglang
-          env:
-            - name: MODEL_EXPRESS_CACHE_DIRECTORY
-              value: "/model/.model-express/cache"
-            - name: HF_HUB_CACHE
-              value: "/model/.model-express/cache"
           command:
           - python3
           - -m

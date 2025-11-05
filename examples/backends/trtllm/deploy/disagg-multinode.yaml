@@ -76,6 +76,12 @@ spec:
       value: "1"
     - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
       value: "1"
+    - name: MODEL_EXPRESS_CACHE_DIRECTORY
+      value: "/model/.model-express/cache"
+    - name: HF_HUB_CACHE
+      value: "/model/.model-express/cache"
+    - name: MODEL_EXPRESS_URL
+      value: "http://trtllm-disagg-modelexpress:8000"
   services:
     Frontend:
       dynamoNamespace: trtllm-disagg
@@ -122,10 +128,6 @@ spec:
               value: "info"
             - name: MODEL_EXPRESS_DATABASE_PATH
               value: "/model/models.db"
-            - name: MODEL_EXPRESS_CACHE_DIRECTORY
-              value: "/model/.model-express/cache"
-            - name: HF_HUB_CACHE
-              value: "/model/.model-express/cache"
           command:
             - /bin/sh
             - -c
@@ -167,13 +169,6 @@ spec:
             configMap:
               name: nvidia-config
         mainContainer:
-          env:
-            - name: MODEL_EXPRESS_URL
-              value: http://trtllm-disagg-modelexpress:8000
-            - name: MODEL_EXPRESS_CACHE_DIRECTORY
-              value: "/model/.model-express/cache"
-            - name: HF_HUB_CACHE
-              value: "/model/.model-express/cache"
           volumeMounts:
             - name: nvidia-config
               mountPath: /workspace/
@@ -214,13 +209,6 @@ spec:
             configMap:
               name: nvidia-config
         mainContainer:
-          env:
-            - name: MODEL_EXPRESS_URL
-              value: http://trtllm-disagg-modelexpress:8000
-            - name: MODEL_EXPRESS_CACHE_DIRECTORY
-              value: "/model/.model-express/cache"
-            - name: HF_HUB_CACHE
-              value: "/model/.model-express/cache"
           volumeMounts:
             - name: nvidia-config
               mountPath: /workspace/
