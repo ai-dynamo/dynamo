@@ -21,8 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     discovery::KV_ROUTERS_ROOT_PATH,
     kv_router::{
-        KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE, ROUTER_CLEANUP_LOCK,
-        ROUTER_SNAPSHOT_LOCK,
+        KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE, ROUTER_SNAPSHOT_LOCK,
         indexer::{DumpRequest, GetWorkersRequest, RouterEvent},
         protocols::WorkerId,
     },
@@ -414,28 +413,11 @@ pub async fn start_kv_router_background(
 
                     tracing::info!("Attempting to delete orphaned consumer: {consumer_to_delete}");
 
-                    // Create a unique cleanup lock for this specific consumer
-                    let cleanup_lock_name = format!("{}/{}/{}", ROUTER_CLEANUP_LOCK, component.subject(), consumer_to_delete);
-                    let cleanup_rwlock = DistributedRWLock::new(cleanup_lock_name);
-
-                    // Try to acquire cleanup write lock (non-blocking) before deleting consumer
-                    if let Some(_cleanup_guard) = cleanup_rwlock.try_write_lock(&etcd_client).await {
-                        tracing::debug!(
-                            "Acquired cleanup lock for deleting consumer: {consumer_to_delete}"
-                        );
-
-                        // Delete the consumer
-                        if let Err(e) = nats_queue.shutdown(Some(consumer_to_delete.clone())).await {
-                            tracing::warn!("Failed to delete consumer {consumer_to_delete}: {e}");
-                        } else {
-                            tracing::info!("Successfully deleted orphaned consumer: {consumer_to_delete}");
-                        }
-
-                        // Cleanup lock is automatically released when _cleanup_guard goes out of scope
+                    // Delete the consumer (allow race condition if multiple routers try to delete)
+                    if let Err(e) = nats_queue.shutdown(Some(consumer_to_delete.clone())).await {
+                        tracing::warn!("Failed to delete consumer {consumer_to_delete}: {e}");
                     } else {
-                        tracing::debug!(
-                            "Could not acquire cleanup lock for consumer {consumer_to_delete}"
-                        );
+                        tracing::info!("Successfully deleted orphaned consumer: {consumer_to_delete}");
                     }
                 }
             }
