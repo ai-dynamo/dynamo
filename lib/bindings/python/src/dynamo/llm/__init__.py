@@ -18,6 +18,8 @@ from dynamo._core import KvPushRouter as KvPushRouter
 from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouterConfig as KvRouterConfig
 from dynamo._core import KvStats as KvStats
+from dynamo._core import MediaDecoder as MediaDecoder
+from dynamo._core import MediaFetcher as MediaFetcher
 from dynamo._core import ModelInput as ModelInput
 from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
 from dynamo._core import ModelType as ModelType
@@ -28,8 +30,6 @@ from dynamo._core import RouterConfig as RouterConfig
 from dynamo._core import RouterMode as RouterMode
 from dynamo._core import SpecDecodeStats as SpecDecodeStats
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
-from dynamo._core import MediaDecoder as MediaDecoder
-from dynamo._core import MediaFetcher as MediaFetcher
 from dynamo._core import WorkerStats as WorkerStats
 from dynamo._core import ZmqKvEventListener as ZmqKvEventListener
 from dynamo._core import ZmqKvEventPublisher as ZmqKvEventPublisher

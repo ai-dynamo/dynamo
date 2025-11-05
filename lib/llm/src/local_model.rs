@@ -14,8 +14,8 @@ use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::{ModelInput, ModelType};
-use crate::request_template::RequestTemplate;
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
+use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
 

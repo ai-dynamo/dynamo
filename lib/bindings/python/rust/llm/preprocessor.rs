@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::llm::model_card::ModelDeploymentCard;
+use std::time::Duration;
 
 use llm_rs::{
     preprocessor::OpenAIPreprocessor,
