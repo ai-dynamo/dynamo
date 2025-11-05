@@ -149,7 +149,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --dyn-reasoning-parser gpt_oss \
   --dyn-tool-call-parser harmony \
   --disaggregation-mode prefill \
-  --disaggregation-strategy prefill_first \
   --max-num-tokens 20000 \
   --max-batch-size 32 \
   --free-gpu-memory-fraction 0.9 \
@@ -166,7 +165,6 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --dyn-reasoning-parser gpt_oss \
   --dyn-tool-call-parser harmony \
   --disaggregation-mode decode \
-  --disaggregation-strategy prefill_first \
   --max-num-tokens 16384 \
   --free-gpu-memory-fraction 0.9 \
   --tensor-parallel-size 4 \
@@ -185,7 +183,7 @@ Make sure that both of the endpoints are available before sending an inference r
 {
   "endpoints": [
     "dyn://dynamo.tensorrt_llm.generate",
-    "dyn://dynamo.tensorrt_llm_next.generate"
+    "dyn://dynamo.prefill.generate"
   ],
   "status": "healthy"
 }

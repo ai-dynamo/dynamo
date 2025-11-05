@@ -251,8 +251,7 @@ spec:
               --tensor-parallel-size 1 \
               --max-batch-size 1 \
               --free-gpu-memory-fraction 0.9 \
-              --disaggregation-mode prefill \
-              --disaggregation-strategy prefill_first
+              --disaggregation-mode prefill
           command:
           - /bin/sh
           - -c
@@ -311,8 +310,7 @@ spec:
               --tensor-parallel-size 2 \
               --max-batch-size 128 \
               --free-gpu-memory-fraction 0.9 \
-              --disaggregation-mode decode \
-              --disaggregation-strategy prefill_first
+              --disaggregation-mode decode
           command:
           - /bin/sh
           - -c
