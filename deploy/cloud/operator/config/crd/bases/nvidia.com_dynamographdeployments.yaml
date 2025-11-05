@@ -206,6 +206,7 @@ spec:
                     x-kubernetes-validations:
                       - message: When create is true, size, storageClass, and volumeAccessMode are required
                         rule: '!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))'
+                  maxItems: 100
                   type: array
                 services:
                   additionalProperties:
@@ -10412,6 +10413,7 @@ spec:
                         type: array
                     type: object
                   description: Services are the services to deploy as part of this deployment.
+                  maxProperties: 100
                   type: object
               type: object
             status:
