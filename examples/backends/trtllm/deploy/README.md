@@ -9,6 +9,7 @@ Basic deployment pattern with frontend and a single worker.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server (with kv router mode disabled)
+- `ModelExpress`: Shared model caching service across workers
 - `TRTLLMWorker`: Single worker handling both prefill and decode
 
 ### 2. **Aggregated Router Deployment** (`agg_router.yaml`)
@@ -16,6 +17,7 @@ Enhanced aggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server (with kv router mode enabled)
+- `ModelExpress`: Shared model caching service across workers
 - `TRTLLMWorker`: Multiple workers handling both prefill and decode (2 replicas for load balancing)
 
 ### 3. **Disaggregated Deployment** (`disagg.yaml`)
@@ -23,6 +25,7 @@ High-performance deployment with separated prefill and decode workers.
 
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
+- `ModelExpress`: Shared model caching service across workers
 - `TRTLLMDecodeWorker`: Specialized decode-only worker
 - `TRTLLMPrefillWorker`: Specialized prefill-only worker
 
@@ -31,6 +34,7 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: HTTP API server (with kv router mode enabled)
+- `ModelExpress`: Shared model caching service across workers
 - `TRTLLMDecodeWorker`: Specialized decode-only worker
 - `TRTLLMPrefillWorker`: Specialized prefill-only worker (2 replicas for load balancing)
 
@@ -40,6 +44,7 @@ Aggregated deployment with custom configuration.
 **Architecture:**
 - `nvidia-config`: ConfigMap containing a custom trtllm configuration
 - `Frontend`: OpenAI-compatible API server (with kv router mode disabled)
+- `ModelExpress`: Shared model caching service across workers
 - `TRTLLMWorker`: Single worker handling both prefill and decode with custom configuration mounted from the configmap
 
 ### 6. **Disaggregated Planner Deployment** (`disagg_planner.yaml`)
@@ -47,6 +52,7 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
+- `ModelExpress`: Shared model caching service across workers
 - `Planner`: SLA-based planner that monitors performance and scales workers automatically
 - `Prometheus`: Metrics collection and monitoring
 - `TRTLLMDecodeWorker`: Specialized decode-only worker
@@ -106,6 +112,16 @@ Before using these templates, ensure you have:
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for TensorRT-LLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
+
+### Persistent Volume Claim (PVC)
+
+All templates expect a pre-created PVC named `model-cache-pvc` for the shared model cache used by ModelExpress and TensorRT-LLM workers.
+
+Apply the shared PVC once per namespace before deploying any graph:
+
+```bash
+kubectl apply -f model_cache_pvc.yaml -n $NAMESPACE
+```
 
 ### Container Images
 
@@ -170,6 +186,11 @@ Export the NAMESPACE you used in your Dynamo Cloud Installation.
 ```bash
 cd dynamo/examples/backends/trtllm/deploy
 export DEPLOYMENT_FILE=agg.yaml
+
+# Create the shared model cache PVC (run once per namespace)
+kubectl apply -f model_cache_pvc.yaml -n $NAMESPACE
+
+# Apply the deployment
 kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 ```
 
