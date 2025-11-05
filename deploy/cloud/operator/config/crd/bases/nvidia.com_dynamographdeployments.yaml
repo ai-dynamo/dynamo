@@ -812,8 +812,13 @@ spec:
                         description: ComponentType indicates the role of this component (for example, "main").
                         type: string
                       dynamoNamespace:
-                        description: Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
+                        description: |-
+                          Deprecated: DynamoNamespace is deprecated and will be removed in a future version.
+                          The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
                         type: string
+                        x-kubernetes-validations:
+                          - message: dynamoNamespace is deprecated and will be removed in a future version; avoid using this field
+                            rule: self == oldSelf
                       envFromSecret:
                         description: |-
                           EnvFromSecret references a Secret whose key/value pairs will be exposed as
@@ -9942,6 +9947,9 @@ spec:
                             x-kubernetes-list-type: map
                         required: []
                         type: object
+                      globalDynamoNamespace:
+                        description: GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+                        type: boolean
                       ingress:
                         description: Ingress config to expose the component outside the cluster (or through a service mesh).
                         properties:
