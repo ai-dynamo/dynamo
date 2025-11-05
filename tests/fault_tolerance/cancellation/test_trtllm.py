@@ -33,6 +33,9 @@ class DynamoWorkerProcess(ManagedProcess):
             request: pytest request object
             mode: One of "prefill_and_decode", "prefill", "decode"
         """
+        # Prefill workers require migration_limit=0 (no KV cache migration support)
+        migration_limit = "0" if mode == "prefill" else "3"
+
         command = [
             "python3",
             "-m",
@@ -46,7 +49,7 @@ class DynamoWorkerProcess(ManagedProcess):
             "--max-seq-len",
             "8192",
             "--migration-limit",
-            "3",
+            migration_limit,
         ]
         if mode != "prefill_and_decode":
             with open("test_request_cancellation_trtllm_config.yaml", "w") as f:
