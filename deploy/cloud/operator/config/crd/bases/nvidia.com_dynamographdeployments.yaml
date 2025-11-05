@@ -10413,7 +10413,7 @@ spec:
                         type: array
                     type: object
                   description: Services are the services to deploy as part of this deployment.
-                  maxProperties: 100
+                  maxProperties: 25
                   type: object
               type: object
             status:
