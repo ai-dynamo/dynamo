@@ -313,6 +313,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
 
+	// TODO: this should be based on if k8s service discovery is enabled
 	// service account, role and role binding for k8s service discovery
 	serviceAccount := serviceaccount.GetKubernetesDiscoveryServiceAccount(fmt.Sprintf("%s-k8s-service-discovery", dynamoDeployment.Name), dynamoDeployment.Namespace)
 	_, syncedServiceAccount, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {

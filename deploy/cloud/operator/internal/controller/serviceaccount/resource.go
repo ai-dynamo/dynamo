@@ -75,6 +75,11 @@ func getEndpointsDiscoveryRole(name, namespace string) *rbacv1.Role {
 				Resources: []string{"endpoints"},
 				Verbs:     []string{"get", "list"},
 			},
+			{
+				APIGroups: []string{"discovery.k8s.io"},
+				Resources: []string{"endpointslices"},
+				Verbs:     []string{"get", "list"},
+			},
 		},
 	}
 }

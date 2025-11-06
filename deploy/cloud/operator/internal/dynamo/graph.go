@@ -853,6 +853,10 @@ func GenerateBasePodSpec(
 			return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 		}
 	}
+
+	// TODO: just for workers and frontend if k8s service discovery is enabled
+	podSpec.ServiceAccountName = fmt.Sprintf("%s-k8s-service-discovery", componentContext.ParentGraphDeploymentName)
+
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
