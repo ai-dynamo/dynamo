@@ -395,24 +395,35 @@ func getCliqueStartupDependencies(
 	return nil
 }
 
-func GenerateComponentService(ctx context.Context, componentName, componentNamespace string) (*corev1.Service, error) {
+func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec) (*corev1.Service, error) {
+	componentName := GetDynamoComponentName(dynamoDeployment, component.ServiceName)
+	var servicePort corev1.ServicePort
+	if component.ComponentType == commonconsts.ComponentTypeFrontend {
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.DynamoServicePortName,
+			Port:       commonconsts.DynamoServicePort,
+			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	} else {
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.DynamoSystemPortName,
+			Port:       commonconsts.DynamoSystemPort,
+			TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	}
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      componentName,
-			Namespace: componentNamespace,
+			Namespace: dynamoDeployment.Namespace,
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
-				commonconsts.KubeLabelDynamoSelector: componentName,
+				commonconsts.KubeLabelDynamoComponentType: component.ComponentType,
+				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace, // TODO: nilness check
 			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       commonconsts.DynamoServicePortName,
-					Port:       commonconsts.DynamoServicePort,
-					TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
+			Ports: []corev1.ServicePort{servicePort},
 		},
 	}
 	return service, nil

@@ -355,25 +355,29 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 
 	resources := []Resource{groveGangSetAsResource}
 	for componentName, component := range dynamoDeployment.Spec.Services {
-		if component.ComponentType == consts.ComponentTypeFrontend {
-			// generate the main component service
-			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace)
-			if err != nil {
-				logger.Error(err, "failed to generate the main component service")
-				return "", "", "", fmt.Errorf("failed to generate the main component service: %w", err)
-			}
-			_, syncedMainComponentService, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
-				return mainComponentService, false, nil
+		// Creating service per component
+		// Would only want to do this when the service discovery backend is k8s - else only create service for frontend
+		// dynamocomponentdeployment_controller.go:1240
+
+		mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamoDeployment, component)
+		if err != nil {
+			logger.Error(err, "failed to generate the main component service")
+			return "", "", "", fmt.Errorf("failed to generate the main component service: %w", err)
+		}
+		_, syncedMainComponentService, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+			return mainComponentService, false, nil
+		})
+		if err != nil {
+			logger.Error(err, "failed to sync the main component service")
+			return "", "", "", fmt.Errorf("failed to sync the main component service: %w", err)
+		}
+		mainComponentServiceAsResource := commonController.WrapResource(syncedMainComponentService,
+			func() (bool, string) {
+				return true, ""
 			})
-			if err != nil {
-				logger.Error(err, "failed to sync the main component service")
-				return "", "", "", fmt.Errorf("failed to sync the main component service: %w", err)
-			}
-			mainComponentServiceAsResource := commonController.WrapResource(syncedMainComponentService,
-				func() (bool, string) {
-					return true, ""
-				})
-			resources = append(resources, mainComponentServiceAsResource)
+		resources = append(resources, mainComponentServiceAsResource)
+
+		if component.ComponentType == consts.ComponentTypeFrontend {
 			// generate the main component ingress
 			ingressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
 			if component.Ingress != nil {
