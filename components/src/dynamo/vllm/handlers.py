@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 
 
 def build_sampling_params(
-    request: Dict[str, Any], default_sampling_params: Dict[str, Any]
+    request: Dict[str, Any],
+    default_sampling_params: Dict[str, Any],
+    model_max_len: int | None = None,
 ) -> SamplingParams:
     """
     Build SamplingParams from a PreprocessedRequest.
@@ -58,6 +60,15 @@ def build_sampling_params(
                 continue
             setattr(sampling_params, key, value)
 
+    # If max_tokens wasn't provided (None or missing), compute a dynamic default
+    provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
+    token_ids = request.get("token_ids", [])
+    input_length = len(token_ids)
+    if model_max_len is not None and (provided_max_tokens is None):
+        # Ensure at least 1 token generation by default when possible
+        dynamic_default = max(1, model_max_len - input_length)
+        sampling_params.max_tokens = dynamic_default
+
     return sampling_params
 
 
@@ -66,7 +77,14 @@ class BaseWorkerHandler(ABC):
     Request handler for the generate and clear_kv_blocks endpoints.
     """
 
-    def __init__(self, runtime, component, engine, default_sampling_params):
+    def __init__(
+        self,
+        runtime,
+        component,
+        engine,
+        default_sampling_params,
+        model_max_len: int | None = None,
+    ):
         self.runtime = runtime
         self.component = component
         self.engine_client = engine
@@ -75,6 +93,7 @@ class BaseWorkerHandler(ABC):
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
         self.image_loader = ImageLoader()
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
+        self.model_max_len = model_max_len
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -223,8 +242,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         component,
         engine,
         default_sampling_params,
+        model_max_len: int | None = None,
     ):
-        super().__init__(runtime, component, engine, default_sampling_params)
+        super().__init__(
+            runtime, component, engine, default_sampling_params, model_max_len
+        )
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
@@ -239,7 +261,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         # Build sampling params from request
-        sampling_params = build_sampling_params(request, self.default_sampling_params)
+        sampling_params = build_sampling_params(
+            request, self.default_sampling_params, self.model_max_len
+        )
 
         # Extract disaggregated_params from request (set by prefill router in Rust frontend)
         disaggregated_params = request.get("disaggregated_params")
@@ -270,8 +294,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
-    def __init__(self, runtime, component, engine, default_sampling_params):
-        super().__init__(runtime, component, engine, default_sampling_params)
+    def __init__(
+        self,
+        runtime,
+        component,
+        engine,
+        default_sampling_params,
+        model_max_len: int | None = None,
+    ):
+        super().__init__(
+            runtime, component, engine, default_sampling_params, model_max_len
+        )
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation with decode phase
@@ -287,7 +320,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         )
 
         # Build sampling params from request using shared utility
-        sampling_params = build_sampling_params(request, self.default_sampling_params)
+        sampling_params = build_sampling_params(
+            request, self.default_sampling_params, self.model_max_len
+        )
 
         # Configure for prefill-only mode with remote decode
         if sampling_params.extra_args is None:
