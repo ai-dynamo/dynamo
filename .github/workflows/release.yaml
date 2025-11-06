@@ -5,12 +5,10 @@ name: Dynamo Release
 
 on:
   workflow_dispatch:
-    inputs:
 
 jobs:
   operator:
     environment: release
-    if:
     strategy:
       fail-fast: false
       matrix:
@@ -59,7 +57,6 @@ jobs:
 
   vllm:
     environment: release
-    if:
     strategy:
       fail-fast: false
       matrix:
@@ -104,7 +101,6 @@ jobs:
 
   sglang:
     environment: release
-    if:
     strategy:
       fail-fast: false
       matrix:
@@ -148,7 +144,6 @@ jobs:
 
   trtllm:
     environment: release
-    if:
     strategy:
       fail-fast: false
       matrix:
@@ -192,7 +187,6 @@ jobs:
 
   wheels:
     environment: release
-    if:
     strategy:
       fail-fast: false
       matrix:
