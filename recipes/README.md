@@ -9,16 +9,16 @@ Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA D
 
 | Model | Framework | Mode | GPUs | Deployment | Benchmark Recipe | Notes |
 |-------|-----------|------|------|------------|------------------|-------|
-| **Llama-3-70B** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization |
-| **Llama-3-70B** | vLLM | Disagg (Single-Node) | 8x H100/H200 | ✅ | ✅ | Prefill + Decode separation |
-| **Llama-3-70B** | vLLM | Disagg (Multi-Node) | 16x H100/H200 | ✅ | ✅ | 2 nodes, 8 GPUs each |
-| **Qwen3-32B-FP8** | TensorRT-LLM | Aggregated | 4x GPU | ✅ | ✅ | FP8 quantization |
-| **Qwen3-32B-FP8** | TensorRT-LLM | Disaggregated | 8x GPU | ✅ | ✅ | Prefill + Decode separation |
-| **GPT-OSS-120B** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP |
-| **GPT-OSS-120B** | TensorRT-LLM | Disaggregated | TBD | ❌ | ❌ | Engine configs only, no K8s manifest |
-| **DeepSeek-R1** | SGLang | Disagg WideEP | 8x H200 | ✅ | ❌ | Benchmark recipe pending |
-| **DeepSeek-R1** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | Benchmark recipe pending |
-| **DeepSeek-R1** | TensorRT-LLM | Disagg WideEP (GB200) | 32+4 GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes |
+| **[Llama-3-70B](llama-3-70b/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization |
+| **[Llama-3-70B](llama-3-70b/vllm/disagg-single-node/)** | vLLM | Disagg (Single-Node) | 8x H100/H200 | ✅ | ✅ | Prefill + Decode separation |
+| **[Llama-3-70B](llama-3-70b/vllm/disagg-multi-node/)** | vLLM | Disagg (Multi-Node) | 16x H100/H200 | ✅ | ✅ | 2 nodes, 8 GPUs each |
+| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GPU | ✅ | ✅ | FP8 quantization |
+| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x GPU | ✅ | ✅ | Prefill + Decode separation |
+| **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP |
+| **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | TBD | ❌ | ❌ | Engine configs only, no K8s manifest |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 8x H200 | ✅ | ❌ | Benchmark recipe pending |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | Benchmark recipe pending |
+| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 32+4 GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available | ❌ = Missing or incomplete
