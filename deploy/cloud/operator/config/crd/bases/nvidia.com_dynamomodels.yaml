@@ -82,9 +82,6 @@ spec:
                     BaseModelName is the base model identifier that matches the service label
                     This is used to discover endpoints via headless services
                   type: string
-                loraPath:
-                  description: LoraPath is the path to the LoRA adapter (only applicable for lora model type)
-                  type: string
                 modelName:
                   description: ModelName is the full model identifier (e.g., "meta-llama/Llama-3.3-70B-Instruct-lora")
                   type: string
@@ -96,6 +93,19 @@ spec:
                     - lora
                     - adapter
                   type: string
+                source:
+                  description: Source specifies the model source location (only applicable for lora model type)
+                  properties:
+                    uri:
+                      description: |-
+                        URI is the model source URI
+                        Supported formats:
+                        - S3: s3://bucket/path/to/model
+                        - HuggingFace: hf://org/model@revision_sha
+                      type: string
+                  required:
+                    - uri
+                  type: object
               required:
                 - baseModelName
                 - modelName
