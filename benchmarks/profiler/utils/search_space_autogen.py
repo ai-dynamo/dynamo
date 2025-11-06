@@ -5,11 +5,12 @@ import argparse
 import logging
 import math
 import os
+from typing import cast
 
 import yaml
 
 from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-from benchmarks.profiler.utils.model_info import get_model_info
+from benchmarks.profiler.utils.model_info import ModelInfo, get_model_info
 from deploy.utils.gpu_inventory import get_gpu_summary
 
 logger = logging.getLogger(__name__)
@@ -33,17 +34,16 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         args.backend
     ]  # args.backend is already validated in argparse
 
-    # first check if config file exists
+    # first get the config
+    if not args.config:
+        # modify config file from default config file
+        logger.info("DGD config file not provided, using default config file")
+        config = config_modifier.load_default_config()
+    else:
+        with open(args.config, "r") as f:
+            config = yaml.safe_load(f)
+
     if args.model:
-        if not args.config:
-            # modify config file from default config file
-            logger.info("DGD config file not provided, using default config file")
-            config = config_modifier.load_default_config()
-
-        else:
-            with open(args.config, "r") as f:
-                config = yaml.safe_load(f)
-
         logger.info(f"Updating model in DGD config file to {args.model}")
         config = config_modifier.update_model(config, args.model)
         if args.dgd_image:
@@ -58,7 +58,7 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
         args.config = config_fn
 
     # get model info and update args
-    model_info = None
+    model_info: ModelInfo | None = None
     if not args.model:
         # get the model name from config
         args.model = config_modifier.get_model_name(config)
@@ -66,12 +66,12 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
     model_info = get_model_info(args.model)
 
     num_experts_str = (
-        f", num_experts={model_info['num_experts']}"
-        if model_info.get("num_experts")
+        f", num_experts={model_info.num_experts}"
+        if model_info.num_experts is not None
         else ""
     )
     logger.info(
-        f"Model {args.model} has size {model_info['model_size']}, is_moe={model_info['is_moe']}, and max_context_length={model_info['max_context_length']}{num_experts_str}"
+        f"Model {args.model} has size {model_info.model_size}, is_moe={model_info.is_moe}, and max_context_length={model_info.max_context_length}{num_experts_str}"
     )
     args.model_info = model_info
 
@@ -95,16 +95,20 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
             )
 
             # model_info should be set by now (checked above), but mypy needs explicit verification
-            assert model_info is not None, "model_info must be set when model is provided"
+            assert (
+                model_info is not None
+            ), "model_info must be set when model is provided"
+
+            vram_mib: int = int(cast(int, gpu_info["vram"]))
+            gpus_per_node: int = int(cast(int, gpu_info["gpus_per_node"]))
 
             min_gpu = math.ceil(
-                model_info["model_size"] / MODEL_GPU_MEM_FRAC_MAX / gpu_info["vram"]  # type: ignore[operator]
+                model_info.model_size / MODEL_GPU_MEM_FRAC_MAX / vram_mib
             )
-            max_gpu = (
-                gpu_info["gpus_per_node"]  # type: ignore[misc]
-                if not model_info["is_moe"]
-                else max(min_gpu * MOE_MODEL_MAX_NUM_GPU_FACTOR, gpu_info["gpus_per_node"])
-            )
+            if not model_info.is_moe:
+                max_gpu = gpus_per_node
+            else:
+                max_gpu = max(min_gpu * MOE_MODEL_MAX_NUM_GPU_FACTOR, gpus_per_node)
             if min_gpu > max_gpu:
                 error_msg = f"No valid GPU configuration found for model {args.model} on the cluster with {gpu_info['gpus_per_node']}x{gpu_info['model']} GPUs per node"
                 logger.error(error_msg)
@@ -115,16 +119,22 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
             )
             args.min_num_gpus_per_engine = min_gpu
             args.max_num_gpus_per_engine = max_gpu
-            args.num_gpus_per_node = gpu_info["gpus_per_node"]  # type: ignore[assignment]
+            args.num_gpus_per_node = gpus_per_node  # type: ignore[assignment]
     else:
         # use default values for GPUs
         if args.min_num_gpus_per_engine == 0:
-            logger.info("GPU discover is disabled and min_num_gpus_per_engine is not specified, setting to 1")
+            logger.info(
+                "GPU discover is disabled and min_num_gpus_per_engine is not specified, setting to 1"
+            )
             args.min_num_gpus_per_engine = 1
         if args.max_num_gpus_per_engine == 0:
-            logger.info("GPU discover is disabled and max_num_gpus_per_engine is not specified, setting to 4")
+            logger.info(
+                "GPU discover is disabled and max_num_gpus_per_engine is not specified, setting to 4"
+            )
             args.max_num_gpus_per_engine = 4
         if args.num_gpus_per_node == 0:
-            logger.info("GPU discover is disabled and num_gpus_per_node is not specified, setting to 8")
+            logger.info(
+                "GPU discover is disabled and num_gpus_per_node is not specified, setting to 8"
+            )
             args.num_gpus_per_node = 8
     return

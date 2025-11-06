@@ -82,4 +82,3 @@ class ConfigModifierProtocol(Protocol):
     @classmethod
     def update_image(cls, config: dict, image: str) -> dict:
         ...
-

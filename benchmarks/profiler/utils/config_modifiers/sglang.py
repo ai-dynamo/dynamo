@@ -296,7 +296,7 @@ class SGLangConfigModifier:
         for i, arg in enumerate(args):
             if arg == "--model-path" and i + 1 < len(args):
                 return args[i + 1]
-        
+
         # Fall back to --served-model-name if --model-path not found
         for i, arg in enumerate(args):
             if arg == "--served-model-name" and i + 1 < len(args):

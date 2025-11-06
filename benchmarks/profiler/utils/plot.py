@@ -33,21 +33,35 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def plot_prefill_performance(prefill_results, target_ttft, output_dir):
+def plot_prefill_performance(
+    prefill_num_gpu,
+    prefill_ttft,
+    prefill_thpt_per_gpu,
+    target_ttft,
+    output_dir,
+    parallel_mapping_labels=None,
+):
     """
-    Plot prefill performance as a 2D scatter plot with GPU count annotations.
+    Plot prefill performance as a 2D scatter plot with GPU count and mapping annotations.
 
     Args:
-        prefill_results: tuple of (prefill_num_gpu, prefill_ttft, prefill_thpt_per_gpu)
+        prefill_num_gpu: list of GPU counts
+        prefill_ttft: list of TTFT values
+        prefill_thpt_per_gpu: list of throughput/GPU values
         target_ttft: target TTFT value for the vertical line
         output_dir: directory to save the plot
+        mapping_labels: optional list of strings describing parallelization mapping per point
     """
-    prefill_num_gpu, prefill_ttft, prefill_thpt_per_gpu = prefill_results
     plt.figure(figsize=(10, 6))
     plt.scatter(prefill_ttft, prefill_thpt_per_gpu, s=100)
     for i, num_gpu in enumerate(prefill_num_gpu):
+        label_suffix = (
+            f" [{parallel_mapping_labels[i]}]"
+            if parallel_mapping_labels and i < len(parallel_mapping_labels)
+            else ""
+        )
         plt.annotate(
-            f"{num_gpu} GPU(s)",
+            f"{num_gpu} GPU(s){label_suffix}",
             (prefill_ttft[i], prefill_thpt_per_gpu[i]),
             xytext=(10, 0),
             textcoords="offset points",
@@ -75,14 +89,20 @@ def plot_decode_performance(decode_results, target_itl, output_dir):
     Plot decode performance with multiple GPU count lines.
 
     Args:
-        decode_results: list of tuples (num_gpu, itl_list, thpt_per_gpu_list)
+        decode_results: list of tuples (num_gpu, itl_list, thpt_per_gpu_list[, mapping_label])
         target_itl: target ITL value for the vertical line
         output_dir: directory to save the plot
     """
     plt.figure(figsize=(10, 6))
 
-    for num_gpu, itl_list, thpt_per_gpu_list in decode_results:
-        plt.plot(itl_list, thpt_per_gpu_list, label=f"{num_gpu} GPU(s)")
+    for item in decode_results:
+        if len(item) == 4:
+            num_gpu, itl_list, thpt_per_gpu_list, parallel_mapping_label = item
+            label = f"{num_gpu} GPU(s) [{parallel_mapping_label}]"
+        else:
+            num_gpu, itl_list, thpt_per_gpu_list = item
+            label = f"{num_gpu} GPU(s)"
+        plt.plot(itl_list, thpt_per_gpu_list, label=label)
 
     plt.axvline(
         x=target_itl, color="r", linestyle="--", label=f"Target ITL: {target_itl} ms"

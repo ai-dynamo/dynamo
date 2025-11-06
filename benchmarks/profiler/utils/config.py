@@ -17,7 +17,7 @@ import json
 import logging
 import math
 import shlex
-from typing import Literal, Optional
+from typing import Optional
 
 from pydantic import BaseModel
 
