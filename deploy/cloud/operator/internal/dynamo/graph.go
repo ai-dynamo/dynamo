@@ -947,6 +947,11 @@ func GenerateGrovePodCliqueSet(
 		}
 	}
 
+	var discoverBackend string
+	if dynamoDeployment.Annotations != nil && dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend] != "" {
+		discoverBackend = dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend]
+	}
+
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
 		dynamoNamespace := getDynamoNamespace(dynamoDeployment, component)
@@ -955,6 +960,13 @@ func GenerateGrovePodCliqueSet(
 		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
 		if err != nil {
 			return nil, fmt.Errorf("failed to determine backend framework for service %s: %w", serviceName, err)
+		}
+
+		if discoverBackend != "" {
+			if component.Annotations == nil {
+				component.Annotations = make(map[string]string)
+			}
+			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend] = discoverBackend
 		}
 
 		numberOfNodes := component.GetNumberOfNodes()
