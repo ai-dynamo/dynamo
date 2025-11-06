@@ -429,7 +429,6 @@ impl JailedStream {
         JailedStreamBuilder::new()
     }
 
-
     /// Apply jail stream transformation with finish_reason fix
     /// This is a convenience method that applies both apply() and fix_finish_reason()
     pub fn apply_with_finish_reason<S>(
