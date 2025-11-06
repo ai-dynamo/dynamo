@@ -396,7 +396,7 @@ COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/whe
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 COPY --chown=dynamo: --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
-COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
+COPY --chown=dynamo: ./ /workspace/
 
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
@@ -405,10 +405,8 @@ RUN uv pip install \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
     fi \
-    && cd /opt/dynamo/benchmarks \
-    && UV_GIT_LFS=1 uv pip install --no-cache . \
-    && cd - \
-    && rm -rf /opt/dynamo/benchmarks
+    && cd /workspace/benchmarks \
+    && UV_GIT_LFS=1 uv pip install --no-cache .
 
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
