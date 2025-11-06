@@ -5,6 +5,7 @@
 
 use crate::block_manager::DeviceStorage as V1DeviceStorage;
 use crate::block_manager::Storage as V1Storage;
+use crate::block_manager::storage::cuda::DeviceStorageType as V1DeviceStorageType;
 
 use super::{MemoryRegion, Result, StorageError, StorageKind};
 use cudarc::driver::CudaContext;
@@ -86,9 +87,9 @@ impl DeviceStorage {
 
         if !matches!(
             v1_storage.device_storage_type(),
-            DeviceStorageType::Torch { .. }
+            V1DeviceStorageType::Torch { .. }
         ) {
-            return Err(StorageError::InvalidConfig(
+            return Err(StorageError::Unsupported(
                 "Unable to convert owned device tensors.".into(),
             ));
         }

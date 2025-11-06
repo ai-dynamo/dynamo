@@ -316,7 +316,7 @@ impl StorageAllocator<PinnedStorage> for PinnedAllocator {
 /// the torch tensor is not GCed until the [`DeviceStorage`] is dropped.
 /// Because of this, we need to store a reference to the torch tensor in the [`DeviceStorage`]
 #[derive(Debug)]
-enum DeviceStorageType {
+pub enum DeviceStorageType {
     Owned,                                   // Memory that we allocated ourselves.
     Torch { _tensor: Arc<dyn TorchTensor> }, // Memory that came from a torch tensor.
 }
@@ -418,7 +418,7 @@ impl CudaContextProivder for DeviceStorage {
 impl Drop for DeviceStorage {
     fn drop(&mut self) {
         self.handles.release();
-        match &self._storage_type {
+        match &self.storage_type {
             DeviceStorageType::Owned => {
                 unsafe { cudarc::driver::result::free_sync(self.ptr as _) }.unwrap()
             }
