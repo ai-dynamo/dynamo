@@ -206,6 +206,7 @@ spec:
                     x-kubernetes-validations:
                       - message: When create is true, size, storageClass, and volumeAccessMode are required
                         rule: '!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))'
+                  maxItems: 100
                   type: array
                 services:
                   additionalProperties:
@@ -812,7 +813,9 @@ spec:
                         description: ComponentType indicates the role of this component (for example, "main").
                         type: string
                       dynamoNamespace:
-                        description: Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
+                        description: |-
+                          DynamoNamespace is deprecated and will be removed in a future version.
+                          The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
                         type: string
                       envFromSecret:
                         description: |-
@@ -9942,6 +9945,9 @@ spec:
                             x-kubernetes-list-type: map
                         required: []
                         type: object
+                      globalDynamoNamespace:
+                        description: GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+                        type: boolean
                       ingress:
                         description: Ingress config to expose the component outside the cluster (or through a service mesh).
                         properties:
@@ -10404,6 +10410,7 @@ spec:
                         type: array
                     type: object
                   description: Services are the services to deploy as part of this deployment.
+                  maxProperties: 25
                   type: object
               type: object
             status:

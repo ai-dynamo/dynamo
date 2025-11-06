@@ -44,6 +44,10 @@ pub struct NvCreateChatCompletionRequest {
     /// Extra args to pass to the chat template rendering context
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
+
+    /// Catch-all for unsupported fields - checked during validation
+    #[serde(flatten, default, skip_serializing)]
+    pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
@@ -271,6 +275,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
         // none for store
