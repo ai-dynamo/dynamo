@@ -7,6 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 
 This guide explains how to set up and view distributed traces in Grafana Tempo for Dynamo workloads.
 
+> **💡 Note:** For local development, use the unified observability stack at `../../deploy/docker-observability.yml`, which includes Tempo, Prometheus, Grafana, and metric exporters in one convenient stack.
+
 ## Overview
 
 Dynamo supports OpenTelemetry-based distributed tracing, allowing you to visualize request flows across Frontend and Worker components. Traces are exported to Tempo via OTLP (OpenTelemetry Protocol) and visualized in Grafana.
@@ -19,7 +21,7 @@ Dynamo supports OpenTelemetry-based distributed tracing, allowing you to visuali
 
 ## Environment Variables
 
-Dynamo's tracing is configured via environment variables. For complete logging documentation, see [docs/observability/logging.md](../../docs/observability/logging.md).
+Dynamo's tracing is configured via environment variables. For complete logging documentation, see [logging.md](./logging.md).
 
 ### Required Environment Variables
 
@@ -52,23 +54,26 @@ export OTEL_SERVICE_NAME=dynamo-frontend
 
 ## Local Deployment with Docker Compose
 
-### 1. Start Tempo and Grafana
+### 1. Start the Unified Observability Stack
 
-From the `deploy/tracing` directory, start the observability stack:
+From the `deploy` directory, start the unified observability stack:
 
 ```bash
-cd deploy/tracing
-docker-compose up -d
+cd deploy
+docker compose -f docker-observability.yml up -d
 ```
 
 This will start:
 - **Tempo** on `http://localhost:3200` (HTTP API) and `localhost:4317` (OTLP gRPC)
-- **Grafana** on `http://localhost:3000` (username: `admin`, password: `admin`)
+- **Prometheus** on `http://localhost:9090`
+- **Grafana** on `http://localhost:3000` (username: `dynamo`, password: `dynamo`)
+- **DCGM Exporter** on `http://localhost:9401/metrics` (GPU metrics)
+- **NATS Exporter** on `http://localhost:7777/metrics`
 
 Verify services are running:
 
 ```bash
-docker-compose ps
+docker compose -f docker-observability.yml ps
 ```
 
 ### 2. Set Environment Variables
