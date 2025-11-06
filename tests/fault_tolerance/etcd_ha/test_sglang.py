@@ -4,6 +4,7 @@
 import logging
 import os
 import shutil
+import time
 
 import pytest
 
@@ -23,38 +24,65 @@ logger = logging.getLogger(__name__)
 
 
 class DynamoWorkerProcess(ManagedProcess):
-    """Process manager for Dynamo worker with vLLM backend and ETCD HA support"""
+    """Process manager for Dynamo worker with SGLang backend and ETCD HA support"""
 
-    def __init__(self, request, etcd_endpoints: list, is_prefill: bool = False):
+    def __init__(self, request, etcd_endpoints: list, mode: str = "agg"):
+        """
+        Initialize SGLang worker process with ETCD HA support.
+
+        Args:
+            request: pytest request object
+            etcd_endpoints: List of ETCD endpoints
+            mode: One of "agg", "prefill", "decode"
+        """
         command = [
             "python3",
             "-m",
-            "dynamo.vllm",
-            "--model",
+            "dynamo.sglang",
+            "--model-path",
             FAULT_TOLERANCE_MODEL_NAME,
-            "--enforce-eager",
-            "--gpu-memory-utilization",
-            "0.45",
-            "--max-model-len",
-            "8192",
+            "--served-model-name",
+            FAULT_TOLERANCE_MODEL_NAME,
+            "--page-size",
+            "16",
+            "--tp",
+            "1",
+            "--trust-remote-code",
+        ]
+
+        # Add mode-specific arguments
+        if mode == "agg":
+            # Aggregated mode - add skip-tokenizer-init
+            command.append("--skip-tokenizer-init")
+        else:
+            # Disaggregated mode - add disaggregation arguments
+            command.extend(
+                [
+                    "--disaggregation-mode",
+                    mode,
+                    "--disaggregation-bootstrap-port",
+                    "12345",
+                    "--host",
+                    "0.0.0.0",
+                    "--disaggregation-transfer-backend",
+                    "nixl",
+                ]
+            )
+
+        health_check_urls = [
+            (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
+            (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
         ]
 
         # Set port based on worker type
-        port = "8082" if is_prefill else "8081"
-
-        # Configure health check based on worker type
-        if is_prefill:
-            # Prefill workers check their own status endpoint
-            command.append("--is-prefill-worker")
+        if mode == "prefill":
+            port = "8082"
             health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
-        else:
-            # Decode workers should also check their own status endpoint first,
-            # then verify the frontend sees the model
-            health_check_urls = [
-                (f"http://localhost:{port}/health", self.is_ready),
-                (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
-                (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
-            ]
+        elif mode == "decode":
+            port = "8081"
+            health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
+        else:  # agg (aggregated mode)
+            port = "8081"
 
         # Set debug logging and ETCD endpoints
         env = os.environ.copy()
@@ -64,9 +92,15 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
 
+        # Set GPU assignment for disaggregated mode
+        if mode == "decode":
+            env["CUDA_VISIBLE_DEVICES"] = "1"  # Use GPU 1 for decode worker
+        elif mode == "prefill":
+            env["CUDA_VISIBLE_DEVICES"] = "0"  # Use GPU 0 for prefill worker
+        # For agg (aggregated) mode, use default GPU assignment
+
         # Set log directory based on worker type
-        worker_type = "prefill_worker" if is_prefill else "worker"
-        log_dir = f"{request.node.name}_{worker_type}"
+        log_dir = f"{request.node.name}_{mode}_worker"
 
         # Clean up any existing log directory from previous runs
         try:
@@ -79,47 +113,49 @@ class DynamoWorkerProcess(ManagedProcess):
             command=command,
             env=env,
             health_check_urls=health_check_urls,
-            timeout=120,
+            timeout=300,
             display_output=True,
             terminate_existing=False,
+            # Ensure any orphaned SGLang engine cores or child helpers are cleaned up
             stragglers=[
-                "VLLM::EngineCore",
+                "SGLANG:EngineCore",
             ],
             straggler_commands=[
-                "-m dynamo.vllm",
+                "-m dynamo.sglang",
             ],
             log_dir=log_dir,
         )
 
-        self.is_prefill = is_prefill
+        self.mode = mode
 
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
         try:
             data = response.json()
             if data.get("status") == "ready":
-                worker_type = "Prefill worker" if self.is_prefill else "Worker"
-                logger.info(f"{worker_type} status is ready")
+                logger.info(f"{self.mode.capitalize()} worker status is ready")
                 return True
-            worker_type = "Prefill worker" if self.is_prefill else "Worker"
-            logger.warning(f"{worker_type} status is not ready: {data.get('status')}")
+            logger.warning(
+                f"{self.mode.capitalize()} worker status is not ready: {data.get('status')}"
+            )
         except ValueError:
-            worker_type = "Prefill worker" if self.is_prefill else "Worker"
-            logger.warning(f"{worker_type} health response is not valid JSON")
+            logger.warning(
+                f"{self.mode.capitalize()} worker health response is not valid JSON"
+            )
         return False
 
 
-@pytest.mark.vllm
+@pytest.mark.sglang
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
+def test_etcd_ha_failover_sglang_aggregated(request, predownload_models):
     """
-    Test ETCD High Availability with leader failover.
+    Test ETCD High Availability with leader failover using SGLang.
 
     This test:
     1. Starts a 3-node ETCD cluster
-    2. Starts NATS, frontend, and a vLLM worker
+    2. Starts NATS, frontend, and an SGLang worker
     3. Sends an inference request to verify the system works
     4. Terminates the ETCD leader node
     5. Sends another inference request to verify the system still works
@@ -140,9 +176,11 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
             with DynamoFrontendProcess(request, etcd_endpoints):
                 logger.info("Frontend started successfully")
 
-                # Step 4: Start a vLLM worker
-                with DynamoWorkerProcess(request, etcd_endpoints):
-                    logger.info("Worker started successfully")
+                # Step 4: Start an SGLang worker
+                with DynamoWorkerProcess(request, etcd_endpoints, mode="agg"):
+                    logger.info("SGLang worker started successfully")
+                    # Small wait to ensure worker is fully ready
+                    time.sleep(2)
 
                     # Step 5: Send first inference request to verify system is working
                     logger.info("Sending first inference request (before failover)")
@@ -167,22 +205,24 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
                     ), f"Expected 'Paris' in response, got: '{result2}'"
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
+@pytest.mark.sglang
+@pytest.mark.gpu_2
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_etcd_ha_failover_vllm_disaggregated(
+def test_etcd_ha_failover_sglang_disaggregated(
     request, predownload_models, set_ucx_tls_no_mm
 ):
     """
-    Test ETCD High Availability with leader failover in disaggregated mode.
+    Test ETCD High Availability with leader failover in disaggregated mode using SGLang.
 
     This test:
     1. Starts a 3-node ETCD cluster
-    2. Starts NATS, frontend, and both prefill and decode vLLM workers
+    2. Starts NATS, frontend, and both prefill and decode SGLang workers
     3. Sends an inference request to verify the system works
     4. Terminates the ETCD leader node
     5. Sends another inference request to verify the system still works
+
+    Note: This test requires 2 GPUs to run decode and prefill workers on separate GPUs.
     """
     # Step 1: Start NATS server
     with NatsServer(request):
@@ -200,13 +240,15 @@ def test_etcd_ha_failover_vllm_disaggregated(
             with DynamoFrontendProcess(request, etcd_endpoints):
                 logger.info("Frontend started successfully")
 
-                # Step 4: Start the prefill worker
-                with DynamoWorkerProcess(request, etcd_endpoints, is_prefill=True):
-                    logger.info("Prefill worker started successfully")
+                # Step 4: Start the decode worker
+                with DynamoWorkerProcess(request, etcd_endpoints, mode="decode"):
+                    logger.info("Decode worker started successfully")
 
-                    # Step 5: Start the decode worker
-                    with DynamoWorkerProcess(request, etcd_endpoints, is_prefill=False):
-                        logger.info("Decode worker started successfully")
+                    # Step 5: Start the prefill worker
+                    with DynamoWorkerProcess(request, etcd_endpoints, mode="prefill"):
+                        logger.info("Prefill worker started successfully")
+                        # Small wait to ensure workers are fully ready
+                        time.sleep(2)
 
                         # Step 6: Send first inference request to verify system is working
                         logger.info("Sending first inference request (before failover)")
@@ -231,17 +273,17 @@ def test_etcd_ha_failover_vllm_disaggregated(
                         ), f"Expected 'Paris' in response, got: '{result2}'"
 
 
-@pytest.mark.vllm
+@pytest.mark.sglang
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
+def test_etcd_non_ha_shutdown_sglang_aggregated(request, predownload_models):
     """
-    Test that frontend and worker shut down when single ETCD node is terminated.
+    Test that frontend and worker shut down when single ETCD node is terminated using SGLang.
 
     This test:
     1. Starts a single ETCD node (no cluster)
-    2. Starts NATS, frontend, and a vLLM worker
+    2. Starts NATS, frontend, and an SGLang worker
     3. Sends an inference request to verify the system works
     4. Terminates the single ETCD node
     5. Verifies that frontend and worker shut down gracefully
@@ -262,9 +304,11 @@ def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
             with DynamoFrontendProcess(request, etcd_endpoints) as frontend:
                 logger.info("Frontend started successfully")
 
-                # Step 4: Start a vLLM worker
-                with DynamoWorkerProcess(request, etcd_endpoints) as worker:
-                    logger.info("Worker started successfully")
+                # Step 4: Start an SGLang worker
+                with DynamoWorkerProcess(request, etcd_endpoints, mode="agg") as worker:
+                    logger.info("SGLang worker started successfully")
+                    # Small wait to ensure worker is fully ready
+                    time.sleep(2)
 
                     # Step 5: Send inference request to verify system is working
                     logger.info("Sending inference request")
@@ -285,22 +329,24 @@ def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
                     )
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
+@pytest.mark.sglang
+@pytest.mark.gpu_2
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_etcd_non_ha_shutdown_vllm_disaggregated(
+def test_etcd_non_ha_shutdown_sglang_disaggregated(
     request, predownload_models, set_ucx_tls_no_mm
 ):
     """
-    Test that frontend and workers shut down when single ETCD node is terminated in disaggregated mode.
+    Test that frontend and workers shut down when single ETCD node is terminated in disaggregated mode using SGLang.
 
     This test:
     1. Starts a single ETCD node (no cluster)
-    2. Starts NATS, frontend, and both prefill and decode vLLM workers
+    2. Starts NATS, frontend, and both prefill and decode SGLang workers
     3. Sends an inference request to verify the system works
     4. Terminates the single ETCD node
     5. Verifies that frontend and both workers shut down gracefully
+
+    Note: This test requires 2 GPUs to run decode and prefill workers on separate GPUs.
     """
     # Step 1: Start NATS server
     with NatsServer(request):
@@ -318,17 +364,19 @@ def test_etcd_non_ha_shutdown_vllm_disaggregated(
             with DynamoFrontendProcess(request, etcd_endpoints) as frontend:
                 logger.info("Frontend started successfully")
 
-                # Step 4: Start the prefill worker
+                # Step 4: Start the decode worker
                 with DynamoWorkerProcess(
-                    request, etcd_endpoints, is_prefill=True
-                ) as prefill_worker:
-                    logger.info("Prefill worker started successfully")
+                    request, etcd_endpoints, mode="decode"
+                ) as decode_worker:
+                    logger.info("Decode worker started successfully")
 
-                    # Step 5: Start the decode worker
+                    # Step 5: Start the prefill worker
                     with DynamoWorkerProcess(
-                        request, etcd_endpoints, is_prefill=False
-                    ) as decode_worker:
-                        logger.info("Decode worker started successfully")
+                        request, etcd_endpoints, mode="prefill"
+                    ) as prefill_worker:
+                        logger.info("Prefill worker started successfully")
+                        # Small wait to ensure workers are fully ready
+                        time.sleep(2)
 
                         # Step 6: Send inference request to verify system is working
                         logger.info("Sending inference request")
