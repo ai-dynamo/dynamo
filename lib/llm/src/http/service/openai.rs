@@ -1858,7 +1858,11 @@ mod tests {
         let request: NvCreateCompletionRequest = serde_json::from_str(json).unwrap();
 
         // Verify both unsupported fields were captured
-        assert!(request.unsupported_fields.contains_key("add_special_tokens"));
+        assert!(
+            request
+                .unsupported_fields
+                .contains_key("add_special_tokens")
+        );
         assert!(request.unsupported_fields.contains_key("response_format"));
 
         let result = validate_completion_fields_generic(&request);
