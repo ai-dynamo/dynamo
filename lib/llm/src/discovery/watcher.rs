@@ -647,6 +647,7 @@ impl ModelWatcher {
 /// The ModelDeploymentCard is published in store with a key like:
 /// - Base model: "v1/mdc/dynamo/backend/generate/694d9981145a61ad"
 /// - LoRA model: "v1/mdc/dynamo/backend/generate/694d9981145a61ad/my-lora-slug"
+///
 /// Extract the EndpointId and instance_id (worker connection ID, always 4th part) from that.
 fn key_extract(s: &str) -> anyhow::Result<(EndpointId, String)> {
     if !s.starts_with(model_card::ROOT_PATH) {
