@@ -115,7 +115,7 @@ def parse_args():
 
 async def run():
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, False)
+    runtime = DistributedRuntime(loop, "etcd", False)
 
     args = parse_args()
 
