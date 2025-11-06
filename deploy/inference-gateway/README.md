@@ -33,6 +33,8 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 
 First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
 You can use the script below or follow the steps manually.
+Note that the script installs the Gateway into the `KGATEWAY_SYSTEM_NAMESPACE=kgateway-system` namespace.
+If you install it into a different namespace, you need to adjust the namespace in the httpRoute CR.
 
 Script:
 

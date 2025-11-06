@@ -58,22 +58,6 @@ jobs:
           curl -LO "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/amd64/kubectl"
           sudo install -m 0755 kubectl /usr/local/bin/kubectl
 
-      - name: Show runner arch & docker info TODO-RM
-        run: |
-          echo "runner.os=${{ runner.os }}  runner.arch=${{ runner.arch }}"
-          uname -a
-          uname -m
-          dpkg --print-architecture || true
-          docker version
-          docker info --format '{{json .OSType}} {{json .Architecture}}'
-          docker buildx ls || true
-
-      - name: Compute PLATFORM TODO-RM
-        id: plat
-        run: |
-          m=$(uname -m); case "$m" in x86_64) a=amd64;; aarch64) a=arm64;; *) echo "bad $m"; exit 1;; esac
-          echo "platform=linux/$a" >> $GITHUB_OUTPUT
-
       - name: Login to NGC
         if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
         run: |
@@ -119,36 +103,39 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Build vllm runtime image (amd64)
-        id: build-vllm
-        uses: ./.github/actions/docker-build
-        env:
-          BUILDKIT_PROGRESS: plain
-        with:
-          framework: vllm
-          target: runtime
-          # platform: linux/amd64
-          platform: ${{ steps.plat.outputs.platform }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Check free disk
+        run: df -h
 
-      - name: Tag and Push vllm image to ACR
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build-vllm.outputs.image_tag }}
-          push_tag: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ env.VLLM_IMAGE_TAG }}
-          aws_push: "false"
-          azure_push: "true"
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      # TODO get this to finish.
+      # - name: Build vllm runtime image (amd64)
+      #   id: build-vllm
+      #   uses: ./.github/actions/docker-build
+      #   env:
+      #     BUILDKIT_PROGRESS: plain
+      #   with:
+      #     framework: vllm
+      #     target: runtime
+      #     platform: linux/amd64
+      #     ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+      #     ci_token: ${{ secrets.CI_TOKEN }}
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #     aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #.    aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      # - name: Tag and Push vllm image to ACR
+      #   uses: ./.github/actions/docker-tag-push
+      #   with:
+      #     local_image: ${{ steps.build-vllm.outputs.image_tag }}
+      #     push_tag: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ env.VLLM_IMAGE_TAG }}
+      #     aws_push: "false"
+      #     azure_push: "true"
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
       - name: Configure kubeconfig and namespace
         shell: bash
@@ -210,13 +197,13 @@ jobs:
           sleep 20
           kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" -n ${KUBE_NS} --timeout=1000s
 
-      - name: Install GAIE CRDs and Kgateway
-        shell: bash
-        env:
-          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
-        run: |
-          set -euo pipefail
-          ${{ github.workspace }}/deploy/inference-gateway/install_gaie_crd_kgateway.sh
+      # - name: Install GAIE CRDs and Kgateway
+      #   shell: bash
+      #   env:
+      #     KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+      #   run: |
+      #     set -euo pipefail
+      #     ${{ github.workspace }}/deploy/inference-gateway/install_gaie_crd_kgateway.sh
 
       - name: Clone GAIE repo into separate folder and set environment
         shell: bash
@@ -240,8 +227,10 @@ jobs:
           set -euo pipefail
           cd ${DYNAMO_DIR}/deploy/inference-gateway
           ./build-epp-dynamo.sh
-          docker tag us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}
-          docker push ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}
+          EPP_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}"
+          docker tag us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty ${EPP_IMAGE}
+          docker push ${EPP_IMAGE}
+          echo "EPP_IMAGE=${EPP_IMAGE}" >> $GITHUB_ENV
 
       - name: Deploy GAIE Helm chart with built EPP image
         shell: bash
@@ -252,7 +241,6 @@ jobs:
         run: |
           set -euo pipefail
           # Use the pushed EPP image from the previous step
-          EPP_IMAGE="gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}"
           echo "Using EPP_IMAGE=${EPP_IMAGE}"
           export EPP_IMAGE
 
@@ -317,20 +305,11 @@ jobs:
             kubectl get all -n ${NS} || true
             helm uninstall dynamo-platform -n ${NS} || true
             kubectl delete dynamographdeployments --all -n ${NS} || true
+            kubectl delete deployment qwen-epp -n ${NS} || true
             kubectl delete namespace ${NS} || true
           else
             echo "NAMESPACE is unset; skipping namespace-scoped cleanup." >&2
           fi
-          # Uninstall Kgateway controller and CRDs (cluster-scoped)
-          helm uninstall kgateway -n kgateway-system || true
-          helm uninstall kgateway-crds -n kgateway-system || true
-          kubectl delete namespace kgateway-system || true
-
-          # Remove Inference Extension CRDs (cluster-scoped)
-          kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${INFERENCE_EXTENSION_VERSION}/manifests.yaml || true
-
-          # Remove Gateway API (cluster-scoped)
-          kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml || true
 
       - name: Remove kubeconfig file
         if: always()
@@ -338,20 +317,14 @@ jobs:
         run: |
           rm -f "${{ github.workspace }}/.kubeconfig"
 
-      # - name: Email on failure
-      # TODO
-      #   if: failure()
-      #   continue-on-error: true
-      #   uses: dawidd6/action-send-mail@v3
-      #   with:
-      #     server_address: ${{ secrets.SMTP_SERVER }}
-      #     server_port: ${{ secrets.SMTP_PORT }}
-      #     username: ${{ secrets.SMTP_USER }}
-      #     password: ${{ secrets.SMTP_PASS }}
-      #     subject: GAIE scheduled run failed
-      #     to: atchernych@nvidia.com
-      #     from: ${{ secrets.SMTP_FROM }}
-      #     secure: true
-      #     html_body: |
-      #       <p>GAIE scheduled run failed.</p>
-      #       <p>Run: <a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">details</a></p>
+      - name: Report failure to Slack
+        if: failure() || cancelled()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "GAIE Deployment with Dynamo (vllm) ${{ job.status }}*\nWorkflow URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\nBranch: ${{ github.ref_name }}\nCommit: ${{ github.sha }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_FAILURE_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
