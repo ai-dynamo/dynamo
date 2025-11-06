@@ -93,6 +93,7 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
+          sudo apt-get update && sudo apt-get install -y make
           cd deploy/cloud/operator
           make check
 
