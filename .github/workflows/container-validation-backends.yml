@@ -87,6 +87,15 @@ jobs:
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
               -f Dockerfile \
               -t dynamo-operator:latest .
+
+      - name: Check for uncommitted changes
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          cd deploy/cloud/operator
+          make check
+
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
