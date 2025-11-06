@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from benchmarks.profiler.utils.model_info import ModelInfo
 
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 console_handler = logging.StreamHandler()
@@ -67,7 +66,6 @@ def get_candidate_parallel_mappings(
     # now verify if the candidates are valid
     verified: list[ParallelizationMapping] = []
     for m in candidates:
-
         # 1) KV heads divisibility checks
         if m.tp is not None:
             if num_kv_heads is None:
@@ -133,18 +131,18 @@ def get_candidate_parallel_mappings(
                 tag = "TEP"
 
             if parallel_size is not None and parallel_size > 0:
-                I = int(intermediate_size)
-                if I % parallel_size != 0:
+                intermediate_size = int(intermediate_size)
+                if intermediate_size % parallel_size != 0:
                     logger.warning(
-                        f"Invalid mapping {tag}={parallel_size}: intermediate_size={I} not divisible by {tag}"
+                        f"Invalid mapping {tag}={parallel_size}: intermediate_size={intermediate_size} not divisible by {tag}"
                     )
                     continue
                 if quant_block is not None:
-                    per_shard = I // parallel_size
-                    Q = int(quant_block)
-                    if Q % per_shard != 0:
+                    per_shard = intermediate_size // parallel_size
+                    quant_block = int(quant_block)
+                    if quant_block % per_shard != 0:
                         logger.warning(
-                            f"Invalid mapping {tag}={parallel_size}: (intermediate_size // {tag})={per_shard} does not divide quantization block {Q}"
+                            f"Invalid mapping {tag}={parallel_size}: (intermediate_size // {tag})={per_shard} does not divide quantization block {quant_block}"
                         )
                         continue
 
@@ -170,5 +168,3 @@ def apply_parallel_mapping_to_config(
     else:
         pass
     return cfg
-
-

@@ -5,7 +5,6 @@ import argparse
 import logging
 import math
 import os
-from typing import cast
 
 import yaml
 
@@ -99,8 +98,8 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
                 model_info is not None
             ), "model_info must be set when model is provided"
 
-            vram_mib = int(gpu_info["vram"])
-            gpus_per_node = int(gpu_info["gpus_per_node"])
+            vram_mib = int(gpu_info["vram"])  # type: ignore[call-overload]
+            gpus_per_node = int(gpu_info["gpus_per_node"])  # type: ignore[call-overload]
 
             min_gpu = math.ceil(
                 model_info.model_size / MODEL_GPU_MEM_FRAC_MAX / vram_mib
