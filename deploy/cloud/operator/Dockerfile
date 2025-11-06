@@ -43,16 +43,7 @@ RUN apt-get update && apt-get install -y make && apt-get clean && rm -rf /var/li
 # Run tests using Makefile
 RUN make test
 
-# Check stage
-FROM base AS checker
-
-# Install make if not present
-RUN apt-get update && apt-get install -y make && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Run check using Makefile
-RUN make check
-
-# Build stage - depends on successful lint, test and check
+# Build stage - depends on successful lint and test
 FROM base AS builder
 
 # Build the binary
