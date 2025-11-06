@@ -72,20 +72,6 @@ jobs:
         run: |
           echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
 
-      - name: Install awscli (for docker-build caching/login)
-        shell: bash
-        run: |
-          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip"
-          unzip -q -o awscliv2.zip
-          sudo ./aws/install --update
-
-      - name: Login to ECR (for docker-build action compatibility)
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-
       - name: Find latest vLLM image in ACR
         shell: bash
         run: |
@@ -94,18 +80,22 @@ jobs:
           # Extract registry name from hostname
           REGISTRY_NAME=$(echo "${{ secrets.AZURE_ACR_HOSTNAME }}" | cut -d'.' -f1)
 
-          # Login to ACR using credentials
-          az acr login --name ${REGISTRY_NAME} \
+          # Login to ACR using credentials (for Docker)
+          az acr login --name "${REGISTRY_NAME}" \
             --username "${{ secrets.AZURE_ACR_USER }}" \
             --password "${{ secrets.AZURE_ACR_PASSWORD }}"
 
-          # Get all tags for ai-dynamo/dynamo repository that match *-vllm-amd64 pattern
-          # Sort by creation time and get the latest
-          LATEST_VLLM_TAG=$(az acr repository show-tags \
-            --name ${REGISTRY_NAME} \
-            --repository ai-dynamo/dynamo \
-            --orderby time_desc \
-            --output tsv | grep -E '^[a-f0-9]+-vllm-amd64$' | head -n 1)
+          # Get all tags for ai-dynamo/dynamo repository that match *-vllm-amd64
+          LATEST_VLLM_TAG=$(
+            az acr repository show-tags \
+              --name "${REGISTRY_NAME}" \
+              --repository ai-dynamo/dynamo \
+              --orderby time_desc \
+              --username "${{ secrets.AZURE_ACR_USER }}" \
+              --password "${{ secrets.AZURE_ACR_PASSWORD }}" \
+              --output tsv | \
+              grep -E '^[a-f0-9]+-vllm-amd64$' | head -n 1
+          )
 
           if [[ -z "${LATEST_VLLM_TAG}" ]]; then
             echo "ERROR: No vLLM images found in ACR matching pattern *-vllm-amd64"
