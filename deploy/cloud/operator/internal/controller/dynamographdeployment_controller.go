@@ -359,7 +359,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		// Would only want to do this when the service discovery backend is k8s - else only create service for frontend
 		// dynamocomponentdeployment_controller.go:1240
 
-		mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamoDeployment, component)
+		mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamoDeployment, component, componentName)
 		if err != nil {
 			logger.Error(err, "failed to generate the main component service")
 			return "", "", "", fmt.Errorf("failed to generate the main component service: %w", err)
