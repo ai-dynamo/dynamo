@@ -93,6 +93,8 @@ mkdir -p $LOG_DIR
 for ((i=0; i<GPUS_PER_NODE; i++)); do
     dp_rank=$((i + NODE_RANK * GPUS_PER_NODE))
     CUDA_VISIBLE_DEVICES=$i \
+        DYN_VLLM_KV_EVENT_PORT=$((20080 + i)) \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) \
         VLLM_ALL2ALL_BACKEND="deepep_low_latency" \
         VLLM_USE_DEEP_GEMM=1 \
         VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1 \

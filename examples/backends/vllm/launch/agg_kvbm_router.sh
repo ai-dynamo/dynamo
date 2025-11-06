@@ -25,12 +25,17 @@ CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=2 \
     python3 -m dynamo.vllm \
     --model $MODEL \
     --enforce-eager \
-    --connector kvbm --gpu-memory-utilization 0.4 &
+    --connector kvbm \
+    --gpu-memory-utilization 0.4 \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556"}' &
 
 DYN_KVBM_LEADER_ZMQ_PUB_PORT=56003 \
 DYN_KVBM_LEADER_ZMQ_ACK_PORT=56004 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=2 \
     python3 -m dynamo.vllm \
     --model $MODEL \
     --enforce-eager \
-    --connector kvbm --gpu-memory-utilization 0.4
+    --connector kvbm \
+    --gpu-memory-utilization 0.4 \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
