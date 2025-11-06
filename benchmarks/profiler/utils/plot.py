@@ -20,6 +20,8 @@ import numpy as np
 from matplotlib import cm
 from scipy.interpolate import griddata
 
+from benchmarks.profiler.utils.pareto import compute_pareto
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 console_handler = logging.StreamHandler()
@@ -31,19 +33,16 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def plot_prefill_performance(
-    prefill_num_gpu, prefill_ttft, prefill_thpt_per_gpu, target_ttft, output_dir
-):
+def plot_prefill_performance(prefill_results, target_ttft, output_dir):
     """
     Plot prefill performance as a 2D scatter plot with GPU count annotations.
 
     Args:
-        prefill_num_gpu: list of GPU counts
-        prefill_ttft: list of time to first token values
-        prefill_thpt_per_gpu: list of throughput per GPU values
+        prefill_results: tuple of (prefill_num_gpu, prefill_ttft, prefill_thpt_per_gpu)
         target_ttft: target TTFT value for the vertical line
         output_dir: directory to save the plot
     """
+    prefill_num_gpu, prefill_ttft, prefill_thpt_per_gpu = prefill_results
     plt.figure(figsize=(10, 6))
     plt.scatter(prefill_ttft, prefill_thpt_per_gpu, s=100)
     for i, num_gpu in enumerate(prefill_num_gpu):
@@ -251,4 +250,48 @@ def plot_decode_3d_surface(
     thpt_plot_path = f"{work_dir}/decode_throughput_interpolation.png"
     logger.info(f"Saving throughput surface plot to {thpt_plot_path}")
     plt.savefig(thpt_plot_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def plot_pd_joint_results(isl, osl, prefill_results, decode_results, output_dir):
+    GPU_COST_PER_HOUR = 3.0  # $3/hour
+
+    # compute pareto front for prefill
+    p_ttft, p_thpt = compute_pareto(prefill_results[1], prefill_results[2])
+
+    # compute pareto front for decode
+    _d_itl, _d_thpt = [], []
+    for _d_result in decode_results:
+        _d_itl.extend(_d_result[1])
+        _d_thpt.extend(_d_result[2])
+    d_itl, d_thpt = compute_pareto(_d_itl, _d_thpt)
+
+    # convert to cost per thousand requests
+    p_ttft = np.array(p_ttft)
+    p_thpt = np.array(p_thpt)
+    d_itl = np.array(d_itl)
+    d_thpt = np.array(d_thpt)
+
+    tokens_per_user = []
+    cost = []
+    ttft = []
+    for _p_ttft, _p_thpt in zip(p_ttft, p_thpt):
+        ttft.append(_p_ttft)
+        prefill_cost = isl * 1000 / _p_thpt * GPU_COST_PER_HOUR / 3600
+        tokens_per_user.append(1000 / d_itl)
+        cost.append(osl * 1000 / d_thpt * GPU_COST_PER_HOUR / 3600 + prefill_cost)
+
+    # plot
+    plt.figure(figsize=(12, 10))
+    plt.title(
+        f"Cost Per 1000 i{isl}o{osl} requests (GPU/hour = ${GPU_COST_PER_HOUR}) Under Different SLA"
+    )
+    for _tokens_per_user, _cost, _ttft in zip(tokens_per_user, cost, ttft):
+        line = plt.plot(_tokens_per_user, _cost, label=f"TTFT: {_ttft:.2f}ms")[0]
+        plt.scatter(_tokens_per_user, _cost, marker="x", s=100, color=line.get_color())
+    plt.xlabel("Tokens per User")
+    plt.ylabel("Cost ($)")
+    plt.grid(True)
+    plt.legend()
+    plt.savefig(f"{output_dir}/cost_sla.png", dpi=300)
     plt.close()
