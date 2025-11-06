@@ -36,6 +36,7 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/imdario/mergo"
@@ -399,6 +400,14 @@ func getCliqueStartupDependencies(
 // component.ServiceName is empty
 func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec, componentName string) (*corev1.Service, error) {
 	componentName = GetDynamoComponentName(dynamoDeployment, componentName)
+	// TODO: need to consolidate notion of ComponentType and SubComponentType (can have P and D where both are ComponentType worker)
+	var componentType string
+	if component.ComponentType == consts.ComponentTypeFrontend {
+		componentType = component.ComponentType
+	} else {
+		componentType = component.SubComponentType
+	}
+
 	var servicePort corev1.ServicePort
 	if component.ComponentType == commonconsts.ComponentTypeFrontend {
 		servicePort = corev1.ServicePort{
@@ -422,7 +431,7 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
-				commonconsts.KubeLabelDynamoComponentType: component.ComponentType,
+				commonconsts.KubeLabelDynamoComponentType: componentType,
 				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace, // TODO: nilness check
 			},
 			Ports: []corev1.ServicePort{servicePort},
