@@ -15,19 +15,11 @@ from vllm.utils import FlexibleArgumentParser
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import add_config_dump_args, register_encoder
 
-from . import __version__
-
-DEFAULT_DYNAMO_PORT_MIN = 20000
-DEFAULT_DYNAMO_PORT_MAX = 30000
-REGISTERED_PORT_MIN = 1024
-REGISTERED_PORT_MAX = 49151
-KV_PORT_ENV_VAR = "DYN_VLLM_KV_PORT"
-DEFAULT_KV_PORT = 20080
+from . import __version__, envs
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
-
 VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
 
 # Global LMCache configuration - initialize once on module import
@@ -296,63 +288,14 @@ def parse_args() -> Config:
     return config
 
 
-def _resolve_port(env_var: str, default_port: int, *, label: str) -> tuple[int, str]:
-    env_value = os.getenv(env_var)
-    if env_value is None:
-        port = default_port
-        source = "default"
-    else:
-        try:
-            port = int(env_value)
-        except ValueError as exc:
-            raise ValueError(
-                f"{env_var} must be an integer port number, got {env_value!r}."
-            ) from exc
-        source = f"env:{env_var}"
-
-    if not (REGISTERED_PORT_MIN <= port <= REGISTERED_PORT_MAX):
-        raise ValueError(
-            f"{label} port {port} is outside of the registered port range "
-            f"({REGISTERED_PORT_MIN}-{REGISTERED_PORT_MAX})."
-        )
-
-    if not (DEFAULT_DYNAMO_PORT_MIN <= port <= DEFAULT_DYNAMO_PORT_MAX):
-        logger.warning(
-            "%s port %s is outside the recommended Dynamo range %s-%s.",
-            label,
-            port,
-            DEFAULT_DYNAMO_PORT_MIN,
-            DEFAULT_DYNAMO_PORT_MAX,
-        )
-
-    return port, source
-
-
 async def configure_ports(config: Config):
     """Configure port settings from dedicated environment overrides."""
 
     if config.engine_args.enable_prefix_caching:
-        kv_port, kv_source = _resolve_port(
-            KV_PORT_ENV_VAR,
-            DEFAULT_KV_PORT,
-            label="KV events",
-        )
-        config.kv_port = kv_port
-        logger.info("Configured KV events port (%s): %s", kv_source, config.kv_port)
+        config.kv_port = envs.DYN_VLLM_KV_EVENT_PORT
 
-        # Check if NIXL is needed based on connector list
-    needs_nixl = config.has_connector("nixl")
-
-    if needs_nixl:
+    if config.has_connector("nixl"):
         ensure_side_channel_host()
-
-        nixl_env_port = os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT")
-        if nixl_env_port is None:
-            logger.info(
-                "No VLLM_NIXL_SIDE_CHANNEL_PORT selected; vLLM default is 5600."
-            )
-        else:
-            logger.info("Using VLLM_NIXL_SIDE_CHANNEL_PORT=%s", nixl_env_port)
 
 
 def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
