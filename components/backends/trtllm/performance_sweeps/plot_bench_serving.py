@@ -155,7 +155,7 @@ def plot_pareto(results, output_file):
             hoverinfo='skip',
         ))
 
-    prior_pareto_points = [
+    ibdb_agg = [
         (493.86, 1063.01),
         (435.31, 1872.98),
         (398.8, 3422.14),
@@ -172,7 +172,7 @@ def plot_pareto(results, output_file):
         (23.792, 66235.53)
     ]
 
-    reference_pareto_x, reference_pareto_y = zip(*prior_pareto_points)
+    reference_pareto_x, reference_pareto_y = zip(*ibdb_agg)
 
     fig.add_trace(go.Scatter(
         x=list(reference_pareto_x),
@@ -186,7 +186,32 @@ def plot_pareto(results, output_file):
             color='blue',
             width=2
         ),
-        name='Current SA submission',
+        name='IBDB Agg Results',
+        hoverinfo='skip',
+    ))
+
+    sa_submission = [
+        (371.3, 1586.34),
+        (334.78, 2871.87),
+        (287.24, 4898.17),
+        (230.7796, 7908.65),
+        (163.7, 11345.36),
+        (122.79, 16935.42),
+        (90.2, 25279.73),
+        (55.519, 31208.02)
+    ]
+
+    sa_submission_x, sa_submission_y = zip(*sa_submission)
+
+    fig.add_trace(go.Scatter(
+        x=list(sa_submission_x),
+        y=list(sa_submission_y),
+        mode='lines+markers',
+        marker=dict(
+            color='green',
+            size=10
+        ),
+        name="Current SA Submission",
         hoverinfo='skip',
     ))
     
