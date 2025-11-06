@@ -63,14 +63,7 @@ const (
 	KubeAnnotationEnableStealingTrafficDebugMode         = "nvidia.com/enable-stealing-traffic-debug-mode"
 	KubeAnnotationEnableDebugMode                        = "nvidia.com/enable-debug-mode"
 	KubeAnnotationEnableDebugPodReceiveProductionTraffic = "nvidia.com/enable-debug-pod-receive-production-traffic"
-	DeploymentTargetTypeProduction                       = "production"
 	DeploymentTargetTypeDebug                            = "debug"
-	HeaderNameDebug                                      = "X-Nvidia-Debug"
-	KubernetesDeploymentStrategy                         = "kubernetes"
-
-	DeploymentTypeStandard       = "standard"
-	DeploymentTypeMultinodeGrove = "multinode-grove"
-	ComponentTypePlanner         = "Planner"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object

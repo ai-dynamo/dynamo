@@ -25,11 +25,13 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller/serviceaccount"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	v1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -310,6 +312,45 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
+
+	// service account, role and role binding for k8s service discovery
+	serviceAccount := serviceaccount.GetKubernetesDiscoveryServiceAccount(fmt.Sprintf("%s-k8s-service-discovery", dynamoDeployment.Name), dynamoDeployment.Namespace)
+	_, syncedServiceAccount, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
+		return serviceAccount.ServiceAccount, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the service account")
+		return "", "", "", fmt.Errorf("failed to sync the service account: %w", err)
+	}
+	serviceAccountAsResource := commonController.WrapResource(syncedServiceAccount,
+		func() (bool, string) {
+			return true, ""
+		})
+
+	// role and role binding for k8s service discovery
+	_, syncedRole, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*v1.Role, bool, error) {
+		return serviceAccount.Role, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the service account")
+		return "", "", "", fmt.Errorf("failed to sync the service account: %w", err)
+	}
+	roleAsResource := commonController.WrapResource(syncedRole,
+		func() (bool, string) {
+			return true, ""
+		})
+	_, syncedRoleBinding, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*v1.RoleBinding, bool, error) {
+		return serviceAccount.RoleBinding, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the role binding")
+		return "", "", "", fmt.Errorf("failed to sync the role binding: %w", err)
+	}
+	roleBindingAsResource := commonController.WrapResource(syncedRoleBinding,
+		func() (bool, string) {
+			return true, ""
+		})
+
 	// generate the dynamoComponentsDeployments from the config
 	groveGangSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever)
 	if err != nil {
