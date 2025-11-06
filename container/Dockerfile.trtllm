@@ -147,15 +147,13 @@ RUN cd /opt/dynamo/wheelhouse/ && \
     # && rm -rf /opt/dynamo/benchmarks
 
 # TODO: Install common and test dependencies
-# RUN uv pip list
-# RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-#     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-#     UV_GIT_LFS=1 uv pip install \
-#         --system --break-system-packages \
-#         --no-cache \
-#         --requirement /tmp/requirements.txt \
-#         --requirement /tmp/requirements.test.txt
-# RUN uv pip list
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    UV_GIT_LFS=1 uv pip install \
+        --system --break-system-packages \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
 # This is needed to make libucc.so visible so pytorch can use it.
 ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
 
