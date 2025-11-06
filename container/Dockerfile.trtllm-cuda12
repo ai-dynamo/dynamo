@@ -146,7 +146,7 @@ ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 ### VIRTUAL ENVIRONMENT SETUP ###
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
