@@ -13,6 +13,7 @@ use dynamo_parsers::tool_calling::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
+use std::collections::HashMap;
 
 use crate::utils::{MarkerMatcher, MatchResult};
 
@@ -370,17 +371,12 @@ impl ChoiceJailState {
 struct ChoiceJailStateCollection {
     /// Vec of states, always kept sorted by choice index for deterministic iteration
     states: Vec<ChoiceJailState>,
-    /// Track if any choice has emitted a finish_reason (per choice index)
-    finish_reason_emitted: std::collections::HashMap<u32, bool>,
 }
 
 impl ChoiceJailStateCollection {
     /// Create a new empty collection
     fn new() -> Self {
-        Self {
-            states: Vec::new(),
-            finish_reason_emitted: std::collections::HashMap::new(),
-        }
+        Self { states: Vec::new() }
     }
 
     /// Get or create state for a choice index
@@ -398,19 +394,6 @@ impl ChoiceJailStateCollection {
                 &mut self.states[insert_pos]
             }
         }
-    }
-
-    /// Check if a finish_reason has already been emitted for this choice
-    fn has_emitted_finish_reason(&self, index: u32) -> bool {
-        self.finish_reason_emitted
-            .get(&index)
-            .copied()
-            .unwrap_or(false)
-    }
-
-    /// Mark that a finish_reason has been emitted for this choice
-    fn mark_finish_reason_emitted(&mut self, index: u32) {
-        self.finish_reason_emitted.insert(index, true);
     }
 }
 
@@ -474,17 +457,6 @@ impl JailedStream {
 
                     // Process each choice independently using the new architecture
                     for choice in &chat_response.choices {
-                        // if we've already emitted a finish_reason for this choice,
-                        // skip any subsequent chunks with finish_reason
-                        if choice.finish_reason.is_some() && choice_states.has_emitted_finish_reason(choice.index) {
-                            tracing::debug!(
-                                "Skipping chunk with finish_reason {:?} for choice {} - already emitted finish_reason",
-                                choice.finish_reason,
-                                choice.index
-                            );
-                            continue;
-                        }
-
                         if let Some(ref content) = choice.delta.content {
                             let choice_state = choice_states.get_or_create_state(choice.index);
 
@@ -538,16 +510,8 @@ impl JailedStream {
                                 last_annotated_event.clone(),
                                 last_annotated_comment.clone(),
                             );
-                            let responses = self.emit_choice_emissions(tool_content_emissions.clone(), chat_response, preserved_metadata);
+                            let responses = self.emit_choice_emissions(tool_content_emissions.clone(), chat_response, preserved_metadata, &choice_states);
                             for emitted_response in responses {
-                                // Mark finish_reason as emitted for choices that have it
-                                if let Some(ref data) = emitted_response.data {
-                                    for choice in &data.choices {
-                                        if choice.finish_reason.is_some() {
-                                            choice_states.mark_finish_reason_emitted(choice.index);
-                                        }
-                                    }
-                                }
                                 yield emitted_response;
                             }
                         }
@@ -559,16 +523,8 @@ impl JailedStream {
                                 last_annotated_event.clone(),
                                 last_annotated_comment.clone(),
                             );
-                            let responses = self.emit_choice_emissions(trailing_emissions, chat_response, preserved_metadata);
+                            let responses = self.emit_choice_emissions(trailing_emissions, chat_response, preserved_metadata, &choice_states);
                             for emitted_response in responses {
-                                // Mark finish_reason as emitted for choices that have it
-                                if let Some(ref data) = emitted_response.data {
-                                    for choice in &data.choices {
-                                        if choice.finish_reason.is_some() {
-                                            choice_states.mark_finish_reason_emitted(choice.index);
-                                        }
-                                    }
-                                }
                                 yield emitted_response;
                             }
                         }
@@ -576,16 +532,8 @@ impl JailedStream {
                         // Emit pass-through content with current metadata
                         if !passthrough_emissions.is_empty() {
                             let current_metadata = (response.id.clone(), response.event.clone(), response.comment.clone());
-                            let responses = self.emit_choice_emissions(passthrough_emissions, chat_response, current_metadata);
+                            let responses = self.emit_choice_emissions(passthrough_emissions, chat_response, current_metadata, &choice_states);
                             for emitted_response in responses {
-                                // Mark finish_reason as emitted for choices that have it
-                                if let Some(ref data) = emitted_response.data {
-                                    for choice in &data.choices {
-                                        if choice.finish_reason.is_some() {
-                                            choice_states.mark_finish_reason_emitted(choice.index);
-                                        }
-                                    }
-                                }
                                 yield emitted_response;
                             }
                         }
@@ -619,16 +567,8 @@ impl JailedStream {
                 };
 
                 let final_metadata = (last_annotated_id, last_annotated_event, last_annotated_comment);
-                let responses = self.emit_choice_emissions(final_emissions, &dummy_response, final_metadata);
+                let responses = self.emit_choice_emissions(final_emissions, &dummy_response, final_metadata, &choice_states);
                 for emitted_response in responses {
-                    // Mark finish_reason as emitted for choices that have it
-                    if let Some(ref data) = emitted_response.data {
-                        for choice in &data.choices {
-                            if choice.finish_reason.is_some() {
-                                choice_states.mark_finish_reason_emitted(choice.index);
-                            }
-                        }
-                    }
                     yield emitted_response;
                 }
             }
@@ -641,6 +581,7 @@ impl JailedStream {
         emissions: Vec<ChoiceEmission>,
         base_response: &NvCreateChatCompletionStreamResponse,
         annotated_metadata: (Option<String>, Option<String>, Option<Vec<String>>),
+        _choice_states: &ChoiceJailStateCollection,
     ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
         if emissions.is_empty() {
             return Vec::new();
@@ -770,14 +711,15 @@ impl JailedStream {
                 .collect();
 
             // Create choice with tool calls
-            return create_choice_stream(
+            let choice = create_choice_stream(
                 choice_index,
                 Some(Role::Assistant),
                 normal_text.as_deref().unwrap_or(""),
                 Some(tool_call_chunks),
-                Some(FinishReason::ToolCalls),
+                None,
                 None,
             );
+            return choice;
         }
 
         // No tool calls found or parsing failed, return content choice
@@ -805,6 +747,44 @@ impl JailedStream {
             }
         }
         false
+    }
+
+    /// Post-processor that sets finish_reason to ToolCalls when tool calls were emitted
+    /// This should be called after apply() to fix the finish_reason for tool call chunks
+    pub fn fix_finish_reason<S>(
+        input_stream: S,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        stream! {
+            tokio::pin!(input_stream);
+            let mut has_tool_calls_per_choice: HashMap<u32, bool> = HashMap::new();
+
+            while let Some(mut response) = input_stream.next().await {
+                // Track if any choice emitted tool calls
+                if let Some(ref data) = response.data {
+                    for choice in &data.choices {
+                        if choice.delta.tool_calls.is_some() {
+                            has_tool_calls_per_choice.insert(choice.index, true);
+                        }
+                    }
+                }
+
+                // If this chunk has finish_reason and the choice had tool calls, override to ToolCalls
+                if let Some(ref mut data) = response.data {
+                    for choice in &mut data.choices {
+                        if choice.finish_reason.is_some()
+                            && has_tool_calls_per_choice.get(&choice.index).copied().unwrap_or(false)
+                        {
+                            choice.finish_reason = Some(FinishReason::ToolCalls);
+                        }
+                    }
+                }
+
+                yield response;
+            }
+        }
     }
 }
 
