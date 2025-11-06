@@ -510,7 +510,7 @@ impl JailedStream {
                                 last_annotated_event.clone(),
                                 last_annotated_comment.clone(),
                             );
-                            let responses = self.emit_choice_emissions(tool_content_emissions.clone(), chat_response, preserved_metadata);
+                            let responses = self.emit_choice_emissions(tool_content_emissions, chat_response, preserved_metadata);
                             for emitted_response in responses {
                                 yield emitted_response;
                             }
