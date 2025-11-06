@@ -7,7 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 This guide explains how to set up and view distributed traces in Grafana Tempo for Dynamo workloads.
 
-> **💡 Note:** For local development, use the unified observability stack at `../../deploy/docker-observability.yml`, which includes Tempo, Prometheus, Grafana, and metric exporters in one convenient stack.
+> **Note:** This guide covers local single-instance deployments using Docker Compose for demonstration purposes. For distributed Kubernetes deployments, see the [Kubernetes Deployment](#kubernetes-deployment) section.
+
+> **💡 Tip:** For local development, use the unified observability stack at `../../deploy/docker-observability.yml`, which includes Tempo, Prometheus, Grafana, and metric exporters in one convenient stack.
 
 ## Overview
 
@@ -25,14 +27,38 @@ Dynamo's tracing is configured via environment variables. For complete logging d
 
 ### Required Environment Variables
 
-| Variable | Description | Example Value |
-|----------|-------------|---------------|
-| `DYN_LOGGING_JSONL` | Enable JSONL logging format (required for tracing) | `true` |
-| `OTEL_EXPORT_ENABLED` | Enable OTLP trace export | `1` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for Tempo | `http://localhost:4317` (local) or `http://tempo:4317` (docker) |
-| `OTEL_SERVICE_NAME` | Service name for identifying components | `dynamo-frontend`, `dynamo-worker-prefill`, `dynamo-worker-decode` |
+| Variable | Description | Default | Example Value |
+|----------|-------------|---------|---------------|
+| `DYN_LOGGING_JSONL` | Enable JSONL logging format (required for tracing) | `false` | `true` |
+| `DYN_LOG` | Log level (info or debug). Use debug to see detailed traces. | `info` | `debug` |
+| `OTEL_EXPORT_ENABLED` | Enable OTLP trace export | disabled | `1` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for Tempo | `http://localhost:4317` | `http://tempo:4317` (docker) |
+| `OTEL_SERVICE_NAME` | Service name for identifying components | `dynamo` | `dynamo-frontend`, `dynamo-worker-prefill`, `dynamo-worker-decode` |
+
+### Tracing Behavior
+
+- **When `OTEL_EXPORT_ENABLED` is NOT set**: Tracing is disabled. Traces are generated locally for trace logging, but not exported to any backend.
+- **When `OTEL_EXPORT_ENABLED=1`**: Traces are exported via OTLP to the endpoint specified by `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
+  - If `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is NOT set, it defaults to `http://localhost:4317`
+  - If `OTEL_SERVICE_NAME` is NOT set, it defaults to `dynamo`
 
 **Note:** When `OTEL_EXPORT_ENABLED=1`, logging initialization is deferred until the runtime is available (required by the OTEL exporter). This means some early logs will be dropped. This will be fixed in a future release.
+
+### Log Levels and Visibility
+
+Traces are exported to Tempo/Grafana regardless of log level. Set `DYN_LOG` only if you want to view trace details in console logs for debugging.
+
+JSONL logs are written to **stderr**:
+
+- **INFO (default)**: Initialization, errors, high-level operations
+- **DEBUG**: Detailed traces with trace IDs, span IDs, and routing decisions
+
+Example:
+```bash
+export DYN_LOGGING_JSONL=true
+export DYN_LOG=debug
+python -m dynamo.frontend --http-port 8000
+```
 
 ### Example Configuration
 
@@ -43,8 +69,8 @@ export DYN_LOGGING_JSONL=true
 # Enable trace export to Tempo
 export OTEL_EXPORT_ENABLED=1
 
-# Set the Tempo endpoint (docker-compose network)
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317
+# Set the Tempo endpoint (docker-compose network). Note that if this is not specified, it will default to http://localhost:4317
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo-host-name-here:4317
 
 # Set service name to identify this component
 export OTEL_SERVICE_NAME=dynamo-frontend
@@ -53,6 +79,8 @@ export OTEL_SERVICE_NAME=dynamo-frontend
 ---
 
 ## Local Deployment with Docker Compose
+
+> **Note:** The following Docker Compose commands are for demonstrating single-instance local deployments, not distributed Kubernetes environments.
 
 ### 1. Start the Unified Observability Stack
 
@@ -85,12 +113,27 @@ Configure Dynamo components to export traces:
 export DYN_LOGGING_JSONL=true
 export OTEL_EXPORT_ENABLED=1
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
-
-# Set service names for each component
-export OTEL_SERVICE_NAME=dynamo-frontend
 ```
 
-### 3. Run vLLM Disaggregated Deployment
+### 3a. Quick Start: Single GPU Aggregated Deployment
+
+For a simple single-GPU deployment, start the frontend and a single vLLM worker:
+
+```bash
+# Start the frontend with tracing enabled
+export OTEL_SERVICE_NAME=dynamo-frontend
+python -m dynamo.frontend --router-mode kv --http-port=8000 &
+
+# Start a single vLLM worker (aggregated prefill and decode)
+export OTEL_SERVICE_NAME=dynamo-worker-vllm
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
+
+wait
+```
+
+This runs both prefill and decode on the same GPU, providing a simpler setup for testing tracing.
+
+### 3b. Run vLLM Disaggregated Deployment (2 GPUs)
 
 Run the vLLM disaggregated script with tracing enabled:
 
@@ -132,9 +175,11 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
 wait
 ```
 
+For disaggregated deployments, this separates prefill and decode onto different GPUs for better resource utilization.
+
 ### 4. Generate Traces
 
-Send requests to the frontend to generate traces:
+Send requests to the frontend to generate traces (works for both aggregated and disaggregated deployments):
 
 ```bash
 curl -d '{
@@ -149,31 +194,32 @@ curl -d '{
 http://localhost:8000/v1/chat/completions
 ```
 
-### 5. View Traces in Grafana Tempo
+### 6. View Traces in Grafana Tempo
 
 1. Open Grafana at `http://localhost:3000`
-2. Login with username `admin` and password `admin`
+2. Login with username `dynamo` and password `dynamo`
 3. Navigate to **Explore** (compass icon in the left sidebar)
 4. Select **Tempo** as the data source (should be selected by default)
-5. Use the **Search** tab to find traces:
+5. In the query type, select **"Search"** (not TraceQL, not Service Graph)
+6. Use the **Search** tab to find traces:
    - Search by **Service Name** (e.g., `dynamo-frontend`)
    - Search by **Span Name** (e.g., `http-request`, `handle_payload`)
    - Search by **Tags** (e.g., `x_request_id=test-trace-001`)
-6. Click on a trace to view the detailed flame graph
+7. Click on a trace to view the detailed flame graph
 
 #### Example Trace View
 
 Below is an example of what a trace looks like in Grafana Tempo:
 
-![Trace Example](./trace.png)
+![Trace Example](trace.png)
 
-### 6. Stop Services
+### 7. Stop Services
 
-When done, stop the Tempo and Grafana stack:
+When done, stop the observability stack:
 
 ```bash
-cd deploy/tracing
-docker-compose down
+cd deploy
+docker compose -f docker-observability.yml down
 ```
 
 ---
