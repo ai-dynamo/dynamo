@@ -85,8 +85,6 @@ func (p *Prober) ProbeEndpoints(
 				// Probe the endpoint
 				ready := p.probeLoRAEndpoint(ctx, c.Address, model.Spec.ModelName)
 
-				logs.V(1).Info("Endpoint probe completed", "address", c.Address, "ready", ready)
-
 				return v1alpha1.EndpointInfo{
 					Address: c.Address,
 					PodName: c.PodName,
@@ -99,19 +97,30 @@ func (p *Prober) ProbeEndpoints(
 	// Execute all probes in parallel with bounded concurrency
 	results, err := workerpool.Execute(ctx, MaxConcurrentProbes, TotalProbeTimeout, tasks)
 
-	// Extract endpoint info from results
+	// Extract endpoint info from results and collect failures
 	endpoints := make([]v1alpha1.EndpointInfo, len(results))
 	readyCount := 0
+	var notReadyEndpoints []string
 	for _, result := range results {
 		endpoints[result.Index] = result.Value
 		if result.Value.Ready {
 			readyCount++
+		} else {
+			notReadyEndpoints = append(notReadyEndpoints, result.Value.Address)
+			if result.Err != nil {
+				logs.Info("Endpoint probe failed",
+					"address", result.Value.Address,
+					"podName", result.Value.PodName,
+					"error", result.Err)
+			}
 		}
 	}
 
 	logs.Info("Completed parallel endpoint probing",
 		"total", len(endpoints),
-		"ready", readyCount)
+		"ready", readyCount,
+		"notReady", len(notReadyEndpoints),
+		"notReadyEndpoints", notReadyEndpoints)
 
 	return endpoints, err
 }
@@ -137,16 +146,8 @@ func (p *Prober) UnloadLoRA(ctx context.Context, candidates []Candidate, modelNa
 				// Unload the LoRA from this endpoint (calls method in lora.go)
 				err := p.unloadLoRA(ctx, c.Address, modelName)
 				if err != nil {
-					logs.V(1).Info("Failed to unload LoRA from endpoint",
-						"address", c.Address,
-						"modelName", modelName,
-						"error", err)
 					return false, err
 				}
-
-				logs.V(1).Info("Successfully unloaded LoRA from endpoint",
-					"address", c.Address,
-					"modelName", modelName)
 				return true, nil
 			},
 		}
@@ -155,18 +156,28 @@ func (p *Prober) UnloadLoRA(ctx context.Context, candidates []Candidate, modelNa
 	// Execute all unload operations in parallel with bounded concurrency
 	results, err := workerpool.Execute(ctx, MaxConcurrentProbes, TotalProbeTimeout, tasks)
 
-	// Count successes
+	// Collect successes and failures with details
 	successCount := 0
+	var failedEndpoints []string
 	for _, result := range results {
 		if result.Value {
 			successCount++
+		} else {
+			// Log failed endpoint with error details
+			endpoint := candidates[result.Index].Address
+			failedEndpoints = append(failedEndpoints, endpoint)
+			logs.Info("Failed to unload LoRA from endpoint",
+				"address", endpoint,
+				"podName", candidates[result.Index].PodName,
+				"error", result.Err)
 		}
 	}
 
 	logs.Info("Completed parallel LoRA unload",
 		"total", len(candidates),
 		"successful", successCount,
-		"failed", len(candidates)-successCount)
+		"failed", len(failedEndpoints),
+		"failedEndpoints", failedEndpoints)
 
 	return err
 }
