@@ -69,11 +69,11 @@ jobs:
           docker run -v ${{ github.workspace }}:/workspace -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\" "
+            bash -c "pytest --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/tmp/${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\" "
       - name: Copy test report from test Container
         if: always()
         run: |
-          docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/${{ env.PYTEST_XML_FILE }} .
+          docker cp ${{ env.CONTAINER_ID }}_pytest:/tmp/${{ env.PYTEST_XML_FILE }} .
       - name: Archive test report
         uses: actions/upload-artifact@v4
         if: always()
