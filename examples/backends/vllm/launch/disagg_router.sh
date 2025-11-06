@@ -25,6 +25,8 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --block-size $BLOCK_SIZE \
     --enforce-eager &
 
+DYN_VLLM_KV_PORT=20081 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
@@ -33,12 +35,16 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
 # two prefill workers
 # When registered with --is-prefill-worker, these workers are automatically detected
 # by the frontend, which activates an internal prefill router for KV-aware prefill routing
+DYN_VLLM_KV_PORT=20082 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
 CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
     --is-prefill-worker &
 
+DYN_VLLM_KV_PORT=20083 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
 CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
