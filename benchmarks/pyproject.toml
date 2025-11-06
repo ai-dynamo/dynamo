@@ -48,6 +48,8 @@ dependencies = [
     "types-tabulate",
     "transformers",
     "pytest-mypy",
+    "gradio>=5.49.1",
+    "plotly>=6.4.0",
 ]
 
 [project.scripts]
