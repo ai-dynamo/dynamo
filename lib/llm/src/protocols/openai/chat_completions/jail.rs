@@ -510,7 +510,7 @@ impl JailedStream {
                                 last_annotated_event.clone(),
                                 last_annotated_comment.clone(),
                             );
-                            let responses = self.emit_choice_emissions(tool_content_emissions.clone(), chat_response, preserved_metadata, &choice_states);
+                            let responses = self.emit_choice_emissions(tool_content_emissions.clone(), chat_response, preserved_metadata);
                             for emitted_response in responses {
                                 yield emitted_response;
                             }
@@ -523,7 +523,7 @@ impl JailedStream {
                                 last_annotated_event.clone(),
                                 last_annotated_comment.clone(),
                             );
-                            let responses = self.emit_choice_emissions(trailing_emissions, chat_response, preserved_metadata, &choice_states);
+                            let responses = self.emit_choice_emissions(trailing_emissions, chat_response, preserved_metadata);
                             for emitted_response in responses {
                                 yield emitted_response;
                             }
@@ -532,7 +532,7 @@ impl JailedStream {
                         // Emit pass-through content with current metadata
                         if !passthrough_emissions.is_empty() {
                             let current_metadata = (response.id.clone(), response.event.clone(), response.comment.clone());
-                            let responses = self.emit_choice_emissions(passthrough_emissions, chat_response, current_metadata, &choice_states);
+                            let responses = self.emit_choice_emissions(passthrough_emissions, chat_response, current_metadata);
                             for emitted_response in responses {
                                 yield emitted_response;
                             }
@@ -567,7 +567,7 @@ impl JailedStream {
                 };
 
                 let final_metadata = (last_annotated_id, last_annotated_event, last_annotated_comment);
-                let responses = self.emit_choice_emissions(final_emissions, &dummy_response, final_metadata, &choice_states);
+                let responses = self.emit_choice_emissions(final_emissions, &dummy_response, final_metadata);
                 for emitted_response in responses {
                     yield emitted_response;
                 }
@@ -581,7 +581,6 @@ impl JailedStream {
         emissions: Vec<ChoiceEmission>,
         base_response: &NvCreateChatCompletionStreamResponse,
         annotated_metadata: (Option<String>, Option<String>, Option<Vec<String>>),
-        _choice_states: &ChoiceJailStateCollection,
     ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
         if emissions.is_empty() {
             return Vec::new();
