@@ -658,6 +658,78 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "Test GenerateDynamoComponentsDeployments with Discover Backend and Metrics Annotatitions",
+			args: args{
+				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment",
+						Namespace: "default",
+						Annotations: map[string]string{
+							commonconsts.KubeAnnotationEnableMetrics:         "false",
+							commonconsts.KubeAnnotationDynamoDiscoverBackend: "test",
+						},
+					},
+					Spec: v1alpha1.DynamoGraphDeploymentSpec{
+						BackendFramework: string(BackendFrameworkSGLang),
+						Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+							"service1": {
+								DynamoNamespace: &[]string{"default-test-dynamographdeployment"}[0],
+								ComponentType:   "frontend",
+								Replicas:        &[]int32{3}[0],
+								Resources: &common.Resources{
+									Requests: &common.ResourceItem{
+										CPU:    "1",
+										Memory: "1Gi",
+										GPU:    "0",
+										Custom: map[string]string{},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: map[string]*v1alpha1.DynamoComponentDeployment{
+				"service1": {
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment-service1",
+						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent:           "service1",
+							commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
+						},
+					},
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						BackendFramework: string(BackendFrameworkSGLang),
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{
+								commonconsts.KubeAnnotationEnableMetrics:         "false",
+								commonconsts.KubeAnnotationDynamoDiscoverBackend: "test",
+							},
+							ServiceName:     "service1",
+							DynamoNamespace: &[]string{"default-test-dynamographdeployment"}[0],
+							ComponentType:   "frontend",
+							Replicas:        &[]int32{3}[0],
+							Resources: &common.Resources{
+								Requests: &common.ResourceItem{
+									CPU:    "1",
+									Memory: "1Gi",
+									GPU:    "0",
+									Custom: map[string]string{},
+								},
+							},
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent:           "service1",
+								commonconsts.KubeLabelDynamoNamespace:           "default-test-dynamographdeployment",
+								commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamographdeployment",
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -4656,6 +4728,91 @@ func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 			if !reflect.DeepEqual(podSpec.ImagePullSecrets, tt.expectedImagePullSecrets) {
 				t.Errorf("GenerateBasePodSpec() ImagePullSecrets = %v, want %v",
 					podSpec.ImagePullSecrets, tt.expectedImagePullSecrets)
+			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
+	tests := []struct {
+		name             string
+		component        *v1alpha1.DynamoComponentDeploymentSharedSpec
+		controllerConfig controller_common.Config
+		wantEnvVar       string
+	}{
+		{
+			name: "Discover backend should be set",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoDiscoverBackend: "kubernetes",
+				},
+			},
+			wantEnvVar: "kubernetes",
+		},
+		{
+			name: "Discover backend should override the controller config",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoDiscoverBackend: "test",
+				},
+			},
+			controllerConfig: controller_common.Config{
+				DiscoverBackend: "etcd",
+			},
+			wantEnvVar: "test",
+		},
+		{
+			name: "Discover backend should be set by the controller config",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{},
+			},
+			controllerConfig: controller_common.Config{
+				DiscoverBackend: "etcd",
+			},
+			wantEnvVar: "etcd",
+		},
+		{
+			name: "Discover backend empty string",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoDiscoverBackend: "",
+				},
+			},
+			controllerConfig: controller_common.Config{
+				DiscoverBackend: "",
+			},
+		},
+		{
+			name:      "Discover backend not set",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{},
+		},
+	}
+	secretsRetriever := &mockSecretsRetriever{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				BackendFrameworkSGLang,
+				secretsRetriever,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				tt.controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+			)
+			if !assert.NoError(t, err) {
+				return
+			}
+			if tt.wantEnvVar != "" {
+				assert.Contains(t, podSpec.Containers[0].Env, corev1.EnvVar{Name: commonconsts.DynamoDiscoverBackendEnvVar, Value: tt.wantEnvVar})
+			} else {
+				for _, env := range podSpec.Containers[0].Env {
+					if env.Name == commonconsts.DynamoDiscoverBackendEnvVar {
+						t.Errorf("GenerateBasePodSpec() Discover backend env var should not be set, got %s", env.Value)
+					}
+				}
 			}
 		})
 	}

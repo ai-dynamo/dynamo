@@ -135,11 +135,14 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 
 		// Propagate metrics annotation from parent deployment if present
 		if parentDynamoGraphDeployment.Annotations != nil {
+			if deployment.Spec.Annotations == nil {
+				deployment.Spec.Annotations = make(map[string]string)
+			}
 			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationEnableMetrics]; exists {
-				if deployment.Spec.Annotations == nil {
-					deployment.Spec.Annotations = make(map[string]string)
-				}
 				deployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics] = val
+			}
+			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend]; exists {
+				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend] = val
 			}
 		}
 
@@ -685,7 +688,7 @@ func GenerateBasePodSpec(
 	serviceName string,
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
-	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes)
+	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controllerConfig.DiscoverBackend)
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
@@ -852,7 +855,7 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32) ComponentContext {
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoverBackend string) ComponentContext {
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
 		ComponentType:                  component.ComponentType,
@@ -861,6 +864,13 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 	}
 	if component.DynamoNamespace != nil {
 		componentContext.DynamoNamespace = *component.DynamoNamespace
+	}
+	// This is the discover backend set by the helm installation/operator
+	componentContext.DiscoverBackend = discoverBackend
+
+	// If the user has set a discover backend in the annotations, use that instead
+	if component.Annotations != nil && component.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend] != "" {
+		componentContext.DiscoverBackend = component.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend]
 	}
 	return componentContext
 }
