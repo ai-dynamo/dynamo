@@ -6,7 +6,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Final
 
 from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
@@ -16,6 +16,13 @@ from dynamo.llm import ZmqKvEventPublisher
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
+from .multimodal_utils.image_loader import ImageLoader
+
+# Multimodal data dictionary keys
+IMAGE_URL_KEY: Final = "image_url"
+VIDEO_URL_KEY: Final = "video_url"
+URL_VARIANT_KEY: Final = "Url"
+DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -65,6 +72,7 @@ class BaseWorkerHandler(ABC):
         self.default_sampling_params = default_sampling_params
         self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
+        self.image_loader = ImageLoader()
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -110,6 +118,50 @@ class BaseWorkerHandler(ABC):
     def cleanup(self):
         """Override in subclasses if cleanup is needed."""
         pass
+
+    async def _extract_multimodal_data(
+        self, request: Dict[str, Any]
+    ) -> Dict[str, Any] | None:
+        """
+        Extract and decode multimodal data from PreprocessedRequest.
+        """
+        if "multi_modal_data" not in request or request["multi_modal_data"] is None:
+            return None
+
+        mm_map = request["multi_modal_data"]
+        vllm_mm_data = {}
+
+        # Process image_url entries
+        images = []
+        for item in mm_map.get(IMAGE_URL_KEY, []):
+            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                url = item[URL_VARIANT_KEY]
+                try:
+                    # ImageLoader supports both data: and http(s): URLs with caching
+                    image = await self.image_loader.load_image(url)
+                    images.append(image)
+                    logger.debug(f"Loaded image from URL: {url[:80]}...")
+                except Exception:
+                    logger.exception(f"Failed to load image from {url[:80]}...")
+                    raise
+            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
+                # Decoded support from PRs #3971/#3988 (frontend decoding + NIXL transfer)
+                # Will contain NIXL metadata for direct memory access
+                # TODO: Implement NIXL read when PRs merge
+                logger.warning(
+                    "Decoded multimodal data not yet supported in standard worker"
+                )
+
+        if images:
+            # vLLM expects single image or list
+            vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+            logger.debug(f"Extracted {len(images)} image(s) for multimodal processing")
+
+        # Handle video_url entries (future expansion)
+        if VIDEO_URL_KEY in mm_map:
+            logger.warning("Video multimodal data not yet supported in standard worker")
+
+        return vllm_mm_data if vllm_mm_data else None
 
     async def generate_tokens(
         self, prompt, sampling_params, request_id, data_parallel_rank=None
@@ -168,7 +220,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
 
-        prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
+        # Extract and decode multimodal data if present
+        multi_modal_data = await self._extract_multimodal_data(request)
+
+        prompt = TokensPrompt(
+            prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
+        )
 
         # Build sampling params from request
         sampling_params = build_sampling_params(request, self.default_sampling_params)
@@ -210,8 +267,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Prefill Request ID: {request_id}")
 
+        # Extract and decode multimodal data if present
+        multi_modal_data = await self._extract_multimodal_data(request)
+
         token_ids = request["token_ids"]
-        prompt = TokensPrompt(prompt_token_ids=token_ids)
+        prompt = TokensPrompt(
+            prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
+        )
 
         # Build sampling params from request using shared utility
         sampling_params = build_sampling_params(request, self.default_sampling_params)

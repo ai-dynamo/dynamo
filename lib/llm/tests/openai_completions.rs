@@ -29,6 +29,7 @@ impl CompletionSample {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
 
         Ok(Self {

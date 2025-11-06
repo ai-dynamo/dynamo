@@ -1647,6 +1647,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
 
         let result = validate_completion_fields_generic(&request);
@@ -1670,6 +1671,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1692,6 +1694,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1714,6 +1717,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1738,6 +1742,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1760,6 +1765,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1790,6 +1796,7 @@ mod tests {
                 "session": {"id": "session-1", "timestamp": 1640995200}
             })
             .into(),
+            unsupported_fields: Default::default(),
         };
 
         let result = validate_completion_fields_generic(&request);
@@ -1975,8 +1982,8 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_fields_rejected() {
-        // Test that all known unsupported fields are rejected and all shown in error message
+    fn test_chat_completions_unknown_fields_rejected() {
+        // Test that known unsupported fields are rejected and all shown in error message
         let json = r#"{
             "messages": [{"role": "user", "content": "Hello"}],
             "model": "test-model",
@@ -2013,6 +2020,38 @@ mod tests {
             assert!(msg.contains("documents"));
             assert!(msg.contains("chat_template"));
             assert!(msg.contains("chat_template_kwargs"));
+        }
+    }
+
+    #[test]
+    fn test_completions_unsupported_fields_rejected() {
+        // Test that known unsupported fields are rejected and all shown in error message
+        let json = r#"{
+            "model": "test-model",
+            "prompt": "Hello",
+            "add_special_tokens": true,
+            "response_format": {"type": "json_object"}
+        }"#;
+
+        let request: NvCreateCompletionRequest = serde_json::from_str(json).unwrap();
+
+        // Verify both unsupported fields were captured
+        assert!(
+            request
+                .unsupported_fields
+                .contains_key("add_special_tokens")
+        );
+        assert!(request.unsupported_fields.contains_key("response_format"));
+
+        let result = validate_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            let msg = &error_response.1.message;
+            assert!(msg.contains("Unsupported parameter"));
+            // Verify both fields appear in error message
+            assert!(msg.contains("add_special_tokens"));
+            assert!(msg.contains("response_format"));
         }
     }
 }

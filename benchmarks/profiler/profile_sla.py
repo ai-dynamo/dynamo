@@ -27,6 +27,7 @@ from benchmarks.profiler.utils.dgd_generation import generate_dgd_config_with_pl
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
+    plot_pd_joint_results,
     plot_prefill_performance,
 )
 from benchmarks.profiler.utils.profile_cache import (
@@ -280,14 +281,10 @@ async def run_profile(args):
                 prefill_thpt_per_gpu.append(args.isl / ttft / num_gpus * 1000)
 
         # Plot the results as a 2D scatter plot
+        prefill_results = None
         if prefill_num_gpus and prefill_ttft and prefill_thpt_per_gpu:
-            plot_prefill_performance(
-                prefill_num_gpus,
-                prefill_ttft,
-                prefill_thpt_per_gpu,
-                args.ttft,
-                args.output_dir,
-            )
+            prefill_results = (prefill_num_gpus, prefill_ttft, prefill_thpt_per_gpu)
+            plot_prefill_performance(prefill_results, args.ttft, args.output_dir)
 
         # then profile decode
         decode_num_gpus = []
@@ -475,6 +472,11 @@ async def run_profile(args):
         # Plot all decode results after profiling is complete
         if decode_results:
             plot_decode_performance(decode_results, args.itl, args.output_dir)
+
+        if prefill_results and decode_results:
+            plot_pd_joint_results(
+                args.isl, args.osl, prefill_results, decode_results, args.output_dir
+            )
 
         if args.dry_run:
             logger.info("Skipping recommendations in dry run mode")
