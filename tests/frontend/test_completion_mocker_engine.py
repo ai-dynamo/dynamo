@@ -157,6 +157,7 @@ def test_completion_string_prompt() -> None:
         f"{response.status_code}: {response.text}"
     )
 
+
 @pytest.mark.usefixtures("start_services")
 @pytest.mark.e2e
 @pytest.mark.model(TEST_MODEL)
@@ -173,6 +174,7 @@ def test_completion_empty_array_prompt() -> None:
         f"Completion request should failed with status 400 but got"
         f"{response.status_code}: {response.text}"
     )
+
 
 @pytest.mark.usefixtures("start_services")
 @pytest.mark.e2e
