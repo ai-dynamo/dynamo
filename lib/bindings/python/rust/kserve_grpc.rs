@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 
-use crate::{CancellationToken, engine::*, to_pyerr};
+use crate::{CancellationToken, engine::*, llm::model_card::ModelDeploymentCard, to_pyerr};
 
 pub use dynamo_llm::grpc::service::kserve;
 
@@ -100,6 +100,29 @@ impl KserveGrpcService {
 
     pub fn list_tensor_models(&self) -> PyResult<Vec<String>> {
         Ok(self.inner.model_manager().list_tensor_models())
+    }
+
+    pub fn save_model_card(&self, key: String, card: ModelDeploymentCard) -> PyResult<()> {
+        self.inner
+            .model_manager()
+            .save_model_card(&key, card.inner)
+            .map_err(to_pyerr)
+    }
+
+    pub fn remove_model_card(&self, key: String) -> PyResult<Option<ModelDeploymentCard>> {
+        let card = self.inner.model_manager().remove_model_card(&key);
+        Ok(card.map(|inner| ModelDeploymentCard { inner }))
+    }
+
+    pub fn get_model_cards(&self) -> PyResult<Vec<ModelDeploymentCard>> {
+        let cards = self
+            .inner
+            .model_manager()
+            .get_model_cards()
+            .into_iter()
+            .map(|inner| ModelDeploymentCard { inner })
+            .collect();
+        Ok(cards)
     }
 
     fn run<'p>(&self, py: Python<'p>, token: CancellationToken) -> PyResult<Bound<'p, PyAny>> {
