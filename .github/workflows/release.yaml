@@ -5,6 +5,9 @@ name: Dynamo Release
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - release-workflow
 
 jobs:
   operator:
