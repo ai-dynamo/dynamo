@@ -338,7 +338,13 @@ impl OpenAIPreprocessor {
         }
 
         if !media_map.is_empty() {
+            // Compute hash for multimodal content
+            use crate::kv_router::mm_hash::{MultimodalHasher, UrlBasedHasher};
+            let hasher = UrlBasedHasher::new();
+            let mm_hash = hasher.hash(&media_map);
+
             builder.multi_modal_data(Some(media_map));
+            builder.mm_content_hash(mm_hash);
         }
 
         Ok(())
