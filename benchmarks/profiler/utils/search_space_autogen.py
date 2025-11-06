@@ -122,17 +122,17 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
     else:
         # use default values for GPUs
         if args.min_num_gpus_per_engine == 0:
-            logger.info(
+            logger.warning(
                 "GPU discover is disabled and min_num_gpus_per_engine is not specified, setting to 1"
             )
             args.min_num_gpus_per_engine = 1
         if args.max_num_gpus_per_engine == 0:
-            logger.info(
+            logger.warning(
                 "GPU discover is disabled and max_num_gpus_per_engine is not specified, setting to 4"
             )
             args.max_num_gpus_per_engine = 4
         if args.num_gpus_per_node == 0:
-            logger.info(
+            logger.warning(
                 "GPU discover is disabled and num_gpus_per_node is not specified, setting to 8"
             )
             args.num_gpus_per_node = 8

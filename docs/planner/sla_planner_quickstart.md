@@ -315,7 +315,8 @@ profilingConfig:
 
     # Profiling sweep settings (optional)
     sweep:
-      force_rerun: false
+      prefill_interpolation_granularity: 16  # Number of samples for prefill ISL sweep
+      decode_interpolation_granularity: 6    # Number of samples for decode sweep
 ```
 
 > **Note**: `engine.config` is a **file path** to a DGD YAML file, not inline configuration. Use ConfigMapRef (recommended) or leave it unset to auto-generate.

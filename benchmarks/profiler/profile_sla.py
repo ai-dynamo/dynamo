@@ -17,6 +17,7 @@ import asyncio
 import logging
 import math
 import os
+from dataclasses import dataclass, field
 
 import numpy as np
 import yaml
@@ -32,13 +33,8 @@ from benchmarks.profiler.utils.dgd_generation import generate_dgd_config_with_pl
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
+    plot_pd_joint_results,
     plot_prefill_performance,
-)
-from benchmarks.profiler.utils.profile_cache import (
-    check_decode_results_exist,
-    check_prefill_results_exist,
-    load_existing_decode_results,
-    load_existing_prefill_results,
 )
 from benchmarks.profiler.utils.profile_decode import (
     get_num_request_range,
@@ -55,6 +51,31 @@ from deploy.utils.dynamo_deployment import (
     cleanup_remaining_deployments,
 )
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
+
+
+@dataclass
+class PrefillProfileData:
+    """Container for prefill profiling results."""
+
+    num_gpus: list[int] = field(default_factory=list)
+    ttft: list[float] = field(default_factory=list)
+    thpt_per_gpu: list[float] = field(default_factory=list)
+    parallel_mapping_labels: list[str] = field(default_factory=list)
+    parallel_mappings: list[ParallelizationMapping] = field(default_factory=list)
+
+
+@dataclass
+class DecodeProfileData:
+    """Container for decode profiling results."""
+
+    num_gpus: list[int] = field(default_factory=list)
+    itl: list[float] = field(default_factory=list)
+    thpt_per_gpu: list[float] = field(default_factory=list)
+    concurrency: list[int] = field(default_factory=list)
+    kv_cache_size: list[int] = field(default_factory=list)
+    parallel_mapping_labels: list[str] = field(default_factory=list)
+    parallel_mappings: list[ParallelizationMapping] = field(default_factory=list)
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -116,32 +137,29 @@ async def run_profile(args):
         model_name = config_modifier.get_model_name(config)
 
         # Determine sweep max context length: allow user-provided cap to override model's if smaller
-        sweep_max_context_length = getattr(args, "max_context_length", None)
-        if hasattr(args, "model_info") and args.model_info is not None:
-            model_max_ctx = args.model_info.max_context_length
-            if sweep_max_context_length is None:
-                sweep_max_context_length = model_max_ctx
-            elif model_max_ctx is not None and model_max_ctx < sweep_max_context_length:
-                logger.info(
-                    f"User-provided max_context_length={sweep_max_context_length} exceeds model's maximum {model_max_ctx}; using model maximum."
-                )
-                sweep_max_context_length = model_max_ctx
-        if sweep_max_context_length is None:
-            logger.warning(
-                "No max_context_length available from args or model; proceeding without a cap."
+        use_specified_max_context_len = getattr(args, "max_context_length", None)
+        model_max_context_len = args.model_info.max_context_length
+        if not use_specified_max_context_len and not model_max_context_len:
+            raise ValueError(
+                "No max_context_length available from args.max_context_length or model_info from HF config"
             )
-
-        # Log skip behavior
-        if args.force_rerun:
+        elif not use_specified_max_context_len:
+            sweep_max_context_length = model_max_context_len
             logger.info(
-                "Force rerun enabled - will re-run all tests even if results exist"
+                f"Using model's maximum context length: {model_max_context_len}"
             )
-        elif args.skip_existing_results:
+        elif not model_max_context_len:
+            sweep_max_context_length = use_specified_max_context_len
             logger.info(
-                "Skip existing results enabled - will skip TP sizes with existing results"
+                f"Using user-provided max_context_length: {use_specified_max_context_len}"
             )
         else:
-            logger.info("Skip existing results disabled - will re-run all tests")
+            sweep_max_context_length = min(
+                use_specified_max_context_len, model_max_context_len
+            )
+            logger.info(
+                f"Using minimum of user-provided and model's maximum context length: {sweep_max_context_length}"
+            )
 
         if args.use_ai_configurator:
             if not args.aic_system:
@@ -172,11 +190,7 @@ async def run_profile(args):
                 )
 
         # first profile prefill
-        prefill_num_gpus = []
-        prefill_ttft = []
-        prefill_thpt_per_gpu = []
-        prefill_parallel_mapping_labels: list[str] = []
-        prefill_parallel_mappings: list[ParallelizationMapping] = []
+        prefill_data = PrefillProfileData()
         logger.info("Profiling prefill...")
         base_prefill_config = config_modifier.convert_config(
             config, "prefill", is_moe_model=args.model_info.is_moe
@@ -191,29 +205,6 @@ async def run_profile(args):
             )
 
             for mapping in candidate_mappings:
-                # Check if results already exist for this GPU count
-                if (
-                    args.skip_existing_results
-                    and not args.force_rerun
-                    and check_prefill_results_exist(args.output_dir, num_gpus, args.isl)
-                ):
-                    logger.info(
-                        f"Skipping prefill {num_gpus} GPU(s) with parallel mapping [{mapping.label('prefill')}] - results already exist"
-                    )
-                    ttft, thpt_per_gpu = load_existing_prefill_results(
-                        args.output_dir, num_gpus, args.isl
-                    )
-                    if ttft is not None and thpt_per_gpu is not None:
-                        prefill_num_gpus.append(num_gpus)
-                        prefill_ttft.append(ttft)
-                        prefill_thpt_per_gpu.append(thpt_per_gpu)
-                        prefill_parallel_mapping_labels.append(mapping.label("prefill"))
-                        prefill_parallel_mappings.append(mapping)
-                        logger.info(
-                            f"Loaded existing prefill results: {num_gpus} GPU TTFT={ttft:.2f}ms, throughput={thpt_per_gpu:.2f} tokens/s/GPU"
-                        )
-                    continue
-
                 # Apply parallel mapping to config
                 prefill_config = apply_parallel_mapping_to_config(
                     base_prefill_config,
@@ -226,7 +217,7 @@ async def run_profile(args):
 
                 # Work dir includes mapping label (safe chars only)
                 parallel_mapping_tag = (
-                    mapping.label("prefill").replace("=", "").replace("/", "_")
+                    mapping.label().replace("=", "").replace("/", "_")
                 )
                 work_dir = (
                     f"{args.output_dir}/prefill_{num_gpus}gpus_{parallel_mapping_tag}"
@@ -291,32 +282,18 @@ async def run_profile(args):
                     logger.info("Deployment deleted")
 
                 if ttft is not None:
-                    prefill_num_gpus.append(num_gpus)
-                    prefill_ttft.append(ttft)
-                    prefill_thpt_per_gpu.append(args.isl / ttft / num_gpus * 1000)
-                    prefill_parallel_mapping_labels.append(mapping.label("prefill"))
-                    prefill_parallel_mappings.append(mapping)
+                    prefill_data.num_gpus.append(num_gpus)
+                    prefill_data.ttft.append(ttft)
+                    prefill_data.thpt_per_gpu.append(args.isl / ttft / num_gpus * 1000)
+                    prefill_data.parallel_mapping_labels.append(mapping.label())
+                    prefill_data.parallel_mappings.append(mapping)
 
         # Plot the results as a 2D scatter plot
-        if prefill_num_gpus and prefill_ttft and prefill_thpt_per_gpu:
-            plot_prefill_performance(
-                prefill_num_gpus,
-                prefill_ttft,
-                prefill_thpt_per_gpu,
-                args.ttft,
-                args.output_dir,
-                parallel_mapping_labels=prefill_parallel_mapping_labels,
-            )
+        if prefill_data.num_gpus and prefill_data.ttft and prefill_data.thpt_per_gpu:
+            plot_prefill_performance(prefill_data, args.ttft, args.output_dir)
 
         # then profile decode
-        decode_num_gpus = []
-        decode_itl = []
-        decode_thpt_per_gpu = []
-        decode_concurrency = []
-        decode_kv_cache_size = []
-        decode_results = []  # Store partial results for plotting later
-        decode_parallel_mapping_labels: list[str] = []
-        decode_parallel_mappings: list[ParallelizationMapping] = []
+        decode_data = DecodeProfileData()
         logger.info("Profiling decode...")
         base_decode_config = config_modifier.convert_config(
             config, "decode", is_moe_model=args.model_info.is_moe
@@ -328,55 +305,6 @@ async def run_profile(args):
             )
 
             for mapping in candidate_mappings:
-                # Check if results already exist for this GPU count
-                if (
-                    args.skip_existing_results
-                    and not args.force_rerun
-                    and check_decode_results_exist(
-                        args.output_dir, num_gpus, args.isl, args.osl
-                    )
-                ):
-                    logger.info(
-                        f"Skipping decode {num_gpus} GPU(s) with parallel mapping [{mapping.label('decode')}] - results already exist"
-                    )
-                    existing_results = load_existing_decode_results(
-                        args.output_dir, num_gpus, args.isl, args.osl
-                    )
-                    if existing_results:
-                        # Add existing results to our arrays
-                        engine_decode_itl = []
-                        engine_decode_thpt_per_gpu = []
-                        for itl, thpt_per_gpu, concurrency in existing_results:
-                            decode_num_gpus.append(num_gpus)
-                            decode_itl.append(itl)
-                            decode_thpt_per_gpu.append(thpt_per_gpu)
-                            decode_concurrency.append(concurrency)
-                            decode_parallel_mapping_labels.append(
-                                mapping.label("decode")
-                            )
-                            decode_parallel_mappings.append(mapping)
-                            # We need to get kv_cache_size from existing logs or estimate it
-                            estimated_kv_cache = max(
-                                100000, concurrency * (args.isl + args.osl) * 2
-                            )  # Conservative estimate
-                            decode_kv_cache_size.append(estimated_kv_cache)
-                            engine_decode_itl.append(itl)
-                            engine_decode_thpt_per_gpu.append(thpt_per_gpu)
-
-                        # Store results for plotting
-                        decode_results.append(
-                            (
-                                num_gpus,
-                                engine_decode_itl,
-                                engine_decode_thpt_per_gpu,
-                                mapping.label("decode"),
-                            )
-                        )
-                        logger.info(
-                            f"Loaded {len(existing_results)} existing decode results for {num_gpus} GPU(s)"
-                        )
-                    continue
-
                 # Apply parallel mapping to config
                 decode_config = apply_parallel_mapping_to_config(
                     base_decode_config,
@@ -388,7 +316,7 @@ async def run_profile(args):
                 logger.info(f"Dynamo config: {decode_config}")
 
                 parallel_mapping_tag = (
-                    mapping.label("decode").replace("=", "").replace("/", "_")
+                    mapping.label().replace("=", "").replace("/", "_")
                 )
                 work_dir = (
                     f"{args.output_dir}/decode_{num_gpus}gpus_{parallel_mapping_tag}"
@@ -452,8 +380,6 @@ async def run_profile(args):
                         f"Sweeping num_request range based on maximum number of kv tokens: {sweep_num_request}"
                     )
 
-                    engine_decode_itl = []
-                    engine_decode_thpt_per_gpu = []
                     for num_request in sweep_num_request:
                         itl = thpt_per_gpu = None
                         if args.use_ai_configurator:
@@ -494,27 +420,13 @@ async def run_profile(args):
                                 )
 
                         if itl is not None and thpt_per_gpu is not None:
-                            engine_decode_itl.append(itl)
-                            engine_decode_thpt_per_gpu.append(thpt_per_gpu)
-                            decode_num_gpus.append(num_gpus)
-                            decode_itl.append(itl)
-                            decode_thpt_per_gpu.append(thpt_per_gpu)
-                            decode_concurrency.append(num_request)
-                            decode_kv_cache_size.append(max_kv_tokens)
-                            decode_parallel_mapping_labels.append(
-                                mapping.label("decode")
-                            )
-                            decode_parallel_mappings.append(mapping)
-
-                    # Store partial results for plotting later
-                    decode_results.append(
-                        (
-                            num_gpus,
-                            engine_decode_itl,
-                            engine_decode_thpt_per_gpu,
-                            mapping.label("decode"),
-                        )
-                    )
+                            decode_data.num_gpus.append(num_gpus)
+                            decode_data.itl.append(itl)
+                            decode_data.thpt_per_gpu.append(thpt_per_gpu)
+                            decode_data.concurrency.append(num_request)
+                            decode_data.kv_cache_size.append(max_kv_tokens)
+                            decode_data.parallel_mapping_labels.append(mapping.label())
+                            decode_data.parallel_mappings.append(mapping)
 
                 if not args.dry_run and not args.use_ai_configurator:
                     logger.info("Cleaning up deployment...")
@@ -523,80 +435,79 @@ async def run_profile(args):
                     logger.info("Deployment deleted")
 
         # Plot all decode results after profiling is complete
-        if decode_results:
-            plot_decode_performance(decode_results, args.itl, args.output_dir)
+        if decode_data.num_gpus:
+            plot_decode_performance(decode_data, args.itl, args.output_dir)
+
+        if prefill_data.num_gpus and decode_data.num_gpus:
+            plot_pd_joint_results(
+                args.isl, args.osl, prefill_data, decode_data, args.output_dir
+            )
 
         if args.dry_run:
             logger.info("Skipping recommendations in dry run mode")
         else:
             logger.info("Analyzing results and generate recommendations...")
             # Safety guards: no results → exit early with a clear message
-            if not (prefill_num_gpus and prefill_ttft and prefill_thpt_per_gpu):
+            if not prefill_data.num_gpus:
                 logger.error("No prefill results produced; skipping recommendations.")
 
             # select best parallel mapping for prefill
-            if min(prefill_ttft) > args.ttft:
+            if min(prefill_data.ttft) > args.ttft:
                 logger.info(
                     "No TP size satisfies the TTFT requirement, please try a smaller model or a more powerful GPU SKU"
                 )
-                selected_prefill_idx = int(np.argmin(np.array(prefill_ttft)))
+                selected_prefill_idx = int(np.argmin(np.array(prefill_data.ttft)))
             else:
                 valid_indices = [
-                    i for i, ttft in enumerate(prefill_ttft) if ttft <= args.ttft
+                    i for i, ttft in enumerate(prefill_data.ttft) if ttft <= args.ttft
                 ]
                 # Among valid TP sizes, select the one with highest throughput per GPU
-                valid_thpts = [prefill_thpt_per_gpu[i] for i in valid_indices]
+                valid_thpts = [prefill_data.thpt_per_gpu[i] for i in valid_indices]
                 max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
                 selected_prefill_idx = max_thpt_idx
             logger.info(
-                f"Suggested prefill parallel mapping: {prefill_parallel_mapping_labels[selected_prefill_idx]} on {prefill_num_gpus[selected_prefill_idx]} GPU(s) (TTFT {prefill_ttft[selected_prefill_idx]:.2f} ms, throughput {prefill_thpt_per_gpu[selected_prefill_idx]:.2f} tokens/s/GPU)"
+                f"Suggested prefill parallel mapping: {prefill_data.parallel_mapping_labels[selected_prefill_idx]} on {prefill_data.num_gpus[selected_prefill_idx]} GPU(s) (TTFT {prefill_data.ttft[selected_prefill_idx]:.2f} ms, throughput {prefill_data.thpt_per_gpu[selected_prefill_idx]:.2f} tokens/s/GPU)"
             )
 
             # select best parallel mapping for decode
-            if not (
-                decode_num_gpus
-                and decode_itl
-                and decode_thpt_per_gpu
-                and decode_concurrency
-                and decode_kv_cache_size
-            ):
+            if not decode_data.num_gpus:
                 logger.error("No decode results produced; skipping recommendations.")
                 return
-            if min(decode_itl) > args.itl:
+            if min(decode_data.itl) > args.itl:
                 logger.info(
                     "No TP size satisfies the ITL requirement, please try a smaller model or a more powerful GPU SKU"
                 )
-                selected_decode_idx = int(np.argmin(np.array(decode_itl)))
+                selected_decode_idx = int(np.argmin(np.array(decode_data.itl)))
             else:
                 valid_indices = [
-                    i for i, itl in enumerate(decode_itl) if itl <= args.itl
+                    i for i, itl in enumerate(decode_data.itl) if itl <= args.itl
                 ]
                 # Among valid TP sizes, select the one with highest throughput per GPU
-                valid_thpts = [decode_thpt_per_gpu[i] for i in valid_indices]
+                valid_thpts = [decode_data.thpt_per_gpu[i] for i in valid_indices]
                 max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
                 selected_decode_idx = max_thpt_idx
             logger.info(
-                f"Suggested decode parallel mapping: {decode_parallel_mapping_labels[selected_decode_idx]} on {decode_num_gpus[selected_decode_idx]} GPU(s) (ITL {decode_itl[selected_decode_idx]:.2f} ms, throughput {decode_thpt_per_gpu[selected_decode_idx]:.2f} tokens/s/GPU)"
+                f"Suggested decode parallel mapping: {decode_data.parallel_mapping_labels[selected_decode_idx]} on {decode_data.num_gpus[selected_decode_idx]} GPU(s) (ITL {decode_data.itl[selected_decode_idx]:.2f} ms, throughput {decode_data.thpt_per_gpu[selected_decode_idx]:.2f} tokens/s/GPU)"
             )
 
         if args.dry_run:
             # use min value for prefill and decode GPU counts
-            prefill_num_gpus = [args.min_num_gpus_per_engine]
-            decode_num_gpus = [args.min_num_gpus_per_engine]
-            prefill_parallel_mappings = [
+            prefill_data.num_gpus = [args.min_num_gpus_per_engine]
+            decode_data.num_gpus = [args.min_num_gpus_per_engine]
+            prefill_data.parallel_mappings = [
                 ParallelizationMapping(tp=args.min_num_gpus_per_engine)
             ]
-            decode_parallel_mappings = [
+            decode_data.parallel_mappings = [
                 ParallelizationMapping(tp=args.min_num_gpus_per_engine)
             ]
             selected_prefill_idx = 0
             selected_decode_idx = 0
 
         # interpolate ISL - TTFT with best prefill parallel mapping
-        best_prefill_gpus = prefill_num_gpus[selected_prefill_idx]
-        best_prefill_mapping = prefill_parallel_mappings[selected_prefill_idx]
+        best_prefill_gpus = prefill_data.num_gpus[selected_prefill_idx]
+        best_prefill_mapping = prefill_data.parallel_mappings[selected_prefill_idx]
         logger.info(
-            f"Profiling prefill under best {best_prefill_gpus} GPU(s) with parallel mapping [{best_prefill_mapping.label('prefill')}] with different ISL..."
+            f"Profiling prefill under best {best_prefill_gpus} GPU(s) with parallel mapping [{best_prefill_mapping.label()}] with different ISL..."
         )
         prefill_config = config_modifier.convert_config(
             config, "prefill", is_moe_model=args.model_info.is_moe
@@ -676,10 +587,10 @@ async def run_profile(args):
             logger.info("Deployment deleted")
 
         # interpolate ITL - Active_KV_Cache - Decode_Context_Length with best decode parallel mapping
-        best_decode_gpus = decode_num_gpus[selected_decode_idx]
-        best_decode_mapping = decode_parallel_mappings[selected_decode_idx]
+        best_decode_gpus = decode_data.num_gpus[selected_decode_idx]
+        best_decode_mapping = decode_data.parallel_mappings[selected_decode_idx]
         logger.info(
-            f"Profiling decode with {best_decode_gpus} GPUs with parallel mapping [{best_decode_mapping.label('decode')}]..."
+            f"Profiling decode with {best_decode_gpus} GPUs with parallel mapping [{best_decode_mapping.label()}]..."
         )
         decode_config = config_modifier.convert_config(
             config, "decode", is_moe_model=args.model_info.is_moe

@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import logging
 from dataclasses import dataclass
+from enum import Enum
 
 from benchmarks.profiler.utils.model_info import ModelInfo
 
@@ -17,6 +19,14 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
+class ParallelizationStrategy(Enum):
+    """Enum for parallelization strategy types."""
+
+    TP = "TP"
+    TEP = "TEP"
+    DEP = "DEP"
+
+
 @dataclass(frozen=True)
 class ParallelizationMapping:
     """
@@ -27,14 +37,99 @@ class ParallelizationMapping:
     tep: int | None = None
     dep: int | None = None
 
-    def label(self, phase: str) -> str:
+    def label(self) -> str:
         if self.tp is not None:
-            return f"TP={self.tp}"
-        if phase == "prefill" and self.tep is not None:
-            return f"TEP={self.tep}"
-        if phase == "decode" and self.dep is not None:
-            return f"DEP={self.dep}"
+            return f"{ParallelizationStrategy.TP.value}={self.tp}"
+        if self.tep is not None:
+            return f"{ParallelizationStrategy.TEP.value}={self.tep}"
+        if self.dep is not None:
+            return f"{ParallelizationStrategy.DEP.value}={self.dep}"
         return "default"
+
+    def get_tp_size(self) -> int:
+        """
+        Get the effective TP size for KV heads splitting.
+        Both TP and TEP split KV heads, DEP doesn't (returns 1).
+        """
+        if self.tp is not None:
+            return self.tp
+        if self.tep is not None:
+            return self.tep
+        return 1  # DEP has TP split of 1
+
+    def get_expert_split(self) -> int:
+        """
+        Get the effective expert split size.
+        Both TEP and DEP split experts, TP doesn't (returns 1).
+        """
+        if self.tep is not None:
+            return self.tep
+        if self.dep is not None:
+            return self.dep
+        return 1  # TP has expert split of 1
+
+
+def _check_divisibility(
+    value: int | None,
+    divisor: int,
+    value_name: str,
+    divisor_name: str,
+    mapping_label: str,
+) -> bool:
+    """
+    Check if value is divisible by divisor.
+    Returns True if valid (or value is None), False if invalid.
+
+    Args:
+        value: The value to check (e.g., num_kv_heads, num_experts)
+        divisor: The divisor to check against
+        value_name: Name of the value for error messages
+        divisor_name: Name of the divisor for error messages (e.g., "tp_size", "expert_split")
+        mapping_label: Label of the mapping for error messages
+    """
+    if value is None:
+        logger.warning(
+            f"Skipping {value_name} divisibility check for {mapping_label}: {value_name} is unknown"
+        )
+        return True
+
+    if divisor > 1 and int(value) % divisor != 0:
+        logger.warning(
+            f"Invalid mapping {mapping_label}: {value_name}={value} not divisible by {divisor_name}={divisor}"
+        )
+        return False
+
+    return True
+
+
+def _validate_intermediate_size(
+    mapping: ParallelizationMapping,
+    intermediate_size: int | None,
+    quant_block: int | None,
+) -> bool:
+    """
+    Validate intermediate size and quantization block for TP and TEP strategies.
+    Checks:
+    - intermediate_size % tp_size == 0
+    - (intermediate_size // tp_size) divides quant_block (if quant_block is known)
+    """
+    tp_size = mapping.get_tp_size()
+
+    # Check basic divisibility
+    if not _check_divisibility(
+        intermediate_size, tp_size, "intermediate_size", "tp_size", mapping.label()
+    ):
+        return False
+
+    # Additional check for quantization block constraint
+    if intermediate_size is not None and quant_block is not None and tp_size > 1:
+        per_shard = int(intermediate_size) // tp_size
+        if not _check_divisibility(
+            per_shard, quant_block, "per_shard", "quant_block", mapping.label()
+        ):
+            return False
+
+    return True
 
 
 def get_candidate_parallel_mappings(
@@ -58,93 +153,29 @@ def get_candidate_parallel_mappings(
     if is_moe:
         if phase == "prefill":
             candidates = [ParallelizationMapping(tep=num_gpus)]
-        else:
+        elif phase == "decode":
             candidates = [ParallelizationMapping(dep=num_gpus)]
     else:
         candidates = [ParallelizationMapping(tp=num_gpus)]
 
-    # now verify if the candidates are valid
+    # Verify candidates against model constraints
     verified: list[ParallelizationMapping] = []
     for m in candidates:
-        # 1) KV heads divisibility checks
-        if m.tp is not None:
-            if num_kv_heads is None:
-                logger.warning(
-                    f"Skipping KV heads divisibility check for TP={m.tp}: num_kv_heads is unknown"
-                )
-            else:
-                if int(num_kv_heads) % int(m.tp) != 0:
-                    logger.warning(
-                        f"Invalid mapping TP={m.tp}: num_kv_heads={num_kv_heads} not divisible by TP"
-                    )
-                    continue
+        # Check KV heads divisibility
+        if not _check_divisibility(
+            num_kv_heads, m.get_tp_size(), "num_kv_heads", "tp_size", m.label()
+        ):
+            continue
 
-        if m.tep is not None:
-            if num_kv_heads is None:
-                logger.warning(
-                    f"Skipping KV heads divisibility check for TEP={m.tep}: num_kv_heads is unknown"
-                )
-            else:
-                if int(num_kv_heads) % int(m.tep) != 0:
-                    logger.warning(
-                        f"Invalid mapping TEP={m.tep}: num_kv_heads={num_kv_heads} not divisible by TEP"
-                    )
-                    continue
+        # Check experts divisibility
+        if not _check_divisibility(
+            num_experts, m.get_expert_split(), "num_experts", "expert_split", m.label()
+        ):
+            continue
 
-        # 2) Experts divisibility checks (for MoE)
-        if m.tep is not None:
-            if num_experts is None:
-                logger.warning(
-                    f"Skipping experts divisibility check for TEP={m.tep}: num_experts is unknown"
-                )
-            else:
-                if int(num_experts) % int(m.tep) != 0:
-                    logger.warning(
-                        f"Invalid mapping TEP={m.tep}: num_experts={num_experts} not divisible by TEP"
-                    )
-                    continue
-
-        if m.dep is not None:
-            if num_experts is None:
-                logger.warning(
-                    f"Skipping experts divisibility check for DEP={m.dep}: num_experts is unknown"
-                )
-            else:
-                if int(num_experts) % int(m.dep) != 0:
-                    logger.warning(
-                        f"Invalid mapping DEP={m.dep}: num_experts={num_experts} not divisible by DEP"
-                    )
-                    continue
-
-        # 3) Intermediate size vs quantization block checks
-        # Always check: intermediate_size % parallel_size == 0 when intermediate_size is known
-        # Additionally (if quant_block known): (intermediate_size // parallel_size) divides quant_block if quant_block is known
-        # Applies to TP and TEP only
-        if intermediate_size is not None:
-            parallel_size = None
-            tag = None
-            if m.tp is not None:
-                parallel_size = int(m.tp)
-                tag = "TP"
-            elif m.tep is not None:
-                parallel_size = int(m.tep)
-                tag = "TEP"
-
-            if parallel_size is not None and parallel_size > 0:
-                intermediate_size = int(intermediate_size)
-                if intermediate_size % parallel_size != 0:
-                    logger.warning(
-                        f"Invalid mapping {tag}={parallel_size}: intermediate_size={intermediate_size} not divisible by {tag}"
-                    )
-                    continue
-                if quant_block is not None:
-                    per_shard = intermediate_size // parallel_size
-                    quant_block = int(quant_block)
-                    if quant_block % per_shard != 0:
-                        logger.warning(
-                            f"Invalid mapping {tag}={parallel_size}: (intermediate_size // {tag})={per_shard} does not divide quantization block {quant_block}"
-                        )
-                        continue
+        # Check intermediate size and quantization block
+        if not _validate_intermediate_size(m, intermediate_size, quant_block):
+            continue
 
         verified.append(m)
 
@@ -158,7 +189,7 @@ def apply_parallel_mapping_to_config(
     config_modifier,
     num_gpus_per_node: int | None,
 ) -> dict:
-    cfg = base_config
+    cfg = copy.deepcopy(base_config)
     if mapping.tp is not None:
         cfg = config_modifier.set_config_tp_size(cfg, mapping.tp)
     elif phase == "prefill" and mapping.tep is not None:

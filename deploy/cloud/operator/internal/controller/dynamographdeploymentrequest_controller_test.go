@@ -852,7 +852,7 @@ var _ = Describe("DGDR Helper Functions", func() {
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"sweep": map[string]interface{}{
-								"force_rerun": true,
+								"prefill_interpolation_granularity": 16,
 							},
 						}),
 					},
