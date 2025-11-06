@@ -388,6 +388,11 @@ jobs:
           echo "Using namespace: $NAMESPACE"
           echo "Using image: $IMAGE"
 
+          # Login to Azure Container Registry to pull the image (disable tracing for security)
+          set +x
+          echo "${{ secrets.AZURE_ACR_PASSWORD }}" | docker login ${{ secrets.AZURE_ACR_HOSTNAME }} -u ${{ secrets.AZURE_ACR_USER }} --password-stdin > /dev/null 2>&1
+          set -x
+
           # Run the tests inside the framework container which has all dependencies
           # Mount kubeconfig, workspace, and run pytest
           docker run --rm \
