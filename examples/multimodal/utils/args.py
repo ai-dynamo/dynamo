@@ -139,8 +139,8 @@ def ensure_side_channel_host():
 def configure_ports(config: Config):
     """Configure port settings from dedicated environment overrides."""
 
-    if config.engine_args.enable_prefix_caching:
-        config.kv_port = get_kv_port()
+    # Always set kv_port as it's used by overwrite_args regardless of prefix caching
+    config.kv_port = get_kv_port()
 
     ensure_side_channel_host()
 
