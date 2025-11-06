@@ -493,9 +493,9 @@ class TestDeterminismDisagg(BaseTestDeterminism):
         monkeypatch.setenv("DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL", "1")
         # Call the base class implementation
         super().base_test_determinism_with_cache_reset(
-            tester, 
-            llm_server, 
-            runtime_services, 
+            tester,
+            llm_server,
+            runtime_services,
             success_rate_threshold=SUCCESS_RATE_THRESHOLD,
         )
 
