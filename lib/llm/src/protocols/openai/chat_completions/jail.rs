@@ -429,6 +429,20 @@ impl JailedStream {
         JailedStreamBuilder::new()
     }
 
+
+    /// Apply jail stream transformation with finish_reason fix
+    /// This is a convenience method that applies both apply() and fix_finish_reason()
+    pub fn apply_with_finish_reason<S>(
+        self,
+        stream: S,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        let jailed_stream = self.apply(stream);
+        JailedStream::fix_finish_reason(jailed_stream)
+    }
+
     /// Apply the jail transformation to a stream of chat completion responses
     /// Consumes self and returns the transformed stream
     pub fn apply<S>(

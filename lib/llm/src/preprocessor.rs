@@ -764,10 +764,7 @@ impl OpenAIPreprocessor {
         let jail = JailedStream::builder()
             .tool_call_parser(tool_call_parser)
             .build();
-        let jailed_stream = jail.apply(stream);
-
-        // Post-process to set finish reason to ToolCalls for the last chunk if any tool calls were emitted
-        JailedStream::fix_finish_reason(jailed_stream)
+        jail.apply_with_finish_reason(stream)
     }
 
     // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
