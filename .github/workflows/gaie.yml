@@ -44,16 +44,25 @@ jobs:
         with:
           driver: docker
 
-      - name: Install tooling (curl, jq, yq, helm, kubectl)
+      - name: Install tooling (curl, jq, yq, helm, kubectl, az)
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y curl bash openssl gettext git jq
+          sudo apt-get update && sudo apt-get install -y curl bash openssl gettext git jq ca-certificates apt-transport-https lsb-release gnupg
+
+          # Install Azure CLI
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+          # Install yq
           curl -L https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
           sudo install -m 0755 yq /usr/local/bin/yq
+
+          # Install Helm
           curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
           sudo chmod 700 get_helm.sh
           sudo ./get_helm.sh
+
+          # Install kubectl
           KUBECTL_VER=$(curl -L -s https://dl.k8s.io/release/stable.txt)
           curl -LO "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/amd64/kubectl"
           sudo install -m 0755 kubectl /usr/local/bin/kubectl
@@ -76,6 +85,37 @@ jobs:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+
+      - name: Find latest vLLM image in ACR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Extract registry name from hostname
+          REGISTRY_NAME=$(echo "${{ secrets.AZURE_ACR_HOSTNAME }}" | cut -d'.' -f1)
+
+          # Login to ACR using credentials
+          az acr login --name ${REGISTRY_NAME} \
+            --username "${{ secrets.AZURE_ACR_USER }}" \
+            --password "${{ secrets.AZURE_ACR_PASSWORD }}"
+
+          # Get all tags for ai-dynamo/dynamo repository that match *-vllm-amd64 pattern
+          # Sort by creation time and get the latest
+          LATEST_VLLM_TAG=$(az acr repository show-tags \
+            --name ${REGISTRY_NAME} \
+            --repository ai-dynamo/dynamo \
+            --orderby time_desc \
+            --output tsv | grep -E '^[a-f0-9]+-vllm-amd64$' | head -n 1)
+
+          if [[ -z "${LATEST_VLLM_TAG}" ]]; then
+            echo "ERROR: No vLLM images found in ACR matching pattern *-vllm-amd64"
+            exit 1
+          fi
+
+          echo "Found latest vLLM image tag: ${LATEST_VLLM_TAG}"
+          echo "Full image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${LATEST_VLLM_TAG}"
+          echo "VLLM_IMAGE_TAG=${LATEST_VLLM_TAG}" >> $GITHUB_ENV
+
       - name: Build Operator image (amd64)
         id: build-operator
         shell: bash
