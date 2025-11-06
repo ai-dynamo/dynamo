@@ -1311,15 +1311,8 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	// 	selector[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
 	// }
 
-	var componentType string
-	if opt.dynamoComponentDeployment.Spec.ComponentType == consts.ComponentTypeFrontend {
-		componentType = opt.dynamoComponentDeployment.Spec.ComponentType
-	} else {
-		componentType = opt.dynamoComponentDeployment.Spec.SubComponentType
-	}
-
 	selector := map[string]string{
-		commonconsts.KubeLabelDynamoComponentType: componentType,
+		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,
 		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace, // TODO: nilness check
 	}
 	labels := selector

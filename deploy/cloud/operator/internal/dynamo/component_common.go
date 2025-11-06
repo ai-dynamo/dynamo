@@ -27,7 +27,7 @@ func ComponentDefaultsFactory(componentType string) ComponentDefaults {
 	switch componentType {
 	case commonconsts.ComponentTypeFrontend:
 		return NewFrontendDefaults()
-	case commonconsts.ComponentTypeWorker:
+	case commonconsts.ComponentTypeWorker, commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode:
 		return NewWorkerDefaults()
 	case commonconsts.ComponentTypePlanner:
 		return NewPlannerDefaults()

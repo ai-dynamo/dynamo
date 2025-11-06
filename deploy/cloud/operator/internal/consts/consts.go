@@ -60,6 +60,8 @@ const (
 	ComponentTypePlanner      = "planner"
 	ComponentTypeFrontend     = "frontend"
 	ComponentTypeWorker       = "worker"
+	ComponentTypePrefill      = "prefill"
+	ComponentTypeDecode       = "decode"
 	ComponentTypeDefault      = "default"
 	PlannerServiceAccountName = "planner-serviceaccount"
 
