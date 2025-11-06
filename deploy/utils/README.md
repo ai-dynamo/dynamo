@@ -92,16 +92,29 @@ python3 -m deploy.utils.inject_manifest \
   --dest /data/configs/disagg.yaml
 ```
 
-**Download benchmark/profiling results:**
+**Download benchmark results:**
 
 ```bash
-# After benchmarking or profiling completes, download results
+# After benchmarking completes, download results
 python3 -m deploy.utils.download_pvc_results \
   --namespace $NAMESPACE \
-  --output-dir ./pvc_files \
+  --output-dir ./benchmarks/results \
   --folder /data/results \
   --no-config   # optional: skip *.yaml/*.yml in the download
 ```
+
+**Download profiling results (optional, for local inspection):**
+
+```bash
+# Optional: Download profiling data for local analysis
+# The planner reads directly from the PVC, so this is only needed for inspection
+python3 -m deploy.utils.download_pvc_results \
+  --namespace $NAMESPACE \
+  --output-dir ./profiling_data \
+  --folder /data
+```
+
+> **Note on Profiling Results**: When using DGDR (DynamoGraphDeploymentRequest) for SLA-driven profiling, profiling data is stored in `/data/` on the PVC. The planner component reads this data directly from the PVC, so downloading is **optional** - only needed if you want to inspect the profiling results locally (e.g., view performance plots, check configurations).
 
 #### Path Requirements
 
@@ -109,8 +122,8 @@ python3 -m deploy.utils.download_pvc_results \
 
 **Common path patterns:**
 - `/data/configs/` - Configuration files (DGD manifests)
-- `/data/results/` - Benchmark results
-- `/data/profiling_results/` - Profiling data
+- `/data/results/` - Benchmark results (for download after benchmarking jobs)
+- `/data/` - Profiling data (used directly by planner, typically not downloaded)
 - `/data/benchmarking/` - Benchmarking artifacts
 
 **User-friendly error messages**: If you forget the `/data/` prefix, the script will show a helpful error message with the correct path and example commands.

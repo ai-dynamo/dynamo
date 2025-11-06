@@ -142,8 +142,6 @@ spec:
             - /workspace/prefill.yaml
             - --disaggregation-mode
             - prefill
-            - --disaggregation-strategy
-            - decode_first
     decode:
       volumeMounts:
         - name: models
@@ -182,5 +180,3 @@ spec:
             - /workspace/decode.yaml
             - --disaggregation-mode
             - decode
-            - --disaggregation-strategy
-            - decode_first

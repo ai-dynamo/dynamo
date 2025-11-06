@@ -22,11 +22,12 @@ import numpy as np
 import yaml
 
 from benchmarks.profiler.utils.aiperf import benchmark_decode, benchmark_prefill
-from benchmarks.profiler.utils.config import generate_dgd_config_with_planner
 from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+from benchmarks.profiler.utils.dgd_generation import generate_dgd_config_with_planner
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
+    plot_pd_joint_results,
     plot_prefill_performance,
 )
 from benchmarks.profiler.utils.profile_cache import (
@@ -92,7 +93,6 @@ async def run_profile(args):
         with open(args.config, "r") as f:
             config = yaml.safe_load(f)
 
-        config = config_modifier.update_model(config, args.model)
         if args.dgd_image:
             config = config_modifier.update_image(config, args.dgd_image)
             logger.info(f"Using DGD image: {args.dgd_image}")
@@ -281,14 +281,10 @@ async def run_profile(args):
                 prefill_thpt_per_gpu.append(args.isl / ttft / num_gpus * 1000)
 
         # Plot the results as a 2D scatter plot
+        prefill_results = None
         if prefill_num_gpus and prefill_ttft and prefill_thpt_per_gpu:
-            plot_prefill_performance(
-                prefill_num_gpus,
-                prefill_ttft,
-                prefill_thpt_per_gpu,
-                args.ttft,
-                args.output_dir,
-            )
+            prefill_results = (prefill_num_gpus, prefill_ttft, prefill_thpt_per_gpu)
+            plot_prefill_performance(prefill_results, args.ttft, args.output_dir)
 
         # then profile decode
         decode_num_gpus = []
@@ -476,6 +472,11 @@ async def run_profile(args):
         # Plot all decode results after profiling is complete
         if decode_results:
             plot_decode_performance(decode_results, args.itl, args.output_dir)
+
+        if prefill_results and decode_results:
+            plot_pd_joint_results(
+                args.isl, args.osl, prefill_results, decode_results, args.output_dir
+            )
 
         if args.dry_run:
             logger.info("Skipping recommendations in dry run mode")
@@ -741,9 +742,12 @@ async def run_profile(args):
         )
         logger.info(f"Final DGD config with planner: {config}")
 
-        # save DGD config with planner
+        # save DGD config with planner; support multi-document output when a ConfigMap is included
         with open(f"{args.output_dir}/config_with_planner.yaml", "w") as f:
-            yaml.dump(config, f)
+            if isinstance(config, list):
+                yaml.dump_all(config, f)
+            else:
+                yaml.dump(config, f)
 
     except Exception as e:
         logger.error(f"Profile job failed with error: {e}")
