@@ -149,9 +149,9 @@ async def run_profile(args):
                 raise ValueError(
                     "Must provide --aic-system when using --use-ai-configurator."
                 )
-            if not args.aic_model_name:
+            if not args.aic_hf_id:
                 raise ValueError(
-                    "Must provide --aic-model-name when using --use-ai-configurator."
+                    "Must provide --aic-hf-id when using --use-ai-configurator."
                 )
             if not args.aic_backend_version:
                 raise ValueError(
@@ -160,15 +160,15 @@ async def run_profile(args):
 
             logger.info("Will use aiconfigurator to estimate perf.")
             ai_configurator_perf_estimator = AIConfiguratorPerfEstimator(
-                args.aic_model_name,
+                args.aic_hf_id,
                 args.aic_system.lower(),
                 args.aic_backend,
                 args.aic_backend_version,
             )
         else:
-            if args.aic_system or args.aic_model_name or args.aic_backend_version:
+            if args.aic_system or args.aic_hf_id or args.aic_backend_version:
                 logger.warning(
-                    "Will ignore --aic-system, --aic-model-name, and/or --backend-version "
+                    "Will ignore --aic-system, --aic-hf-id, and/or --backend-version "
                     "when not using --use-ai-configurator."
                 )
 

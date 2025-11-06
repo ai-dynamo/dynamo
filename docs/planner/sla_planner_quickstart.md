@@ -230,7 +230,7 @@ sweep:
 sweep:
   use_ai_configurator: true
   aic_system: h200_sxm
-  aic_model_name: QWEN3_32B
+  aic_hf_id: Qwen/Qwen3-32B
   aic_backend_version: "0.20.0"
 ```
 
