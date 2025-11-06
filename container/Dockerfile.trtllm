@@ -157,6 +157,9 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 # This is needed to make libucc.so visible so pytorch can use it.
 ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
 
+# Cleanup workspace since TRTLLM has some files there and Dynamo uses /workspace as home
+RUN rm -rf /workspace/*
+
 # Copy tests, benchmarks, deploy and components for CI
 COPY tests /workspace/tests
 COPY examples /workspace/examples
