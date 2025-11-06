@@ -2,7 +2,7 @@
 
 Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA Dynamo.
 
-> **Prerequisites:** This guide assumes you have already installed the Dynamo Kubernetes Platform.  
+> **Prerequisites:** This guide assumes you have already installed the Dynamo Kubernetes Platform.
 > If not, follow the **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** first.
 
 ## Available Recipes
