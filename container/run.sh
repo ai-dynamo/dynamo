@@ -276,10 +276,7 @@ get_options() {
 
     if [ -n "$HF_HOME" ]; then
         mkdir -p "$HF_HOME"
-        # Use /home/ubuntu for local-dev target, /root for root user, /home/dynamo for dynamo user.
-        if [ "$TARGET" = "local-dev" ] || [[ "$IMAGE" == *"local-dev"* ]]; then
-            HF_HOME_TARGET="/home/ubuntu/.cache/huggingface"
-        elif [[ ${USER} == "root" ]] || [[ ${USER} == "0" ]]; then
+        if [[ ${USER} == "root" ]] || [[ ${USER} == "0" ]]; then
             HF_HOME_TARGET="/root/.cache/huggingface"
         else
             HF_HOME_TARGET="/home/dynamo/.cache/huggingface"
