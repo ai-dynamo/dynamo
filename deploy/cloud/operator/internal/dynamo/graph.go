@@ -395,8 +395,9 @@ func getCliqueStartupDependencies(
 	return nil
 }
 
-func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec) (*corev1.Service, error) {
-	componentName := GetDynamoComponentName(dynamoDeployment, component.ServiceName)
+// TODO: validation for all resource creation (or maybe just Service) that it's DNS-1035 compliant
+// component.ServiceName is empty
+func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec, componentName string) (*corev1.Service, error) {
 	var servicePort corev1.ServicePort
 	if component.ComponentType == commonconsts.ComponentTypeFrontend {
 		servicePort = corev1.ServicePort{
