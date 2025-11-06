@@ -50,6 +50,8 @@ const (
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
 	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
+	DynamoNamespaceEnvVar        = "DYN_NAMESPACE"
+	DynamoComponentEnvVar        = "DYN_COMPONENT"
 
 	GlobalDynamoNamespace = "dynamo"
 

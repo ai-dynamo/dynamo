@@ -824,7 +824,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Command: []string{"/bin/sh", "-c"},
 										Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1"},
 										Env: []corev1.EnvVar{
-											{Name: "DYN_NAMESPACE", Value: "default"},
+											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
+											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
@@ -937,7 +938,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Command: []string{"/bin/sh", "-c"},
 										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 										Env: []corev1.EnvVar{
-											{Name: "DYN_NAMESPACE", Value: "default"},
+											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
+											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 											{Name: "DYN_SYSTEM_PORT", Value: "9090"},

@@ -1335,8 +1335,12 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "etcd-address",
 													},
 													{
-														Name:  "DYN_NAMESPACE",
+														Name:  commonconsts.DynamoNamespaceEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoComponentEnvVar,
+														Value: commonconsts.ComponentTypeFrontend,
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -1478,8 +1482,12 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "etcd-address",
 													},
 													{
-														Name:  "DYN_NAMESPACE",
+														Name:  commonconsts.DynamoNamespaceEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoComponentEnvVar,
+														Value: commonconsts.ComponentTypePlanner,
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -1839,8 +1847,12 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "etcd-address",
 													},
 													{
-														Name:  "DYN_NAMESPACE",
+														Name:  commonconsts.DynamoNamespaceEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoComponentEnvVar,
+														Value: commonconsts.ComponentTypeWorker,
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -1988,8 +2000,12 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "etcd-address",
 													},
 													{
-														Name:  "DYN_NAMESPACE",
+														Name:  commonconsts.DynamoNamespaceEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoComponentEnvVar,
+														Value: commonconsts.ComponentTypeWorker,
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2119,8 +2135,12 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "etcd-address",
 													},
 													{
-														Name:  "DYN_NAMESPACE",
+														Name:  commonconsts.DynamoNamespaceEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoComponentEnvVar,
+														Value: commonconsts.ComponentTypeFrontend,
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2253,8 +2273,12 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "etcd-address",
 													},
 													{
-														Name:  "DYN_NAMESPACE",
+														Name:  commonconsts.DynamoNamespaceEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoComponentEnvVar,
+														Value: commonconsts.ComponentTypePlanner,
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2636,8 +2660,12 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "etcd-address",
 													},
 													{
-														Name:  "DYN_NAMESPACE",
+														Name:  commonconsts.DynamoNamespaceEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoComponentEnvVar,
+														Value: commonconsts.ComponentTypeWorker,
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2772,8 +2800,12 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "etcd-address",
 													},
 													{
-														Name:  "DYN_NAMESPACE",
+														Name:  commonconsts.DynamoNamespaceEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoComponentEnvVar,
+														Value: commonconsts.ComponentTypeWorker,
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -2903,8 +2935,12 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "etcd-address",
 													},
 													{
-														Name:  "DYN_NAMESPACE",
+														Name:  commonconsts.DynamoNamespaceEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoComponentEnvVar,
+														Value: commonconsts.ComponentTypeFrontend,
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3044,8 +3080,12 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "etcd-address",
 													},
 													{
-														Name:  "DYN_NAMESPACE",
+														Name:  commonconsts.DynamoNamespaceEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoComponentEnvVar,
+														Value: commonconsts.ComponentTypePlanner,
 													},
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -3175,13 +3215,13 @@ func assertDYNNamespace(t *testing.T, podSpec corev1.PodSpec, expectedNamespace 
 	if assert.Len(t, podSpec.Containers, 1) {
 		foundDYNNamespace := false
 		for _, env := range podSpec.Containers[0].Env {
-			if env.Name == "DYN_NAMESPACE" {
+			if env.Name == commonconsts.DynamoNamespaceEnvVar {
 				assert.Equal(t, expectedNamespace, env.Value)
 				foundDYNNamespace = true
 				break
 			}
 		}
-		assert.True(t, foundDYNNamespace, "DYN_NAMESPACE not found in container environment variables")
+		assert.True(t, foundDYNNamespace, fmt.Sprintf("%s not found in container environment variables", commonconsts.DynamoNamespaceEnvVar))
 	}
 }
 
@@ -4576,7 +4616,8 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 						Env: []corev1.EnvVar{
 							{Name: "ANOTHER_COMPONENTENV", Value: "true"},
 							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
-							{Name: "DYN_NAMESPACE", Value: ""},
+							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
+							{Name: commonconsts.DynamoNamespaceEnvVar, Value: ""},
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 							{Name: "DYN_SYSTEM_PORT", Value: "9090"},

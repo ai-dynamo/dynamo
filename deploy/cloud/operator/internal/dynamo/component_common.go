@@ -42,6 +42,7 @@ type BaseComponentDefaults struct{}
 type ComponentContext struct {
 	numberOfNodes                  int32
 	DynamoNamespace                string
+	ComponentType                  string
 	ParentGraphDeploymentName      string
 	ParentGraphDeploymentNamespace string
 }
@@ -71,8 +72,12 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 	}
 	container.Env = []corev1.EnvVar{
 		{
-			Name:  "DYN_NAMESPACE",
+			Name:  commonconsts.DynamoNamespaceEnvVar,
 			Value: context.DynamoNamespace,
+		},
+		{
+			Name:  commonconsts.DynamoComponentEnvVar,
+			Value: context.ComponentType,
 		},
 		{
 			Name:  "DYN_PARENT_DGD_K8S_NAME",
