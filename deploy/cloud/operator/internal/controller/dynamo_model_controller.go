@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -130,7 +131,15 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Load LoRA on all endpoints in parallel with bounded concurrency
 	allEndpoints, probeErr := r.EndpointClient.LoadLoRA(ctx, candidates, model)
-	hasFailures := probeErr != nil || countReadyEndpoints(allEndpoints) < len(allEndpoints)
+
+	// Determine if we need to requeue based on model type
+	// For LoRA models: requeue if there were probe errors OR if not all endpoints are ready
+	// For base models: only requeue if there were probe errors (Ready is expected to be false)
+	isLoRA := strings.ToLower(model.Spec.ModelType) == "lora"
+	hasFailures := probeErr != nil
+	if isLoRA {
+		hasFailures = hasFailures || countReadyEndpoints(allEndpoints) < len(allEndpoints)
+	}
 
 	if probeErr != nil {
 		logs.Error(probeErr, "Some endpoints failed during probing")
@@ -152,18 +161,31 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	model.Status.TotalEndpoints = len(allEndpoints)
 	model.Status.ReadyEndpoints = countReadyEndpoints(allEndpoints)
 
-	// Update conditions
-	if model.Status.ReadyEndpoints > 0 {
-		r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionTrue, ReasonEndpointsDiscovered,
-			fmt.Sprintf("Found %d ready endpoint(s) out of %d total", model.Status.ReadyEndpoints, model.Status.TotalEndpoints))
-		r.Recorder.Eventf(model, corev1.EventTypeNormal, "EndpointsReady",
-			"Discovered %d ready endpoints for base model %s", model.Status.ReadyEndpoints, model.Spec.BaseModelName)
-	} else if model.Status.TotalEndpoints > 0 {
-		r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoReadyEndpoints,
-			fmt.Sprintf("Found %d endpoint(s) but none are ready", model.Status.TotalEndpoints))
-		r.Recorder.Event(model, corev1.EventTypeWarning, "NoReadyEndpoints", "Endpoints exist but none are ready")
+	// Update conditions based on model type
+	if isLoRA {
+		// For LoRA models, check readiness
+		if model.Status.ReadyEndpoints > 0 {
+			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionTrue, ReasonEndpointsDiscovered,
+				fmt.Sprintf("Found %d ready endpoint(s) out of %d total", model.Status.ReadyEndpoints, model.Status.TotalEndpoints))
+			r.Recorder.Eventf(model, corev1.EventTypeNormal, "EndpointsReady",
+				"Discovered %d ready endpoints for base model %s", model.Status.ReadyEndpoints, model.Spec.BaseModelName)
+		} else if model.Status.TotalEndpoints > 0 {
+			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoReadyEndpoints,
+				fmt.Sprintf("Found %d endpoint(s) but none are ready", model.Status.TotalEndpoints))
+			r.Recorder.Event(model, corev1.EventTypeWarning, "NoReadyEndpoints", "Endpoints exist but none are ready")
+		} else {
+			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoEndpoints, "No endpoints found")
+		}
 	} else {
-		r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoEndpoints, "No endpoints found")
+		// For base models, just check that endpoints exist (readiness doesn't apply)
+		if model.Status.TotalEndpoints > 0 {
+			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionTrue, ReasonEndpointsDiscovered,
+				fmt.Sprintf("Found %d endpoint(s) for base model", model.Status.TotalEndpoints))
+			r.Recorder.Eventf(model, corev1.EventTypeNormal, "EndpointsDiscovered",
+				"Discovered %d endpoints for base model %s", model.Status.TotalEndpoints, model.Spec.BaseModelName)
+		} else {
+			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoEndpoints, "No endpoints found")
+		}
 	}
 
 	if err := r.Status().Update(ctx, model); err != nil {
