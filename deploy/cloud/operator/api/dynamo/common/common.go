@@ -32,8 +32,9 @@ type ResourceItem struct {
 }
 
 type Resources struct {
-	Requests *ResourceItem `json:"requests,omitempty"`
-	Limits   *ResourceItem `json:"limits,omitempty"`
+	Requests *ResourceItem          `json:"requests,omitempty"`
+	Limits   *ResourceItem          `json:"limits,omitempty"`
+	Claims   []corev1.ResourceClaim `json:"claims,omitempty"`
 }
 
 type DeploymentTargetHPAConf struct {

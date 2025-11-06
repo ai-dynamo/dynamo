@@ -48,6 +48,8 @@ docker run \
     dynamo-wideep-gb200:latest
 ```
 
+In each container, you should be in the /sgl-workspace/dynamo/examples/backends/sglang directory.
+
 3. Run the ingress and prefill worker
 
 ```bash
@@ -59,7 +61,6 @@ MC_TE_METRIC=true \
 SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
 SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
 SGLANG_DISAGGREGATION_WAITING_TIMEOUT=100000 \
-SGLANG_MOONCAKE_CUSTOM_MEM_POOL=True \
 MC_FORCE_MNNVL=1 \
 NCCL_MNNVL_ENABLE=1 \
 NCCL_CUMEM_ENABLE=1 \
@@ -98,11 +99,31 @@ python3 -m dynamo.sglang \
   --disable-cuda-graph \
   --chunked-prefill-size 16384 \
   --max-total-tokens 32768 \
-  --mem-fraction-static 0.8 \
-  --log-level debug
+  --mem-fraction-static 0.82 \
+  --log-level debug \
+  --disaggregation-transfer-backend nixl
 ```
 
 On the other prefill nodes (this example has 2 total prefill nodes), run the same command but change `--node-rank` to 1
+
+> [!IMPORTANT]
+> If you encounter random CPU recv timeout issues during the warm-up phase in multi-GPU or multi-node setups, they are likely caused by DeepGEMM kernel compilation overhead.
+> To avoid these non-deterministic timeouts, it's strongly recommended to precompile the DeepGEMM kernels before launching the SGLang engine. This ensures all kernels are cached and ready, preventing long initialization delays or distributed timeout errors. To precompile and use cached kernels, please execute the following commands:
+
+```bash
+# 1. Precompile DeepGEMM kernels
+export SGLANG_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
+python3 -m sglang.compile_deep_gemm <ServerArgs>
+
+# 2. Launch the engine with the same cache directory
+export SGLANG_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
+python3 -m dynamo.frontend <ServerArgs>
+```
+
+> [!NOTE]
+> There's a known issue where the compile request may fail due to missing bootstrap information, but the kernels are still successfully cached.
+> Using a gradual warm-up phase and enabling caching for FlashInfer (similar to DeepGEMM) can further improve stability and reduce startup time.
+> See https://github.com/sgl-project/sglang/issues/9867#issuecomment-3336551174 for more details.
 
 4. Run the decode worker on the head decode node
 
@@ -128,10 +149,10 @@ python3 -m dynamo.sglang \
   --disaggregation-mode decode \
   --dist-init-addr ${HEAD_DECODE_NODE_IP}:29500 \
   --disaggregation-bootstrap-port 30001 \
-  --nnodes 12 \
+  --nnodes 2 \
   --node-rank 0 \
-  --tp-size 48 \
-  --dp-size 48 \
+  --tp-size 8 \
+  --dp-size 8 \
   --enable-dp-attention \
   --host 0.0.0.0 \
   --decode-log-interval 1 \
@@ -152,7 +173,8 @@ python3 -m dynamo.sglang \
   --watchdog-timeout 1000000 \
   --chunked-prefill-size 36864 \
   --mem-fraction-static 0.82 \
-  --log-level debug
+  --log-level debug \
+  --disaggregation-transfer-backend nixl
 ```
 
-On the other decode nodes (this example has 2 total decode nodes), run the same command but change `--node-rank` to 1
+On the other decode nodes (this example has 2 total decode nodes), run the same command but change `--node-rank` to 1.

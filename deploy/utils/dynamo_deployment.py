@@ -248,6 +248,26 @@ class DynamoDeploymentClient:
         self.deployment_spec["metadata"]["name"] = self.deployment_name
         self.deployment_spec["metadata"]["namespace"] = self.namespace
 
+        # Add ownerReference if env vars are set (for temporary DGDs during profiling)
+        # This makes the DGD auto-delete when the DGDR is deleted
+        dgdr_name = os.environ.get("DGDR_NAME")
+        dgdr_namespace = os.environ.get("DGDR_NAMESPACE")
+        dgdr_uid = os.environ.get("DGDR_UID")
+
+        if dgdr_name and dgdr_namespace and dgdr_uid:
+            if self.namespace == dgdr_namespace:
+                self.deployment_spec["metadata"]["ownerReferences"] = [
+                    {
+                        "apiVersion": "nvidia.com/v1alpha1",
+                        "kind": "DynamoGraphDeploymentRequest",
+                        "name": dgdr_name,
+                        "uid": dgdr_uid,
+                        "controller": False,
+                        "blockOwnerDeletion": True,
+                    }
+                ]
+                print(f"Added ownerReference to DGDR {dgdr_name} for auto-cleanup")
+
         try:
             await self.custom_api.create_namespaced_custom_object(
                 group="nvidia.com",

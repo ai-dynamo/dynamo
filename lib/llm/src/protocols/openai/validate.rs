@@ -94,6 +94,20 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 // Shared Fields
 //
 
+/// Validates that no unsupported fields are present in the request
+pub fn validate_no_unsupported_fields(
+    unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), anyhow::Error> {
+    if !unsupported_fields.is_empty() {
+        let fields: Vec<_> = unsupported_fields
+            .keys()
+            .map(|s| format!("`{}`", s))
+            .collect();
+        anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
+    }
+    Ok(())
+}
+
 /// Validates the temperature parameter
 pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Error> {
     if let Some(temp) = temperature
@@ -243,6 +257,27 @@ pub fn validate_n(n: Option<u8>) -> Result<(), anyhow::Error> {
         && !(MIN_N..=MAX_N).contains(&value)
     {
         anyhow::bail!("n must be between {} and {}, got {}", MIN_N, MAX_N, value);
+    }
+    Ok(())
+}
+
+/// Validates n and temperature interaction
+/// When n > 1, temperature must be > 0 to ensure diverse outputs
+pub fn validate_n_with_temperature(
+    n: Option<u8>,
+    temperature: Option<f32>,
+) -> Result<(), anyhow::Error> {
+    if let Some(n_value) = n
+        && n_value > 1
+    {
+        let temp = temperature.unwrap_or(1.0);
+        if temp == 0.0 {
+            anyhow::bail!(
+                "When n > 1, temperature must be greater than 0 to ensure diverse outputs. Got n={}, temperature={}",
+                n_value,
+                temp
+            );
+        }
     }
     Ok(())
 }

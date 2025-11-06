@@ -28,6 +28,9 @@ inputs:
   sccache_s3_bucket:
     description: 'SCCache S3 Bucket'
     required: false
+  aws_account_id:
+    description: 'AWS Account ID'
+    required: false
   aws_access_key_id:
     description: 'AWS Access Key ID'
     required: false
@@ -58,8 +61,13 @@ runs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
       with:
-        # This is not # of CPUs, this is CPU priority, 1024 is the default
-        driver-opts: 'cpu-shares=100'
+        driver: docker
+    - name: Login to ECR
+      shell: bash
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
     - name: Login to NGC
       if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
       shell: bash
