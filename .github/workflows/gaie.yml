@@ -86,6 +86,7 @@ jobs:
             --password "${{ secrets.AZURE_ACR_PASSWORD }}"
 
           # Get all tags for ai-dynamo/dynamo repository that match *-vllm-amd64
+          # Use awk instead of grep|head to avoid SIGPIPE/pipefail issues
           LATEST_VLLM_TAG=$(
             az acr repository show-tags \
               --name "${REGISTRY_NAME}" \
@@ -94,7 +95,7 @@ jobs:
               --username "${{ secrets.AZURE_ACR_USER }}" \
               --password "${{ secrets.AZURE_ACR_PASSWORD }}" \
               --output tsv | \
-              grep -E '^[a-f0-9]+-vllm-amd64$' | head -n 1
+            awk '/^[a-f0-9]+-vllm-amd64$/ { print; exit }'
           )
 
           if [[ -z "${LATEST_VLLM_TAG}" ]]; then
