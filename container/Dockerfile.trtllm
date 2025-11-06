@@ -141,8 +141,8 @@ RUN cd /opt/dynamo/wheelhouse/ && \
     pip list \
     # Install benchmarks
     cd /opt/dynamo/benchmarks &&\
-    && UV_GIT_LFS=1 uv pip install --no-cache --system --break-system-packages . \
-    && pip list
+    UV_GIT_LFS=1 uv pip install --no-cache --system --break-system-packages . &&\
+    pip list
 
 # TODO: Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
