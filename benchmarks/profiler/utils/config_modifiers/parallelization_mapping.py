@@ -68,6 +68,22 @@ class ParallelizationMapping:
             return self.dep
         return 1  # TP has expert split of 1
 
+    def get_attn_dp_size(self, num_gpus: int) -> int:
+        """
+        Get the attention data parallelism size.
+        DEP uses data parallelism for attention (returns num_gpus).
+        TP and TEP don't use data parallelism for attention (returns 1).
+
+        Args:
+            num_gpus: Total number of GPUs being used
+
+        Returns:
+            The attention data parallelism size
+        """
+        if self.dep is not None:
+            return num_gpus
+        return 1  # TP and TEP have attention DP size of 1
+
 
 def _check_divisibility(
     value: int | None,
@@ -154,7 +170,10 @@ def get_candidate_parallel_mappings(
         if phase == "prefill":
             candidates = [ParallelizationMapping(tep=num_gpus)]
         elif phase == "decode":
-            candidates = [ParallelizationMapping(dep=num_gpus)]
+            candidates = [
+                ParallelizationMapping(dep=num_gpus),
+                ParallelizationMapping(tep=num_gpus),
+            ]
     else:
         candidates = [ParallelizationMapping(tp=num_gpus)]
 

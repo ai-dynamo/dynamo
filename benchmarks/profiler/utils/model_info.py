@@ -106,6 +106,7 @@ def get_model_weight_size(
 
 class ModelInfo(BaseModel):
     model_size: float
+    architecture: str
     is_moe: bool
     max_context_length: Optional[int] = None
     num_experts: Optional[int] = None
@@ -125,7 +126,8 @@ def get_model_info(
         trust_remote_code=trust_remote_code,
     )
 
-    if config.architectures[0] in MOE_ARCHITECTURES:
+    architecture = config.architectures[0]
+    if architecture in MOE_ARCHITECTURES:
         is_moe = True
     else:
         is_moe = False
@@ -220,6 +222,7 @@ def get_model_info(
 
     return ModelInfo(
         model_size=model_size,
+        architecture=architecture,
         is_moe=is_moe,
         max_context_length=max_context_length,
         num_experts=num_experts,

@@ -361,8 +361,7 @@ async def run_profile(args):
 
                     # Compute max_concurrency and max_kv_tokens to know which
                     # num_request to sweep over.
-                    # attention_dp_size equals DEP size when using DEP; otherwise 1
-                    attention_dp_size = num_gpus if mapping.dep is not None else 1
+                    attention_dp_size = mapping.get_attn_dp_size(num_gpus)
                     max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
                         f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
                         attention_dp_size=attention_dp_size,
@@ -370,7 +369,7 @@ async def run_profile(args):
                     max_concurrency = max_kv_tokens // (args.isl + args.osl)
 
                 if not args.dry_run:
-                    attention_dp_size = num_gpus if mapping.dep is not None else 1
+                    attention_dp_size = mapping.get_attn_dp_size(num_gpus)
                     sweep_num_request = get_num_request_range(
                         attention_dp_size,
                         max_concurrency,
@@ -614,10 +613,7 @@ async def run_profile(args):
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
         elif args.use_ai_configurator:
-            # attention_dp_size equals DEP size when using DEP; otherwise 1
-            attention_dp_size = (
-                best_decode_gpus if best_decode_mapping.dep is not None else 1
-            )
+            attention_dp_size = best_decode_mapping.get_attn_dp_size(best_decode_gpus)
             max_kv_tokens = ai_configurator_perf_estimator.get_max_kv_tokens(
                 args.isl, args.osl, tp_size=(best_decode_mapping.tp or best_decode_gpus)
             )
@@ -652,10 +648,7 @@ async def run_profile(args):
                 f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
             )
 
-            # attention_dp_size equals DEP size when using DEP; otherwise 1
-            attention_dp_size = (
-                best_decode_gpus if best_decode_mapping.dep is not None else 1
-            )
+            attention_dp_size = best_decode_mapping.get_attn_dp_size(best_decode_gpus)
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
                 f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
                 attention_dp_size=attention_dp_size,
