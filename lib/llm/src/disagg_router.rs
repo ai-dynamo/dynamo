@@ -73,7 +73,7 @@ impl DisaggRouterConf {
 
         // Set up the watcher after getting the initial value
         let prefix_watcher = etcd_client.kv_get_and_watch_prefix(&etcd_key).await?;
-        let (key, _watcher, mut kv_event_rx) = prefix_watcher.dissolve();
+        let (key, mut kv_event_rx) = prefix_watcher.dissolve();
 
         // Spawn background task to watch for config changes
         drt.runtime().secondary().spawn(async move {

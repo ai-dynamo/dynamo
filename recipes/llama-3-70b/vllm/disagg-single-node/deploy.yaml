@@ -33,13 +33,15 @@ spec:
       extraPodSpec:
         affinity:
           podAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              - labelSelector:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
                   matchExpressions:
-                    - key: nvidia.com/dynamo-component-type
-                      operator: In
-                      values:
-                        - worker
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                    - worker
                 topologyKey: kubernetes.io/hostname
         mainContainer:
           env:
@@ -72,13 +74,15 @@ spec:
       extraPodSpec:
         affinity:
           podAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              - labelSelector:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
                   matchExpressions:
-                    - key: nvidia.com/dynamo-component-type
-                      operator: In
-                      values:
-                        - worker
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                    - worker
                 topologyKey: kubernetes.io/hostname
         mainContainer:
           env:

@@ -213,6 +213,21 @@ class LLMServerManager:
         # Give frontend time to start up
         time.sleep(5)
 
+        model = os.environ.get(
+            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+        )
+
+        # Try to download the model.
+        print("Attempting model download...")
+        try:
+            subprocess.run(
+                f"pip install hf_transfer && HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model}",
+                check=True,
+                shell=True,
+            )
+        except subprocess.CalledProcessError:
+            print("Model download failed. Is this a locally stored model?")
+
         # Launch decoder
         self.process_decoder = subprocess.Popen(
             self.decoder_cmd,
@@ -222,11 +237,6 @@ class LLMServerManager:
             preexec_fn=os.setsid,
         )
         print(f"Decoder process started with PID: {self.process_decoder.pid}")
-
-        # The prefiller and decoder cannot download the model simultaneously,
-        # because the Hugging Face rust library (invoked by fetch_llm) needs to hold an exclusive lock on the model files.
-        print("Sleeping for 60 seconds to allow the decoder to download the model. ")
-        time.sleep(60)
 
         # Launch prefiller
         self.process_prefiller = subprocess.Popen(

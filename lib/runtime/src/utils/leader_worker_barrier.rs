@@ -27,7 +27,7 @@ async fn wait_for_key_count<T: DeserializeOwned>(
     expected_count: usize,
     timeout: Option<Duration>,
 ) -> Result<HashMap<String, T>, LeaderWorkerBarrierError> {
-    let (_key, _watcher, mut rx) = client
+    let (_key, mut rx) = client
         .kv_get_and_watch_prefix(&key)
         .await
         .map_err(LeaderWorkerBarrierError::EtcdError)?
@@ -151,7 +151,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         data: &LeaderData,
     ) -> anyhow::Result<HashMap<String, WorkerData>, LeaderWorkerBarrierError> {
         let etcd_client = rt
-            .deprecated_etcd_client()
+            .etcd_client()
             .ok_or(LeaderWorkerBarrierError::EtcdClientNotFound)?;
 
         let lease_id = etcd_client.lease_id();
@@ -245,7 +245,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         data: &WorkerData,
     ) -> anyhow::Result<LeaderData, LeaderWorkerBarrierError> {
         let etcd_client = rt
-            .deprecated_etcd_client()
+            .etcd_client()
             .ok_or(LeaderWorkerBarrierError::EtcdClientNotFound)?;
 
         let lease_id = etcd_client.lease_id();
