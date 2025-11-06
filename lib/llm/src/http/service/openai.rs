@@ -1804,8 +1804,8 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_fields_rejected() {
-        // Test that all known unsupported fields are rejected and all shown in error message
+    fn test_chat_completions_unknown_fields_rejected() {
+        // Test that known unsupported fields are rejected and all shown in error message
         let json = r#"{
             "messages": [{"role": "user", "content": "Hello"}],
             "model": "test-model",
@@ -1847,9 +1847,7 @@ mod tests {
 
     #[test]
     fn test_completions_unsupported_fields_rejected() {
-        // Test that unsupported fields from bug report are rejected in completions API.
-        // Mirrors test_unknown_fields_rejected for chat completions.
-        // Note: response_format type validation is handled by serde's tagged enum.
+        // Test that known unsupported fields are rejected and all shown in error message
         let json = r#"{
             "model": "test-model",
             "prompt": "Hello",
