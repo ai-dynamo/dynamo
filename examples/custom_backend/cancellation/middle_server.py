@@ -50,7 +50,7 @@ class MiddleServer:
 async def main():
     """Start the middle server"""
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "etcd", True)
+    runtime = DistributedRuntime(loop, "etcd", False)
 
     # Create middle server handler
     handler = MiddleServer(runtime)
