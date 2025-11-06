@@ -127,7 +127,6 @@ ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
 ENV LD_LIBRARY_PATH=${TENSORRT_LIB_DIR}:${LD_LIBRARY_PATH}
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
-COPY benchmarks/ /opt/dynamo/benchmarks/
 COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN cd /opt/dynamo/wheelhouse/ && \
     ls -lah  && \
@@ -138,10 +137,13 @@ RUN cd /opt/dynamo/wheelhouse/ && \
         ai_dynamo_runtime-*.whl \
         ai_dynamo-*.whl \
         nixl/nixl-*.whl &&\
-    pip list \
-    # Install benchmarks
-    cd /opt/dynamo/benchmarks &&\
-    UV_GIT_LFS=1 uv pip install --no-cache --system --break-system-packages . &&\
+    pip list
+
+# Install benchmarks
+COPY benchmarks/ /opt/dynamo/benchmarks/
+RUN cd /opt/dynamo/benchmarks &&\
+    ls -la &&\
+    pip install --no-cache --break-system-packages . &&\
     pip list
 
 # TODO: Install common and test dependencies
