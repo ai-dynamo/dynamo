@@ -19,6 +19,8 @@ package dynamo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
@@ -63,10 +65,9 @@ func ReconcileModelServicesForComponents(
 		}
 		seenBaseModels[baseModelName] = true
 
-		// Generate headless service
+		// Generate headless service with deterministic name based on model name
 		headlessService := GenerateHeadlessServiceForModel(
 			ctx,
-			baseModelName, // Use base model name as service name
 			namespace,
 			baseModelName,
 		)
@@ -97,28 +98,39 @@ func ReconcileModelServicesForComponents(
 }
 
 // GenerateHeadlessServiceForModel creates a headless service for model endpoint discovery
+// Service name is generated deterministically from the base model name using a hash
+// The base model name hash is stored as a label for efficient discovery
+// The original base model name is stored in an annotation for human readability
 func GenerateHeadlessServiceForModel(
 	ctx context.Context,
-	serviceName string,
 	namespace string,
 	baseModelName string,
 ) *corev1.Service {
+	// Generate deterministic service name from model name
+	serviceName := GenerateServiceName(baseModelName)
+
+	// Hash the base model name for use in labels (no length or character restrictions)
+	modelHash := HashModelName(baseModelName)
+
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      serviceName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoBaseModel: baseModelName,
-				"nvidia.com/managed-by":               "dynamo-operator",
+				commonconsts.KubeLabelDynamoBaseModelHash: modelHash,
+				"nvidia.com/managed-by":                   "dynamo-operator",
+			},
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoBaseModel: baseModelName, // Original name for humans
 			},
 		},
 		Spec: corev1.ServiceSpec{
 			// Headless service - no ClusterIP, no load balancing
 			ClusterIP: corev1.ClusterIPNone,
 
-			// Selector to match pods with the base model label
+			// Selector to match pods with the base model hash label
 			Selector: map[string]string{
-				commonconsts.KubeLabelDynamoBaseModel: baseModelName,
+				commonconsts.KubeLabelDynamoBaseModelHash: modelHash,
 			},
 
 			// Don't publish not-ready addresses - only ready pods in EndpointSlices
@@ -139,9 +151,31 @@ func GenerateHeadlessServiceForModel(
 	return service
 }
 
-// AddBaseModelLabel adds the base model label to a label map if modelRef is present
+// HashModelName creates a deterministic hash from a base model name for use in labels
+// Returns an 8-character hex string (always valid as a Kubernetes label value)
+func HashModelName(baseModelName string) string {
+	hash := sha256.Sum256([]byte(baseModelName))
+	// Use 8 characters for brevity and consistency
+	return hex.EncodeToString(hash[:])[:8]
+}
+
+// GenerateServiceName creates a deterministic, DNS-safe service name from a base model name
+// Format: dynamo-model-{8-char-hash}
+func GenerateServiceName(baseModelName string) string {
+	return fmt.Sprintf("dynamo-model-%s", HashModelName(baseModelName))
+}
+
+// AddBaseModelLabel adds the base model hash label to a label map if modelRef is present
+// Uses a hash of the model name to avoid label length/character restrictions
 func AddBaseModelLabel(labels map[string]string, modelRef *v1alpha1.ModelReference) {
 	if modelRef != nil && modelRef.Name != "" {
-		labels[commonconsts.KubeLabelDynamoBaseModel] = modelRef.Name
+		labels[commonconsts.KubeLabelDynamoBaseModelHash] = HashModelName(modelRef.Name)
+	}
+}
+
+// AddBaseModelAnnotation adds the base model annotation to preserve the original model name
+func AddBaseModelAnnotation(annotations map[string]string, modelRef *v1alpha1.ModelReference) {
+	if modelRef != nil && modelRef.Name != "" {
+		annotations[commonconsts.KubeAnnotationDynamoBaseModel] = modelRef.Name
 	}
 }

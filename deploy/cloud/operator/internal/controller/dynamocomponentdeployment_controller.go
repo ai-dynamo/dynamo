@@ -965,6 +965,10 @@ func (r *DynamoComponentDeploymentReconciler) getKubeAnnotations(dynamoComponent
 	for k, v := range extraAnnotations {
 		annotations[k] = v
 	}
+	// Add base model annotation if modelRef is specified (for human readability)
+	if dynamoComponentDeployment != nil {
+		dynamo.AddBaseModelAnnotation(annotations, dynamoComponentDeployment.Spec.ModelRef)
+	}
 	return annotations
 }
 

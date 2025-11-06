@@ -40,6 +40,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/modelendpoint"
 )
 
@@ -320,12 +321,16 @@ func (r *DynamoModelReconciler) getEndpointCandidates(
 ) ([]modelendpoint.Candidate, map[string]bool, error) {
 	logs := log.FromContext(ctx)
 
-	// Get EndpointSlices for the headless service
-	// Service name = base model name, so we can directly query by service label
+	// Generate the predictable service name from the base model name
+	// Service name is deterministic: dynamo-model-{8-char-hash}
+	serviceName := dynamo.GenerateServiceName(model.Spec.BaseModelName)
+
+	// Query EndpointSlices directly by service name
+	// EndpointSlices are automatically labeled with kubernetes.io/service-name
 	endpointSlices := &discoveryv1.EndpointSliceList{}
 	if err := r.List(ctx, endpointSlices,
 		client.InNamespace(model.Namespace),
-		client.MatchingLabels{discoveryv1.LabelServiceName: model.Spec.BaseModelName},
+		client.MatchingLabels{discoveryv1.LabelServiceName: serviceName},
 	); err != nil {
 		logs.Error(err, "Failed to list endpoint slices for model")
 		r.Recorder.Event(model, corev1.EventTypeWarning, "EndpointDiscoveryFailed", err.Error())
