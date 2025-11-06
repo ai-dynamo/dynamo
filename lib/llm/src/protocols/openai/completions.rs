@@ -37,6 +37,10 @@ pub struct NvCreateCompletionRequest {
     // metadata - passthrough parameter without restrictions
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+
+    /// Catch-all for unsupported fields - checked during validation
+    #[serde(flatten, default, skip_serializing)]
+    pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
@@ -372,6 +376,7 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_model(&self.inner.model)?;
         validate::validate_prompt(&self.inner.prompt)?;
         validate::validate_suffix(self.inner.suffix.as_deref())?;
