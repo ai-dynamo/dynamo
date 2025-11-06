@@ -77,7 +77,6 @@ impl OAIChatPreprocessor {
     }
 }
 
-
 #[pyclass]
 #[derive(Clone)]
 pub struct MediaDecoder {
