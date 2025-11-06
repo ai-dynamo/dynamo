@@ -67,7 +67,7 @@ spec:
           echo "SSH keys generated and saved to shared volume"
       containers:
       - name: kubectl-create-secret
-        image: registry.k8s.io/kubectl:v1.31.7
+        image: alpine/k8s:1.31.2
         volumeMounts:
         - name: shared
           mountPath: /shared
