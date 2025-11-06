@@ -51,6 +51,14 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 					{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypePlanner},
 					{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "name"},
 					{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "namespace"},
+					{
+						Name: "POD_NAME",
+						ValueFrom: &corev1.EnvVarSource{
+							FieldRef: &corev1.ObjectFieldSelector{
+								FieldPath: "metadata.name",
+							},
+						},
+					},
 					{Name: "PLANNER_PROMETHEUS_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort)},
 				},
 			},

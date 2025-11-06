@@ -1331,6 +1331,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "nats-address",
 													},
 													{
+														Name: "POD_NAME",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.name",
+															},
+														},
+													},
+													{
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
@@ -1508,6 +1516,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "PLANNER_PROMETHEUS_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
+													},
+													{
+														Name: "POD_NAME",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.name",
+															},
+														},
 													},
 												},
 												Resources: corev1.ResourceRequirements{
@@ -1862,6 +1878,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
 													},
+													{
+														Name: "POD_NAME",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.name",
+															},
+														},
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -2015,6 +2039,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
 													},
+													{
+														Name: "POD_NAME",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.name",
+															},
+														},
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -2149,6 +2181,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
+													},
+													{
+														Name: "POD_NAME",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.name",
+															},
+														},
 													},
 												},
 												Resources: corev1.ResourceRequirements{
@@ -2291,6 +2331,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "PLANNER_PROMETHEUS_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
+													},
+													{
+														Name: "POD_NAME",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.name",
+															},
+														},
 													},
 												},
 												Resources: corev1.ResourceRequirements{
@@ -2675,6 +2723,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
 													},
+													{
+														Name: "POD_NAME",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.name",
+															},
+														},
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -2815,6 +2871,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
 													},
+													{
+														Name: "POD_NAME",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.name",
+															},
+														},
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -2949,6 +3013,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
+													},
+													{
+														Name: "POD_NAME",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.name",
+															},
+														},
 													},
 												},
 												Resources: corev1.ResourceRequirements{
@@ -3098,6 +3170,14 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  "PLANNER_PROMETHEUS_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
+													},
+													{
+														Name: "POD_NAME",
+														ValueFrom: &corev1.EnvVarSource{
+															FieldRef: &corev1.ObjectFieldSelector{
+																FieldPath: "metadata.name",
+															},
+														},
 													},
 												},
 												Resources: corev1.ResourceRequirements{
@@ -4622,6 +4702,11 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 							{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 							{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
+							{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{
+								FieldRef: &corev1.ObjectFieldSelector{
+									FieldPath: "metadata.name",
+								},
+							}},
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{

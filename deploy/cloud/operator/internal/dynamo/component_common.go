@@ -87,6 +87,14 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 			Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 			Value: context.ParentGraphDeploymentNamespace,
 		},
+		{
+			Name: "POD_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.name",
+				},
+			},
+		},
 	}
 
 	return container
