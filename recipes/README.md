@@ -5,7 +5,7 @@ Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA D
 > **Prerequisites:** This guide assumes you have already installed the Dynamo Kubernetes Platform.  
 > If not, follow the **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** first.
 
-## 📊 Available Recipes
+## Available Recipes
 
 | Model | Framework | Mode | GPUs | Deployment | Benchmark Recipe | Notes |
 |-------|-----------|------|------|------------|------------------|-------|
@@ -24,7 +24,7 @@ Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA D
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available | ❌ = Missing or incomplete
 - **Benchmark Recipe**: ✅ = Includes `perf.yaml` for running AIPerf benchmarks | ❌ = No benchmark recipe provided
 
-## 📁 Recipe Structure
+## Recipe Structure
 
 Each complete recipe follows this standard structure:
 
@@ -40,7 +40,7 @@ Each complete recipe follows this standard structure:
         └── perf.yaml (optional)  # AIPerf benchmark job
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -147,7 +147,7 @@ kubectl logs -f job/<benchmark-job-name> -n ${NAMESPACE}
 kubectl logs job/<benchmark-job-name> -n ${NAMESPACE} | tail -50
 ```
 
-## 📖 Example Deployments
+## Example Deployments
 
 ### Llama-3-70B with vLLM (Aggregated)
 
@@ -173,7 +173,7 @@ kubectl port-forward svc/llama3-70b-agg-frontend 8000:8000 -n ${NAMESPACE}
 
 See [deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml](deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml) for the complete multi-node WideEP configuration.
 
-## 🛠️ Customization
+## Customization
 
 Each `deploy.yaml` contains:
 - **ConfigMap**: Engine-specific configuration (embedded in the manifest)
@@ -220,7 +220,7 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
 # Update version tag as needed
 ```
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -243,7 +243,7 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
 - [Kubernetes Deployment Guide](../docs/kubernetes/README.md#troubleshooting)
 - [Observability Documentation](../docs/kubernetes/observability/)
 
-## 📖 Related Documentation
+## Related Documentation
 
 - **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** - Platform installation and concepts
 - **[API Reference](../docs/kubernetes/api_reference.md)** - DynamoGraphDeployment CRD specification
@@ -253,7 +253,7 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
 - **[Observability](../docs/kubernetes/observability/)** - Monitoring and logging
 - **[Benchmarking Guide](../docs/benchmarks/benchmarking.md)** - Performance testing
 
-## 🤝 Contributing
+## Contributing
 
 We welcome contributions of new recipes! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 - Recipe submission guidelines
