@@ -141,6 +141,36 @@ class StandaloneRouterHandler:
 
         yield result
 
+    async def snapshot(self, request):
+        """
+        Return the current KV router radix tree state as a snapshot.
+
+        This endpoint allows peer routers to fetch snapshots for recovery,
+        removing the dependency on NATS object store for snapshot storage.
+        """
+        if self.kv_push_router is None:
+            logger.error("KvPushRouter not initialized - cannot get snapshot")
+            yield {"error": "Router not initialized", "events": [], "count": 0}
+            return
+
+        try:
+            # Call the indexer's dump_events method
+            # Note to self: already implemented and tested in Rust
+            events = await self.kv_push_router.router.indexer.dump_events()
+
+            logger.info(
+                f"Snapshot requested - returning {len(events)} events to peer router"
+            )
+
+            yield {
+                "events": events,
+                "count": len(events),
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to get router snapshot: {e}")
+            yield {"error": str(e), "events": [], "count": 0}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -266,14 +296,14 @@ async def worker(runtime: DistributedRuntime):
         runtime, args.endpoint, args.block_size, kv_router_config
     )
     await handler.initialize()
-
     # Expose endpoints
     generate_endpoint = component.endpoint("generate")
     best_worker_endpoint = component.endpoint("best_worker_id")
+    snapshot_endpoint = component.endpoint("snapshot")
 
     logger.debug("Starting to serve endpoints...")
 
-    # Serve both endpoints concurrently
+    # Serve all endpoints concurrently
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -283,6 +313,11 @@ async def worker(runtime: DistributedRuntime):
             ),
             best_worker_endpoint.serve_endpoint(
                 handler.best_worker_id,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "router")],
+            ),
+            snapshot_endpoint.serve_endpoint(
+                handler.snapshot,
                 graceful_shutdown=True,
                 metrics_labels=[("service", "router")],
             ),

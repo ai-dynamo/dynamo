@@ -35,6 +35,114 @@ const MAX_SNAPSHOT_STABILITY_ATTEMPTS: usize = 10;
 const CHECK_INTERVAL_BASE: Duration = Duration::from_secs(1);
 const CHECK_INTERVAL_JITTER_MS: i64 = 100;
 
+/// Download snapshot from peer router via Dynamo endpoint (transport-agnostic).
+/// This removes the dependency on NATS object store for snapshot recovery.
+async fn download_snapshot_from_peer(
+    component: &Component,
+    kv_events_tx: &mpsc::Sender<RouterEvent>,
+) -> Result<()> {
+    tracing::info!("Attempting to fetch snapshot from peer routers via Dynamo endpoint...");
+
+    // List instances of the same component (peer routers)
+    let instances = match component.list_instances().await {
+        Ok(instances) => instances,
+        Err(e) => {
+            tracing::debug!("Failed to list router instances: {:?}", e);
+            return Err(e);
+        }
+    };
+
+    if instances.is_empty() {
+        tracing::debug!("No peer router instances found");
+        return Err(anyhow::anyhow!("No peer routers available"));
+    }
+
+    tracing::info!(
+        "Found {} peer router instance(s), will attempt to fetch snapshot",
+        instances.len()
+    );
+
+    // Try each peer instance
+    for instance in instances {
+        let instance_id = instance.id();
+        tracing::debug!("Trying to fetch snapshot from instance {}", instance_id);
+
+        // Create endpoint client for snapshot endpoint
+        let snapshot_endpoint = component.endpoint("snapshot");
+        let client = match snapshot_endpoint.client().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to create client for instance {}: {:?}", instance_id, e);
+                continue;
+            }
+        };
+
+        // Use PushRouter pattern (follows existing patterns in codebase)
+        use dynamo_runtime::pipeline::PushRouter;
+        use dynamo_runtime::stream::StreamExt;
+
+        let router = match PushRouter::<(), serde_json::Value>::from_client(
+            client,
+            Default::default(),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Failed to create router for instance {}: {:?}", instance_id, e);
+                continue;
+            }
+        };
+
+        // Call snapshot endpoint (transport-agnostic - uses Dynamo's request plane)
+        let mut stream = match router.direct(().into(), instance_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to call snapshot endpoint on instance {}: {:?}", instance_id, e);
+                continue;
+            }
+        };
+
+        // Get response
+        if let Some(response) = stream.next().await {
+            // Parse snapshot response
+            let events_value = &response["events"];
+            if events_value.is_null() {
+                tracing::warn!("Snapshot response from instance {} has no events", instance_id);
+                continue;
+            }
+
+            let events: Vec<RouterEvent> = match serde_json::from_value(events_value.clone()) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize events from instance {}: {:?}", instance_id, e);
+                    continue;
+                }
+            };
+
+            tracing::info!(
+                "Successfully fetched snapshot with {} events from peer instance {} via Dynamo endpoint (NATS object store NOT used)",
+                events.len(),
+                instance_id
+            );
+
+            // Send events to indexer to reconstruct tree
+            for event in events {
+                if let Err(e) = kv_events_tx.send(event).await {
+                    tracing::error!("Failed to send event to indexer: {:?}", e);
+                    return Err(anyhow::anyhow!("Failed to send events to indexer"));
+                }
+            }
+
+            tracing::info!("Snapshot loaded from peer router (sequence-based recovery complete)");
+            return Ok(());
+        }
+    }
+
+    tracing::debug!("Could not fetch snapshot from any peer router");
+    Err(anyhow::anyhow!("No peer snapshot available"))
+}
+
 /// Download a stable snapshot from object store and send events to the indexer.
 /// Retries until two consecutive reads match or max attempts is reached.
 async fn download_stable_snapshot(
@@ -260,8 +368,27 @@ pub async fn start_kv_router_background(
 
     // Handle initial state based on router_reset_states flag
     if !router_reset_states {
-        // Try to download initial state from object store with stability check
-        download_stable_snapshot(&nats_client, &bucket_name, &kv_events_tx).await?;
+        // Try peer snapshot first (transport-agnostic, no NATS object store)
+        match download_snapshot_from_peer(&component, &kv_events_tx).await {
+            Ok(_) => {
+                tracing::info!("Router state loaded from peer via Dynamo endpoint");
+            }
+            Err(e) => {
+                tracing::debug!("Peer snapshot not available: {:?}", e);
+                tracing::info!("Falling back to NATS object store for snapshot");
+
+                // Fallback to NATS object store (existing behavior)
+                match download_stable_snapshot(&nats_client, &bucket_name, &kv_events_tx).await {
+                    Ok(_) => {
+                        tracing::info!("✅ Router state loaded from NATS object store (fallback)");
+                    }
+                    Err(e) => {
+                        tracing::warn!("NATS object store snapshot also failed: {:?}", e);
+                        tracing::info!("Starting with fresh router state (no snapshot available)");
+                    }
+                }
+            }
+        }
     } else {
         // Delete the bucket to reset state
         tracing::info!("Resetting router state, deleting bucket: {bucket_name}");
