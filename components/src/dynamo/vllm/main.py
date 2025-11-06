@@ -8,7 +8,6 @@ import signal
 from typing import Optional
 
 import uvloop
-from kvbm.vllm_integration.consolidator_config import get_consolidator_endpoints
 from prometheus_client import REGISTRY
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
@@ -75,7 +74,7 @@ async def graceful_shutdown(runtime):
 async def worker(runtime: DistributedRuntime):
     config = parse_args()
 
-    await configure_ports(runtime, config)
+    await configure_ports(config)
     overwrite_args(config)
 
     # Set up signal handler for graceful shutdown
@@ -216,7 +215,18 @@ def setup_vllm_engine(config, stat_logger=None):
     # Set up consolidator endpoints if KVBM is enabled
     consolidator_endpoints = None
     if config.has_connector("kvbm"):
-        consolidator_endpoints = get_consolidator_endpoints(vllm_config)
+        try:
+            from kvbm.vllm_integration.consolidator_config import (
+                get_consolidator_endpoints,
+            )
+
+            consolidator_endpoints = get_consolidator_endpoints(vllm_config)
+        except Exception as e:
+            logger.warning(
+                f"KVBM connector is enabled but failed to get consolidator endpoints: {e}. "
+                "Continuing without KV event consolidation. "
+                "Ensure 'kvbm' package is installed if this feature is needed."
+            )
     vllm_config.consolidator_endpoints = consolidator_endpoints
 
     factory = []

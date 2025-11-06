@@ -47,6 +47,9 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Set debug logging environment
         env = os.environ.copy()
+        env["DYN_VLLM_KV_EVENT_PORT"] = f"2008{worker_id[-1]}"
+        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = f"560{worker_id[-1]}"
+
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
