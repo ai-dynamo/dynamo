@@ -562,9 +562,9 @@ func main() {
 	}
 
 	if err = (&controller.DynamoModelReconciler{
-		Client:   mgr.GetClient(),
-		Recorder: mgr.GetEventRecorderFor("dynamomodel"),
-		Prober:   modelendpoint.NewProber(),
+		Client:         mgr.GetClient(),
+		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
+		EndpointClient: modelendpoint.NewClient(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoModel")
 		os.Exit(1)

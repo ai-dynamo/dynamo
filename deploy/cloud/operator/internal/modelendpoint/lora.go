@@ -28,13 +28,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// LoadLoRA loads a LoRA model on the specified endpoint
-func (p *Prober) LoadLoRA(ctx context.Context, address, modelName string) error {
+// loadLoRA loads a LoRA model on a single endpoint
+func (c *Client) loadLoRA(ctx context.Context, address, modelName, sourceURI string) error {
 	logs := log.FromContext(ctx)
 
+	// Build request body with source object
 	loadReq := map[string]interface{}{
 		"lora_name": modelName,
-		"lora_path": modelName, // May need to adjust based on actual API
+		"source": map[string]interface{}{
+			"uri": sourceURI,
+		},
 	}
 
 	loadBody, err := json.Marshal(loadReq)
@@ -48,7 +51,7 @@ func (p *Prober) LoadLoRA(ctx context.Context, address, modelName string) error 
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to call load LoRA endpoint: %w", err)
 	}
@@ -60,92 +63,12 @@ func (p *Prober) LoadLoRA(ctx context.Context, address, modelName string) error 
 		return fmt.Errorf("load LoRA failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	logs.Info("Successfully loaded LoRA", "address", address, "modelName", modelName)
+	logs.Info("Successfully loaded LoRA", "address", address, "modelName", modelName, "sourceURI", sourceURI)
 	return nil
 }
 
-// VerifyLoRALoaded checks if a LoRA model is present in the GET /loras response
-func (p *Prober) VerifyLoRALoaded(ctx context.Context, address, modelName string) bool {
-	logs := log.FromContext(ctx)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", address+"/v1/loras", nil)
-	if err != nil {
-		logs.V(1).Info("Failed to create GET loras request", "error", err)
-		return false
-	}
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		logs.V(1).Info("Failed to call GET loras endpoint", "address", address, "error", err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		logs.V(1).Info("GET loras failed", "address", address, "status", resp.StatusCode)
-		return false
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		logs.V(1).Info("Failed to read loras response", "error", err)
-		return false
-	}
-
-	// Parse the response - expecting a JSON array or object with lora names
-	var lorasResp struct {
-		Loras []string `json:"loras"`
-	}
-
-	if err := json.Unmarshal(body, &lorasResp); err != nil {
-		// Try parsing as a simple array
-		var lorasList []string
-		if err := json.Unmarshal(body, &lorasList); err != nil {
-			logs.V(1).Info("Failed to parse loras response", "error", err, "body", string(body))
-			return false
-		}
-		lorasResp.Loras = lorasList
-	}
-
-	// Check if our model is in the list
-	for _, lora := range lorasResp.Loras {
-		if lora == modelName {
-			logs.V(1).Info("LoRA model verified as loaded", "address", address, "modelName", modelName)
-			return true
-		}
-	}
-
-	logs.V(1).Info("LoRA model not found in list", "address", address, "modelName", modelName, "availableLoras", lorasResp.Loras)
-	return false
-}
-
-// probeLoRAEndpoint checks if LoRA is already loaded, and loads it if not
-func (p *Prober) probeLoRAEndpoint(ctx context.Context, address, modelName string) bool {
-	logs := log.FromContext(ctx)
-
-	// Step 1: Check if LoRA is already loaded
-	if p.VerifyLoRALoaded(ctx, address, modelName) {
-		logs.V(1).Info("LoRA already loaded", "address", address, "modelName", modelName)
-		return true
-	}
-
-	// Step 2: Load the LoRA since it's not present
-	if err := p.LoadLoRA(ctx, address, modelName); err != nil {
-		logs.V(1).Info("Failed to load LoRA", "address", address, "error", err)
-		return false
-	}
-
-	// Step 3: Verify the LoRA was loaded successfully
-	if p.VerifyLoRALoaded(ctx, address, modelName) {
-		return true
-	}
-
-	logs.V(1).Info("LoRA load appeared successful but verification failed", "address", address)
-	return false
-}
-
 // unloadLoRA unloads a LoRA model from a single endpoint
-func (p *Prober) unloadLoRA(ctx context.Context, address, modelName string) error {
+func (c *Client) unloadLoRA(ctx context.Context, address, modelName string) error {
 	logs := log.FromContext(ctx)
 
 	req, err := http.NewRequestWithContext(ctx, "DELETE", address+"/v1/loras/"+modelName, nil)
@@ -154,7 +77,7 @@ func (p *Prober) unloadLoRA(ctx context.Context, address, modelName string) erro
 		return fmt.Errorf("failed to create unload LoRA request: %w", err)
 	}
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		logs.V(1).Info("Failed to call unload LoRA endpoint", "address", address, "error", err)
 		return fmt.Errorf("failed to call unload LoRA endpoint: %w", err)

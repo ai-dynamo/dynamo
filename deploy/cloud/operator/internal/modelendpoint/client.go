@@ -19,6 +19,7 @@ package modelendpoint
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -30,40 +31,40 @@ import (
 )
 
 const (
-	// MaxConcurrentProbes is the maximum number of concurrent endpoint probes
-	MaxConcurrentProbes = 10
-	// ProbeTimeout is the timeout for individual HTTP requests
-	ProbeTimeout = 15 * time.Second
-	// TotalProbeTimeout is the timeout for all probes to complete
-	TotalProbeTimeout = 30 * time.Second
+	// MaxConcurrentOperations is the maximum number of concurrent endpoint operations
+	MaxConcurrentOperations = 10
+	// RequestTimeout is the timeout for individual HTTP requests
+	RequestTimeout = 15 * time.Second
+	// TotalTimeout is the timeout for all operations to complete
+	TotalTimeout = 30 * time.Second
 )
 
-// Prober handles HTTP-based endpoint probing
-type Prober struct {
+// Client handles HTTP communication with model endpoint control APIs
+type Client struct {
 	httpClient *http.Client
 }
 
-// NewProber creates a new endpoint prober
-func NewProber() *Prober {
-	return &Prober{
+// NewClient creates a new model endpoint client
+func NewClient() *Client {
+	return &Client{
 		httpClient: &http.Client{
-			Timeout: ProbeTimeout,
+			Timeout: RequestTimeout,
 		},
 	}
 }
 
-// ProbeEndpoints probes all endpoints in parallel with bounded concurrency
-// Returns partial results even if some endpoints fail
-func (p *Prober) ProbeEndpoints(
+// LoadLoRA loads a LoRA model on all endpoints in parallel with bounded concurrency
+// Returns endpoint info with ready status and partial results even if some endpoints fail
+func (c *Client) LoadLoRA(
 	ctx context.Context,
 	candidates []Candidate,
 	model *v1alpha1.DynamoModel,
 ) ([]v1alpha1.EndpointInfo, error) {
 	logs := log.FromContext(ctx)
 
-	// Skip probing for non-LoRA models
+	// Skip loading for non-LoRA models
 	if strings.ToLower(model.Spec.ModelType) != "lora" {
-		logs.V(1).Info("Skipping probe for non-LoRA model", "modelType", model.Spec.ModelType)
+		logs.V(1).Info("Skipping LoRA load for non-LoRA model", "modelType", model.Spec.ModelType)
 		endpoints := make([]v1alpha1.EndpointInfo, len(candidates))
 		for i, c := range candidates {
 			endpoints[i] = v1alpha1.EndpointInfo{
@@ -75,27 +76,37 @@ func (p *Prober) ProbeEndpoints(
 		return endpoints, nil
 	}
 
+	// Get source URI for LoRA loading
+	sourceURI := ""
+	if model.Spec.Source != nil {
+		sourceURI = model.Spec.Source.URI
+	}
+	if sourceURI == "" {
+		logs.Error(nil, "Source URI is required for LoRA models")
+		return nil, fmt.Errorf("source URI is required for LoRA models")
+	}
+
 	// Build tasks for the worker pool
 	tasks := make([]workerpool.Task[v1alpha1.EndpointInfo], len(candidates))
 	for i, candidate := range candidates {
-		c := candidate // Capture loop variable
 		tasks[i] = workerpool.Task[v1alpha1.EndpointInfo]{
 			Index: i,
 			Work: func(ctx context.Context) (v1alpha1.EndpointInfo, error) {
-				// Probe the endpoint
-				ready := p.probeLoRAEndpoint(ctx, c.Address, model.Spec.ModelName)
+				// Load the LoRA on this endpoint (idempotent operation)
+				err := c.loadLoRA(ctx, candidate.Address, model.Spec.ModelName, sourceURI)
+				ready := err == nil
 
 				return v1alpha1.EndpointInfo{
-					Address: c.Address,
-					PodName: c.PodName,
+					Address: candidate.Address,
+					PodName: candidate.PodName,
 					Ready:   ready,
-				}, nil
+				}, err
 			},
 		}
 	}
 
-	// Execute all probes in parallel with bounded concurrency
-	results, err := workerpool.Execute(ctx, MaxConcurrentProbes, TotalProbeTimeout, tasks)
+	// Execute all load operations in parallel with bounded concurrency
+	results, err := workerpool.Execute(ctx, MaxConcurrentOperations, TotalTimeout, tasks)
 
 	// Extract endpoint info from results and collect failures
 	endpoints := make([]v1alpha1.EndpointInfo, len(results))
@@ -108,7 +119,7 @@ func (p *Prober) ProbeEndpoints(
 		} else {
 			notReadyEndpoints = append(notReadyEndpoints, result.Value.Address)
 			if result.Err != nil {
-				logs.Info("Endpoint probe failed",
+				logs.Info("Endpoint load operation failed",
 					"address", result.Value.Address,
 					"podName", result.Value.PodName,
 					"error", result.Err)
@@ -116,7 +127,7 @@ func (p *Prober) ProbeEndpoints(
 		}
 	}
 
-	logs.Info("Completed parallel endpoint probing",
+	logs.Info("Completed parallel LoRA load operations",
 		"total", len(endpoints),
 		"ready", readyCount,
 		"notReady", len(notReadyEndpoints),
@@ -126,7 +137,7 @@ func (p *Prober) ProbeEndpoints(
 }
 
 // UnloadLoRA unloads a LoRA model from all endpoints in parallel
-func (p *Prober) UnloadLoRA(ctx context.Context, candidates []Candidate, modelName string) error {
+func (c *Client) UnloadLoRA(ctx context.Context, candidates []Candidate, modelName string) error {
 	logs := log.FromContext(ctx)
 
 	if len(candidates) == 0 {
@@ -139,12 +150,11 @@ func (p *Prober) UnloadLoRA(ctx context.Context, candidates []Candidate, modelNa
 	// Build tasks for the worker pool
 	tasks := make([]workerpool.Task[bool], len(candidates))
 	for i, candidate := range candidates {
-		c := candidate // Capture loop variable
 		tasks[i] = workerpool.Task[bool]{
 			Index: i,
 			Work: func(ctx context.Context) (bool, error) {
 				// Unload the LoRA from this endpoint (calls method in lora.go)
-				err := p.unloadLoRA(ctx, c.Address, modelName)
+				err := c.unloadLoRA(ctx, candidate.Address, modelName)
 				if err != nil {
 					return false, err
 				}
@@ -154,7 +164,7 @@ func (p *Prober) UnloadLoRA(ctx context.Context, candidates []Candidate, modelNa
 	}
 
 	// Execute all unload operations in parallel with bounded concurrency
-	results, err := workerpool.Execute(ctx, MaxConcurrentProbes, TotalProbeTimeout, tasks)
+	results, err := workerpool.Execute(ctx, MaxConcurrentOperations, TotalTimeout, tasks)
 
 	// Collect successes and failures with details
 	successCount := 0

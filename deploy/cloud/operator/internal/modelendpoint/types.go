@@ -17,19 +17,8 @@
 
 package modelendpoint
 
-import (
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-)
-
-// Candidate represents an endpoint candidate to be probed
+// Candidate represents an endpoint candidate for operations
 type Candidate struct {
 	Address string
 	PodName string
-}
-
-// ProbeResult represents the result of probing a single endpoint
-type ProbeResult struct {
-	Index    int
-	Endpoint v1alpha1.EndpointInfo
-	Err      error
 }

@@ -38,9 +38,19 @@ type DynamoModelSpec struct {
 	// +optional
 	ModelType string `json:"modelType,omitempty"`
 
-	// LoraPath is the path to the LoRA adapter (only applicable for lora model type)
+	// Source specifies the model source location (only applicable for lora model type)
 	// +optional
-	LoraPath string `json:"loraPath,omitempty"`
+	Source *ModelSource `json:"source,omitempty"`
+}
+
+// ModelSource defines the source location of a model
+type ModelSource struct {
+	// URI is the model source URI
+	// Supported formats:
+	// - S3: s3://bucket/path/to/model
+	// - HuggingFace: hf://org/model@revision_sha
+	// +kubebuilder:validation:Required
+	URI string `json:"uri"`
 }
 
 // EndpointInfo represents a single endpoint (pod) serving the model

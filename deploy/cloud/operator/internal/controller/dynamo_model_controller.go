@@ -31,7 +31,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -40,6 +39,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/modelendpoint"
 )
 
@@ -57,16 +57,13 @@ const (
 
 	// Field index names
 	dynamoModelBaseModelIndex = ".spec.baseModelName"
-
-	// Finalizer
-	dynamoModelFinalizer = "nvidia.com/dynamo-model-finalizer"
 )
 
 // DynamoModelReconciler reconciles a DynamoModel object
 type DynamoModelReconciler struct {
 	client.Client
-	Recorder record.EventRecorder
-	Prober   *modelendpoint.Prober
+	Recorder       record.EventRecorder
+	EndpointClient *modelendpoint.Client
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels,verbs=get;list;watch;create;update;patch;delete
@@ -93,19 +90,13 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	logs = logs.WithValues("dynamoModel", model.Name, "namespace", model.Namespace, "baseModelName", model.Spec.BaseModelName)
 	logs.Info("Reconciling DynamoModel")
 
-	// Handle deletion with finalizer
-	if !model.DeletionTimestamp.IsZero() {
-		return r.handleDeletion(ctx, model)
+	// Handle finalizer using common handler
+	finalized, err := commoncontroller.HandleFinalizer(ctx, model, r.Client, r)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-
-	// Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(model, dynamoModelFinalizer) {
-		controllerutil.AddFinalizer(model, dynamoModelFinalizer)
-		if err := r.Update(ctx, model); err != nil {
-			logs.Error(err, "Failed to add finalizer")
-			return ctrl.Result{}, err
-		}
-		logs.Info("Added finalizer to DynamoModel")
+	if finalized {
+		// Object was being deleted and finalizer has been called
 		return ctrl.Result{}, nil
 	}
 
@@ -131,13 +122,13 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Initialize prober if needed
-	if r.Prober == nil {
-		r.Prober = modelendpoint.NewProber()
+	// Initialize endpoint client if needed
+	if r.EndpointClient == nil {
+		r.EndpointClient = modelendpoint.NewClient()
 	}
 
-	// Probe all endpoints in parallel with bounded concurrency
-	allEndpoints, probeErr := r.Prober.ProbeEndpoints(ctx, candidates, model)
+	// Load LoRA on all endpoints in parallel with bounded concurrency
+	allEndpoints, probeErr := r.EndpointClient.LoadLoRA(ctx, candidates, model)
 	hasFailures := probeErr != nil || countReadyEndpoints(allEndpoints) < len(allEndpoints)
 
 	if probeErr != nil {
@@ -272,37 +263,36 @@ func (r *DynamoModelReconciler) findModelsForEndpointSlice(ctx context.Context, 
 	return requests
 }
 
-// handleDeletion handles cleanup when a DynamoModel is being deleted
-func (r *DynamoModelReconciler) handleDeletion(ctx context.Context, model *v1alpha1.DynamoModel) (ctrl.Result, error) {
+// FinalizeResource implements the Finalizer interface
+// Performs cleanup when a DynamoModel is being deleted
+func (r *DynamoModelReconciler) FinalizeResource(ctx context.Context, model *v1alpha1.DynamoModel) error {
 	logs := log.FromContext(ctx)
 
-	// Check if finalizer is present
-	if !controllerutil.ContainsFinalizer(model, dynamoModelFinalizer) {
-		logs.Info("Finalizer not found, skipping cleanup")
-		return ctrl.Result{}, nil
-	}
-
-	logs.Info("Handling DynamoModel deletion", "modelType", model.Spec.ModelType)
+	logs.Info("Finalizing DynamoModel", "modelType", model.Spec.ModelType)
 
 	// Only perform cleanup for LoRA models
 	if model.Spec.ModelType == "lora" {
 		// Get endpoint candidates (reusing common logic)
 		candidates, _, err := r.getEndpointCandidates(ctx, model)
 		if err != nil {
-			logs.Error(err, "Failed to get endpoints during deletion")
+			logs.Info("Failed to get endpoints during deletion, continuing with resource deletion",
+				"error", err.Error())
 			r.Recorder.Event(model, corev1.EventTypeWarning, "CleanupFailed", err.Error())
 			// Continue with deletion even if we can't get endpoints
 		} else if len(candidates) > 0 {
 			logs.Info("Unloading LoRA from endpoints", "endpointCount", len(candidates))
 
-			// Initialize prober if needed
-			if r.Prober == nil {
-				r.Prober = modelendpoint.NewProber()
+			// Initialize endpoint client if needed
+			if r.EndpointClient == nil {
+				r.EndpointClient = modelendpoint.NewClient()
 			}
 
 			// Unload LoRA from all endpoints in parallel
-			if err := r.Prober.UnloadLoRA(ctx, candidates, model.Spec.ModelName); err != nil {
-				logs.Error(err, "Failed to unload LoRA from some endpoints")
+			if err := r.EndpointClient.UnloadLoRA(ctx, candidates, model.Spec.ModelName); err != nil {
+				// Log as Info since we're continuing with deletion anyway (expected behavior)
+				// Detailed failure information is already logged by the prober
+				logs.Info("Some endpoints failed to unload LoRA, continuing with deletion",
+					"error", err.Error())
 				r.Recorder.Event(model, corev1.EventTypeWarning, "LoRAUnloadFailed",
 					fmt.Sprintf("Failed to unload LoRA from some endpoints: %v", err))
 				// Continue with deletion even if unload fails
@@ -318,15 +308,8 @@ func (r *DynamoModelReconciler) handleDeletion(ctx context.Context, model *v1alp
 		logs.Info("Skipping cleanup for non-LoRA model")
 	}
 
-	// Remove finalizer using controllerutil
-	controllerutil.RemoveFinalizer(model, dynamoModelFinalizer)
-	if err := r.Update(ctx, model); err != nil {
-		logs.Error(err, "Failed to remove finalizer")
-		return ctrl.Result{}, err
-	}
-
-	logs.Info("Finalizer removed, DynamoModel will be deleted")
-	return ctrl.Result{}, nil
+	logs.Info("Finalization completed successfully")
+	return nil
 }
 
 // getEndpointCandidates fetches EndpointSlices and extracts endpoint candidates
