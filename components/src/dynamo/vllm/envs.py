@@ -57,6 +57,7 @@ def _resolve_port(env_var: str, default_port: int) -> int:
 # Environment variables configuration
 environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for KV events publishing to the frontend
+    # Note: This env variable is ignored if explicitly using --kv-events-config ''
     "DYN_VLLM_KV_EVENT_PORT": lambda: _resolve_port("DYN_VLLM_KV_EVENT_PORT", 20080),
 }
 

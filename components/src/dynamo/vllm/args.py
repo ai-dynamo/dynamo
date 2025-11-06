@@ -305,18 +305,18 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
         return None
 
     # If user provided their own config, use that
-    if getattr(config.engine_args, "kv_events_config"):
-        logger.info("Using user-provided kv_events_config")
+    if c := getattr(config.engine_args, "kv_events_config"):
+        logger.info(f"Using user-provided kv_events_config {c}")
         return None
 
     # Create default events config for prefix caching
-    logger.info("Creating Dynamo default kv_events_config for prefix caching")
     if config.kv_port is None:
         raise ValueError(
             "config.kv_port is not set; call configure_ports(...) before overwrite_args "
             "or provide --kv-event-config to supply an explicit endpoint."
         )
     dp_rank = config.engine_args.data_parallel_rank or 0
+
     return KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
@@ -392,6 +392,10 @@ def overwrite_args(config):
         defaults["kv_transfer_config"] = kv_transfer_config
 
     kv_events_config = create_kv_events_config(config)
+    logger.info(
+        f"Using Dynamo default kv_events_config for publishing kv events over zmq: {kv_events_config}"
+    )
+
     if kv_events_config:
         defaults["kv_events_config"] = kv_events_config
 
