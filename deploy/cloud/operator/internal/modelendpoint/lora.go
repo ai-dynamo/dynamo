@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -45,7 +46,13 @@ func (c *Client) loadLoRA(ctx context.Context, address, modelName, sourceURI str
 		return fmt.Errorf("failed to marshal load LoRA request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", address+"/v1/load_lora", bytes.NewBuffer(loadBody))
+	// Build URL robustly using url.JoinPath to handle trailing slashes
+	apiURL, err := url.JoinPath(address, "/loras")
+	if err != nil {
+		return fmt.Errorf("failed to construct load LoRA URL: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(loadBody))
 	if err != nil {
 		return fmt.Errorf("failed to create load LoRA request: %w", err)
 	}
@@ -55,7 +62,11 @@ func (c *Client) loadLoRA(ctx context.Context, address, modelName, sourceURI str
 	if err != nil {
 		return fmt.Errorf("failed to call load LoRA endpoint: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			logs.V(1).Info("Failed to close response body", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
@@ -71,7 +82,14 @@ func (c *Client) loadLoRA(ctx context.Context, address, modelName, sourceURI str
 func (c *Client) unloadLoRA(ctx context.Context, address, modelName string) error {
 	logs := log.FromContext(ctx)
 
-	req, err := http.NewRequestWithContext(ctx, "DELETE", address+"/v1/loras/"+modelName, nil)
+	// Build URL robustly using url.JoinPath to handle trailing slashes and encode modelName
+	apiURL, err := url.JoinPath(address, "/loras", modelName)
+	if err != nil {
+		logs.V(1).Info("Failed to construct unload LoRA URL", "error", err)
+		return fmt.Errorf("failed to construct unload LoRA URL: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "DELETE", apiURL, nil)
 	if err != nil {
 		logs.V(1).Info("Failed to create unload LoRA request", "error", err)
 		return fmt.Errorf("failed to create unload LoRA request: %w", err)
@@ -82,7 +100,11 @@ func (c *Client) unloadLoRA(ctx context.Context, address, modelName string) erro
 		logs.V(1).Info("Failed to call unload LoRA endpoint", "address", address, "error", err)
 		return fmt.Errorf("failed to call unload LoRA endpoint: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			logs.V(1).Info("Failed to close response body", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)

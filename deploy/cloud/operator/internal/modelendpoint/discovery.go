@@ -19,7 +19,8 @@ package modelendpoint
 
 import (
 	"context"
-	"fmt"
+	"net"
+	"strconv"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -60,7 +61,7 @@ func ExtractCandidates(endpointSlices *discoveryv1.EndpointSliceList, port int32
 			}
 
 			for _, addr := range ep.Addresses {
-				address := fmt.Sprintf("http://%s:%d", addr, port)
+				address := "http://" + net.JoinHostPort(addr, strconv.Itoa(int(port)))
 				candidates = append(candidates, Candidate{
 					Address: address,
 					PodName: podName,

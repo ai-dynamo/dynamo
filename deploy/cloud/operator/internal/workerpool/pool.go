@@ -37,10 +37,16 @@ type Result[T any] struct {
 	Err   error
 }
 
-// Execute runs all tasks in parallel with bounded concurrency
+// Execute runs all tasks in parallel with bounded concurrency using a worker pool
 // Returns results in the same order as input tasks, even if execution order differs
 // Continues executing all tasks even if some fail
+// Spawns exactly maxWorkers goroutines regardless of task count
 func Execute[T any](ctx context.Context, maxWorkers int, timeout time.Duration, tasks []Task[T]) ([]Result[T], error) {
+	// Validate maxWorkers to prevent panics or hangs
+	if maxWorkers < 1 {
+		return nil, fmt.Errorf("maxWorkers must be at least 1, got %d", maxWorkers)
+	}
+
 	if len(tasks) == 0 {
 		return nil, nil
 	}
@@ -49,34 +55,40 @@ func Execute[T any](ctx context.Context, maxWorkers int, timeout time.Duration, 
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Create buffered channels
+	// Create channels
+	taskChan := make(chan Task[T])
 	results := make(chan Result[T], len(tasks))
-	semaphore := make(chan struct{}, maxWorkers)
 
-	// Launch all task goroutines
+	// Start exactly maxWorkers worker goroutines
 	var wg sync.WaitGroup
-	for _, task := range tasks {
+	for range maxWorkers {
 		wg.Add(1)
-		go func(t Task[T]) {
+		go func() {
 			defer wg.Done()
+			// Each worker pulls tasks from the channel until it's closed
+			for task := range taskChan {
+				// Execute the task
+				value, err := task.Work(execCtx)
 
-			// Acquire semaphore slot (bounded concurrency)
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			// Execute the task
-			value, err := t.Work(execCtx)
-
-			// Send result through channel
-			results <- Result[T]{
-				Index: t.Index,
-				Value: value,
-				Err:   err,
+				// Send result through channel
+				results <- Result[T]{
+					Index: task.Index,
+					Value: value,
+					Err:   err,
+				}
 			}
-		}(task)
+		}()
 	}
 
-	// Close results channel when all goroutines complete
+	// Feed tasks to workers in a separate goroutine to avoid blocking
+	go func() {
+		for _, task := range tasks {
+			taskChan <- task
+		}
+		close(taskChan) // Signal workers that no more tasks are coming
+	}()
+
+	// Close results channel when all workers complete
 	go func() {
 		wg.Wait()
 		close(results)
