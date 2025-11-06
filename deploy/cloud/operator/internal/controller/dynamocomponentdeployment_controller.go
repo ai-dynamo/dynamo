@@ -327,6 +327,21 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		modified = true
 	}
 
+	// create or update headless service for model endpoint discovery
+	componentMap := map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		dynamoComponentDeployment.Name: &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
+	}
+	if err := dynamo.ReconcileModelServicesForComponents(
+		ctx,
+		r,
+		dynamoComponentDeployment,
+		componentMap,
+		dynamoComponentDeployment.Namespace,
+	); err != nil {
+		logs.Error(err, "Failed to reconcile model service")
+		return ctrl.Result{}, err
+	}
+
 	// create or update api-server ingresses
 	modified_, err = r.createOrUpdateOrDeleteIngress(ctx, generateResourceOption{
 		dynamoComponentDeployment: dynamoComponentDeployment,
@@ -926,10 +941,17 @@ func (r *DynamoComponentDeploymentReconciler) getGenericServiceName(dynamoCompon
 }
 
 func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) map[string]string {
+	labels := map[string]string{}
 	if dynamoComponentDeployment != nil && dynamoComponentDeployment.Labels != nil {
-		return dynamoComponentDeployment.Labels
+		for k, v := range dynamoComponentDeployment.Labels {
+			labels[k] = v
+		}
 	}
-	return map[string]string{}
+	// Add base model label if modelRef is specified
+	if dynamoComponentDeployment != nil {
+		dynamo.AddBaseModelLabel(labels, dynamoComponentDeployment.Spec.ModelRef)
+	}
+	return labels
 }
 
 func (r *DynamoComponentDeploymentReconciler) getKubeAnnotations(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) map[string]string {
