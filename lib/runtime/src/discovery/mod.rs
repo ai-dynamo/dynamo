@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::component::TransportType;
 use crate::Result;
+use crate::component::TransportType;
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,9 @@ pub enum DiscoveryKey {
     /// Query all endpoints in the system
     AllEndpoints,
     /// Query all endpoints in a specific namespace
-    NamespacedEndpoints { namespace: String },
+    NamespacedEndpoints {
+        namespace: String,
+    },
     /// Query all endpoints in a namespace/component
     ComponentEndpoints {
         namespace: String,
@@ -34,7 +36,9 @@ pub enum DiscoveryKey {
         endpoint: String,
     },
     AllModelCards,
-    NamespacedModelCards { namespace: String },
+    NamespacedModelCards {
+        namespace: String,
+    },
     ComponentModelCards {
         namespace: String,
         component: String,
@@ -156,9 +160,9 @@ impl DiscoveryInstance {
     {
         match self {
             Self::ModelCard { card_json, .. } => Ok(serde_json::from_value(card_json.clone())?),
-            Self::Endpoint(_) => crate::raise!(
-                "Cannot deserialize model card from Endpoint instance"
-            ),
+            Self::Endpoint(_) => {
+                crate::raise!("Cannot deserialize model card from Endpoint instance")
+            }
         }
     }
 }
@@ -192,4 +196,3 @@ pub trait DiscoveryClient: Send + Sync {
     /// Returns a stream of discovery events (Added/Removed) for the given discovery key
     async fn list_and_watch(&self, key: DiscoveryKey) -> Result<DiscoveryStream>;
 }
-
