@@ -74,7 +74,7 @@ async def graceful_shutdown(runtime):
 async def worker(runtime: DistributedRuntime):
     config = parse_args()
 
-    await configure_ports(runtime, config)
+    await configure_ports(config)
     overwrite_args(config)
 
     # Set up signal handler for graceful shutdown
