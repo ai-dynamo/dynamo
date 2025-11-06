@@ -9,7 +9,6 @@ on:
 
 jobs:
   operator:
-    needs: changed-files
     environment: release
     if:
     strategy:
@@ -59,7 +58,6 @@ jobs:
       #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   vllm:
-    needs: changed-files
     environment: release
     if:
     strategy:
@@ -105,7 +103,6 @@ jobs:
       #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   sglang:
-    needs: changed-files\
     environment: release
     if:
     strategy:
@@ -150,7 +147,6 @@ jobs:
       #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   trtllm:
-    needs: changed-files
     environment: release
     if:
     strategy:
@@ -195,7 +191,6 @@ jobs:
       #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   wheels:
-    needs: changed-files
     environment: release
     if:
     strategy:
