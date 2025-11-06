@@ -306,7 +306,9 @@ mod tests {
         );
 
         // Verify last chunk has Stop finish_reason for no-tool cases
-        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        let last_chunk = output_chunks
+            .last()
+            .expect("Should have at least one chunk");
         if let Some(data) = &last_chunk.data
             && let Some(choice) = data.choices.first()
         {
@@ -374,7 +376,9 @@ mod tests {
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
 
         // Verify the last chunk has ToolCalls finish_reason (empty Stop chunks should be filtered)
-        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        let last_chunk = output_chunks
+            .last()
+            .expect("Should have at least one chunk");
         if let Some(data) = &last_chunk.data
             && let Some(choice) = data.choices.first()
         {
@@ -433,7 +437,9 @@ mod tests {
         );
 
         // Verify last chunk has Stop finish_reason for no-tool cases
-        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        let last_chunk = output_chunks
+            .last()
+            .expect("Should have at least one chunk");
         if let Some(data) = &last_chunk.data
             && let Some(choice) = data.choices.first()
         {
@@ -497,7 +503,9 @@ mod tests {
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
 
         // Verify the last chunk has ToolCalls finish_reason (empty Stop chunks should be filtered)
-        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        let last_chunk = output_chunks
+            .last()
+            .expect("Should have at least one chunk");
         if let Some(data) = &last_chunk.data
             && let Some(choice) = data.choices.first()
         {
@@ -569,7 +577,9 @@ mod tests {
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
 
         // Verify last chunk has Stop finish_reason for no-tool cases
-        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        let last_chunk = output_chunks
+            .last()
+            .expect("Should have at least one chunk");
         if let Some(data) = &last_chunk.data
             && let Some(choice) = data.choices.first()
         {
@@ -643,8 +653,7 @@ mod tests {
                 .as_ref()
                 .and_then(|d| d.choices.first())
                 .map(|c| {
-                    c.finish_reason == Some(FinishReason::ToolCalls)
-                        && c.delta.tool_calls.is_some()
+                    c.finish_reason == Some(FinishReason::ToolCalls) && c.delta.tool_calls.is_some()
                 })
                 .unwrap_or(false)
         });
@@ -707,7 +716,9 @@ mod tests {
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
 
         // Verify last chunk has Stop finish_reason for no-tool cases
-        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        let last_chunk = output_chunks
+            .last()
+            .expect("Should have at least one chunk");
         if let Some(data) = &last_chunk.data
             && let Some(choice) = data.choices.first()
         {
@@ -779,8 +790,7 @@ mod tests {
                 .as_ref()
                 .and_then(|d| d.choices.first())
                 .map(|c| {
-                    c.finish_reason == Some(FinishReason::ToolCalls)
-                        && c.delta.tool_calls.is_some()
+                    c.finish_reason == Some(FinishReason::ToolCalls) && c.delta.tool_calls.is_some()
                 })
                 .unwrap_or(false)
         });
@@ -842,7 +852,9 @@ mod tests {
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
 
         // Verify the last chunk has ToolCalls finish_reason (empty Stop chunks should be filtered)
-        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        let last_chunk = output_chunks
+            .last()
+            .expect("Should have at least one chunk");
         if let Some(data) = &last_chunk.data
             && let Some(choice) = data.choices.first()
         {
@@ -857,5 +869,4 @@ mod tests {
             );
         }
     }
-
 }
