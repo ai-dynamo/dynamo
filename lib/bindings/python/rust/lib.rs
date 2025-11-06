@@ -241,9 +241,9 @@ async fn register_model(mut config: ModelConfig) -> anyhow::Result<()> {
     // Check if this is a LoRA registration
     if let (Some(lora_name), Some(base_path)) = (&config.lora_name, &config.base_path) {
         // LoRA registration path
-        use llm_rs::model_card::{ModelDeploymentCard, ROOT_PATH};
-        use dynamo_runtime::storage::key_value_store::Key;
         use dynamo_runtime::slug::Slug;
+        use dynamo_runtime::storage::key_value_store::Key;
+        use llm_rs::model_card::{ModelDeploymentCard, ROOT_PATH};
 
         // Resolve base model path
         let base_model_path = resolve_model_path(base_path).await?;
@@ -280,7 +280,9 @@ async fn register_model(mut config: ModelConfig) -> anyhow::Result<()> {
         card_store.publish(ROOT_PATH, None, &key, &mut card).await?;
     } else {
         // Base model registration path
-        let model_path = config.model_path.as_ref()
+        let model_path = config
+            .model_path
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("model_path is required for base model registration"))?;
 
         // Resolve model path and preserve name for HuggingFace repos
@@ -307,7 +309,13 @@ async fn register_model(mut config: ModelConfig) -> anyhow::Result<()> {
             .custom_template_path(config.custom_template_path);
 
         let mut local_model = builder.build().await?;
-        local_model.attach(&config.endpoint.inner, config.model_type, config.model_input).await?;
+        local_model
+            .attach(
+                &config.endpoint.inner,
+                config.model_type,
+                config.model_input,
+            )
+            .await?;
     }
 
     Ok(())
@@ -400,7 +408,6 @@ impl ModelConfig {
     }
 }
 
-
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
 /// This is the main way you create a Dynamo worker / backend.
 ///
@@ -482,7 +489,7 @@ fn register_llm<'p>(
     let registration_mode = if let Some(lora_name) = lora_name {
         let base_path = base_model_path.ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "base_model_path is required when lora_name is provided"
+                "base_model_path is required when lora_name is provided",
             )
         })?;
         RegistrationMode::Lora {
@@ -498,7 +505,10 @@ fn register_llm<'p>(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let result = match registration_mode {
-            RegistrationMode::Lora { lora_name, base_path } => {
+            RegistrationMode::Lora {
+                lora_name,
+                base_path,
+            } => {
                 register_model(ModelConfig::for_lora(
                     lora_name,
                     base_path,
@@ -507,9 +517,13 @@ fn register_llm<'p>(
                     model_input,
                     kv_cache_block_size,
                     user_data_json,
-                )).await
+                ))
+                .await
             }
-            RegistrationMode::BaseModel { model_path, model_name } => {
+            RegistrationMode::BaseModel {
+                model_path,
+                model_name,
+            } => {
                 register_model(ModelConfig::for_base_model(
                     model_path,
                     model_name,
@@ -523,7 +537,8 @@ fn register_llm<'p>(
                     runtime_config,
                     user_data_json,
                     custom_template_path_owned,
-                )).await
+                ))
+                .await
             }
         };
 
