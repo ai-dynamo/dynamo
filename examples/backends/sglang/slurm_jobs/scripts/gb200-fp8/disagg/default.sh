@@ -76,7 +76,7 @@ if [ "$mode" = "prefill" ]; then
     fi
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
     export SGLANG_DG_CACHE_DIR="/configs/dg-10212025"
-    ##export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
+    export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
 
     command_suffix=""
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/prefill_dsr1-0528_in1000out1000_num40000.json"; fi
@@ -138,7 +138,7 @@ elif [ "$mode" = "decode" ]; then
     fi
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
     export SGLANG_DG_CACHE_DIR="/configs/dg-10212025"
-    #export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
+    export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
 
     command_suffix=""
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/decode_dsr1-0528_loadgen_in1024out1024_num2000_2p12d.json"; fi
