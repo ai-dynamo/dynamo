@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -63,7 +62,7 @@ func (c *Client) LoadLoRA(
 	logs := log.FromContext(ctx)
 
 	// Skip loading for non-LoRA models
-	if strings.ToLower(model.Spec.ModelType) != "lora" {
+	if !model.IsLoRA() {
 		logs.V(1).Info("Skipping LoRA load for non-LoRA model", "modelType", model.Spec.ModelType)
 		endpoints := make([]v1alpha1.EndpointInfo, len(candidates))
 		for i, c := range candidates {

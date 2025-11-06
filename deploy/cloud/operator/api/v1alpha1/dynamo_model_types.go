@@ -18,6 +18,8 @@
 package v1alpha1
 
 import (
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -115,6 +117,11 @@ type DynamoModelList struct {
 
 func init() {
 	SchemeBuilder.Register(&DynamoModel{}, &DynamoModelList{})
+}
+
+// IsLoRA returns true if this is a LoRA model (case-insensitive)
+func (m *DynamoModel) IsLoRA() bool {
+	return strings.EqualFold(m.Spec.ModelType, "lora")
 }
 
 // GetReadyEndpoints returns only the endpoints that are ready

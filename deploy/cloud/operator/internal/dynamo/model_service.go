@@ -33,14 +33,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// ReconcileModelServicesForComponents creates headless services for components with modelRef
+// ReconcileModelServicesForComponents creates services for components with modelRef
 // This is common logic used by both DynamoGraphDeployment and DynamoComponentDeployment controllers
 // reconciler must implement controller_common.Reconciler interface
 func ReconcileModelServicesForComponents(
 	ctx context.Context,
 	reconciler commonController.Reconciler,
 	owner client.Object,
-	services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec,
+	components map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec,
 	namespace string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -48,7 +48,7 @@ func ReconcileModelServicesForComponents(
 	// Track unique base models to avoid creating duplicate services
 	seenBaseModels := make(map[string]bool)
 
-	for componentName, component := range services {
+	for componentName, component := range components {
 		// Skip if no modelRef
 		if component.ModelRef == nil || component.ModelRef.Name == "" {
 			continue
@@ -66,8 +66,7 @@ func ReconcileModelServicesForComponents(
 		seenBaseModels[baseModelName] = true
 
 		// Generate headless service with deterministic name based on model name
-		headlessService := GenerateHeadlessServiceForModel(
-			ctx,
+		headlessService := generateHeadlessServiceForModel(
 			namespace,
 			baseModelName,
 		)
@@ -101,8 +100,7 @@ func ReconcileModelServicesForComponents(
 // Service name is generated deterministically from the base model name using a hash
 // The base model name hash is stored as a label for efficient discovery
 // The original base model name is stored in an annotation for human readability
-func GenerateHeadlessServiceForModel(
-	ctx context.Context,
+func generateHeadlessServiceForModel(
 	namespace string,
 	baseModelName string,
 ) *corev1.Service {
@@ -168,14 +166,16 @@ func GenerateServiceName(baseModelName string) string {
 // AddBaseModelLabel adds the base model hash label to a label map if modelRef is present
 // Uses a hash of the model name to avoid label length/character restrictions
 func AddBaseModelLabel(labels map[string]string, modelRef *v1alpha1.ModelReference) {
-	if modelRef != nil && modelRef.Name != "" {
-		labels[commonconsts.KubeLabelDynamoBaseModelHash] = HashModelName(modelRef.Name)
+	if labels == nil || modelRef == nil || modelRef.Name == "" {
+		return
 	}
+	labels[commonconsts.KubeLabelDynamoBaseModelHash] = HashModelName(modelRef.Name)
 }
 
 // AddBaseModelAnnotation adds the base model annotation to preserve the original model name
 func AddBaseModelAnnotation(annotations map[string]string, modelRef *v1alpha1.ModelReference) {
-	if modelRef != nil && modelRef.Name != "" {
-		annotations[commonconsts.KubeAnnotationDynamoBaseModel] = modelRef.Name
+	if annotations == nil || modelRef == nil || modelRef.Name == "" {
+		return
 	}
+	annotations[commonconsts.KubeAnnotationDynamoBaseModel] = modelRef.Name
 }

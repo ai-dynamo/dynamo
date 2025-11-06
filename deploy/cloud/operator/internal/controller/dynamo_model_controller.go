@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -59,6 +58,9 @@ const (
 
 	// Field index names
 	dynamoModelBaseModelIndex = ".spec.baseModelName"
+
+	// Requeue duration for retries when endpoints are not ready
+	requeueAfterDuration = 30 * time.Second
 )
 
 // DynamoModelReconciler reconciles a DynamoModel object
@@ -106,7 +108,7 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	candidates, serviceNames, err := r.getEndpointCandidates(ctx, model)
 	if err != nil {
 		// Error already logged and status updated in helper
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
+		return ctrl.Result{RequeueAfter: requeueAfterDuration}, err
 	}
 
 	if len(candidates) == 0 {
@@ -121,12 +123,7 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if err := r.Status().Update(ctx, model); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
-	// Initialize endpoint client if needed
-	if r.EndpointClient == nil {
-		r.EndpointClient = modelendpoint.NewClient()
+		return ctrl.Result{RequeueAfter: requeueAfterDuration}, nil
 	}
 
 	// Load LoRA on all endpoints in parallel with bounded concurrency
@@ -135,9 +132,8 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Determine if we need to requeue based on model type
 	// For LoRA models: requeue if there were probe errors OR if not all endpoints are ready
 	// For base models: only requeue if there were probe errors (Ready is expected to be false)
-	isLoRA := strings.ToLower(model.Spec.ModelType) == "lora"
 	hasFailures := probeErr != nil
-	if isLoRA {
+	if model.IsLoRA() {
 		hasFailures = hasFailures || countReadyEndpoints(allEndpoints) < len(allEndpoints)
 	}
 
@@ -162,7 +158,7 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	model.Status.ReadyEndpoints = countReadyEndpoints(allEndpoints)
 
 	// Update conditions based on model type
-	if isLoRA {
+	if model.IsLoRA() {
 		// For LoRA models, check readiness
 		if model.Status.ReadyEndpoints > 0 {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionTrue, ReasonEndpointsDiscovered,
@@ -202,7 +198,7 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		logs.Info("Requeuing due to endpoint probe failures",
 			"ready", model.Status.ReadyEndpoints,
 			"total", model.Status.TotalEndpoints)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: requeueAfterDuration}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -294,7 +290,7 @@ func (r *DynamoModelReconciler) FinalizeResource(ctx context.Context, model *v1a
 	logs.Info("Finalizing DynamoModel", "modelType", model.Spec.ModelType)
 
 	// Only perform cleanup for LoRA models
-	if model.Spec.ModelType == "lora" {
+	if model.IsLoRA() {
 		// Get endpoint candidates (reusing common logic)
 		candidates, _, err := r.getEndpointCandidates(ctx, model)
 		if err != nil {
@@ -304,11 +300,6 @@ func (r *DynamoModelReconciler) FinalizeResource(ctx context.Context, model *v1a
 			// Continue with deletion even if we can't get endpoints
 		} else if len(candidates) > 0 {
 			logs.Info("Unloading LoRA from endpoints", "endpointCount", len(candidates))
-
-			// Initialize endpoint client if needed
-			if r.EndpointClient == nil {
-				r.EndpointClient = modelendpoint.NewClient()
-			}
 
 			// Unload LoRA from all endpoints in parallel
 			if err := r.EndpointClient.UnloadLoRA(ctx, candidates, model.Spec.ModelName); err != nil {
