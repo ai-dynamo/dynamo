@@ -49,8 +49,8 @@ export TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER=1
 export TRTLLM_MOE_USE_LOW_PRECISION_COMBINE=1
 
 # NOTE: Set (or unset) these depending on what cluster you're using
-export TRTLLM_UCX_INTERFACE=enP6p3s0f1np1
-export UCX_NET_DEVICES=enP6p3s0f1np1
+export TRTLLM_UCX_INTERFACE=enP6p9s0np0
+export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_3:1,mlx5_4:1,enP6p9s0np0
 export OVERRIDE_QUANT_ALGO=W4A8_MXFP4_MXFP8
 export TRTLLM_ENABLE_PDL=1
 
