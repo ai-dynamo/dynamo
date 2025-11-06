@@ -328,7 +328,7 @@ pub struct DeviceStorage {
     size: usize,
     ctx: Arc<CudaContext>,
     handles: RegistrationHandles,
-    _storage_type: DeviceStorageType,
+    storage_type: DeviceStorageType,
 }
 
 impl Local for DeviceStorage {}
@@ -345,7 +345,7 @@ impl DeviceStorage {
             size,
             ctx: ctx.clone(),
             handles: RegistrationHandles::new(),
-            _storage_type: DeviceStorageType::Owned,
+            storage_type: DeviceStorageType::Owned,
         })
     }
 
@@ -373,13 +373,17 @@ impl DeviceStorage {
             size,
             ctx: ctx.clone(),
             handles: RegistrationHandles::new(),
-            _storage_type: DeviceStorageType::Torch { _tensor: tensor },
+            storage_type: DeviceStorageType::Torch { _tensor: tensor },
         })
     }
 
     /// Get the CUDA context
     pub fn context(&self) -> &Arc<CudaContext> {
         &self.ctx
+    }
+
+    pub fn device_storage_type(&self) -> &DeviceStorageType {
+        &self.storage_type
     }
 }
 

@@ -84,6 +84,15 @@ impl DeviceStorage {
 
         let len = v1_storage.size();
 
+        if !matches!(
+            v1_storage.device_storage_type(),
+            DeviceStorageType::Torch { .. }
+        ) {
+            return Err(StorageError::InvalidConfig(
+                "Unable to convert owned device tensors.".into(),
+            ));
+        }
+
         Ok(Self {
             ctx,
             ptr,
