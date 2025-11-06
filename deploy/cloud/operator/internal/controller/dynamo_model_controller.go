@@ -321,16 +321,15 @@ func (r *DynamoModelReconciler) getEndpointCandidates(
 ) ([]modelendpoint.Candidate, map[string]bool, error) {
 	logs := log.FromContext(ctx)
 
-	// Generate the predictable service name from the base model name
-	// Service name is deterministic: dynamo-model-{8-char-hash}
-	serviceName := dynamo.GenerateServiceName(model.Spec.BaseModelName)
+	// Hash the base model name for label-based discovery
+	modelHash := dynamo.HashModelName(model.Spec.BaseModelName)
 
-	// Query EndpointSlices directly by service name
-	// EndpointSlices are automatically labeled with kubernetes.io/service-name
+	// Query EndpointSlices directly by base model hash label
+	// This label propagates from the Service to its EndpointSlices
 	endpointSlices := &discoveryv1.EndpointSliceList{}
 	if err := r.List(ctx, endpointSlices,
 		client.InNamespace(model.Namespace),
-		client.MatchingLabels{discoveryv1.LabelServiceName: serviceName},
+		client.MatchingLabels{consts.KubeLabelDynamoBaseModelHash: modelHash},
 	); err != nil {
 		logs.Error(err, "Failed to list endpoint slices for model")
 		r.Recorder.Event(model, corev1.EventTypeWarning, "EndpointDiscoveryFailed", err.Error())
