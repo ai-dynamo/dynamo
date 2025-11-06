@@ -10,183 +10,183 @@ on:
       - release-workflow
 
 jobs:
-  operator:
-    environment: release
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: cpu-amd-m5-2xlarge }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: operator (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Build Container
-        id: build-image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          cd deploy/cloud/operator
-          docker buildx build --load \
-              --platform linux/${{ matrix.platform.arch }} \
-              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              -f Dockerfile \
-              -t dynamo-operator:latest .
-      # - name: Docker Tag and Push
-      #   uses: ./.github/actions/docker-tag-push
-      #   with:
-      #     local_image: dynamo-operator:latest
-      #     push_tag: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
-      #     aws_push: 'false'
-      #     azure_push: 'true'
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  # operator:
+  #   environment: release
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64, runner: cpu-amd-m5-2xlarge }
+  #         - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+  #   name: operator (${{ matrix.platform.arch }})
+  #   runs-on: ${{ matrix.platform.runner }}
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Set up Docker Buildx
+  #       uses: docker/setup-buildx-action@v3
+  #       with:
+  #         driver: docker
+  #     - name: Login to ECR
+  #       shell: bash
+  #       env:
+  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #       run: |
+  #         aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+  #     - name: Build Container
+  #       id: build-image
+  #       shell: bash
+  #       env:
+  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #       run: |
+  #         cd deploy/cloud/operator
+  #         docker buildx build --load \
+  #             --platform linux/${{ matrix.platform.arch }} \
+  #             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+  #             -f Dockerfile \
+  #             -t dynamo-operator:latest .
+  #     # - name: Docker Tag and Push
+  #     #   uses: ./.github/actions/docker-tag-push
+  #     #   with:
+  #     #     local_image: dynamo-operator:latest
+  #     #     push_tag: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
+  #     #     aws_push: 'false'
+  #     #     azure_push: 'true'
+  #     #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #     #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #     #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #     #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #     #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-  vllm:
-    environment: release
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: vllm (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Build Container
-        id: build-image
-        uses: ./.github/actions/docker-build
-        with:
-          framework: vllm
-          target: runtime
-          platform: 'linux/${{ matrix.platform.arch }}'
-          base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && '129' || '' }}
-          torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      # - name: Docker Tag and Push
-      #   uses: ./.github/actions/docker-tag-push
-      #   with:
-      #     local_image: ${{ steps.build-image.outputs.image_tag }}
-      #     push_tag: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
-      #     aws_push: 'true'
-      #     azure_push: 'true'
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  # vllm:
+  #   environment: release
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64, runner: gpu-l40-amd64 }
+  #         - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+  #   name: vllm (${{ matrix.platform.arch }})
+  #   runs-on: ${{ matrix.platform.runner }}
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Build Container
+  #       id: build-image
+  #       uses: ./.github/actions/docker-build
+  #       with:
+  #         framework: vllm
+  #         target: runtime
+  #         platform: 'linux/${{ matrix.platform.arch }}'
+  #         base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+  #         runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
+  #         cuda_version: ${{ matrix.platform.arch == 'arm64' && '129' || '' }}
+  #         torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         ci_token: ${{ secrets.CI_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #     # - name: Docker Tag and Push
+  #     #   uses: ./.github/actions/docker-tag-push
+  #     #   with:
+  #     #     local_image: ${{ steps.build-image.outputs.image_tag }}
+  #     #     push_tag: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
+  #     #     aws_push: 'true'
+  #     #     azure_push: 'true'
+  #     #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #     #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #     #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #     #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #     #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-  sglang:
-    environment: release
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: sglang (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  # sglang:
+  #   environment: release
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64, runner: gpu-l40-amd64 }
+  #         - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+  #   name: sglang (${{ matrix.platform.arch }})
+  #   runs-on: ${{ matrix.platform.runner }}
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
-      - name: Build Container
-        id: build-image
-        uses: ./.github/actions/docker-build
-        with:
-          framework: sglang
-          target: runtime
-          platform: 'linux/${{ matrix.platform.arch }}'
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #     - name: Build Container
+  #       id: build-image
+  #       uses: ./.github/actions/docker-build
+  #       with:
+  #         framework: sglang
+  #         target: runtime
+  #         platform: 'linux/${{ matrix.platform.arch }}'
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         ci_token: ${{ secrets.CI_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      # - name: Docker Tag and Push
-      #   uses: ./.github/actions/docker-tag-push
-      #   with:
-      #     local_image: ${{ steps.build-image.outputs.image_tag }}
-      #     push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
-      #     # OPS-1145: Switch aws_push to true
-      #     aws_push: 'false'
-      #     azure_push: 'true'
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #     # - name: Docker Tag and Push
+  #     #   uses: ./.github/actions/docker-tag-push
+  #     #   with:
+  #     #     local_image: ${{ steps.build-image.outputs.image_tag }}
+  #     #     push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+  #     #     # OPS-1145: Switch aws_push to true
+  #     #     aws_push: 'false'
+  #     #     azure_push: 'true'
+  #     #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #     #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #     #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #     #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #     #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-  trtllm:
-    environment: release
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: trtllm (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  # trtllm:
+  #   environment: release
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64, runner: gpu-l40-amd64 }
+  #         - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+  #   name: trtllm (${{ matrix.platform.arch }})
+  #   runs-on: ${{ matrix.platform.runner }}
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
-      - name: Build Container
-        id: build-image
-        uses: ./.github/actions/docker-build
-        with:
-          framework: trtllm
-          target: runtime
-          platform: 'linux/${{ matrix.platform.arch }}'
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #     - name: Build Container
+  #       id: build-image
+  #       uses: ./.github/actions/docker-build
+  #       with:
+  #         framework: trtllm
+  #         target: runtime
+  #         platform: 'linux/${{ matrix.platform.arch }}'
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         ci_token: ${{ secrets.CI_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      # - name: Docker Tag and Push
-      #   uses: ./.github/actions/docker-tag-push
-      #   with:
-      #     local_image: ${{ steps.build-image.outputs.image_tag }}
-      #     push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
-      #     # OPS-1145: Switch aws_push to true
-      #     aws_push: 'false'
-      #     azure_push: 'true'
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #     # - name: Docker Tag and Push
+  #     #   uses: ./.github/actions/docker-tag-push
+  #     #   with:
+  #     #     local_image: ${{ steps.build-image.outputs.image_tag }}
+  #     #     push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+  #     #     # OPS-1145: Switch aws_push to true
+  #     #     aws_push: 'false'
+  #     #     azure_push: 'true'
+  #     #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #     #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #     #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #     #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #     #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   wheels:
     environment: release
@@ -196,7 +196,7 @@ jobs:
         platform:
           - { arch: amd64, runner: gpu-l40-amd64 }
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: trtllm (${{ matrix.platform.arch }})
+    name: wheels (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout code
@@ -224,7 +224,7 @@ jobs:
           set -x
           docker run -d --rm dynamo-base:0.0.0 sleep 10
           CONTAINER_ID=$(docker ps -a | grep dynamo-base:0.0.0 | awk '{print $1}')
-          WHEELS=$(docker exec ${CONTAINER_ID} ls wheelhouse)
+          WHEELS=$(docker exec ${CONTAINER_ID} ls -la)
           DYNAMO_RUNTIME_WHL=$(echo $WHEELS | grep "ai_dynamo_runtime.*.whl")
           DYNAMO_ANY_WHL=$(echo $WHEELS | grep "ai_dynamo.*any.whl")
           docker cp ${CONTAINER_ID}:/opt/dynamo/wheelhouse/${DYNAMO_RUNTIME_WHL} .
