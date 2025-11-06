@@ -26,7 +26,7 @@ across backends.
 
 */
 
-use dynamo_async_openai::types::ChatChoiceStream;
+use dynamo_async_openai::types::{ChatChoiceStream, FinishReason};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_runtime::protocols::annotated::Annotated;
@@ -304,6 +304,18 @@ mod tests {
             aggregated.has_tool_calls, expected_has_tool_calls,
             "Tool calls presence should match expected value"
         );
+
+        // Verify last chunk has Stop finish_reason for no-tool cases
+        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        if let Some(data) = &last_chunk.data
+            && let Some(choice) = data.choices.first()
+        {
+            assert_eq!(
+                choice.finish_reason,
+                Some(FinishReason::Stop),
+                "Last chunk should have Stop finish_reason for non-tool call case"
+            );
+        }
     }
 
     #[tokio::test]
@@ -360,6 +372,22 @@ mod tests {
 
         // Verify tool calls
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify the last chunk has ToolCalls finish_reason (empty Stop chunks should be filtered)
+        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        if let Some(data) = &last_chunk.data
+            && let Some(choice) = data.choices.first()
+        {
+            assert_eq!(
+                choice.finish_reason,
+                Some(FinishReason::ToolCalls),
+                "Last chunk should have ToolCalls finish_reason (empty Stop chunks should be filtered)"
+            );
+            assert!(
+                choice.delta.tool_calls.is_some(),
+                "Last chunk with ToolCalls finish_reason must have tool_calls data"
+            );
+        }
     }
 
     #[tokio::test]
@@ -403,6 +431,18 @@ mod tests {
             aggregated.has_tool_calls, expected_has_tool_calls,
             "Tool calls presence should match expected value"
         );
+
+        // Verify last chunk has Stop finish_reason for no-tool cases
+        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        if let Some(data) = &last_chunk.data
+            && let Some(choice) = data.choices.first()
+        {
+            assert_eq!(
+                choice.finish_reason,
+                Some(FinishReason::Stop),
+                "Last chunk should have Stop finish_reason for non-tool call case"
+            );
+        }
     }
 
     #[tokio::test]
@@ -455,6 +495,22 @@ mod tests {
 
         // Verify tool calls
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify the last chunk has ToolCalls finish_reason (empty Stop chunks should be filtered)
+        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        if let Some(data) = &last_chunk.data
+            && let Some(choice) = data.choices.first()
+        {
+            assert_eq!(
+                choice.finish_reason,
+                Some(FinishReason::ToolCalls),
+                "Last chunk should have ToolCalls finish_reason (empty Stop chunks should be filtered)"
+            );
+            assert!(
+                choice.delta.tool_calls.is_some(),
+                "Last chunk with ToolCalls finish_reason must have tool_calls data"
+            );
+        }
     }
 
     #[tokio::test]
@@ -511,6 +567,18 @@ mod tests {
         );
 
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify last chunk has Stop finish_reason for no-tool cases
+        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        if let Some(data) = &last_chunk.data
+            && let Some(choice) = data.choices.first()
+        {
+            assert_eq!(
+                choice.finish_reason,
+                Some(FinishReason::Stop),
+                "Last chunk should have Stop finish_reason for non-tool call case"
+            );
+        }
     }
 
     #[tokio::test]
@@ -567,6 +635,23 @@ mod tests {
         );
 
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify there is a chunk with ToolCalls finish_reason and tool call data
+        let has_tool_calls_chunk = output_chunks.iter().any(|chunk| {
+            chunk
+                .data
+                .as_ref()
+                .and_then(|d| d.choices.first())
+                .map(|c| {
+                    c.finish_reason == Some(FinishReason::ToolCalls)
+                        && c.delta.tool_calls.is_some()
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            has_tool_calls_chunk,
+            "Should have a chunk with ToolCalls finish_reason and tool_calls data"
+        );
     }
 
     #[tokio::test]
@@ -620,6 +705,18 @@ mod tests {
         );
 
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify last chunk has Stop finish_reason for no-tool cases
+        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        if let Some(data) = &last_chunk.data
+            && let Some(choice) = data.choices.first()
+        {
+            assert_eq!(
+                choice.finish_reason,
+                Some(FinishReason::Stop),
+                "Last chunk should have Stop finish_reason for non-tool call case"
+            );
+        }
     }
 
     #[tokio::test]
@@ -674,6 +771,23 @@ mod tests {
             "Tool calls presence should match expected value"
         );
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify there is a chunk with ToolCalls finish_reason and tool call data
+        let has_tool_calls_chunk = output_chunks.iter().any(|chunk| {
+            chunk
+                .data
+                .as_ref()
+                .and_then(|d| d.choices.first())
+                .map(|c| {
+                    c.finish_reason == Some(FinishReason::ToolCalls)
+                        && c.delta.tool_calls.is_some()
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            has_tool_calls_chunk,
+            "Should have a chunk with ToolCalls finish_reason and tool_calls data"
+        );
     }
 
     #[tokio::test]
@@ -726,5 +840,22 @@ mod tests {
 
         // Verify tool calls
         assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify the last chunk has ToolCalls finish_reason (empty Stop chunks should be filtered)
+        let last_chunk = output_chunks.last().expect("Should have at least one chunk");
+        if let Some(data) = &last_chunk.data
+            && let Some(choice) = data.choices.first()
+        {
+            assert_eq!(
+                choice.finish_reason,
+                Some(FinishReason::ToolCalls),
+                "Last chunk should have ToolCalls finish_reason (empty Stop chunks should be filtered)"
+            );
+            assert!(
+                choice.delta.tool_calls.is_some(),
+                "Last chunk with ToolCalls finish_reason must have tool_calls data"
+            );
+        }
     }
+
 }

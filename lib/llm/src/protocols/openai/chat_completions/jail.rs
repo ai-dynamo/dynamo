@@ -370,12 +370,17 @@ impl ChoiceJailState {
 struct ChoiceJailStateCollection {
     /// Vec of states, always kept sorted by choice index for deterministic iteration
     states: Vec<ChoiceJailState>,
+    /// Track if any choice has emitted a finish_reason (per choice index)
+    finish_reason_emitted: std::collections::HashMap<u32, bool>,
 }
 
 impl ChoiceJailStateCollection {
     /// Create a new empty collection
     fn new() -> Self {
-        Self { states: Vec::new() }
+        Self {
+            states: Vec::new(),
+            finish_reason_emitted: std::collections::HashMap::new(),
+        }
     }
 
     /// Get or create state for a choice index
@@ -393,6 +398,19 @@ impl ChoiceJailStateCollection {
                 &mut self.states[insert_pos]
             }
         }
+    }
+
+    /// Check if a finish_reason has already been emitted for this choice
+    fn has_emitted_finish_reason(&self, index: u32) -> bool {
+        self.finish_reason_emitted
+            .get(&index)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Mark that a finish_reason has been emitted for this choice
+    fn mark_finish_reason_emitted(&mut self, index: u32) {
+        self.finish_reason_emitted.insert(index, true);
     }
 }
 
@@ -456,6 +474,17 @@ impl JailedStream {
 
                     // Process each choice independently using the new architecture
                     for choice in &chat_response.choices {
+                        // if we've already emitted a finish_reason for this choice,
+                        // skip any subsequent chunks with finish_reason
+                        if choice.finish_reason.is_some() && choice_states.has_emitted_finish_reason(choice.index) {
+                            tracing::debug!(
+                                "Skipping chunk with finish_reason {:?} for choice {} - already emitted finish_reason",
+                                choice.finish_reason,
+                                choice.index
+                            );
+                            continue;
+                        }
+
                         if let Some(ref content) = choice.delta.content {
                             let choice_state = choice_states.get_or_create_state(choice.index);
 
@@ -509,8 +538,16 @@ impl JailedStream {
                                 last_annotated_event.clone(),
                                 last_annotated_comment.clone(),
                             );
-                            let responses = self.emit_choice_emissions(tool_content_emissions, chat_response, preserved_metadata);
+                            let responses = self.emit_choice_emissions(tool_content_emissions.clone(), chat_response, preserved_metadata);
                             for emitted_response in responses {
+                                // Mark finish_reason as emitted for choices that have it
+                                if let Some(ref data) = emitted_response.data {
+                                    for choice in &data.choices {
+                                        if choice.finish_reason.is_some() {
+                                            choice_states.mark_finish_reason_emitted(choice.index);
+                                        }
+                                    }
+                                }
                                 yield emitted_response;
                             }
                         }
@@ -524,6 +561,14 @@ impl JailedStream {
                             );
                             let responses = self.emit_choice_emissions(trailing_emissions, chat_response, preserved_metadata);
                             for emitted_response in responses {
+                                // Mark finish_reason as emitted for choices that have it
+                                if let Some(ref data) = emitted_response.data {
+                                    for choice in &data.choices {
+                                        if choice.finish_reason.is_some() {
+                                            choice_states.mark_finish_reason_emitted(choice.index);
+                                        }
+                                    }
+                                }
                                 yield emitted_response;
                             }
                         }
@@ -533,6 +578,14 @@ impl JailedStream {
                             let current_metadata = (response.id.clone(), response.event.clone(), response.comment.clone());
                             let responses = self.emit_choice_emissions(passthrough_emissions, chat_response, current_metadata);
                             for emitted_response in responses {
+                                // Mark finish_reason as emitted for choices that have it
+                                if let Some(ref data) = emitted_response.data {
+                                    for choice in &data.choices {
+                                        if choice.finish_reason.is_some() {
+                                            choice_states.mark_finish_reason_emitted(choice.index);
+                                        }
+                                    }
+                                }
                                 yield emitted_response;
                             }
                         }
@@ -568,6 +621,14 @@ impl JailedStream {
                 let final_metadata = (last_annotated_id, last_annotated_event, last_annotated_comment);
                 let responses = self.emit_choice_emissions(final_emissions, &dummy_response, final_metadata);
                 for emitted_response in responses {
+                    // Mark finish_reason as emitted for choices that have it
+                    if let Some(ref data) = emitted_response.data {
+                        for choice in &data.choices {
+                            if choice.finish_reason.is_some() {
+                                choice_states.mark_finish_reason_emitted(choice.index);
+                            }
+                        }
+                    }
                     yield emitted_response;
                 }
             }
