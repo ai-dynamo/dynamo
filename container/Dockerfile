@@ -408,6 +408,11 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS frontend
 # Install uv package manager
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
+COPY --from=dev /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dev /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# Add ETCD to PATH
+ENV PATH=/usr/local/bin/etcd:$PATH
+
 # Create and activate virtual environment
 ARG PYTHON_VERSION
 RUN mkdir -p /opt/dynamo/venv && \
@@ -416,6 +421,7 @@ RUN mkdir -p /opt/dynamo/venv && \
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
+COPY benchmarks/ /opt/dynamo/benchmarks/
 COPY --from=dev /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
@@ -430,9 +436,13 @@ RUN uv pip install \
     && rm -rf /opt/dynamo/benchmarks
 
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     UV_GIT_LFS=1 uv pip install \
         --no-cache \
-        --requirement /tmp/requirements.txt
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
+
+COPY . /workspace/
 
 # Setup launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
