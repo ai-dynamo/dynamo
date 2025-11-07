@@ -106,16 +106,6 @@ To quickly setup etcd & NATS, you can also run:
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-### Optional: Observability Stack
-
-For monitoring with metrics (Prometheus, Grafana) and distributed tracing (Tempo), deploy the observability stack:
-
-```bash
-docker compose -f deploy/docker-observability.yml up -d
-```
-
-This provides GPU metrics (DCGM), NATS metrics, Prometheus, and Grafana dashboards. Access Grafana at `http://localhost:3000` (username: `dynamo`, password: `dynamo`).
-
 ## 2. Select an engine
 
 We publish Python wheels specialized for each of our supported engines: vllm, sglang, and trtllm. The examples that follow use SGLang; continue reading for other engines.
