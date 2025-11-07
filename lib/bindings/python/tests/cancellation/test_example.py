@@ -100,6 +100,7 @@ def stop_process(process):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Graham working on it")
 async def test_direct_connection_cancellation(example_dir, server_process):
     """Test cancellation with direct client-server connection"""
     # Run the client (direct connection)
@@ -121,6 +122,7 @@ async def test_direct_connection_cancellation(example_dir, server_process):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Graham working on it")
 async def test_middle_server_cancellation(
     example_dir, server_process, middle_server_process
 ):

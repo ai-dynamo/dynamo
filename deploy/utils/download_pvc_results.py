@@ -182,7 +182,7 @@ def main():
     parser.add_argument(
         "--folder",
         required=True,
-        help="Absolute folder path in the PVC to download, must start with /data/, e.g. /data/profiling_results or /data/benchmarking_results",
+        help="Absolute folder path in the PVC to download, must start with /data",
     )
 
     args = parser.parse_args()
@@ -192,10 +192,6 @@ def main():
         print("❌ Error: Folder path must start with '/data/'")
         print(f"   Provided: {args.folder}")
         print("   Quick Fix: Add '/data/' prefix to your path")
-        print("   Examples:")
-        print("     /profiling_results → /data/profiling_results")
-        print("     /benchmarking_results → /data/benchmarking_results")
-        print("     /configs → /data/configs")
         sys.exit(1)
 
     print("📥 PVC Results Download")

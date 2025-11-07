@@ -27,7 +27,7 @@ async fn wait_for_key_count<T: DeserializeOwned>(
     expected_count: usize,
     timeout: Option<Duration>,
 ) -> Result<HashMap<String, T>, LeaderWorkerBarrierError> {
-    let (_key, _watcher, mut rx) = client
+    let (_key, mut rx) = client
         .kv_get_and_watch_prefix(&key)
         .await
         .map_err(LeaderWorkerBarrierError::EtcdError)?

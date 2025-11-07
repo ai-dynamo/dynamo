@@ -299,7 +299,7 @@ pub fn run_input<'p>(
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         dynamo_llm::entrypoint::input::run_input(
-            either::Either::Right(distributed_runtime.inner.clone()),
+            distributed_runtime.inner.clone(),
             input_enum,
             engine_config.inner,
         )
