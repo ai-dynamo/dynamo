@@ -398,7 +398,7 @@ main() {
             echo "Running TEP mode ($mtp_mode) with ctx_num=$ctx_num, gen_num=$gen_num, gen_tp_size=$gen_tp_size, gen_batch_size=$gen_batch_size, gen_max_num_tokens=$gen_max_num_tokens, gen_gpu_memory_fraction=$gen_gpu_memory_fraction, gen_mtp_size=$gen_mtp_size, gen_eplb_num_slots=$gen_eplb_num_slots, gen_concurrency_list=\"$gen_concurrency_list\""
 
             # TEP mode: Use false to disable attention dp
-            run_single $ctx_num $gen_num $gen_tp_size $gen_batch_size $gen_max_num_tokens false $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
+            run_single $ctx_num $gen_num $gen_tp_size $gen_tp_size $gen_batch_size $gen_max_num_tokens false $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
             ;;
         "dep")
             if [ $# -ne 11 ]; then
@@ -418,13 +418,28 @@ main() {
 
             echo "Running DEP mode ($mtp_mode) with ctx_num=$ctx_num, gen_num=$gen_num, gen_tp_size=$gen_tp_size, gen_batch_size=$gen_batch_size, gen_max_num_tokens=$gen_max_num_tokens, gen_gpu_memory_fraction=$gen_gpu_memory_fraction, gen_mtp_size=$gen_mtp_size, gen_eplb_num_slots=$gen_eplb_num_slots, gen_concurrency_list=\"$gen_concurrency_list\""
 
-            run_single $ctx_num $gen_num $gen_tp_size $gen_batch_size $gen_max_num_tokens true $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
+            run_single $ctx_num $gen_num $gen_tp_size $gen_tp_size $gen_batch_size $gen_max_num_tokens true $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
             ;;
-        "gpt-oss")
-            echo "Running GPT-OSS sweeps..."
-            run_gpt_oss
+        "tp")
+            if [ $# -ne 11 ]; then
+                echo "Error: TP mode requires 11 additional parameters (including mtp_mode)"
+                usage
+            fi
+
+            local ctx_num=$3
+            local gen_num=$4
+            local gen_tp_size=$5
+            local gen_batch_size=$6
+            local gen_max_num_tokens=$7
+            local gen_gpu_memory_fraction=$8
+            local gen_mtp_size=$9
+            local gen_eplb_num_slots=${10}
+            local gen_concurrency_list=${11}
+
+            echo "Running TP mode ($mtp_mode) with ctx_num=$ctx_num, gen_num=$gen_num, gen_tp_size=$gen_tp_size, gen_batch_size=$gen_batch_size, gen_max_num_tokens=$gen_max_num_tokens, gen_gpu_memory_fraction=$gen_gpu_memory_fraction, gen_mtp_size=$gen_mtp_size, gen_eplb_num_slots=$gen_eplb_num_slots, gen_concurrency_list=\"$gen_concurrency_list\""
+
+            run_single $ctx_num $gen_num $gen_tp_size 1 $gen_batch_size $gen_max_num_tokens false $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
             ;;
-        
         *)
             echo "Error: Unknown mode '$mode'"
             usage
