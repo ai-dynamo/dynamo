@@ -200,6 +200,16 @@ etcd:
   # Node tolerations for etcd pods (allows scheduling on specific nodes)
   tolerations: []
 
+  # Pod Disruption Budget configuration
+  # If replicas is 1, then need minAvailable to be 0 to enable node draining
+  pdb:
+    # Enable/disable a Pod Disruption Budget creation
+    create: true
+    # Minimum number/percentage of pods that should remain scheduled
+    minAvailable: 0
+    # Maximum number/percentage of pods that may be made unavailable
+    maxUnavailable: ""
+
 # NATS configuration - messaging system for operator communication
 nats:
   # -- Whether to enable NATS deployment, disable if you want to use an external NATS instance. For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats , all nats settings should be prefixed with "nats."
