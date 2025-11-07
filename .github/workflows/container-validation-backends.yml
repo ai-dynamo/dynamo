@@ -30,7 +30,14 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [vllm, sglang, trtllm, operator]
+    needs:
+      - vllm
+      - sglang
+      - trtllm
+      - operator
+      - vllm-test
+      - sglang-test
+      - trtllm-test
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -146,25 +153,6 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run unit tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and vllm and gpu_1"
-          framework: "vllm"
-          test_type: "unit"
-          platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and vllm and gpu_1 and not slow"
-          framework: "vllm"
-          test_type: "e2e, gpu_1"
-          platform_arch: ${{ matrix.platform.arch }}
-
   sglang:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
@@ -208,25 +196,6 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-      - name: Run unit tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and sglang and gpu_1"
-          framework: "sglang"
-          test_type: "unit"
-          platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and sglang and gpu_1"
-          framework: "sglang"
-          test_type: "e2e, gpu_1"
-          platform_arch: ${{ matrix.platform.arch }}
 
   trtllm:
     needs: changed-files
@@ -272,23 +241,79 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-      - name: Run unit tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
+  vllm-test:
+    needs: [changed-files, vllm]
+    if: needs.changed-files.outputs.has_code_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+        test_type:
+          - { name: unit, marks: "unit and vllm and gpu_1", type: "unit" }
+          - { name: e2e, marks: "e2e and vllm and gpu_1 and not slow", type: "e2e, gpu_1" }
+    name: vllm-test-${{ matrix.test_type.name }} (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Run ${{ matrix.test_type.name }} tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and trtllm_marker and gpu_1"
-          framework: "trtllm"
-          test_type: "unit"
+          image_tag: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
+          pytest_marks: ${{ matrix.test_type.marks }}
+          framework: "vllm"
+          test_type: ${{ matrix.test_type.type }}
           platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
+
+  sglang-test:
+    needs: [changed-files, sglang]
+    if: needs.changed-files.outputs.has_code_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+        test_type:
+          - { name: unit, marks: "unit and sglang and gpu_1", type: "unit" }
+          - { name: e2e, marks: "e2e and sglang and gpu_1", type: "e2e, gpu_1" }
+    name: sglang-test-${{ matrix.test_type.name }} (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Run ${{ matrix.test_type.name }} tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
+          image_tag: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+          pytest_marks: ${{ matrix.test_type.marks }}
+          framework: "sglang"
+          test_type: ${{ matrix.test_type.type }}
+          platform_arch: ${{ matrix.platform.arch }}
+
+  trtllm-test:
+    needs: [changed-files, trtllm]
+    if: needs.changed-files.outputs.has_code_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+        test_type:
+          - { name: unit, marks: "unit and trtllm_marker and gpu_1", type: "unit" }
+          - { name: e2e, marks: "e2e and trtllm_marker and gpu_1 and not slow", type: "e2e, gpu_1" }
+    name: trtllm-test-${{ matrix.test_type.name }} (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Run ${{ matrix.test_type.name }} tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
+          pytest_marks: ${{ matrix.test_type.marks }}
           framework: "trtllm"
-          test_type: "e2e, gpu_1"
+          test_type: ${{ matrix.test_type.type }}
           platform_arch: ${{ matrix.platform.arch }}
 
   # Upload metrics for this workflow and all its jobs
@@ -297,7 +322,6 @@ jobs:
     runs-on: gitlab
     if: always()  # Always run, even if other jobs fail
     needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -604,7 +628,15 @@ jobs:
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
     if: always()
-    needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
+    needs:
+      - changed-files
+      - deploy-operator
+      - deploy-test-trtllm
+      - deploy-test-sglang
+      - deploy-test-vllm
+      - vllm-test
+      - sglang-test
+      - trtllm-test
     steps:
     - uses: actions/checkout@v4
     - name: Setup Kubeconfig
