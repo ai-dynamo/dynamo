@@ -4,6 +4,8 @@
 use derive_getters::Dissolve;
 use tokio_util::sync::CancellationToken;
 
+use crate::storage::key_value_store;
+
 use super::*;
 
 pub use async_nats::service::endpoint::Stats as EndpointStats;

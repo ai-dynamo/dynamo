@@ -34,7 +34,7 @@ async def distributed_runtime():
     Each test gets its own runtime in a forked process to avoid singleton conflicts.
     """
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, False)
+    runtime = DistributedRuntime(loop, "etcd", False)
     yield runtime
     runtime.shutdown()
 

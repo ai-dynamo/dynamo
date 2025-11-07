@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::pipeline::{
-    AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
-    SingleIn,
+use crate::{
+    pipeline::{
+        AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
+        SingleIn,
+    },
+    storage::key_value_store::{KeyValueStoreManager, WatchEvent},
 };
 use arc_swap::ArcSwap;
 use futures::StreamExt;
