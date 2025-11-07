@@ -17,7 +17,7 @@ import json
 import logging
 import math
 import shlex
-from typing import Literal, Optional, Protocol
+from typing import Optional
 
 from pydantic import BaseModel
 
@@ -378,69 +378,3 @@ def update_image(config: dict, image: str) -> dict:
             logger.debug(f"Updated image for {service_name} to {image}")
 
     return cfg.model_dump()
-
-
-class ConfigModifierProtocol(Protocol):
-    @classmethod
-    def convert_config(
-        cls,
-        config: dict,
-        target: Literal["prefill", "decode"],
-        is_moe_model: bool = False,
-    ) -> dict:
-        ...
-
-    @classmethod
-    def set_config_tp_size(
-        cls,
-        config: dict,
-        tp_size: int,
-        component_type: SubComponentType = SubComponentType.DECODE,
-    ) -> dict:
-        ...
-
-    @classmethod
-    def set_config_tep_size(
-        cls,
-        config: dict,
-        tep_size: int,
-        num_gpus_per_node: int,
-        component_type: SubComponentType = SubComponentType.DECODE,
-    ) -> dict:
-        ...
-
-    @classmethod
-    def set_config_dep_size(
-        cls,
-        config: dict,
-        dep_size: int,
-        num_gpus_per_node: int,
-        component_type: SubComponentType = SubComponentType.DECODE,
-    ) -> dict:
-        ...
-
-    @classmethod
-    def get_model_name(cls, config: dict) -> str:
-        ...
-
-    @classmethod
-    def get_port(cls, config: dict) -> int:
-        ...
-
-    @classmethod
-    def get_kv_cache_size_from_dynamo_log(
-        cls, dynamo_log_fn: str, attention_dp_size: int = 1
-    ) -> int:
-        ...
-
-    @classmethod
-    def load_default_config(cls) -> dict:
-        ...
-
-    @classmethod
-    def update_model(cls, config: dict, model_name: str) -> dict:
-        ...
-
-    @classmethod
-    def update_image(cls, config: dict, image: str) -> dict:
-        ...
