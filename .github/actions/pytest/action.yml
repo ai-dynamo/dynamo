@@ -67,7 +67,7 @@ runs:
 
         # Copy test results from container to host
         echo "📥 Copying test results from container..."
-        if docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/test-results .; then
+        if docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/test-results ./test-results; then
           echo "✅ Successfully copied test results from container"
         else
           echo "⚠️  Failed to copy test results from container"
