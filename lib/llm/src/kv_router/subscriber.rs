@@ -16,21 +16,17 @@ use dynamo_runtime::{
     },
 };
 use rand::Rng;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     discovery::KV_ROUTERS_ROOT_PATH,
     kv_router::{
-        KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
+        KV_EVENT_SUBJECT,
         indexer::{DumpRequest, GetWorkersRequest, RouterEvent},
         protocols::WorkerId,
     },
 };
-
-/// Delay between snapshot reads to verify stability
-const SNAPSHOT_STABILITY_DELAY: Duration = Duration::from_millis(100);
-const MAX_SNAPSHOT_STABILITY_ATTEMPTS: usize = 10;
 
 const CHECK_INTERVAL_BASE: Duration = Duration::from_secs(1);
 const CHECK_INTERVAL_JITTER_MS: i64 = 100;
@@ -83,6 +79,7 @@ async fn download_snapshot_from_peer(
         // Use PushRouter pattern (follows existing patterns in codebase)
         use dynamo_runtime::pipeline::PushRouter;
         use dynamo_runtime::protocols::annotated::Annotated;
+        use dynamo_runtime::protocols::maybe_error::MaybeError;
         use dynamo_runtime::stream::StreamExt;
 
         let router = match PushRouter::<(), Annotated<serde_json::Value>>::from_client(
@@ -162,7 +159,7 @@ async fn download_snapshot_from_peer(
             };
 
             tracing::info!(
-                "Successfully fetched snapshot with {} events from peer instance {} via Dynamo endpoint (NATS object store NOT used)",
+                "Successfully fetched snapshot with {} events from peer instance {} via Dynamo endpoint",
                 events.len(),
                 instance_id
             );
@@ -184,17 +181,17 @@ async fn download_snapshot_from_peer(
     Err(anyhow::anyhow!("No peer snapshot available"))
 }
 
-/// Start a unified background task for event consumption and optional snapshot management
+/// Start a unified background task for event consumption
 #[allow(clippy::too_many_arguments)]
 pub async fn start_kv_router_background(
     component: Component,
     consumer_uuid: String,
     kv_events_tx: mpsc::Sender<RouterEvent>,
     remove_worker_tx: mpsc::Sender<WorkerId>,
-    maybe_get_workers_tx: Option<mpsc::Sender<GetWorkersRequest>>,
-    maybe_snapshot_tx: Option<mpsc::Sender<DumpRequest>>,
+    _maybe_get_workers_tx: Option<mpsc::Sender<GetWorkersRequest>>,
+    _maybe_snapshot_tx: Option<mpsc::Sender<DumpRequest>>,
     cancellation_token: CancellationToken,
-    router_snapshot_threshold: Option<u32>,
+    _router_snapshot_threshold: Option<u32>,
     router_reset_states: bool,
 ) -> Result<()> {
     // Set up NATS connections
@@ -213,22 +210,11 @@ pub async fn start_kv_router_background(
     );
     nats_queue.connect_with_reset(router_reset_states).await?;
 
-    // Always create NATS client (needed for both reset and snapshots)
-    let client_options = dynamo_runtime::transports::nats::Client::builder()
-        .server(&nats_server)
-        .build()?;
-    let nats_client = client_options.connect().await?;
-
-    // Get etcd client (needed for both snapshots and router watching)
+    // Get etcd client (needed for router watching)
     let etcd_client = component
         .drt()
         .etcd_client()
         .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
-
-    // Create bucket name for snapshots/state
-    let bucket_name = Slug::slugify(&format!("{}-{RADIX_STATE_BUCKET}", component.subject()))
-        .to_string()
-        .replace("_", "-");
 
     // Handle initial state based on router_reset_states flag
     if !router_reset_states {
@@ -265,10 +251,10 @@ pub async fn start_kv_router_background(
         .await?
         .dissolve();
 
-    // Get instances_rx for tracking current workers
+    // Verify we have dynamic instance source for KV routing
     let client = generate_endpoint.client().await?;
-    let instances_rx = match client.instance_source.as_ref() {
-        dynamo_runtime::component::InstanceSource::Dynamic(rx) => rx.clone(),
+    match client.instance_source.as_ref() {
+        dynamo_runtime::component::InstanceSource::Dynamic(_) => {}
         dynamo_runtime::component::InstanceSource::Static => {
             anyhow::bail!("Expected dynamic instance source for KV routing");
         }
