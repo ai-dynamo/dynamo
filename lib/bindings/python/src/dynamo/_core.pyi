@@ -12,7 +12,6 @@ from typing import (
     Tuple,
 )
 
-
 from ._prometheus_names import prometheus_names
 
 # Import from specialized modules
