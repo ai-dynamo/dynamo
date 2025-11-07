@@ -299,7 +299,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      # Run matrix jobs sequentially to prevent a Helm race condition.
+      # Run matrix jobs sequentially to prevent a Helm race condition
       # Parallel jobs conflict on ClusterRole ownership when installing the chart.
       # Error: ClusterRole "...-operator" exists... cannot be imported... current value is "...-ft-vllm"
       max-parallel: 1
