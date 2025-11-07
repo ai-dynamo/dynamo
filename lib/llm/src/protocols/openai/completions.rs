@@ -419,23 +419,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_skip_special_tokens_deserialization() {
-        // Test that skip_special_tokens can be deserialized from JSON
-        let json_str = json!({
-            "model": "test-model",
-            "prompt": "Hello, world!",
-            "skip_special_tokens": false
-        });
-
-        let request: NvCreateCompletionRequest =
-            serde_json::from_value(json_str).expect("Failed to deserialize request");
-
-        assert_eq!(request.common.skip_special_tokens, Some(false));
-    }
-
-    #[test]
-    fn test_skip_special_tokens_default_none() {
-        // Test that skip_special_tokens defaults to None when not specified
+    fn test_skip_special_tokens_none() {
         let json_str = json!({
             "model": "test-model",
             "prompt": "Hello, world!"
@@ -445,11 +429,16 @@ mod tests {
             serde_json::from_value(json_str).expect("Failed to deserialize request");
 
         assert_eq!(request.common.skip_special_tokens, None);
+
+        let output_options = request
+            .extract_output_options()
+            .expect("Failed to extract output options");
+
+        assert_eq!(output_options.skip_special_tokens, None);
     }
 
     #[test]
-    fn test_skip_special_tokens_output_options() {
-        // Test that skip_special_tokens is properly extracted to OutputOptions
+    fn test_skip_special_tokens_true_propagates() {
         let json_str = json!({
             "model": "test-model",
             "prompt": "Hello, world!",
@@ -468,7 +457,6 @@ mod tests {
 
     #[test]
     fn test_skip_special_tokens_false_propagates() {
-        // Test that skip_special_tokens=false is properly extracted
         let json_str = json!({
             "model": "test-model",
             "prompt": "Hello, world!",

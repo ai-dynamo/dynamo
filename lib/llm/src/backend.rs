@@ -130,8 +130,8 @@ impl
 
         let prompt_token_ids = request.token_ids.clone();
 
-        // Default to true to match vLLM/TensorRT-LLM behavior
-        let skip_special_tokens = request.output_options.skip_special_tokens.unwrap_or(true);
+        // TODO: Consider updating default to true to match behavior of other frameworks
+        let skip_special_tokens = request.output_options.skip_special_tokens.unwrap_or(false);
 
         let next_stream = next.generate(request).await?;
 
