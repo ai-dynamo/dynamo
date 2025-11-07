@@ -35,8 +35,7 @@ const MAX_SNAPSHOT_STABILITY_ATTEMPTS: usize = 10;
 const CHECK_INTERVAL_BASE: Duration = Duration::from_secs(1);
 const CHECK_INTERVAL_JITTER_MS: i64 = 100;
 
-/// Download snapshot from peer router via Dynamo endpoint (transport-agnostic).
-/// This removes the dependency on NATS object store for snapshot recovery.
+/// Download snapshot from peer router via Dynamo endpoint.
 async fn download_snapshot_from_peer(
     component: &Component,
     kv_events_tx: &mpsc::Sender<RouterEvent>,
@@ -72,16 +71,21 @@ async fn download_snapshot_from_peer(
         let client = match snapshot_endpoint.client().await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("Failed to create client for instance {}: {:?}", instance_id, e);
+                tracing::warn!(
+                    "Failed to create client for instance {}: {:?}",
+                    instance_id,
+                    e
+                );
                 continue;
             }
         };
 
         // Use PushRouter pattern (follows existing patterns in codebase)
         use dynamo_runtime::pipeline::PushRouter;
+        use dynamo_runtime::protocols::annotated::Annotated;
         use dynamo_runtime::stream::StreamExt;
 
-        let router = match PushRouter::<(), serde_json::Value>::from_client(
+        let router = match PushRouter::<(), Annotated<serde_json::Value>>::from_client(
             client,
             Default::default(),
         )
@@ -89,7 +93,11 @@ async fn download_snapshot_from_peer(
         {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("Failed to create router for instance {}: {:?}", instance_id, e);
+                tracing::warn!(
+                    "Failed to create router for instance {}: {:?}",
+                    instance_id,
+                    e
+                );
                 continue;
             }
         };
@@ -98,24 +106,57 @@ async fn download_snapshot_from_peer(
         let mut stream = match router.direct(().into(), instance_id).await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!("Failed to call snapshot endpoint on instance {}: {:?}", instance_id, e);
+                tracing::warn!(
+                    "Failed to call snapshot endpoint on instance {}: {:?}",
+                    instance_id,
+                    e
+                );
                 continue;
             }
         };
 
         // Get response
-        if let Some(response) = stream.next().await {
+        if let Some(annotated_response) = stream.next().await {
+            // Check for errors in the annotated response
+            if let Some(err) = annotated_response.err() {
+                tracing::warn!(
+                    "Snapshot endpoint returned error from instance {}: {:?}",
+                    instance_id,
+                    err
+                );
+                continue;
+            }
+
+            // Extract the data from the annotated response
+            let response = match annotated_response.data {
+                Some(data) => data,
+                None => {
+                    tracing::warn!(
+                        "Snapshot response from instance {} has no data",
+                        instance_id
+                    );
+                    continue;
+                }
+            };
+
             // Parse snapshot response
             let events_value = &response["events"];
             if events_value.is_null() {
-                tracing::warn!("Snapshot response from instance {} has no events", instance_id);
+                tracing::warn!(
+                    "Snapshot response from instance {} has no events",
+                    instance_id
+                );
                 continue;
             }
 
             let events: Vec<RouterEvent> = match serde_json::from_value(events_value.clone()) {
                 Ok(e) => e,
                 Err(e) => {
-                    tracing::warn!("Failed to deserialize events from instance {}: {:?}", instance_id, e);
+                    tracing::warn!(
+                        "Failed to deserialize events from instance {}: {:?}",
+                        instance_id,
+                        e
+                    );
                     continue;
                 }
             };
@@ -141,183 +182,6 @@ async fn download_snapshot_from_peer(
 
     tracing::debug!("Could not fetch snapshot from any peer router");
     Err(anyhow::anyhow!("No peer snapshot available"))
-}
-
-/// Download a stable snapshot from object store and send events to the indexer.
-/// Retries until two consecutive reads match or max attempts is reached.
-async fn download_stable_snapshot(
-    nats_client: &dynamo_runtime::transports::nats::Client,
-    bucket_name: &str,
-    kv_events_tx: &mpsc::Sender<RouterEvent>,
-) -> Result<()> {
-    let url = url::Url::parse(&format!(
-        "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
-        nats_client.addr()
-    ))?;
-
-    // Try to get initial snapshot
-    let Ok(mut prev_events) = nats_client
-        .object_store_download_data::<Vec<RouterEvent>>(&url)
-        .await
-    else {
-        tracing::debug!(
-            "Failed to download snapshots. This is normal for freshly started Router replicas."
-        );
-        return Ok(());
-    };
-
-    // Keep trying until we get two consecutive stable reads
-    for attempt in 1..=MAX_SNAPSHOT_STABILITY_ATTEMPTS {
-        tokio::time::sleep(SNAPSHOT_STABILITY_DELAY).await;
-
-        let curr_events = match nats_client
-            .object_store_download_data::<Vec<RouterEvent>>(&url)
-            .await
-        {
-            Ok(events) => events,
-            Err(e) => {
-                tracing::warn!(
-                    "Snapshot read failed on attempt {attempt}, using previous snapshot with {} events: {e:?}",
-                    prev_events.len()
-                );
-                break;
-            }
-        };
-
-        // Check if snapshot is stable (two consecutive reads match)
-        if prev_events == curr_events {
-            tracing::info!(
-                "Successfully downloaded stable snapshot with {} events from object store (stable after {attempt} attempts)",
-                curr_events.len()
-            );
-            prev_events = curr_events;
-            break;
-        }
-
-        tracing::debug!(
-            "Snapshot changed between reads on attempt {attempt} ({} -> {} events), retrying",
-            prev_events.len(),
-            curr_events.len()
-        );
-        prev_events = curr_events;
-
-        if attempt == MAX_SNAPSHOT_STABILITY_ATTEMPTS {
-            tracing::warn!(
-                "Max stability attempts reached, using latest snapshot with {} events",
-                prev_events.len()
-            );
-        }
-    }
-
-    // Send all events to the indexer
-    for event in prev_events {
-        if let Err(e) = kv_events_tx.send(event).await {
-            tracing::warn!("Failed to send initial event to indexer: {e:?}");
-        }
-    }
-    tracing::info!("Successfully sent all initial events to indexer");
-
-    Ok(())
-}
-
-/// Resources required for snapshot operations
-#[derive(Clone)]
-struct SnapshotResources {
-    nats_client: dynamo_runtime::transports::nats::Client,
-    bucket_name: String,
-    instances_rx: tokio::sync::watch::Receiver<Vec<dynamo_runtime::component::Instance>>,
-    get_workers_tx: mpsc::Sender<GetWorkersRequest>,
-    snapshot_tx: mpsc::Sender<DumpRequest>,
-}
-
-impl SnapshotResources {
-    /// Perform snapshot upload and purge operations
-    async fn purge_then_snapshot(
-        &self,
-        nats_queue: &mut NatsQueue,
-        remove_worker_tx: &mpsc::Sender<WorkerId>,
-    ) -> anyhow::Result<()> {
-        // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
-        // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
-        // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
-        tracing::info!("Purging acknowledged messages and performing snapshot of radix tree");
-        let start_time = std::time::Instant::now();
-
-        // Clean up stale workers before snapshot
-        // Get current worker IDs from instances_rx
-        let current_instances = self.instances_rx.borrow().clone();
-        let current_worker_ids: std::collections::HashSet<u64> = current_instances
-            .iter()
-            .map(|instance| instance.instance_id)
-            .collect();
-
-        // Get worker IDs from the indexer
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let get_workers_req = GetWorkersRequest { resp: resp_tx };
-
-        if let Err(e) = self.get_workers_tx.send(get_workers_req).await {
-            tracing::warn!("Failed to send get_workers request during snapshot: {e:?}");
-        } else {
-            match resp_rx.await {
-                Ok(indexer_worker_ids) => {
-                    // Find workers in indexer but not in current instances
-                    for worker_id in indexer_worker_ids {
-                        if !current_worker_ids.contains(&worker_id) {
-                            tracing::info!(
-                                "Removing stale worker {worker_id} from indexer during snapshot"
-                            );
-                            if let Err(e) = remove_worker_tx.send(worker_id).await {
-                                tracing::warn!(
-                                    "Failed to send remove_worker for stale worker {worker_id}: {e:?}"
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to receive worker IDs from indexer: {e:?}");
-                }
-            }
-        }
-
-        // First, purge acknowledged messages from the stream
-        nats_queue.purge_acknowledged().await?;
-
-        // Now request a snapshot from the indexer (which reflects the post-purge state)
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let dump_req = DumpRequest { resp: resp_tx };
-
-        self.snapshot_tx
-            .send(dump_req)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to send dump request: {e:?}"))?;
-
-        // Wait for the dump response
-        let events = resp_rx
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to receive dump response: {e:?}"))?;
-
-        // Upload the snapshot to NATS object store
-        let url = url::Url::parse(&format!(
-            "nats://{}/{}/{RADIX_STATE_FILE}",
-            self.nats_client.addr(),
-            self.bucket_name
-        ))?;
-
-        self.nats_client
-            .object_store_upload_data(&events, &url)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to upload snapshot: {e:?}"))?;
-
-        tracing::info!(
-            "Successfully performed snapshot of radix tree with {} events to bucket {} in {}ms",
-            events.len(),
-            self.bucket_name,
-            start_time.elapsed().as_millis()
-        );
-
-        Ok(())
-    }
 }
 
 /// Start a unified background task for event consumption and optional snapshot management
@@ -374,27 +238,15 @@ pub async fn start_kv_router_background(
                 tracing::info!("Router state loaded from peer via Dynamo endpoint");
             }
             Err(e) => {
-                tracing::debug!("Peer snapshot not available: {:?}", e);
-                tracing::info!("Falling back to NATS object store for snapshot");
-
-                // Fallback to NATS object store (existing behavior)
-                match download_stable_snapshot(&nats_client, &bucket_name, &kv_events_tx).await {
-                    Ok(_) => {
-                        tracing::info!("✅ Router state loaded from NATS object store (fallback)");
-                    }
-                    Err(e) => {
-                        tracing::warn!("NATS object store snapshot also failed: {:?}", e);
-                        tracing::info!("Starting with fresh router state (no snapshot available)");
-                    }
-                }
+                tracing::info!(
+                    "Peer snapshot not available ({}), starting with empty KV tree. \
+                    Tree will rebuild naturally as workers send KV events.",
+                    e
+                );
             }
         }
     } else {
-        // Delete the bucket to reset state
-        tracing::info!("Resetting router state, deleting bucket: {bucket_name}");
-        if let Err(e) = nats_client.object_store_delete_bucket(&bucket_name).await {
-            tracing::warn!("Failed to delete bucket (may not exist): {e:?}");
-        }
+        tracing::info!("Router reset_states flag enabled, starting with empty KV tree");
     }
 
     // Cleanup orphaned consumers on startup
@@ -420,23 +272,6 @@ pub async fn start_kv_router_background(
         dynamo_runtime::component::InstanceSource::Static => {
             anyhow::bail!("Expected dynamic instance source for KV routing");
         }
-    };
-
-    // Only set up snapshot-related resources if snapshot_tx, get_workers_tx, and threshold are provided
-    let snapshot_resources = if let (Some(get_workers_tx), Some(snapshot_tx), Some(_)) = (
-        maybe_get_workers_tx,
-        maybe_snapshot_tx,
-        router_snapshot_threshold,
-    ) {
-        Some(SnapshotResources {
-            nats_client,
-            bucket_name,
-            instances_rx,
-            get_workers_tx,
-            snapshot_tx,
-        })
-    } else {
-        None
     };
 
     tokio::spawn(async move {
@@ -515,35 +350,6 @@ pub async fn start_kv_router_background(
                             tracing::error!("Failed to dequeue task: {e:?}");
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
-                    }
-                }
-
-                // Handle periodic stream checking and purging (only if snapshot_resources is provided)
-                _ = check_interval.tick() => {
-                    let Some(resources) = snapshot_resources.as_ref() else {
-                        continue;
-                    };
-
-                    // Check total messages in the stream
-                    let Ok(message_count) = nats_queue.get_stream_messages().await else {
-                        tracing::warn!("Failed to get stream message count");
-                        continue;
-                    };
-
-                    let threshold = router_snapshot_threshold.unwrap_or(u32::MAX) as u64;
-
-                    if message_count <= threshold {
-                        continue;
-                    }
-
-                    tracing::info!("Stream has {message_count} messages (threshold: {threshold}), performing purge and snapshot");
-
-                    match resources.purge_then_snapshot(
-                        &mut nats_queue,
-                        &remove_worker_tx,
-                    ).await {
-                        Ok(_) => tracing::info!("Successfully performed purge and snapshot"),
-                        Err(e) => tracing::debug!("Could not perform purge and snapshot: {e:?}"),
                     }
                 }
 
