@@ -64,6 +64,10 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
 
+        if is_prefill:
+            env["DYN_VLLM_KV_EVENT_PORT"] = "20082"
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "5601"
+
         # Set log directory based on worker type
         worker_type = "prefill_worker" if is_prefill else "worker"
         log_dir = f"{request.node.name}_{worker_type}"
