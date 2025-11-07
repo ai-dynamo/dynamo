@@ -91,9 +91,34 @@ impl KVStoreDiscoveryClient {
         }
     }
 
-    /// Check if a key matches the given discovery key filter
-    fn matches_prefix(key_str: &str, prefix: &str) -> bool {
-        key_str.starts_with(prefix)
+    /// Strip bucket prefix from a key if present, returning the relative path within the bucket
+    /// For example: "v1/instances/ns/comp/ep" -> "ns/comp/ep"
+    /// Or if already relative: "ns/comp/ep" -> "ns/comp/ep"
+    fn strip_bucket_prefix<'a>(key: &'a str, bucket_name: &str) -> &'a str {
+        // Try to strip "bucket_name/" from the beginning
+        if let Some(stripped) = key.strip_prefix(bucket_name) {
+            // Strip the leading slash if present
+            stripped.strip_prefix('/').unwrap_or(stripped)
+        } else {
+            // Key is already relative to bucket
+            key
+        }
+    }
+
+    /// Check if a key matches the given prefix, handling both absolute and relative key formats
+    /// This works regardless of whether keys include the bucket prefix (etcd) or not (memory)
+    fn matches_prefix(key_str: &str, prefix: &str, bucket_name: &str) -> bool {
+        // Normalize both the key and prefix to relative paths (without bucket prefix)
+        let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
+        let relative_prefix = Self::strip_bucket_prefix(prefix, bucket_name);
+
+        // Empty prefix matches everything in the bucket
+        if relative_prefix.is_empty() {
+            return true;
+        }
+
+        // Check if the relative key starts with the relative prefix
+        relative_key.starts_with(relative_prefix)
     }
 
     /// Parse and deserialize a discovery instance from KV store entry
@@ -204,7 +229,7 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
         // Filter by prefix and deserialize
         let mut instances = Vec::new();
         for (key_str, value) in entries {
-            if Self::matches_prefix(&key_str, &prefix) {
+            if Self::matches_prefix(&key_str, &prefix, bucket_name) {
                 match Self::parse_instance(&value) {
                     Ok(instance) => instances.push(instance),
                     Err(e) => {
@@ -261,10 +286,10 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                             "KVStoreDiscoveryClient::list_and_watch: Put event, key={}, prefix={}, matches={}",
                             kv.key_str(),
                             prefix,
-                            Self::matches_prefix(kv.key_str(), &prefix)
+                            Self::matches_prefix(kv.key_str(), &prefix, bucket_name)
                         );
                         // Check if this key matches our prefix
-                        if !Self::matches_prefix(kv.key_str(), &prefix) {
+                        if !Self::matches_prefix(kv.key_str(), &prefix, bucket_name) {
                             tracing::debug!(
                                 "KVStoreDiscoveryClient::list_and_watch: Skipping key {} (doesn't match prefix {})",
                                 kv.key_str(),
@@ -299,7 +324,7 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                             prefix
                         );
                         // Check if this key matches our prefix
-                        if !Self::matches_prefix(kv.key_str(), &prefix) {
+                        if !Self::matches_prefix(kv.key_str(), &prefix, bucket_name) {
                             tracing::debug!(
                                 "KVStoreDiscoveryClient::list_and_watch: Skipping deleted key {} (doesn't match prefix {})",
                                 kv.key_str(),
