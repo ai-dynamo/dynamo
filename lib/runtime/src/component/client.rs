@@ -9,6 +9,7 @@ use crate::{
     storage::key_value_store::{KeyValueStoreManager, WatchEvent},
 };
 use arc_swap::ArcSwap;
+use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::unix::pipe::Receiver;
@@ -67,18 +68,33 @@ impl Client {
 
     // Client with auto-discover instances using etcd
     pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
+        tracing::debug!(
+            "Client::new_dynamic: Creating dynamic client for endpoint: {}",
+            endpoint.path()
+        );
         const INSTANCE_REFRESH_PERIOD: Duration = Duration::from_secs(1);
 
-        // create live endpoint watcher
         let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
+        tracing::debug!(
+            "Client::new_dynamic: Got instance source for endpoint: {}",
+            endpoint.path()
+        );
 
         let client = Client {
-            endpoint,
+            endpoint: endpoint.clone(),
             instance_source: instance_source.clone(),
             instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
             instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
         };
+        tracing::debug!(
+            "Client::new_dynamic: Starting instance source monitor for endpoint: {}",
+            endpoint.path()
+        );
         client.monitor_instance_source();
+        tracing::debug!(
+            "Client::new_dynamic: Successfully created dynamic client for endpoint: {}",
+            endpoint.path()
+        );
         Ok(client)
     }
 
@@ -113,17 +129,47 @@ impl Client {
 
     /// Wait for at least one Instance to be available for this Endpoint
     pub async fn wait_for_instances(&self) -> Result<Vec<Instance>> {
+        tracing::debug!(
+            "wait_for_instances: Starting wait for endpoint: {}",
+            self.endpoint.path()
+        );
         let mut instances: Vec<Instance> = vec![];
         if let InstanceSource::Dynamic(mut rx) = self.instance_source.as_ref().clone() {
             // wait for there to be 1 or more endpoints
+            let mut iteration = 0;
             loop {
                 instances = rx.borrow_and_update().to_vec();
+                tracing::debug!(
+                    "wait_for_instances: iteration={}, current_instance_count={}, endpoint={}",
+                    iteration,
+                    instances.len(),
+                    self.endpoint.path()
+                );
                 if instances.is_empty() {
+                    tracing::debug!(
+                        "wait_for_instances: No instances yet, waiting for change notification for endpoint: {}",
+                        self.endpoint.path()
+                    );
                     rx.changed().await?;
+                    tracing::debug!(
+                        "wait_for_instances: Change notification received for endpoint: {}",
+                        self.endpoint.path()
+                    );
                 } else {
+                    tracing::info!(
+                        "wait_for_instances: Found {} instance(s) for endpoint: {}",
+                        instances.len(),
+                        self.endpoint.path()
+                    );
                     break;
                 }
+                iteration += 1;
             }
+        } else {
+            tracing::debug!(
+                "wait_for_instances: Static instance source, no dynamic discovery for endpoint: {}",
+                self.endpoint.path()
+            );
         }
         Ok(instances)
     }
@@ -159,14 +205,22 @@ impl Client {
     fn monitor_instance_source(&self) {
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
+        let endpoint_path = self.endpoint.path();
+        tracing::debug!(
+            "monitor_instance_source: Starting monitor for endpoint: {}",
+            endpoint_path
+        );
         tokio::task::spawn(async move {
             let mut rx = match client.instance_source.as_ref() {
                 InstanceSource::Static => {
-                    tracing::error!("Static instance source is not watchable");
+                    tracing::error!(
+                        "monitor_instance_source: Static instance source is not watchable"
+                    );
                     return;
                 }
                 InstanceSource::Dynamic(rx) => rx.clone(),
             };
+            let mut iteration = 0;
             while !cancel_token.is_cancelled() {
                 let instance_ids: Vec<u64> = rx
                     .borrow_and_update()
@@ -174,17 +228,37 @@ impl Client {
                     .map(|instance| instance.id())
                     .collect();
 
+                tracing::debug!(
+                    "monitor_instance_source: iteration={}, instance_count={}, instance_ids={:?}, endpoint={}",
+                    iteration,
+                    instance_ids.len(),
+                    instance_ids,
+                    endpoint_path
+                );
+
                 // TODO: this resets both tracked available and free instances
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
-                client.instance_free.store(Arc::new(instance_ids));
+                client.instance_free.store(Arc::new(instance_ids.clone()));
 
-                tracing::debug!("instance source updated");
+                tracing::debug!(
+                    "monitor_instance_source: instance source updated, endpoint={}",
+                    endpoint_path
+                );
 
                 if let Err(err) = rx.changed().await {
-                    tracing::error!("The Sender is dropped: {}", err);
+                    tracing::error!(
+                        "monitor_instance_source: The Sender is dropped: {}, endpoint={}",
+                        err,
+                        endpoint_path
+                    );
                     cancel_token.cancel();
                 }
+                iteration += 1;
             }
+            tracing::debug!(
+                "monitor_instance_source: Monitor loop exiting for endpoint: {}",
+                endpoint_path
+            );
         });
     }
 
@@ -195,100 +269,141 @@ impl Client {
         let instance_sources = drt.instance_sources();
         let mut instance_sources = instance_sources.lock().await;
 
+        tracing::debug!(
+            "get_or_create_dynamic_instance_source: Checking cache for endpoint: {}",
+            endpoint.path()
+        );
+
         if let Some(instance_source) = instance_sources.get(endpoint) {
             if let Some(instance_source) = instance_source.upgrade() {
+                tracing::debug!(
+                    "get_or_create_dynamic_instance_source: Found cached instance source for endpoint: {}",
+                    endpoint.path()
+                );
                 return Ok(instance_source);
             } else {
+                tracing::debug!(
+                    "get_or_create_dynamic_instance_source: Cached instance source was dropped, removing for endpoint: {}",
+                    endpoint.path()
+                );
                 instance_sources.remove(endpoint);
             }
         }
 
-        let prefix = endpoint.etcd_root();
-        let store = Arc::new(drt.store().clone());
-        let (_, mut kv_event_rx) =
-            store.watch(super::INSTANCE_ROOT_PATH, None, drt.primary_token());
+        tracing::debug!(
+            "get_or_create_dynamic_instance_source: Creating new instance source for endpoint: {}",
+            endpoint.path()
+        );
+
+        let discovery = drt.discovery();
+        let discovery_query = crate::discovery::DiscoveryQuery::Endpoint {
+            namespace: endpoint.component.namespace.name.clone(),
+            component: endpoint.component.name.clone(),
+            endpoint: endpoint.name.clone(),
+        };
+
+        tracing::debug!(
+            "get_or_create_dynamic_instance_source: Calling discovery.list_and_watch for query: {:?}",
+            discovery_query
+        );
+
+        let mut discovery_stream = discovery
+            .list_and_watch(discovery_query.clone(), None)
+            .await?;
+
+        tracing::debug!(
+            "get_or_create_dynamic_instance_source: Got discovery stream for query: {:?}",
+            discovery_query
+        );
+
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
 
         let secondary = endpoint.component.drt.runtime.secondary().clone();
 
-        // this task should be included in the registry
-        // currently this is created once per client, but this object/task should only be instantiated
-        // once per worker/instance
         secondary.spawn(async move {
-            tracing::debug!("Starting endpoint watcher for prefix: {prefix}");
-            let mut map = HashMap::new();
+            tracing::debug!("endpoint_watcher: Starting for discovery query: {:?}", discovery_query);
+            let mut map: HashMap<u64, Instance> = HashMap::new();
+            let mut event_count = 0;
 
             loop {
-                let kv_event = tokio::select! {
+                let discovery_event = tokio::select! {
                     _ = watch_tx.closed() => {
-                        tracing::debug!("all watchers have closed; shutting down endpoint watcher for prefix: {prefix}");
+                        tracing::debug!("endpoint_watcher: all watchers have closed; shutting down for discovery query: {:?}", discovery_query);
                         break;
                     }
-                    kv_event = kv_event_rx.recv() => {
-                        match kv_event {
-                            Some(kv_event) => kv_event,
+                    discovery_event = discovery_stream.next() => {
+                        tracing::debug!("endpoint_watcher: Received stream event for discovery query: {:?}", discovery_query);
+                        match discovery_event {
+                            Some(Ok(event)) => {
+                                tracing::debug!("endpoint_watcher: Got Ok event: {:?}", event);
+                                event
+                            },
+                            Some(Err(e)) => {
+                                tracing::error!("endpoint_watcher: discovery stream error: {}; shutting down for discovery query: {:?}", e, discovery_query);
+                                break;
+                            }
                             None => {
-                                tracing::debug!("watch stream has closed; shutting down endpoint watcher for prefix: {prefix}");
+                                tracing::debug!("endpoint_watcher: watch stream has closed; shutting down for discovery query: {:?}", discovery_query);
                                 break;
                             }
                         }
                     }
                 };
 
-                match kv_event {
-                    WatchEvent::Put(kv) => {
-                        let key = kv.key_str();
-                        if !key.starts_with(&prefix) {
-                            continue;
-                        }
-                        let Some(mut key) = key.strip_prefix(super::INSTANCE_ROOT_PATH) else {
-                            tracing::error!("WatchEvent::Put Key not in INSTANCE_ROOT_PATH. Should be impossible.");
-                            continue;
-                        };
-                        if key.starts_with("/") {
-                            key = &key[1..];
-                        }
+                event_count += 1;
+                tracing::debug!("endpoint_watcher: Processing event #{} for discovery query: {:?}", event_count, discovery_query);
 
-                        match serde_json::from_slice::<Instance>(kv.value()) {
-                            Ok(val) => map.insert(key.to_string(), val),
-                            Err(err) => {
-                                tracing::error!(error = %err, prefix,
-                                    "Unable to parse put endpoint event; shutting down endpoint watcher");
-                                break;
+                match discovery_event {
+                    crate::discovery::DiscoveryEvent::Added(discovery_instance) => {
+                        match discovery_instance {
+                            crate::discovery::DiscoveryInstance::Endpoint(instance) => {
+                                tracing::debug!(
+                                    "endpoint_watcher: Added endpoint instance_id={}, namespace={}, component={}, endpoint={}",
+                                    instance.instance_id,
+                                    instance.namespace,
+                                    instance.component,
+                                    instance.endpoint
+                                );
+                                map.insert(instance.instance_id, instance);
                             }
-                        };
+                            _ => {
+                                tracing::debug!("endpoint_watcher: Ignoring non-endpoint instance (Model, etc.) for discovery query: {:?}", discovery_query);
+                            }
+                        }
                     }
-                    WatchEvent::Delete(key) => {
-                        let key = key.as_ref();
-                        if !key.starts_with(&prefix) {
-                            continue;
-                        }
-                        let Some(mut key) = key.strip_prefix(super::INSTANCE_ROOT_PATH) else {
-                            tracing::error!("WatchEvent::Delete Key not in INSTANCE_ROOT_PATH. Should be impossible.");
-                            continue;
-                        };
-                        if key.starts_with("/") {
-                            key = &key[1..];
-                        }
-                        map.remove(key);
+                    crate::discovery::DiscoveryEvent::Removed(instance_id) => {
+                        tracing::debug!(
+                            "endpoint_watcher: Removed instance_id={} for discovery query: {:?}",
+                            instance_id,
+                            discovery_query
+                        );
+                        map.remove(&instance_id);
                     }
                 }
 
                 let instances: Vec<Instance> = map.values().cloned().collect();
+                tracing::debug!(
+                    "endpoint_watcher: Current map size={}, sending update for discovery query: {:?}",
+                    instances.len(),
+                    discovery_query
+                );
 
                 if watch_tx.send(instances).is_err() {
-                    tracing::debug!("Unable to send watch updates; shutting down endpoint watcher for prefix: {}", prefix);
+                    tracing::debug!("endpoint_watcher: Unable to send watch updates; shutting down for discovery query: {:?}", discovery_query);
                     break;
                 }
-
             }
 
-            tracing::debug!("Completed endpoint watcher for prefix: {prefix}");
+            tracing::debug!("endpoint_watcher: Completed for discovery query: {:?}, total events processed: {}", discovery_query, event_count);
             let _ = watch_tx.send(vec![]);
         });
 
         let instance_source = Arc::new(InstanceSource::Dynamic(watch_rx));
         instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
+        tracing::debug!(
+            "get_or_create_dynamic_instance_source: Successfully created and cached instance source for endpoint: {}",
+            endpoint.path()
+        );
         Ok(instance_source)
     }
 }
