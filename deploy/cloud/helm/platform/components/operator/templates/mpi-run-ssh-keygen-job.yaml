@@ -44,7 +44,8 @@ spec:
       {{- end }}
       securityContext:
         runAsNonRoot: true
-        allowPrivilegeEscalation: false
+        runAsUser: 65534
+        fsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
       initContainers:
