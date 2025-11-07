@@ -59,19 +59,6 @@ impl NixlAgent {
             if let Some(param_name) = env_key.strip_prefix(&prefix) {
                 let param_key = param_name.to_lowercase();
                 params.add(&param_key, &env_value)?;
-
-                // Redact sensitive-looking parameters
-                let display_value = if param_key.contains("secret")
-                    || param_key.contains("key") && param_key != "access_key"
-                {
-                    "<REDACTED>".to_string()
-                } else {
-                    env_value.clone()
-                };
-                param_sources.push(format!(
-                    "{}={} (from {})",
-                    param_key, display_value, env_key
-                ));
                 found_any = true;
             }
         }
@@ -83,9 +70,6 @@ impl NixlAgent {
             "{} backend parameters configured from environment:",
             backend_name
         );
-        for source in &param_sources {
-            tracing::debug!("   {}", source);
-        }
 
         Ok(Some(params))
     }
@@ -132,7 +116,7 @@ impl NixlAgent {
                     tracing::debug!("{} backend created with provided parameters", backend_upper);
                 }
                 Err(e) => {
-                    tracing::error!(
+                    eprintln!(
                         "Failed to create {} backend with provided params: {}. Operations requiring this backend will fail.",
                         backend_upper,
                         e
@@ -196,7 +180,7 @@ impl NixlAgent {
                             );
                         }
                         Err(e) => {
-                            tracing::error!(
+                            eprintln!(
                                 "Failed to create {} backend with custom params: {}. Check your DYN_KVBM_NIXL_BACKEND_{}_* environment variables.",
                                 backend_upper,
                                 e,
@@ -213,7 +197,7 @@ impl NixlAgent {
                                 available_backends.insert(backend_upper);
                             }
                             Err(e) => {
-                                tracing::error!(
+                                eprintln!(
                                     "Failed to create {} backend: {}. Operations requiring this backend will fail.",
                                     backend_upper,
                                     e
@@ -221,7 +205,7 @@ impl NixlAgent {
                             }
                         },
                         Err(_) => {
-                            tracing::error!(
+                            eprintln!(
                                 "No {} plugin found. Operations requiring this backend will fail.",
                                 backend_upper
                             );
@@ -289,7 +273,7 @@ impl NixlAgent {
                     tracing::debug!("{} backend created with provided parameters", backend_upper);
                 }
                 Err(e) => {
-                    tracing::error!(
+                    eprintln!(
                         "Failed to create {} backend with provided params: {}",
                         backend_upper,
                         e
@@ -367,7 +351,7 @@ impl NixlAgent {
                             );
                         }
                         Err(e) => {
-                            tracing::error!(
+                            eprintln!(
                                 "✗ Failed to create {} backend with custom params: {}",
                                 backend_upper,
                                 e
@@ -387,7 +371,7 @@ impl NixlAgent {
                                 available_backends.insert(backend_upper);
                             }
                             Err(e) => {
-                                tracing::error!(
+                                eprintln!(
                                     "✗ Failed to create {} backend: {}",
                                     backend_upper,
                                     e
@@ -397,14 +381,14 @@ impl NixlAgent {
                             }
                         },
                         Err(e) => {
-                            tracing::error!("No {} plugin found", backend_upper);
+                            eprintln!("No {} plugin found", backend_upper);
                             failed_backends
                                 .push((backend_upper.clone(), format!("plugin not found: {}", e)));
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::error!(
+                    eprintln!(
                         "Failed to parse {} backend parameters from environment: {}",
                         backend_upper,
                         e
