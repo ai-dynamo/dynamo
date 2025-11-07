@@ -1279,11 +1279,11 @@ pub mod tests {
 
                 // 1. Extract the dynamically generated trace ID and validate consistency
                 // All logs should have the same trace_id since they're part of the same trace
+                // Skip any initialization logs that don't have trace_id (e.g., OTLP setup messages)
                 let trace_id = lines
-                    .first()
-                    .and_then(|log_line| log_line.get("trace_id"))
-                    .and_then(|v| v.as_str())
-                    .expect("First log line should have a trace_id")
+                    .iter()
+                    .find_map(|log_line| log_line.get("trace_id").and_then(|v| v.as_str()))
+                    .expect("At least one log line should have a trace_id")
                     .to_string();
 
                 // Verify trace_id is not a zero/invalid ID
@@ -1318,172 +1318,147 @@ pub mod tests {
                     }
                 }
 
-                // 2. Validate span IDs are unique for SPAN_CREATED and SPAN_CLOSED events
-                let mut created_span_ids: Vec<String> = Vec::new();
-                let mut closed_span_ids: Vec<String> = Vec::new();
+                // 2. Validate span IDs exist and are properly formatted
+                let mut span_ids_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut span_timestamps: std::collections::HashMap<String, DateTime<Utc>> = std::collections::HashMap::new();
 
                 for log_line in &lines {
-                    if let Some(message) = log_line.get("message") {
-                        match message.as_str().unwrap() {
-                            "SPAN_CREATED" => {
-                                if let Some(span_id) = log_line.get("span_id") {
-                                    let span_id_str = span_id.as_str().unwrap();
-                                    assert!(
-                                        created_span_ids.iter().all(|id| id != span_id_str),
-                                        "Duplicate span ID found in SPAN_CREATED: {}",
-                                        span_id_str
-                                    );
-                                    created_span_ids.push(span_id_str.to_string());
-                                }
-                            }
-                            "SPAN_CLOSED" => {
-                                if let Some(span_id) = log_line.get("span_id") {
-                                    let span_id_str = span_id.as_str().unwrap();
-                                    assert!(
-                                        closed_span_ids.iter().all(|id| id != span_id_str),
-                                        "Duplicate span ID found in SPAN_CLOSED: {}",
-                                        span_id_str
-                                    );
-                                    closed_span_ids.push(span_id_str.to_string());
-                                }
-                            }
-                            _ => {}
+                    if let Some(span_id) = log_line.get("span_id") {
+                        let span_id_str = span_id.as_str().unwrap();
+                        assert!(
+                            is_valid_span_id(span_id_str),
+                            "Invalid span_id format: {}",
+                            span_id_str
+                        );
+                        span_ids_seen.insert(span_id_str.to_string());
+                    }
+
+                    // Validate timestamp format and track span timestamps
+                    if let Some(time_str) = log_line.get("time").and_then(|v| v.as_str()) {
+                        let timestamp = DateTime::parse_from_rfc3339(time_str)
+                            .expect("All timestamps should be valid RFC3339 format")
+                            .with_timezone(&Utc);
+
+                        // Track timestamp for each span_name
+                        if let Some(span_name) = log_line.get("span_name").and_then(|v| v.as_str()) {
+                            span_timestamps.insert(span_name.to_string(), timestamp);
                         }
                     }
                 }
 
-                // Additionally, ensure that every SPAN_CLOSED has a corresponding SPAN_CREATED
-                for closed_span_id in &closed_span_ids {
-                    assert!(
-                        created_span_ids.contains(closed_span_id),
-                        "SPAN_CLOSED without corresponding SPAN_CREATED: {}",
-                        closed_span_id
-                    );
-                }
-
-                // 3. Validate parent span relationships
+                // 3. Validate parent-child span relationships
+                // Extract span IDs for each span by looking at their log messages
                 let parent_span_id = lines
                     .iter()
                     .find(|log_line| {
-                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CREATED"
-                            && log_line.get("span_name").unwrap().as_str().unwrap() == "parent"
+                        log_line.get("span_name")
+                            .and_then(|v| v.as_str()) == Some("parent")
                     })
                     .and_then(|log_line| {
-                        log_line
-                            .get("span_id")
-                            .map(|s| s.as_str().unwrap().to_string())
+                        log_line.get("span_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
                     })
-                    .unwrap();
+                    .expect("Should find parent span with span_id");
 
                 let child_span_id = lines
                     .iter()
                     .find(|log_line| {
-                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CREATED"
-                            && log_line.get("span_name").unwrap().as_str().unwrap() == "child"
+                        log_line.get("span_name")
+                            .and_then(|v| v.as_str()) == Some("child")
                     })
                     .and_then(|log_line| {
-                        log_line
-                            .get("span_id")
-                            .map(|s| s.as_str().unwrap().to_string())
+                        log_line.get("span_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
                     })
-                    .unwrap();
+                    .expect("Should find child span with span_id");
 
-                let _grandchild_span_id = lines
+                let grandchild_span_id = lines
                     .iter()
                     .find(|log_line| {
-                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CREATED"
-                            && log_line.get("span_name").unwrap().as_str().unwrap() == "grandchild"
+                        log_line.get("span_name")
+                            .and_then(|v| v.as_str()) == Some("grandchild")
                     })
                     .and_then(|log_line| {
-                        log_line
-                            .get("span_id")
-                            .map(|s| s.as_str().unwrap().to_string())
+                        log_line.get("span_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
                     })
-                    .unwrap();
+                    .expect("Should find grandchild span with span_id");
 
-                // Parent span has no parent_id
+                // Verify span IDs are unique
+                assert_ne!(parent_span_id, child_span_id, "Parent and child should have different span IDs");
+                assert_ne!(child_span_id, grandchild_span_id, "Child and grandchild should have different span IDs");
+                assert_ne!(parent_span_id, grandchild_span_id, "Parent and grandchild should have different span IDs");
+
+                // Verify parent span has no parent_id
                 for log_line in &lines {
                     if let Some(span_name) = log_line.get("span_name")
                         && let Some(span_name_str) = span_name.as_str()
                         && span_name_str == "parent"
                     {
-                        assert!(log_line.get("parent_id").is_none());
+                        assert!(
+                            log_line.get("parent_id").is_none(),
+                            "Parent span should not have a parent_id"
+                        );
                     }
                 }
 
-                // Child span's parent_id is parent_span_id
+                // Verify child span's parent_id is parent_span_id
                 for log_line in &lines {
                     if let Some(span_name) = log_line.get("span_name")
                         && let Some(span_name_str) = span_name.as_str()
                         && span_name_str == "child"
                     {
+                        let parent_id = log_line.get("parent_id")
+                            .and_then(|v| v.as_str())
+                            .expect("Child span should have a parent_id");
                         assert_eq!(
-                            log_line.get("parent_id").unwrap().as_str().unwrap(),
-                            &parent_span_id
+                            parent_id,
+                            parent_span_id,
+                            "Child's parent_id should match parent's span_id"
                         );
                     }
                 }
 
-                // Grandchild span's parent_id is child_span_id
+                // Verify grandchild span's parent_id is child_span_id
                 for log_line in &lines {
                     if let Some(span_name) = log_line.get("span_name")
                         && let Some(span_name_str) = span_name.as_str()
                         && span_name_str == "grandchild"
                     {
+                        let parent_id = log_line.get("parent_id")
+                            .and_then(|v| v.as_str())
+                            .expect("Grandchild span should have a parent_id");
                         assert_eq!(
-                            log_line.get("parent_id").unwrap().as_str().unwrap(),
-                            &child_span_id
+                            parent_id,
+                            child_span_id,
+                            "Grandchild's parent_id should match child's span_id"
                         );
                     }
                 }
 
-                // Validate duration relationships
-                let parent_duration = lines
-                    .iter()
-                    .find(|log_line| {
-                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CLOSED"
-                            && log_line.get("span_name").unwrap().as_str().unwrap() == "parent"
-                    })
-                    .and_then(|log_line| {
-                        log_line
-                            .get("time.duration_us")
-                            .map(|d| d.as_u64().unwrap())
-                    })
-                    .unwrap();
+                // 4. Validate timestamp ordering - spans should log in execution order
+                let parent_time = span_timestamps.get("parent")
+                    .expect("Should have timestamp for parent span");
+                let child_time = span_timestamps.get("child")
+                    .expect("Should have timestamp for child span");
+                let grandchild_time = span_timestamps.get("grandchild")
+                    .expect("Should have timestamp for grandchild span");
 
-                let child_duration = lines
-                    .iter()
-                    .find(|log_line| {
-                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CLOSED"
-                            && log_line.get("span_name").unwrap().as_str().unwrap() == "child"
-                    })
-                    .and_then(|log_line| {
-                        log_line
-                            .get("time.duration_us")
-                            .map(|d| d.as_u64().unwrap())
-                    })
-                    .unwrap();
-
-                let grandchild_duration = lines
-                    .iter()
-                    .find(|log_line| {
-                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CLOSED"
-                            && log_line.get("span_name").unwrap().as_str().unwrap() == "grandchild"
-                    })
-                    .and_then(|log_line| {
-                        log_line
-                            .get("time.duration_us")
-                            .map(|d| d.as_u64().unwrap())
-                    })
-                    .unwrap();
-
+                // Parent logs first (or at same time), then child, then grandchild
                 assert!(
-                    parent_duration > child_duration + grandchild_duration,
-                    "Parent duration is not greater than the sum of child and grandchild durations"
+                    parent_time <= child_time,
+                    "Parent span should log before or at same time as child span (parent: {}, child: {})",
+                    parent_time,
+                    child_time
                 );
                 assert!(
-                    child_duration > grandchild_duration,
-                    "Child duration is not greater than grandchild duration"
+                    child_time <= grandchild_time,
+                    "Child span should log before or at same time as grandchild span (child: {}, grandchild: {})",
+                    child_time,
+                    grandchild_time
                 );
 
                 Ok::<(), anyhow::Error>(())

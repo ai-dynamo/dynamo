@@ -313,6 +313,14 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
             return;
         }
 
+        if bounce_buffer_spec.block_ids().len() == 0 {
+            tx.send(Err(anyhow::anyhow!(
+                "Bounce buffer must have at least one block."
+            )))
+            .unwrap();
+            return;
+        }
+
         let num_bounce_blocks = bounce_buffer_spec.block_ids().len();
 
         if num_bounce_blocks == 1 {
@@ -332,7 +340,7 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
                 )
                 .await
                 {
-                    tx.send(Err(e)).unwrap();
+                    let _ = tx.send(Err(e));
                     return;
                 }
             }
@@ -352,10 +360,10 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
             )
             .await
             {
-                tx.send(Err(e)).unwrap();
+                let _ = tx.send(Err(e));
                 return;
             }
-            tx.send(Ok(())).unwrap();
+            let _ = tx.send(Ok(()));
         }
     });
 

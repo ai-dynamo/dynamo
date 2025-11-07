@@ -155,6 +155,7 @@ async fn benchmark(args: &Args) -> Result<()> {
         .bounce_buffer(bounce_buffer_spec)
         .build()?;
 
+    anyhow::ensure!(args.blocks_per_batch <= args.num_blocks, "blocks_per_batch must be less than or equal to num_blocks");
     let blocks = (0..args.blocks_per_batch).collect::<Vec<_>>();
 
     for (src, dst, name) in vec![

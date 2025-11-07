@@ -75,6 +75,19 @@ jobs:
         run: |
           cd deploy/cloud/operator
           docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.24'
+      - name: Check for uncommitted changes
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          sudo apt-get update && sudo apt-get install -y make
+          cd deploy/cloud/operator
+          make check
       - name: Build Container
         id: build-image
         shell: bash
@@ -344,7 +357,7 @@ jobs:
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
     if: needs.changed-files.outputs.has_code_changes == 'true'
-    needs: [changed-files, operator]
+    needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
     outputs:
@@ -455,6 +468,7 @@ jobs:
         export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
         export KUBE_NS=$NAMESPACE
         export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
+        echo "GRAPH_NAME=${GRAPH_NAME}" >> $GITHUB_ENV
         # Update the deployment file in-place
         yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
 
@@ -479,7 +493,7 @@ jobs:
         echo ""
 
         kubectl get all -n $KUBE_NS
-        export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+        export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} | tail -n1 | awk '{print $1}')
         export CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${KUBE_NS} -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
         echo "Container port is ${CONTAINER_PORT}"
         kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${KUBE_NS} &
@@ -547,7 +561,6 @@ jobs:
       timeout-minutes: 5
       env:
         NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-        PROFILE: ${{ matrix.profile }}
       run: |
         set -x
         export KUBECONFIG=$(pwd)/.kubeconfig
@@ -557,8 +570,7 @@ jobs:
         kubectl get all
 
         echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
-        PROFILE_SANITIZED="${PROFILE/_/-}"
-        kubectl delete dynamographdeployments $FRAMEWORK-$PROFILE_SANITIZED -n $NAMESPACE || true
+        kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE || true
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge

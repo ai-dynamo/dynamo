@@ -52,12 +52,20 @@ impl DistributedRuntime {
 
         let runtime_clone = runtime.clone();
 
+        // TODO: Here is where we will later select the KeyValueStore impl
         let (etcd_client, store) = if is_static {
             (None, KeyValueStoreManager::memory())
         } else {
-            let etcd_client = etcd::Client::new(etcd_config.clone(), runtime_clone).await?;
-            let store = KeyValueStoreManager::etcd(etcd_client.clone());
-            (Some(etcd_client), store)
+            match etcd::Client::new(etcd_config.clone(), runtime_clone).await {
+                Ok(etcd_client) => {
+                    let store = KeyValueStoreManager::etcd(etcd_client.clone());
+                    (Some(etcd_client), store)
+                }
+                Err(err) => {
+                    tracing::info!(%err, "Did not connect to etcd. Using memory storage.");
+                    (None, KeyValueStoreManager::memory())
+                }
+            }
         };
 
         let nats_client = Some(nats_config.clone().connect().await?);
@@ -266,13 +274,10 @@ impl DistributedRuntime {
     }
 
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
+    //
+    // Try to use `store()` instead of this. Only use this if you have not been able to migrate
+    // yet, or if you require etcd-specific features like distributed locking (rare).
     pub fn etcd_client(&self) -> Option<etcd::Client> {
-        self.etcd_client.clone()
-    }
-
-    // Deprecated but our CI blocks us using the feature currently.
-    //#[deprecated(note = "Use KeyValueStoreManager via store(); this will be removed")]
-    pub fn deprecated_etcd_client(&self) -> Option<etcd::Client> {
         self.etcd_client.clone()
     }
 

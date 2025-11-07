@@ -86,6 +86,25 @@ python3 -m dynamo.sglang \
 
 On the other prefill node (since this example has 4 total prefill nodes), run the same command but change `--node-rank` to 1,2, and 3
 
+> [!IMPORTANT]
+> If you encounter random CPU recv timeout issues during the warm-up phase in multi-GPU or multi-node setups, they are likely caused by DeepGEMM kernel compilation overhead.
+> To avoid these non-deterministic timeouts, it's strongly recommended to precompile the DeepGEMM kernels before launching the SGLang engine. This ensures all kernels are cached and ready, preventing long initialization delays or distributed timeout errors. To precompile and use cached kernels, please execute the following commands:
+
+```bash
+# 1. Precompile DeepGEMM kernels
+export SGLANG_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
+python3 -m sglang.compile_deep_gemm <ServerArgs>
+
+# 2. Launch the engine with the same cache directory
+export SGLANG_DG_CACHE_DIR="/configs/dgcache/3p1dcache"
+python3 -m dynamo.frontend <ServerArgs>
+```
+
+> [!NOTE]
+> There's a known issue where the compile request may fail due to missing bootstrap information, but the kernels are still successfully cached.
+> Using a gradual warm-up phase and enabling caching for FlashInfer (similar to DeepGEMM) can further improve stability and reduce startup time.
+> See https://github.com/sgl-project/sglang/issues/9867#issuecomment-3336551174 for more details.
+
 4. Run the decode worker on the head decode node
 
 ```bash

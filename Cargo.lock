@@ -2190,6 +2190,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-config"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "dynamo-engine-mistralrs"
 version = "0.6.1"
 dependencies = [
@@ -2251,6 +2258,7 @@ dependencies = [
  "galil-seiferas",
  "hf-hub",
  "humantime",
+ "image",
  "indicatif 0.18.2",
  "insta",
  "itertools 0.14.0",
@@ -2288,6 +2296,7 @@ dependencies = [
  "tmq",
  "tokenizers",
  "tokio",
+ "tokio-rayon",
  "tokio-stream",
  "tokio-util",
  "toktrie 1.2.0",
@@ -2304,6 +2313,23 @@ dependencies = [
  "validator",
  "xxhash-rust",
  "zeromq",
+]
+
+[[package]]
+name = "dynamo-memory"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
+ "cudarc 0.17.3",
+ "dynamo-config",
+ "libc",
+ "nix 0.30.1",
+ "nixl-sys",
+ "offset-allocator",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.16",
+ "tracing",
 ]
 
 [[package]]
@@ -5306,6 +5332,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags 2.9.4",
+ "cfg-if 1.0.3",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nixl-sys"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6437,7 +6475,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "977dc837525cfd22919ba6a831413854beb7c99a256c03bf8624ad707e45810e"
 dependencies = [
  "async-channel",
- "clap 4.5.48",
+ "clap 4.5.51",
  "futures",
  "inventory",
  "once_cell",
@@ -9627,7 +9665,6 @@ name = "unit-prefix"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "323402cff2dd658f39ca17c789b502021b3f18707c91cdf22e3838e1b4023817"
-
 
 [[package]]
 name = "unsafe-libyaml"
