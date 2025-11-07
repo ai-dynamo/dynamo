@@ -70,7 +70,7 @@ cd $DYNAMO_HOME/examples/backends/vllm
 >
 > # [Experimental] Option 3: Disk cache only (GPU -> Disk direct offloading, bypassing CPU)
 > # NOTE: this option is only experimental and it might not give out the best performance.
-> # NOTE: disk offload filtering is not support when using this option.
+> # NOTE: disk offload filtering is not supported when using this option.
 > export DYN_KVBM_DISK_CACHE_GB=8
 > ```
 >
@@ -114,7 +114,7 @@ To avoid it, please set a longer timeout for leader–worker initialization.
 export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=1200
 ```
 
-2. When offloading to disk is enabled, KVBM could fail to start up if fallocate is not support to create the files.
+2. When offloading to disk is enabled, KVBM could fail to start up if fallocate is not supported to create the files.
 To bypass the issue, please use disk zerofill fallback.
 
 ```bash
