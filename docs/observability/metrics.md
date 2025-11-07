@@ -20,9 +20,16 @@ Dynamo provides built-in metrics capabilities through the Dynamo metrics API, wh
 | `DYN_SYSTEM_ENABLED` | Enable system metrics/health server | `false` | `true` |
 | `DYN_SYSTEM_PORT` | System metrics/health port | `8081` | `9090` |
 
-## Getting Started (Single GPU)
+## Getting Started Quickly
 
-**Note:** This requires NATS and etcd running. For a complete setup with Prometheus and Grafana visualization, see the [Prometheus and Grafana Setup Guide](prometheus-grafana.md).
+This is a single machine example.
+
+### Start Observability Stack
+
+For visualizing metrics with Prometheus and Grafana, start the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
+
+
+### Launch Dynamo Components
 
 Launch a frontend and vLLM backend to test metrics:
 

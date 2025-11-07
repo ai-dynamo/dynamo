@@ -22,7 +22,7 @@ orchestration frameworks such as Kubernetes.
 | `DYN_SYSTEM_LIVE_PATH` | Custom liveness endpoint path | `/live` | `/custom/live` |
 | `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` | Endpoints required for ready state | none | `["generate"]` |
 
-## Getting Started (Single GPU)
+## Getting Started Quickly
 
 Enable health checks and query endpoints:
 

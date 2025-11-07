@@ -36,7 +36,13 @@ distributed tracing.
 | `OTEL_EXPORT_ENABLED` | Enable OTLP trace exporting | `false` | `true` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP exporter endpoint | `http://localhost:4317` | `http://tempo:4317` |
 
-## Getting Started
+## Getting Started Quickly
+
+### Start Observability Stack
+
+For collecting and visualizing logs with Grafana Loki (Kubernetes), or viewing trace context in logs alongside Grafana Tempo, start the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
+
+### Enable Structured Logging
 
 Enable structured JSONL logging:
 
@@ -99,15 +105,15 @@ Resulting Log format:
 {"time":"2025-09-02T15:53:31.943747Z","level":"INFO","target":"log","message":"Scheduler config values: {'max_num_seqs': 256, 'max_num_batched_tokens': 2048}","log.file":"/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py","log.line":268,"log.target":"main.get_engine_cache_info"}
 ```
 
-## Logging of OpenTelemetry Tracing
+## Logging of Trace and Span IDs
 
-When `DYN_LOGGING_JSONL` is enabled, Dynamo uses OpenTelemetry for distributed tracing. All logs include `trace_id` and `span_id` fields, and spans are automatically created for requests. This is useful for short debugging sessions where you want to examine trace context in logs without setting up a full tracing backend.
+When `DYN_LOGGING_JSONL` is enabled, all logs include OpenTelemetry compatible `trace_id` and `span_id` fields, and spans are automatically created for requests. This is useful for short debugging sessions where you want to examine trace context in logs without setting up a full tracing backend and for correlating log messages with traces.
 
-**Note:** This section has overlap with [Distributed Tracing with Tempo](tracing.md) since OpenTelemetry has aspects of both logging and tracing. For trace visualization in Grafana Tempo and persistent trace analysis, see [Distributed Tracing with Tempo](tracing.md).
+**Note:** This section has overlap with [Distributed Tracing with Tempo](tracing.md). For trace visualization in Grafana Tempo and persistent trace analysis, see [Distributed Tracing with Tempo](tracing.md).
 
 ### Configuration for Logging
 
-To see OpenTelemetry trace information in logs:
+To see trace information in logs:
 
 ```bash
 export DYN_LOGGING_JSONL=true
@@ -141,7 +147,7 @@ Check the logs (stderr) for JSONL output containing `trace_id`, `span_id`, and `
 
 ## Trace and Span Information in Logs
 
-This section shows how OpenTelemetry trace and span information appears in JSONL logs. These logs can be used to understand request flows even without a trace visualization backend.
+This section shows how trace and span information appears in JSONL logs. These logs can be used to understand request flows even without a trace visualization backend.
 
 ### Example Disaggregated Trace in Grafana
 

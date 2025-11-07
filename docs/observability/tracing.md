@@ -24,27 +24,11 @@ This guide covers single GPU demo setup using Docker Compose. For Kubernetes dep
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for Tempo | `http://localhost:4317` | `http://tempo:4317` |
 | `OTEL_SERVICE_NAME` | Service name for identifying components | `dynamo` | `dynamo-frontend` |
 
-## Getting Started (Single GPU)
+## Getting Started Quickly
 
 ### 1. Start Observability Stack
 
-```bash
-cd deploy
-docker compose -f docker-observability.yml up -d
-```
-
-This will start:
-- **Tempo** on `http://localhost:3200` (HTTP API) and `localhost:4317` (OTLP gRPC)
-- **Prometheus** on `http://localhost:9090`
-- **Grafana** on `http://localhost:3000` (username: `dynamo`, password: `dynamo`)
-- **DCGM Exporter** on `http://localhost:9401/metrics` (GPU metrics)
-- **NATS Exporter** on `http://localhost:7777/metrics`
-
-Verify services are running:
-
-```bash
-docker compose -f docker-observability.yml ps
-```
+Start the observability stack (Prometheus, Grafana, Tempo, exporters). See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
 
 ### 2. Set Environment Variables
 
@@ -155,12 +139,7 @@ Below is an example of what a trace looks like in Grafana Tempo:
 
 ### 6. Stop Services
 
-When done, stop the observability stack:
-
-```bash
-cd deploy
-docker compose -f docker-observability.yml down
-```
+When done, stop the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for Docker Compose commands.
 
 ---
 
