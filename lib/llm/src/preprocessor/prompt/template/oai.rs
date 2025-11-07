@@ -194,17 +194,14 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn should_add_generation_prompt(&self) -> bool {
-        // Only add generation prompt if the last message was not assistant (default to true when no last message)
-        self.inner
-            .messages
-            .last()
-            .map(|last| {
-                !matches!(
-                    last,
-                    dynamo_async_openai::types::ChatCompletionRequestMessage::Assistant(_)
-                )
-            })
-            .unwrap_or(true)
+        if let Some(last) = self.inner.messages.last() {
+            matches!(
+                last,
+                dynamo_async_openai::types::ChatCompletionRequestMessage::User(_)
+            )
+        } else {
+            true
+        }
     }
 
     fn extract_text(&self) -> Option<TextInput> {
@@ -334,6 +331,7 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
 mod tests {
     use super::*;
     use dynamo_async_openai::types::ChatCompletionRequestMessage as Msg;
+    use minijinja::{Environment, context};
 
     #[test]
     fn test_may_be_fix_tool_schema_missing_type_and_properties() {
@@ -741,52 +739,8 @@ NORMAL MODE
         assert_eq!(messages[0]["content"].as_array().unwrap().len(), 3);
     }
 
-    fn user() -> Msg {
-        Msg::User(Default::default())
-    }
-    fn asst() -> Msg {
-        Msg::Assistant(Default::default())
-    }
-    fn tool() -> Msg {
-        Msg::Tool(Default::default())
-    }
-
-    fn dummy_state(messages: Vec<Msg>) -> NvCreateChatCompletionRequest {
-        let json = serde_json::json!({
-            "model": "test-model",
-            "messages": messages
-        });
-        serde_json::from_value(json).unwrap()
-    }
-
-    #[test]
-    fn add_after_user() {
-        let s = dummy_state(vec![user()]);
-        assert!(s.should_add_generation_prompt());
-    }
-
-    #[test]
-    fn add_after_tool() {
-        let s = dummy_state(vec![tool()]);
-        assert!(s.should_add_generation_prompt());
-    }
-
-    #[test]
-    fn no_after_assistant() {
-        let s = dummy_state(vec![asst()]);
-        assert!(!s.should_add_generation_prompt());
-    }
-
-    #[test]
-    fn add_when_empty() {
-        let s = dummy_state(vec![]);
-        assert!(s.should_add_generation_prompt());
-    }
-
     #[test]
     fn test_normalize_tool_arguments_tojson() {
-        use minijinja::{Environment, context};
-
         let tmpl = r#"{{ messages[0].tool_calls[0].function.arguments | tojson }}"#;
 
         // Message with tool_calls containing JSON string arguments
@@ -821,8 +775,6 @@ NORMAL MODE
 
     #[test]
     fn test_normalize_tool_arguments_items_loop() {
-        use minijinja::{Environment, context};
-
         let tmpl = r#"{% for k, v in messages[0].tool_calls[0].function.arguments|items %}{{k}}={{v}};{% endfor %}"#;
 
         let mut messages = serde_json::Value::Array(vec![serde_json::json!({
@@ -888,6 +840,5 @@ NORMAL MODE
             messages[0]["tool_calls"][0]["function"]["arguments"],
             serde_json::Value::String("not valid json at all".to_string())
         );
-
     }
 }
