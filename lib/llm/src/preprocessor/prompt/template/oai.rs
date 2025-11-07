@@ -158,9 +158,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn messages(&self) -> Value {
-        let mut messages_json = serde_json::to_value(&self.inner.messages).unwrap();
-
-        normalize_tool_arguments_in_messages(&mut messages_json);
+        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
 
         let needs_fixing = if let Some(arr) = messages_json.as_array() {
             arr.iter()
@@ -300,8 +298,13 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             add_generation_prompt
         );
 
+        let messages_canonical = req.messages();
+        let mut messages_for_template: serde_json::Value =
+            serde_json::to_value(&messages_canonical).unwrap();
+        normalize_tool_arguments_in_messages(&mut messages_for_template);
+
         let ctx = context! {
-            messages => req.messages(),
+            messages => messages_for_template,
             tools => tools,
             bos_token => self.config.bos_tok(),
             eos_token => self.config.eos_tok(),
