@@ -51,7 +51,6 @@ class DynamoWorkerProcess(ManagedProcess):
         env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = f"560{worker_id[-1]}"
 
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = f"808{worker_id[-1]}"
 
