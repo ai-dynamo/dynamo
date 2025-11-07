@@ -82,6 +82,19 @@ jobs:
         run: |
           cd deploy/cloud/operator
           docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.24'
+      - name: Check for uncommitted changes
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          sudo apt-get update && sudo apt-get install -y make
+          cd deploy/cloud/operator
+          make check
       - name: Build Container
         id: build-image
         shell: bash
@@ -442,6 +455,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         profile:
           - agg
@@ -496,7 +510,7 @@ jobs:
         export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
         echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
         # Wait for all pods with the deployment label to be ready
-        kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1000s
+        kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1300s
 
         # Debug: Show final pod statuses for the deployment
         echo "=== FINAL POD STATUSES ==="
@@ -591,6 +605,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         profile:
           - agg
@@ -611,6 +626,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         profile:
           - agg

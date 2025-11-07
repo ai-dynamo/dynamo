@@ -76,8 +76,6 @@ def create_profiler_parser() -> argparse.Namespace:
             max_num_gpus_per_engine: Int (maximum number of GPUs per engine, default: 0)
             num_gpus_per_node: Int (number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size, default: 0)
         sweep:
-            skip_existing_results: Boolean (skip TP sizes that already have results in the output directory, default: False)
-            force_rerun: Boolean (force re-running all tests even if results already exist (overrides --skip-existing-results), default: False)
             prefill_interpolation_granularity: Int (how many samples to benchmark to interpolate TTFT under different ISL, default: 16)
             decode_interpolation_granularity: Int (how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length, default: 6)
             use_ai_configurator: Boolean (use ai-configurator to estimate benchmarking results instead of running actual deployment, default: False)
@@ -158,26 +156,20 @@ def create_profiler_parser() -> argparse.Namespace:
     parser.add_argument(
         "--min-num-gpus-per-engine",
         type=int,
-        default=config.get("hardware", {}).get("min_num_gpus_per_engine", 1),
+        default=config.get("hardware", {}).get("min_num_gpus_per_engine", 0),
         help="minimum number of GPUs per engine",
     )
     parser.add_argument(
         "--max-num-gpus-per-engine",
         type=int,
-        default=config.get("hardware", {}).get("max_num_gpus_per_engine", 8),
+        default=config.get("hardware", {}).get("max_num_gpus_per_engine", 0),
         help="maximum number of GPUs per engine",
     )
     parser.add_argument(
-        "--skip-existing-results",
-        action="store_true",
-        default=config.get("sweep", {}).get("skip_existing_results", False),
-        help="Skip TP sizes that already have results in the output directory",
-    )
-    parser.add_argument(
-        "--force-rerun",
-        action="store_true",
-        default=config.get("sweep", {}).get("force_rerun", False),
-        help="Force re-running all tests even if results already exist (overrides --skip-existing-results)",
+        "--num-gpus-per-node",
+        type=int,
+        default=config.get("hardware", {}).get("num_gpus_per_node", 0),
+        help="Number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size",
     )
     parser.add_argument(
         "--isl",
@@ -234,19 +226,6 @@ def create_profiler_parser() -> argparse.Namespace:
         action="store_true",
         default=config.get("sweep", {}).get("dry_run", False),
         help="Dry run the profile job",
-    )
-    parser.add_argument(
-        "--is-moe-model",
-        action="store_true",
-        dest="is_moe_model",
-        default=config.get("engine", {}).get("is_moe_model", False),
-        help="Enable MoE (Mixture of Experts) model support, use TEP for prefill and DEP for decode",
-    )
-    parser.add_argument(
-        "--num-gpus-per-node",
-        type=int,
-        default=config.get("hardware", {}).get("num_gpus_per_node", 8),
-        help="Number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size",
     )
     parser.add_argument(
         "--enable-gpu-discovery",
@@ -311,9 +290,5 @@ def create_profiler_parser() -> argparse.Namespace:
     if not args.model and not args.config:
         parser.error("--model or --config is required (provide at least one)")
 
-    # Run auto-generation if GPU discovery is enabled
-    # This will override any manually specified hardware parameters
-    if args.enable_gpu_discovery:
-        auto_generate_search_space(args)
-
+    auto_generate_search_space(args)
     return args
