@@ -69,10 +69,7 @@ echo "Model: $MODEL_NAME"
 echo "Prompt Template: $PROMPT_TEMPLATE"
 echo "=================================================="
 
-# Configure UCX for local same-machine communication
-# Use shared memory (sm), self, and TCP transports instead of InfiniBand
-# This prevents NIXL_ERR_BACKEND errors when running all workers on same machine
-export UCX_TLS=sm,self,tcp
+#export UCX_TLS=sm,self,tcp
 
 echo "UCX Transport: $UCX_TLS (local same-machine mode)"
 echo "=================================================="
@@ -93,15 +90,15 @@ fi
 
 # Start encode worker 
 echo "Starting encode worker on GPU 1..."
-CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-encode-worker --model $MODEL_NAME --enforce-eager $EXTRA_ARGS &
+CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-encode-worker --model $MODEL_NAME  $EXTRA_ARGS &
 
 # Start prefill worker 
 echo "Starting prefill worker on GPU 2..."
-CUDA_VISIBLE_DEVICES=2 python -m dynamo.vllm --multimodal-worker --is-prefill-worker --model $MODEL_NAME --enforce-eager --connector nixl $EXTRA_ARGS &
+CUDA_VISIBLE_DEVICES=2 python -m dynamo.vllm --multimodal-worker --is-prefill-worker --model $MODEL_NAME $EXTRA_ARGS &
 
 # Start decode worker
 echo "Starting decode worker on GPU 3..."
-CUDA_VISIBLE_DEVICES=3 python -m dynamo.vllm --multimodal-decode-worker --model $MODEL_NAME --enforce-eager --connector nixl $EXTRA_ARGS &
+CUDA_VISIBLE_DEVICES=3 python -m dynamo.vllm --multimodal-decode-worker --model $MODEL_NAME $EXTRA_ARGS &
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."

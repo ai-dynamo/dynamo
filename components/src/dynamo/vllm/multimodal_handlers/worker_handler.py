@@ -58,6 +58,10 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received decode request: {{ id: {request.request_id} }}.")
 
+        print(f"Decode Worker request: {request}")
+        print("#########################")
+        print("Decode Worker is Generating...")
+        print("#########################")
         # Decode worker doesn't process embeddings, so we pass None or empty tensor
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
@@ -66,8 +70,16 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
             sampling_params=request.sampling_params,
             request_id=request.request_id,
         )
+        
+        print("#########################")
+        print("Decode Worker generated tokens...")
+        print("#########################")
+
 
         async for response in gen:
+            print("#########################")
+            print(f"Decode Worker generated token response: {response}")
+            print("#########################")
             logger.debug(f"Response kv_transfer_params: {response.kv_transfer_params}")
             yield MyRequestOutput(
                 request_id=response.request_id,
@@ -200,6 +212,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
 
             logger.debug("Prefill request: %s", pd_request)
 
+
+        print("#########################")
+        print("Prefill Worker is Generating...")
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=pd_request.engine_prompt["prompt_token_ids"],
@@ -208,6 +223,9 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             sampling_params=pd_request.sampling_params,
             request_id=pd_request.request_id,
         )
+
+        print("#########################")
+        print("Prefill Worker generated tokens...")
 
         if self.enable_disagg and self.decode_worker_client:
             decode_request = copy.deepcopy(request)
