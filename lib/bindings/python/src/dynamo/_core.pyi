@@ -12,6 +12,8 @@ from typing import (
     Tuple,
 )
 
+from click import Option
+
 from ._prometheus_names import prometheus_names
 
 # Import from specialized modules
@@ -894,6 +896,7 @@ class KserveGrpcService:
         model: str,
         checksum: str,
         engine: PythonAsyncEngine,
+        runtime_config: Optional[ModelRuntimeConfig], 
     ) -> None:
         """
         Register a tensor-based model with the service.
