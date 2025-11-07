@@ -1,58 +1,58 @@
-name: "Docker Build"
-description: "Build Dynamo container images"
+name: 'Docker Build'
+description: 'Build Dynamo container images'
 inputs:
   framework:
-    description: "Framework to build"
+    description: 'Framework to build'
     required: true
-    default: "vllm"
+    default: 'vllm'
   target:
-    description: "Target to build"
+    description: 'Target to build'
     required: false
-    default: "runtime"
+    default: 'runtime'
   platform:
-    description: "Docker platform to build on, ie. linux/amd64"
+    description: 'Docker platform to build on, ie. linux/amd64'
     required: false
-    default: "linux/amd64"
+    default: 'linux/amd64'
   image_tag:
-    description: "Custom image tag (optional, defaults to framework:latest)"
+    description: 'Custom image tag (optional, defaults to framework:latest)'
     required: false
   ngc_ci_access_token:
-    description: "NGC CI Access Token"
+    description: 'NGC CI Access Token'
     required: false
   ci_token:
-    description: "CI Token"
+    description: 'CI Token'
     required: false
   aws_default_region:
-    description: "AWS Default Region"
+    description: 'AWS Default Region'
     required: false
   sccache_s3_bucket:
-    description: "SCCache S3 Bucket"
+    description: 'SCCache S3 Bucket'
     required: false
   aws_account_id:
-    description: "AWS Account ID"
+    description: 'AWS Account ID'
     required: false
   aws_access_key_id:
-    description: "AWS Access Key ID"
+    description: 'AWS Access Key ID'
     required: false
   aws_secret_access_key:
-    description: "AWS Secret Access Key"
+    description: 'AWS Secret Access Key'
     required: false
   base_image_tag:
-    description: "Optional override for base image tag passed to build.sh"
+    description: 'Optional override for base image tag passed to build.sh'
     required: false
   runtime_image_tag:
-    description: "Optional override for RUNTIME_IMAGE_TAG build-arg"
+    description: 'Optional override for RUNTIME_IMAGE_TAG build-arg'
     required: false
   cuda_version:
-    description: "Optional override for CUDA_VERSION build-arg"
+    description: 'Optional override for CUDA_VERSION build-arg'
     required: false
   torch_backend:
-    description: "Optional override for TORCH_BACKEND build-arg (e.g., cu129)"
+    description: 'Optional override for TORCH_BACKEND build-arg (e.g., cu129)'
     required: false
 
 outputs:
   image_tag:
-    description: "Image Tag"
+    description: 'Image Tag'
     value: ${{ steps.build.outputs.image_tag }}
 
 runs:
@@ -84,6 +84,7 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.ci_token }}
         AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
+        SCCACHE_S3_BUCKET:  ${{ inputs.sccache_s3_bucket }}
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
@@ -115,7 +116,7 @@ runs:
           EXTRA_ARGS+=" --build-arg TORCH_BACKEND=${{ inputs.torch_backend }}"
         fi
 
-        BUILDKIT_PROGRESS=plain ./container/build.sh --tag "$IMAGE_TAG" \
+        ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \

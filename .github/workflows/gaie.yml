@@ -253,7 +253,7 @@ jobs:
             --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} \
             --namespace=${KUBE_NS} || true
           # Deploy vllm backend graph
-          cd $GITHUB_WORKSPACE/components/backends/${FRAMEWORK}
+          cd ${{ github.workspace }}/components/backends/${FRAMEWORK}
           export GRAPH_NAME=$(yq e '.metadata.name' ${DEPLOYMENT_FILE})
           yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' ${DEPLOYMENT_FILE}
           kubectl apply -n ${KUBE_NS} -f ${DEPLOYMENT_FILE}
