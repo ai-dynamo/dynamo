@@ -243,140 +243,41 @@ impl KeyValueStoreManager {
     ) {
         let bucket_name = bucket_name.to_string();
         let (tx, rx) = tokio::sync::mpsc::channel(128);
-        tracing::debug!("KeyValueStoreManager.watch: Starting watch for bucket={}", bucket_name);
         let watch_task = tokio::spawn(async move {
-            tracing::debug!("KeyValueStoreManager.watch: Watch task started for bucket={}", bucket_name);
-            // Get or create the bucket
+            // Start listening for changes but don't poll this yet
             let bucket = self
                 .0
                 .get_or_create_bucket(&bucket_name, bucket_ttl)
                 .await?;
-            tracing::debug!("KeyValueStoreManager.watch: Got bucket for bucket={}", bucket_name);
-            
-            // CRITICAL: Get existing entries BEFORE starting the watch to avoid missing entries.
-            // This handles the race condition where entries might be added between these calls.
-            // We'll use deduplication to handle any overlap.
-            let existing_entries = bucket.entries().await?;
-            let existing_count = existing_entries.len();
-            tracing::debug!(
-                "KeyValueStoreManager.watch: Found {} existing entries in bucket={}",
-                existing_count,
-                bucket_name
-            );
-            
-            // Now start the watch stream for future changes
             let mut stream = bucket.watch().await?;
-            tracing::debug!("KeyValueStoreManager.watch: Got watch stream for bucket={}", bucket_name);
 
-            // Track keys we've sent to deduplicate between existing entries and watch stream
-            let mut seen_keys = std::collections::HashSet::new();
-            
-            // First, send all existing entries as Put events
-            for (key, bytes) in existing_entries {
-                tracing::debug!(
-                    "KeyValueStoreManager.watch: Sending existing entry key={}, size={} bytes for bucket={}",
-                    key,
-                    bytes.len(),
-                    bucket_name
-                );
-                seen_keys.insert(key.clone());
+            // Send all the existing keys
+            for (key, bytes) in bucket.entries().await? {
                 if let Err(err) = tx
                     .send_timeout(
-                        WatchEvent::Put(KeyValue::new(key.clone(), bytes)),
+                        WatchEvent::Put(KeyValue::new(key, bytes)),
                         WATCH_SEND_TIMEOUT,
                     )
                     .await
                 {
-                    tracing::error!(bucket_name, %err, key, "KeyValueStoreManager.watch failed sending existing key to channel");
-                } else {
-                    tracing::debug!(
-                        "KeyValueStoreManager.watch: Successfully sent existing entry key={} for bucket={}",
-                        key,
-                        bucket_name
-                    );
+                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding existing key to channel");
                 }
             }
-            tracing::debug!(
-                "KeyValueStoreManager.watch: Finished sending {} existing entries for bucket={}, now watching for new events",
-                existing_count,
-                bucket_name
-            );
 
-            // Now forward events from the watch stream with simple deduplication
-            // Note: The memory backend's watch() already includes existing entries and deduplicates
-            // internally, so we may receive some duplicates. We'll skip Put events for keys we
-            // just sent from entries(), but allow Delete events and subsequent updates through.
-            let mut new_event_count = 0;
-            let mut dedup_count = 0;
+            // Now block waiting for new entries
             loop {
                 let event = tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        tracing::debug!("KeyValueStoreManager.watch: Cancel token triggered for bucket={}", bucket_name);
-                        break;
-                    }
+                    _ = cancel_token.cancelled() => break,
                     result = stream.next() => match result {
-                        Some(event) => {
-                            tracing::debug!(
-                                "KeyValueStoreManager.watch: Received event from stream for bucket={}",
-                                bucket_name
-                            );
-                            event
-                        },
-                        None => {
-                            tracing::debug!("KeyValueStoreManager.watch: Stream closed for bucket={}", bucket_name);
-                            break;
-                        }
+                        Some(event) => event,
+                        None => break,
                     }
                 };
-                
-                // Simple deduplication: For Put events, if we just sent this key from entries(),
-                // skip it once. For memory backend, this skips the duplicate from its watch stream.
-                // For etcd backend, this shouldn't trigger since watch only sees new events.
-                // For subsequent Puts to the same key (updates), we'll send them.
-                let should_send = match &event {
-                    WatchEvent::Put(kv) => {
-                        let key = kv.key_str();
-                        if seen_keys.remove(key) {
-                            // We already sent this key from entries(), so skip this one occurrence
-                            dedup_count += 1;
-                            tracing::debug!(
-                                "KeyValueStoreManager.watch: Deduplicating Put for key={} in bucket={} (probably from memory backend's initial yield)",
-                                key,
-                                bucket_name
-                            );
-                            false
-                        } else {
-                            // Either a new key or an update to a key we've already seen
-                            true
-                        }
-                    }
-                    WatchEvent::Delete(_) => {
-                        // Always send deletes
-                        true
-                    }
-                };
-                
-                if should_send {
-                    new_event_count += 1;
-                    if let Err(err) = tx.send_timeout(event, WATCH_SEND_TIMEOUT).await {
-                        tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed sending new event to channel");
-                    } else {
-                        tracing::debug!(
-                            "KeyValueStoreManager.watch: Successfully sent new event #{} for bucket={}",
-                            new_event_count,
-                            bucket_name
-                        );
-                    }
+                if let Err(err) = tx.send_timeout(event, WATCH_SEND_TIMEOUT).await {
+                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding new key to channel");
                 }
             }
 
-            tracing::debug!(
-                "KeyValueStoreManager.watch: Watch task ending for bucket={}, sent {} existing + {} new events (deduplicated {} events)",
-                bucket_name,
-                existing_count,
-                new_event_count,
-                dedup_count
-            );
             Ok::<(), StoreError>(())
         });
         (watch_task, rx)

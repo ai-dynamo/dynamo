@@ -3,7 +3,6 @@
 
 use crate::component::TransportType;
 use crate::Result;
-use crate::component::TransportType;
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
