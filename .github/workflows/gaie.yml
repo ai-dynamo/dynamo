@@ -107,35 +107,67 @@ jobs:
           echo "Full image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${LATEST_VLLM_TAG}"
           echo "VLLM_IMAGE_TAG=${LATEST_VLLM_TAG}" >> $GITHUB_ENV
 
-      - name: Build Operator image (amd64)
-        id: build-operator
+      - name: Find latest Operator image in ACR
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           set -euo pipefail
-          cd deploy/cloud/operator
-          docker buildx build --load \
-            --platform linux/amd64 \
-            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-            -f Dockerfile \
-            -t dynamo-operator:latest .
 
-      - name: Tag and Push Operator image to ACR
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: dynamo-operator:latest
-          push_tag: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ env.OPERATOR_IMAGE_TAG }}
-          aws_push: "false"
-          azure_push: "true"
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          # Extract registry name from hostname
+          REGISTRY_NAME=$(echo "${{ secrets.AZURE_ACR_HOSTNAME }}" | cut -d'.' -f1)
 
-      - name: Check free disk
-        run: df -h
+          # Login to ACR using credentials (for Docker)
+          az acr login --name "${REGISTRY_NAME}" \
+            --username "${{ secrets.AZURE_ACR_USER }}" \
+            --password "${{ secrets.AZURE_ACR_PASSWORD }}"
+
+          # Get all tags for ai-dynamo/dynamo repository that match *-operator-amd64
+          # Use awk instead of grep|head to avoid SIGPIPE/pipefail issues
+          LATEST_OPERATOR_TAG=$(
+            az acr repository show-tags \
+              --name "${REGISTRY_NAME}" \
+              --repository ai-dynamo/dynamo \
+              --orderby time_desc \
+              --username "${{ secrets.AZURE_ACR_USER }}" \
+              --password "${{ secrets.AZURE_ACR_PASSWORD }}" \
+              --output tsv | \
+            awk '/^[a-f0-9]+-operator-amd64$/ { print; exit }'
+          )
+
+          if [[ -z "${LATEST_OPERATOR_TAG}" ]]; then
+            echo "ERROR: No Operator images found in ACR matching pattern *-operator-amd64"
+            exit 1
+          fi
+
+          echo "Found latest Operator image tag: ${LATEST_OPERATOR_TAG}"
+          echo "Full image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${LATEST_OPERATOR_TAG}"
+          echo "OPERATOR_IMAGE_TAG=${LATEST_OPERATOR_TAG}" >> $GITHUB_ENV
+
+      # - name: Build Operator image (amd64)
+      #   id: build-operator
+      #   shell: bash
+      #   env:
+      #     ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+      #   run: |
+      #     set -euo pipefail
+      #     cd deploy/cloud/operator
+      #     docker buildx build --load \
+      #       --platform linux/amd64 \
+      #       --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+      #       -f Dockerfile \
+      #       -t dynamo-operator:latest .
+
+      # - name: Tag and Push Operator image to ACR
+      #   uses: ./.github/actions/docker-tag-push
+      #   with:
+      #     local_image: dynamo-operator:latest
+      #     push_tag: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ env.OPERATOR_IMAGE_TAG }}
+      #     aws_push: "false"
+      #     azure_push: "true"
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
       # TODO get this to finish.
       # - name: Build vllm runtime image (amd64)
