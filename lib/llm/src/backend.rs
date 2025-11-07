@@ -136,7 +136,12 @@ impl
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
-        let state = self.decoder(next_stream, &prompt_token_ids, stop_conditions, skip_special_tokens)?;
+        let state = self.decoder(
+            next_stream,
+            &prompt_token_ids,
+            stop_conditions,
+            skip_special_tokens,
+        )?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
             match state.stream.next().await {

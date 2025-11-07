@@ -204,8 +204,14 @@ fn test_decode_with_skip_special_tokens() {
 
     // Print the decoded values for visibility
     println!("Token IDs: {:?}", token_ids);
-    println!("Decoded WITH special tokens (skip=false): {:?}", decoded_with_special);
-    println!("Decoded WITHOUT special tokens (skip=true): {:?}", decoded_without_special);
+    println!(
+        "Decoded WITH special tokens (skip=false): {:?}",
+        decoded_with_special
+    );
+    println!(
+        "Decoded WITHOUT special tokens (skip=true): {:?}",
+        decoded_without_special
+    );
 
     // Verify that the version with special tokens contains the special token markers
     assert!(
