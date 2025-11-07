@@ -8,7 +8,6 @@ import signal
 from typing import Optional
 
 import uvloop
-
 from kvbm.vllm_integration.consolidator_config import get_consolidator_endpoints
 from prometheus_client import REGISTRY
 from vllm.distributed.kv_events import ZmqEventPublisher

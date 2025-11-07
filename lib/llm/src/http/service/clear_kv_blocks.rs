@@ -186,8 +186,9 @@ async fn clear_kv_blocks_handler(
 
         let instances_filtered: Vec<dynamo_runtime::component::Instance> = discovery_instances
             .into_iter()
-            .map(|di| match di {
-                dynamo_runtime::discovery::DiscoveryInstance::Endpoint(instance) => instance,
+            .filter_map(|di| match di {
+                dynamo_runtime::discovery::DiscoveryInstance::Endpoint(instance) => Some(instance),
+                _ => None,
             })
             .collect();
 
