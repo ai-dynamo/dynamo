@@ -4,6 +4,8 @@
 use derive_getters::Dissolve;
 use tokio_util::sync::CancellationToken;
 
+use crate::storage::key_value_store;
+
 use super::*;
 
 pub use async_nats::service::endpoint::Stats as EndpointStats;
@@ -118,8 +120,6 @@ impl EndpointConfigBuilder {
         let endpoint_name = endpoint.name.clone();
         let system_health = endpoint.drt().system_health.clone();
         let subject = endpoint.subject_to(connection_id);
-        let etcd_path = endpoint.etcd_path_with_lease_id(connection_id);
-        let etcd_client = endpoint.component.drt.etcd_client.clone();
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
@@ -193,9 +193,6 @@ impl EndpointConfigBuilder {
             result
         });
 
-        // make the components service endpoint discovery in etcd
-
-        // client.register_service()
         let info = Instance {
             component: component_name.clone(),
             endpoint: endpoint_name.clone(),
@@ -206,15 +203,16 @@ impl EndpointConfigBuilder {
 
         let info = serde_json::to_vec_pretty(&info)?;
 
-        if let Some(etcd_client) = &etcd_client
-            && let Err(e) = etcd_client
-                .kv_create(&etcd_path, info, Some(connection_id))
-                .await
-        {
+        let store = endpoint.drt().store();
+        let instances_bucket = store
+            .get_or_create_bucket(super::INSTANCE_ROOT_PATH, None)
+            .await?;
+        let key = key_value_store::Key::from_raw(endpoint.unique_path(connection_id));
+        if let Err(err) = instances_bucket.insert(&key, info.into(), 0).await {
             tracing::error!(
                 component_name,
                 endpoint_name,
-                error = %e,
+                error = %err,
                 "Unable to register service for discovery"
             );
             endpoint_shutdown_token.cancel();
