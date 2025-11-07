@@ -54,6 +54,10 @@ impl KeyValueStore for EtcdStore {
     fn connection_id(&self) -> u64 {
         self.client.lease_id()
     }
+
+    fn shutdown(&self) {
+        // Revoke the lease? etcd will do it for us on disconnect.
+    }
 }
 
 pub struct EtcdBucket {
@@ -132,13 +136,13 @@ impl KeyValueBucket for EtcdBucket {
                             continue;
                         }
                     };
-                    let item = KeyValue::new(key, v_bytes.into());
                     match e.event_type() {
                         EventType::Put => {
+                            let item = KeyValue::new(key, v_bytes.into());
                             yield WatchEvent::Put(item);
                         }
                         EventType::Delete => {
-                            yield WatchEvent::Delete(item);
+                            yield WatchEvent::Delete(Key::from_raw(key));
                         }
                     }
                 }

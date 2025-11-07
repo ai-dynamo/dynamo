@@ -93,6 +93,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": None,
         "help": "Dump debug config to the specified file path. If not specified, the config will be dumped to stdout at INFO level.",
     },
+    "store-kv": {
+        "flags": ["--store-kv"],
+        "type": str,
+        "default": os.environ.get("DYN_STORE_KV", "etcd"),
+        "help": "Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    },
 }
 
 
@@ -102,6 +108,7 @@ class DynamoArgs:
     component: str
     endpoint: str
     migration_limit: int
+    store_kv: str
 
     # tool and reasoning parser options
     tool_call_parser: Optional[str] = None
@@ -329,6 +336,7 @@ async def parse_args(args: list[str]) -> Config:
         component=parsed_component_name,
         endpoint=parsed_endpoint_name,
         migration_limit=parsed_args.migration_limit,
+        store_kv=parsed_args.store_kv,
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
         custom_jinja_template=expanded_template_path,
