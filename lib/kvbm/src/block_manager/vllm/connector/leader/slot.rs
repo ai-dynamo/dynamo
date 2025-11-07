@@ -712,14 +712,35 @@ impl Slot for VllmConnectorSlot {
     }
 
     fn mark_as_finished(&mut self, _iteration: u64) -> Result<(), SlotError> {
-        self.state = SlotState::Finishing;
-        tracing::info!(
-            request_id = %self.request_id,
-            "request set to finish: cached_gpu_tokens: {}; cached_host_tokens: {}; cached_disk_tokens: {}",
-            self.tokens_cached_from_device,
-            self.tokens_cached_from_host,
-            self.tokens_cached_from_disk
-        );
+        // Check if there are any pending operations
+        let has_pending_ops = self
+            .pending_operations
+            .as_ref()
+            .map(|ops| !ops.is_empty())
+            .unwrap_or(false);
+
+        if has_pending_ops {
+            // There are pending operations - need to wait for them to complete
+            self.state = SlotState::Finishing;
+            tracing::debug!(
+                request_id = %self.request_id,
+                pending_operations = self.pending_operations.as_ref().unwrap().len(),
+                "request set to finish (with pending operations): cached_gpu_tokens: {}; cached_host_tokens: {}; cached_disk_tokens: {}",
+                self.tokens_cached_from_device,
+                self.tokens_cached_from_host,
+                self.tokens_cached_from_disk
+            );
+        } else {
+            // No pending operations - can immediately mark as finished
+            self.state = SlotState::Finished;
+            tracing::debug!(
+                request_id = %self.request_id,
+                "request set to finished (no pending operations): cached_gpu_tokens: {}; cached_host_tokens: {}; cached_disk_tokens: {}",
+                self.tokens_cached_from_device,
+                self.tokens_cached_from_host,
+                self.tokens_cached_from_disk
+            );
+        }
         Ok(())
     }
 
@@ -1232,9 +1253,8 @@ impl LocalTransferEngine {
                     {
                         tracing::error!("LocalOffloadTask: error processing request: {:?}", e);
 
-                        // Notify scheduler that this operation is "complete" (even though it failed)
-                        // Create a fake/immediate transfer request that completes instantly
-                        // This increments the workers' completed counter so they can progress
+                        // Create a fake/immediate transfer request that completes instantly.
+                        // Otherwise, worker side might stuck and cause memory leak.
                         let fake_xfer = BlockTransferRequest {
                             from_pool: BlockTransferPool::Device, // Use valid Device->Host transfer type
                             to_pool: BlockTransferPool::Host,     // (offload path, but no blocks)
