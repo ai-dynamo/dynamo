@@ -841,4 +841,48 @@ NORMAL MODE
             serde_json::Value::String("not valid json at all".to_string())
         );
     }
+
+    #[test]
+    fn test_normalize_tool_arguments_with_multimodal_content() {
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Check this:"},
+                        {"type": "video_url", "video_url": {"url": "https://example.com/vid.mp4"}},
+                        {"type": "text", "text": "Interesting?"}
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "analyze_video",
+                            "arguments": "{\"url\":\"https://example.com/vid.mp4\",\"format\":\"mp4\"}"
+                        }
+                    }]
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let mut messages = serde_json::to_value(request.messages()).unwrap();
+
+        normalize_tool_arguments_in_messages(&mut messages);
+
+        // Multimodal content preserved as array
+        assert!(messages[0]["content"].is_array());
+        assert_eq!(messages[0]["content"].as_array().unwrap().len(), 3);
+
+        // Tool arguments deserialized to object
+        assert!(messages[1]["tool_calls"][0]["function"]["arguments"].is_object());
+        assert_eq!(
+            messages[1]["tool_calls"][0]["function"]["arguments"]["url"],
+            "https://example.com/vid.mp4"
+        );
+    }
 }
