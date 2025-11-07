@@ -50,8 +50,9 @@ const (
 	ConditionTypeServicesFound  = "ServicesFound"
 
 	// Condition reasons
+	ReasonAllEndpointsReady   = "AllEndpointsReady"
 	ReasonEndpointsDiscovered = "EndpointsDiscovered"
-	ReasonNoReadyEndpoints    = "NoReadyEndpoints"
+	ReasonNotReady            = "NotReady"
 	ReasonNoEndpoints         = "NoEndpoints"
 	ReasonServicesFound       = "ServicesFound"
 	ReasonNoServicesFound     = "NoServicesFound"
@@ -161,16 +162,17 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Update conditions based on model type
 	if model.IsLoRA() {
-		// For LoRA models, check readiness
-		if model.Status.ReadyEndpoints > 0 {
-			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionTrue, ReasonEndpointsDiscovered,
-				fmt.Sprintf("Found %d ready endpoint(s) out of %d total", model.Status.ReadyEndpoints, model.Status.TotalEndpoints))
+		// For LoRA models, check readiness - condition is True only when ALL endpoints are ready
+		if model.Status.ReadyEndpoints == model.Status.TotalEndpoints && model.Status.TotalEndpoints > 0 {
+			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionTrue, ReasonAllEndpointsReady,
+				fmt.Sprintf("All %d endpoint(s) are ready", model.Status.TotalEndpoints))
 			r.Recorder.Eventf(model, corev1.EventTypeNormal, "EndpointsReady",
-				"Discovered %d ready endpoints for base model %s", model.Status.ReadyEndpoints, model.Spec.BaseModelName)
+				"All %d endpoints ready for base model %s", model.Status.TotalEndpoints, model.Spec.BaseModelName)
 		} else if model.Status.TotalEndpoints > 0 {
-			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoReadyEndpoints,
-				fmt.Sprintf("Found %d endpoint(s) but none are ready", model.Status.TotalEndpoints))
-			r.Recorder.Event(model, corev1.EventTypeWarning, "NoReadyEndpoints", "Endpoints exist but none are ready")
+			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNotReady,
+				fmt.Sprintf("Found %d ready endpoint(s) out of %d total", model.Status.ReadyEndpoints, model.Status.TotalEndpoints))
+			r.Recorder.Eventf(model, corev1.EventTypeWarning, "NotReady",
+				"Only %d of %d endpoints ready for base model %s", model.Status.ReadyEndpoints, model.Status.TotalEndpoints, model.Spec.BaseModelName)
 		} else {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoEndpoints, "No endpoints found")
 		}

@@ -420,7 +420,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `address` _string_ | Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090") |  |  |
 | `podName` _string_ | PodName is the name of the pod serving this endpoint |  |  |
-| `ready` _boolean_ | Ready indicates whether the endpoint is ready to serve traffic<br />For LoRA models: true if the LoRA was successfully loaded and appears in GET /v1/loras<br />For base models: always false (no probing performed) |  |  |
+| `ready` _boolean_ | Ready indicates whether the endpoint is ready to serve traffic<br />For LoRA models: true if the POST /loras request succeeded with a 2xx status code<br />For base models: always false (no probing performed) |  |  |
 
 
 #### IngressSpec

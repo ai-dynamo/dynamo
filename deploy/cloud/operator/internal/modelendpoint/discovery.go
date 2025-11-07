@@ -54,11 +54,11 @@ func ExtractCandidates(endpointSlices *discoveryv1.EndpointSliceList, port int32
 				continue
 			}
 
-			// Get pod name from TargetRef
-			podName := ""
-			if ep.TargetRef != nil && ep.TargetRef.Kind == "Pod" {
-				podName = ep.TargetRef.Name
+			// Get pod name from TargetRef - skip if not a Pod
+			if ep.TargetRef == nil || ep.TargetRef.Kind != "Pod" {
+				continue
 			}
+			podName := ep.TargetRef.Name
 
 			for _, addr := range ep.Addresses {
 				address := "http://" + net.JoinHostPort(addr, strconv.Itoa(int(port)))

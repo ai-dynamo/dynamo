@@ -297,6 +297,11 @@ An endpoint is **ready** when:
 1. The pod is running and healthy
 2. The LoRA load API call succeeded
 
+**Condition states:**
+- `EndpointsReady=True`: All endpoints are ready (full availability)
+- `EndpointsReady=False, Reason=NotReady`: Not all endpoints ready (check message for counts)
+- `EndpointsReady=False, Reason=NoEndpoints`: No endpoints found
+
 When `readyEndpoints < totalEndpoints`, the operator automatically retries loading every 30 seconds.
 
 ### Viewing Endpoints
@@ -495,8 +500,9 @@ kubectl logs -n dynamo-system deployment/dynamo-operator-controller-manager | gr
 
 | Event/Message | Meaning | Action |
 |---------------|---------|--------|
-| `EndpointsReady` | All endpoints loaded LoRA | ✅ Good |
-| `PartialEndpointFailure` | Some endpoints failed | Check logs for errors |
+| `EndpointsReady` | All endpoints are ready | ✅ Good - full service availability |
+| `NotReady` | Not all endpoints ready | ⚠️ Check readyEndpoints count - operator will retry |
+| `PartialEndpointFailure` | Some endpoints failed to load | Check logs for errors |
 | `NoEndpointsFound` | No pods discovered | Verify DGD running and modelRef matches |
 | `EndpointDiscoveryFailed` | Can't query endpoints | Check operator RBAC permissions |
 | `Successfully reconciled` | Reconciliation complete | ✅ Good |

@@ -65,7 +65,7 @@ type EndpointInfo struct {
 	PodName string `json:"podName,omitempty"`
 
 	// Ready indicates whether the endpoint is ready to serve traffic
-	// For LoRA models: true if the LoRA was successfully loaded and appears in GET /v1/loras
+	// For LoRA models: true if the POST /loras request succeeded with a 2xx status code
 	// For base models: always false (no probing performed)
 	Ready bool `json:"ready"`
 }
