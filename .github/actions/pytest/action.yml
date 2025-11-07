@@ -66,7 +66,7 @@ runs:
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
         # Copy test results from container to host
-        docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/test-results ./test-results || echo "Failed to copy test results"
+        docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/test-results . || echo "Failed to copy test results"
 
         # Clean up container
         docker rm -f ${{ env.CONTAINER_ID }}_pytest || echo "Failed to clean up container"
