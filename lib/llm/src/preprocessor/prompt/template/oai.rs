@@ -4,6 +4,7 @@
 use super::*;
 
 use minijinja::{context, value::Value};
+use std::result::Result::Ok;
 
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
@@ -131,26 +132,22 @@ fn normalize_tool_arguments_in_messages(messages: &mut serde_json::Value) {
     for msg in msgs.iter_mut() {
         if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
             for tc in tool_calls {
-                if let Some(function) = tc.get_mut("function").and_then(|v| v.as_object_mut()) {
-                    if let Some(args) = function.get_mut("arguments") {
-                        if let Some(s) = args.as_str() {
-                            if let Result::Ok(parsed) = serde_json::from_str(s) {
-                                *args = parsed;
-                            }
-                        }
-                    }
+                if let Some(function) = tc.get_mut("function").and_then(|v| v.as_object_mut())
+                    && let Some(args) = function.get_mut("arguments")
+                    && let Some(s) = args.as_str()
+                    && let Ok(parsed) = serde_json::from_str(s)
+                {
+                    *args = parsed;
                 }
             }
         }
 
-        if let Some(function_call) = msg.get_mut("function_call").and_then(|v| v.as_object_mut()) {
-            if let Some(args) = function_call.get_mut("arguments") {
-                if let Some(s) = args.as_str() {
-                    if let Result::Ok(parsed) = serde_json::from_str(s) {
-                        *args = parsed;
-                    }
-                }
-            }
+        if let Some(function_call) = msg.get_mut("function_call").and_then(|v| v.as_object_mut())
+            && let Some(args) = function_call.get_mut("arguments")
+            && let Some(s) = args.as_str()
+            && let Ok(parsed) = serde_json::from_str(s)
+        {
+            *args = parsed;
         }
     }
 }
@@ -846,7 +843,6 @@ NORMAL MODE
             .render(context! { messages => messages.as_array().unwrap() })
             .unwrap();
 
-        // Order-insensitive check: either a=1;b=x; or b=x;a=1;
         assert!(out == "a=1;b=x;" || out == "b=x;a=1;");
     }
 
@@ -885,7 +881,6 @@ NORMAL MODE
 
         normalize_tool_arguments_in_messages(&mut messages);
 
-        // Should remain as string
         assert_eq!(
             messages[0]["tool_calls"][0]["function"]["arguments"],
             serde_json::Value::String("not valid json at all".to_string())
