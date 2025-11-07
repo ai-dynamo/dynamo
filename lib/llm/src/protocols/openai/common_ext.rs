@@ -76,7 +76,7 @@ pub struct CommonExt {
     /// Whether to skip special tokens in the decoded output.
     /// When true, special tokens (like EOS, BOS, PAD) are removed from the output text.
     /// When false, special tokens are included in the output text.
-    /// Defaults to true if not specified (matching vLLM/TensorRT-LLM behavior).
+    /// Defaults to false if not specified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub skip_special_tokens: Option<bool>,
