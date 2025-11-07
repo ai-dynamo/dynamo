@@ -37,7 +37,7 @@ dependencies:
   - name: kai-scheduler
     version: v0.9.4
     repository: oci://ghcr.io/nvidia/kai-scheduler
-    condition: kai-scheduler.enabled
+    condition: global.kai-scheduler.enabled
   - name: grove-charts
     alias: grove
     version: v0.1.0-alpha.3

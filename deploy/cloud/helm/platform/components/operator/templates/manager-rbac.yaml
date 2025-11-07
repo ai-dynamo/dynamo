@@ -488,6 +488,7 @@ subjects:
 - kind: ServiceAccount
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
   namespace: '{{ .Release.Namespace }}'
+{{- if index .Values.global "kai-scheduler" "enabled" }}
 ---
 # ClusterRole for kai-scheduler queue access
 # This is always a ClusterRole since Queue resources are cluster-scoped
@@ -527,3 +528,4 @@ subjects:
 - kind: ServiceAccount
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
   namespace: '{{ .Release.Namespace }}'
+{{- end }}

@@ -47,7 +47,10 @@ controllerManager:
     - --logtostderr=true
     - --v=0
     containerSecurityContext:
+      runAsNonRoot: true
       allowPrivilegeEscalation: false
+      seccompProfile:
+        type: RuntimeDefault
       capabilities:
         drop:
         - ALL
@@ -68,7 +71,10 @@ controllerManager:
     - --leader-elect
     - --leader-election-id=dynamo.nko.nvidia.com
     containerSecurityContext:
+      runAsNonRoot: true
       allowPrivilegeEscalation: false
+      seccompProfile:
+        type: RuntimeDefault
       capabilities:
         drop:
         - ALL

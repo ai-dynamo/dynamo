@@ -44,8 +44,9 @@ spec:
       {{- end }}
       securityContext:
         runAsNonRoot: true
-        runAsUser: 65534
-        fsGroup: 65534
+        allowPrivilegeEscalation: false
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
       - name: keygen
         image: bitnamisecure/git:latest
@@ -57,6 +58,11 @@ spec:
           value: "{{ .Values.dynamo.mpiRun.secretName }}"
         - name: NAMESPACE
           value: "{{ .Release.Namespace }}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
         command:
         - /bin/bash
         - -e
@@ -71,6 +77,11 @@ spec:
         volumeMounts:
         - name: shared
           mountPath: /shared
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
         env:
         - name: SECRET_NAME
           value: "{{ .Values.dynamo.mpiRun.secretName }}"
