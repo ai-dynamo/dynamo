@@ -108,7 +108,8 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	candidates, serviceNames, err := r.getEndpointCandidates(ctx, model)
 	if err != nil {
 		// Error already logged and status updated in helper
-		return ctrl.Result{RequeueAfter: requeueAfterDuration}, err
+		// Let controller-runtime handle retry with exponential backoff
+		return ctrl.Result{}, err
 	}
 
 	if len(candidates) == 0 {
@@ -123,7 +124,8 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if err := r.Status().Update(ctx, model); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: requeueAfterDuration}, nil
+		// Don't requeue - we're watching EndpointSlices, so we'll be notified when they appear
+		return ctrl.Result{}, nil
 	}
 
 	// Load LoRA on all endpoints in parallel with bounded concurrency
