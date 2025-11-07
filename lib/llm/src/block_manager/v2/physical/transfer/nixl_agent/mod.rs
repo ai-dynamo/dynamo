@@ -118,8 +118,7 @@ impl NixlAgent {
                 Err(e) => {
                     eprintln!(
                         "Failed to create {} backend with provided params: {}. Operations requiring this backend will fail.",
-                        backend_upper,
-                        e
+                        backend_upper, e
                     );
                 }
             }
@@ -182,9 +181,7 @@ impl NixlAgent {
                         Err(e) => {
                             eprintln!(
                                 "Failed to create {} backend with custom params: {}. Check your DYN_KVBM_NIXL_BACKEND_{}_* environment variables.",
-                                backend_upper,
-                                e,
-                                backend_upper
+                                backend_upper, e, backend_upper
                             );
                         }
                     }
@@ -199,8 +196,7 @@ impl NixlAgent {
                             Err(e) => {
                                 eprintln!(
                                     "Failed to create {} backend: {}. Operations requiring this backend will fail.",
-                                    backend_upper,
-                                    e
+                                    backend_upper, e
                                 );
                             }
                         },
@@ -275,8 +271,7 @@ impl NixlAgent {
                 Err(e) => {
                     eprintln!(
                         "Failed to create {} backend with provided params: {}",
-                        backend_upper,
-                        e
+                        backend_upper, e
                     );
                     failed_backends.push((
                         backend_upper.clone(),
@@ -353,8 +348,7 @@ impl NixlAgent {
                         Err(e) => {
                             eprintln!(
                                 "✗ Failed to create {} backend with custom params: {}",
-                                backend_upper,
-                                e
+                                backend_upper, e
                             );
                             failed_backends.push((
                                 backend_upper.clone(),
@@ -371,11 +365,7 @@ impl NixlAgent {
                                 available_backends.insert(backend_upper);
                             }
                             Err(e) => {
-                                eprintln!(
-                                    "✗ Failed to create {} backend: {}",
-                                    backend_upper,
-                                    e
-                                );
+                                eprintln!("✗ Failed to create {} backend: {}", backend_upper, e);
                                 failed_backends
                                     .push((backend_upper.clone(), format!("create failed: {}", e)));
                             }
@@ -390,8 +380,7 @@ impl NixlAgent {
                 Err(e) => {
                     eprintln!(
                         "Failed to parse {} backend parameters from environment: {}",
-                        backend_upper,
-                        e
+                        backend_upper, e
                     );
                     failed_backends.push((
                         backend_upper.clone(),
