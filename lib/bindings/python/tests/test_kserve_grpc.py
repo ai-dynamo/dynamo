@@ -4,7 +4,8 @@
 import asyncio
 import contextlib
 import socket
-from typing import Any, Optional
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Optional, Tuple
 
 import pytest
 import tritonclient.grpc as grpcclient
@@ -48,19 +49,46 @@ class EchoTensorEngine:
         return _generator()
 
 
+@pytest.fixture
+def tensor_service(runtime):
+    @asynccontextmanager
+    async def _start(
+        model_name: str,
+        *,
+        runtime_config: Optional[ModelRuntimeConfig] = None,
+        checksum: str = "dummy-mdcsum",
+    ) -> AsyncIterator[Tuple[str, int]]:
+        host = "127.0.0.1"
+        port = 8787
+        loop = asyncio.get_running_loop()
+        engine = PythonAsyncEngine(EchoTensorEngine(model_name).generate, loop)
+        tensor_model_service = KserveGrpcService(port=port, host=host)
+
+        tensor_model_service.add_tensor_model(
+            model_name, checksum, engine, runtime_config=runtime_config
+        )
+
+        cancel_token = runtime.child_token()
+
+        async def _serve():
+            await tensor_model_service.run(cancel_token)
+
+        server_task = asyncio.create_task(_serve())
+        try:
+            await asyncio.sleep(1) # wait service to start
+            yield host, port
+        finally:
+            cancel_token.cancel()
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(server_task, timeout=5)
+
+    return _start
+
+
 @pytest.mark.asyncio
-async def test_model_config_uses_runtime_config(runtime):
+async def test_model_config_uses_runtime_config(tensor_service):
     """Ensure tensor runtime_config is returned via the ModelConfig endpoint."""
-    host = "127.0.0.1"
-    port = 8787
     model_name = "tensor-config-model"
-    checksum = "dummy-mdcsum"
-
-    loop = asyncio.get_running_loop()
-    engine = PythonAsyncEngine(EchoTensorEngine(model_name).generate, loop)
-
-    service = KserveGrpcService(port=port, host=host)
-
     tensor_config = {
         "name": model_name,
         "inputs": [
@@ -74,40 +102,40 @@ async def test_model_config_uses_runtime_config(runtime):
     runtime_config = ModelRuntimeConfig()
     runtime_config.set_tensor_model_config(tensor_config)
 
-    service.add_tensor_model(
-        model_name, checksum, engine, runtime_config=runtime_config
-    )
-
-    cancel_token = runtime.child_token()
-
-    async def _serve():
-        await service.run(cancel_token)
-
-    server_task = asyncio.create_task(_serve())
-
-    client: Optional[grpcclient.InferenceServerClient] = None
-    try:
-        await asyncio.sleep(1) # wait service to start
+    async with tensor_service(model_name, runtime_config=runtime_config) as (host, port):
         client = grpcclient.InferenceServerClient(url=f"{host}:{port}")
-        response = await _fetch_model_config(client, model_name)
-
-        model_config = response.config
-        assert model_config.name == model_name
-        assert model_config.platform == "dynamo"
-        assert model_config.backend == "dynamo"
-
-        inputs = {spec.name: spec for spec in model_config.input}
-        assert list(inputs["input_text"].dims) == [-1]
-        assert inputs["input_text"].data_type == mc.TYPE_STRING
-        assert list(inputs["control_flag"].dims) == [1]
-        assert inputs["control_flag"].data_type == mc.TYPE_BOOL
-
-        outputs = {spec.name: spec for spec in model_config.output}
-        assert list(outputs["results"].dims) == [-1]
-        assert outputs["results"].data_type == mc.TYPE_STRING
-    finally:
-        if client is not None:
+        try:
+            response = await _fetch_model_config(client, model_name)
+        finally:
             client.close()
-        cancel_token.cancel()
-        with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
-            await asyncio.wait_for(server_task, timeout=5)
+
+    model_config = response.config
+    assert model_config.name == model_name
+    assert model_config.platform == "dynamo"
+    assert model_config.backend == "dynamo"
+
+    inputs = {spec.name: spec for spec in model_config.input}
+    assert list(inputs["input_text"].dims) == [-1]
+    assert inputs["input_text"].data_type == mc.TYPE_STRING
+    assert list(inputs["control_flag"].dims) == [1]
+    assert inputs["control_flag"].data_type == mc.TYPE_BOOL
+
+    outputs = {spec.name: spec for spec in model_config.output}
+    assert list(outputs["results"].dims) == [-1]
+    assert outputs["results"].data_type == mc.TYPE_STRING
+
+
+@pytest.mark.asyncio
+async def test_model_config_missing_runtime_config_errors(tensor_service):
+    """ModelConfig should return NOT_FOUND when no tensor runtime_config is saved."""
+    model_name = "tensor-config-missing"
+
+    async with tensor_service(model_name, runtime_config=None) as (host, port):
+        client = grpcclient.InferenceServerClient(url=f"{host}:{port}")
+        try:
+            with pytest.raises(InferenceServerException) as excinfo:
+                await asyncio.to_thread(client.get_model_config, model_name)
+        finally:
+            client.close()
+
+    assert "not found" in str(excinfo.value).lower()
