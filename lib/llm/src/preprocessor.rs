@@ -344,7 +344,7 @@ impl OpenAIPreprocessor {
             let mm_hash = hasher.hash(&media_map);
 
             builder.multi_modal_data(Some(media_map));
-            builder.mm_content_hash(mm_hash);
+            builder.mm_hash(mm_hash);
         }
 
         Ok(())

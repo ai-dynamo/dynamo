@@ -35,7 +35,7 @@ pub struct PreprocessedRequest {
     /// Hash of multimodal content for KV cache differentiation
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mm_content_hash: Option<u64>,
+    pub mm_hash: Option<u64>,
 
     /// StopConditions are conditions that the inference engine will use to stop generation.
     pub stop_conditions: StopConditions,

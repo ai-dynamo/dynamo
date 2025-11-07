@@ -1220,7 +1220,7 @@ impl KvPushRouter {
                 .find_best_match(
                     request_id.as_deref(),
                     &token_ids,
-                    None, // mm_content_hash - not exposed in Python bindings yet
+                    None, // mm_hash - not exposed in Python bindings yet
                     router_config_override.as_ref(),
                     update_states,
                 )
@@ -1268,7 +1268,7 @@ impl KvPushRouter {
                 .find_best_match(
                     request_id.as_deref(),
                     &token_ids,
-                    None, // mm_content_hash - not exposed in Python bindings yet
+                    None, // mm_hash - not exposed in Python bindings yet
                     router_config_override.as_ref(),
                     update_states,
                 )
@@ -1316,7 +1316,7 @@ impl KvPushRouter {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let loads = chooser
-                .get_potential_loads(&token_ids, None) // mm_content_hash - not exposed in Python bindings yet
+                .get_potential_loads(&token_ids, None) // mm_hash - not exposed in Python bindings yet
                 .await
                 .map_err(to_pyerr)?;
 
