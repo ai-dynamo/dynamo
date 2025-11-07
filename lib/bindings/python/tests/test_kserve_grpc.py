@@ -3,7 +3,6 @@
 
 import asyncio
 import contextlib
-import socket
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional, Tuple
 
@@ -29,7 +28,9 @@ async def _fetch_model_config(
         except InferenceServerException as err:
             last_error = err
             await asyncio.sleep(0.1)
-    raise AssertionError(f"Unable to fetch model config for '{model_name}': {last_error}")
+    raise AssertionError(
+        f"Unable to fetch model config for '{model_name}': {last_error}"
+    )
 
 
 class EchoTensorEngine:
@@ -75,7 +76,7 @@ def tensor_service(runtime):
 
         server_task = asyncio.create_task(_serve())
         try:
-            await asyncio.sleep(1) # wait service to start
+            await asyncio.sleep(1)  # wait service to start
             yield host, port
         finally:
             cancel_token.cancel()
@@ -102,7 +103,10 @@ async def test_model_config_uses_runtime_config(tensor_service):
     runtime_config = ModelRuntimeConfig()
     runtime_config.set_tensor_model_config(tensor_config)
 
-    async with tensor_service(model_name, runtime_config=runtime_config) as (host, port):
+    async with tensor_service(model_name, runtime_config=runtime_config) as (
+        host,
+        port,
+    ):
         client = grpcclient.InferenceServerClient(url=f"{host}:{port}")
         try:
             response = await _fetch_model_config(client, model_name)
