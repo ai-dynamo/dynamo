@@ -189,6 +189,10 @@ impl CommonExtProvider for NvCreateCompletionRequest {
     fn get_include_stop_str_in_output(&self) -> Option<bool> {
         self.common.include_stop_str_in_output
     }
+
+    fn get_skip_special_tokens(&self) -> Option<bool> {
+        self.common.skip_special_tokens
+    }
 }
 
 impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
@@ -364,7 +368,7 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
-        None
+        CommonExtProvider::get_skip_special_tokens(self)
     }
 
     fn get_formatted_prompt(&self) -> Option<bool> {
@@ -405,5 +409,79 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::common::OutputOptionsProvider;
+    use serde_json::json;
+
+    #[test]
+    fn test_skip_special_tokens_deserialization() {
+        // Test that skip_special_tokens can be deserialized from JSON
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "Hello, world!",
+            "skip_special_tokens": false
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert_eq!(request.common.skip_special_tokens, Some(false));
+    }
+
+    #[test]
+    fn test_skip_special_tokens_default_none() {
+        // Test that skip_special_tokens defaults to None when not specified
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "Hello, world!"
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert_eq!(request.common.skip_special_tokens, None);
+    }
+
+    #[test]
+    fn test_skip_special_tokens_output_options() {
+        // Test that skip_special_tokens is properly extracted to OutputOptions
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "Hello, world!",
+            "skip_special_tokens": true
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        let output_options = request
+            .extract_output_options()
+            .expect("Failed to extract output options");
+
+        assert_eq!(output_options.skip_special_tokens, Some(true));
+    }
+
+    #[test]
+    fn test_skip_special_tokens_false_propagates() {
+        // Test that skip_special_tokens=false is properly extracted
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "Hello, world!",
+            "skip_special_tokens": false
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        let output_options = request
+            .extract_output_options()
+            .expect("Failed to extract output options");
+
+        assert_eq!(output_options.skip_special_tokens, Some(false));
     }
 }
