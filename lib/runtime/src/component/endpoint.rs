@@ -216,14 +216,6 @@ impl EndpointConfigBuilder {
             ));
         }
 
-        tracing::warn!(
-            "DISCOVERY_VALIDATION: endpoint_registered: namespace={}, component={}, endpoint={}, instance_id={}",
-            namespace_name,
-            component_name,
-            endpoint_name,
-            connection_id
-        );
-
         task.await??;
 
         Ok(())

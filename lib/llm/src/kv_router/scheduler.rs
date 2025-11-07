@@ -162,16 +162,6 @@ impl KvScheduler {
                 let new_instances = instances_monitor_rx.borrow_and_update().clone();
                 let new_configs = configs_monitor_rx.borrow_and_update().clone();
 
-                // Log config state for comparison
-                let config_details: Vec<(u64, Option<u64>)> = new_configs
-                    .iter()
-                    .map(|(&worker_id, config)| (worker_id, config.total_kv_blocks))
-                    .collect();
-                tracing::warn!(
-                    "DISCOVERY_VALIDATION: scheduler_config_state: configs={:?}",
-                    config_details
-                );
-
                 // Build the new workers_with_configs map
                 let mut new_workers_with_configs = HashMap::new();
                 for instance in &new_instances {
