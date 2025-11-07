@@ -5,7 +5,7 @@ use crate::kv_router::KV_METRICS_SUBJECT;
 use crate::kv_router::scoring::LoadEvent;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::component::Client;
-use dynamo_runtime::discovery::{watch_and_extract_field, DiscoveryKey};
+use dynamo_runtime::discovery::{DiscoveryKey, watch_and_extract_field};
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::EventSubscriber;
@@ -81,11 +81,13 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
         // Watch for runtime config updates from model deployment cards via discovery interface
         let discovery = component.drt().discovery_client();
-        let discovery_stream = discovery.list_and_watch(DiscoveryKey::AllModelCards).await?;
-        let mut config_events_rx = watch_and_extract_field(
-            discovery_stream,
-            |card: ModelDeploymentCard| card.runtime_config,
-        );
+        let discovery_stream = discovery
+            .list_and_watch(DiscoveryKey::AllModelCards)
+            .await?;
+        let mut config_events_rx =
+            watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
+                card.runtime_config
+            });
 
         // Subscribe to KV metrics events
         let mut kv_metrics_rx = component.namespace().subscribe(KV_METRICS_SUBJECT).await?;
@@ -109,7 +111,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                     // Handle runtime config updates
                     _ = config_events_rx.changed() => {
                         let runtime_configs = config_events_rx.borrow().clone();
-                        
+
                         tracing::warn!(
                             worker_count = runtime_configs.len(),
                             "DISCOVERY: Runtime config updates received"

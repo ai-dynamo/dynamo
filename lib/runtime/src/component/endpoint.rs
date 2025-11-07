@@ -195,7 +195,7 @@ impl EndpointConfigBuilder {
         // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
         // consistent registration/discovery across the system.
         let discovery_client = endpoint.drt().discovery_client();
-        
+
         let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
             namespace: namespace_name.clone(),
             component: component_name.clone(),
@@ -215,7 +215,7 @@ impl EndpointConfigBuilder {
                 "Unable to register service for discovery. Check discovery service status"
             ));
         }
-        
+
         tracing::warn!(
             "DISCOVERY_VALIDATION: endpoint_registered: namespace={}, component={}, endpoint={}, instance_id={}",
             namespace_name,
@@ -223,7 +223,7 @@ impl EndpointConfigBuilder {
             endpoint_name,
             connection_id
         );
-        
+
         task.await??;
 
         Ok(())

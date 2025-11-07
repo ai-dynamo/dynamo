@@ -26,17 +26,24 @@ pub async fn list_all_instances(
         .collect();
 
     instances.sort();
-    
+
     // Log all instances found for comparison
     let instance_details: Vec<(u64, &str, &str, &str)> = instances
         .iter()
-        .map(|inst| (inst.instance_id, inst.namespace.as_str(), inst.component.as_str(), inst.endpoint.as_str()))
+        .map(|inst| {
+            (
+                inst.instance_id,
+                inst.namespace.as_str(),
+                inst.component.as_str(),
+                inst.endpoint.as_str(),
+            )
+        })
         .collect();
     tracing::warn!(
         "DISCOVERY_VALIDATION: all_instances_found: count={}, instances={:?}",
         instances.len(),
         instance_details
     );
-    
+
     Ok(instances)
 }

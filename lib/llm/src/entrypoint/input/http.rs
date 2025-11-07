@@ -285,7 +285,9 @@ async fn run_watcher(
     );
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery_client();
-    let discovery_stream = discovery.list_and_watch(dynamo_runtime::discovery::DiscoveryKey::AllModelCards).await?;
+    let discovery_stream = discovery
+        .list_and_watch(dynamo_runtime::discovery::DiscoveryKey::AllModelCards)
+        .await?;
 
     // Create a channel to receive model type updates
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
@@ -301,7 +303,9 @@ async fn run_watcher(
 
     // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(discovery_stream, target_namespace.as_deref()).await;
+        watch_obj
+            .watch(discovery_stream, target_namespace.as_deref())
+            .await;
     });
 
     Ok(())

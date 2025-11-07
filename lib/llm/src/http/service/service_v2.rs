@@ -78,10 +78,8 @@ impl State {
         // Create a cancellation token for the discovery client's watch streams
         let discovery_client = {
             let cancel_token = CancellationToken::new();
-            Arc::new(KVStoreDiscoveryClient::new(
-                store.clone(),
-                cancel_token,
-            )) as Arc<dyn DiscoveryClient>
+            Arc::new(KVStoreDiscoveryClient::new(store.clone(), cancel_token))
+                as Arc<dyn DiscoveryClient>
         };
 
         Self {

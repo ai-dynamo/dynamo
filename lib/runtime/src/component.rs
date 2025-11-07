@@ -279,14 +279,14 @@ impl Component {
 
     pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
         let discovery_client = self.drt.discovery_client();
-        
+
         let discovery_key = crate::discovery::DiscoveryKey::ComponentEndpoints {
             namespace: self.namespace.name(),
             component: self.name.clone(),
         };
-        
+
         let discovery_instances = discovery_client.list(discovery_key).await?;
-        
+
         // Extract Instance from DiscoveryInstance::Endpoint wrapper
         let mut instances: Vec<Instance> = discovery_instances
             .into_iter()
@@ -295,7 +295,7 @@ impl Component {
                 _ => None, // Ignore all other variants (ModelCard, etc.)
             })
             .collect();
-        
+
         instances.sort();
         Ok(instances)
     }

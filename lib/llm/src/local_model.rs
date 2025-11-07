@@ -422,7 +422,7 @@ impl LocalModel {
             &self.card,
         )?;
         let _instance = discovery.register(spec).await?;
-        
+
         tracing::warn!(
             "DISCOVERY_VALIDATION: model_card_registered: namespace={}, component={}, endpoint={}, model_name={}",
             endpoint.component().namespace().name(),
@@ -430,7 +430,7 @@ impl LocalModel {
             endpoint.name(),
             self.card.name()
         );
-        
+
         Ok(())
     }
 }

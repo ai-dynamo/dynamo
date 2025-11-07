@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::component::TransportType;
 use crate::Result;
+use crate::component::TransportType;
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -199,4 +199,3 @@ pub trait DiscoveryClient: Send + Sync {
     /// Returns a stream of discovery events (Added/Removed) for the given discovery key
     async fn list_and_watch(&self, key: DiscoveryKey) -> Result<DiscoveryStream>;
 }
-

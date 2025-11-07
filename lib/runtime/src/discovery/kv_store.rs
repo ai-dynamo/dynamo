@@ -8,7 +8,10 @@ use futures::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use super::{DiscoveryClient, DiscoveryEvent, DiscoveryInstance, DiscoveryKey, DiscoverySpec, DiscoveryStream};
+use super::{
+    DiscoveryClient, DiscoveryEvent, DiscoveryInstance, DiscoveryKey, DiscoverySpec,
+    DiscoveryStream,
+};
 
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODEL_CARDS_BUCKET: &str = "v1/mdc";
@@ -33,7 +36,12 @@ impl KVStoreDiscoveryClient {
     }
 
     /// Build the key path for a model card (relative to bucket, not absolute)
-    fn model_card_key(namespace: &str, component: &str, endpoint: &str, instance_id: u64) -> String {
+    fn model_card_key(
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        instance_id: u64,
+    ) -> String {
         format!("{}/{}/{}/{:x}", namespace, component, endpoint, instance_id)
     }
 
@@ -44,21 +52,41 @@ impl KVStoreDiscoveryClient {
             DiscoveryKey::NamespacedEndpoints { namespace } => {
                 format!("{}/{}", INSTANCES_BUCKET, namespace)
             }
-            DiscoveryKey::ComponentEndpoints { namespace, component } => {
+            DiscoveryKey::ComponentEndpoints {
+                namespace,
+                component,
+            } => {
                 format!("{}/{}/{}", INSTANCES_BUCKET, namespace, component)
             }
-            DiscoveryKey::Endpoint { namespace, component, endpoint } => {
-                format!("{}/{}/{}/{}", INSTANCES_BUCKET, namespace, component, endpoint)
+            DiscoveryKey::Endpoint {
+                namespace,
+                component,
+                endpoint,
+            } => {
+                format!(
+                    "{}/{}/{}/{}",
+                    INSTANCES_BUCKET, namespace, component, endpoint
+                )
             }
             DiscoveryKey::AllModelCards => MODEL_CARDS_BUCKET.to_string(),
             DiscoveryKey::NamespacedModelCards { namespace } => {
                 format!("{}/{}", MODEL_CARDS_BUCKET, namespace)
             }
-            DiscoveryKey::ComponentModelCards { namespace, component } => {
+            DiscoveryKey::ComponentModelCards {
+                namespace,
+                component,
+            } => {
                 format!("{}/{}/{}", MODEL_CARDS_BUCKET, namespace, component)
             }
-            DiscoveryKey::EndpointModelCards { namespace, component, endpoint } => {
-                format!("{}/{}/{}/{}", MODEL_CARDS_BUCKET, namespace, component, endpoint)
+            DiscoveryKey::EndpointModelCards {
+                namespace,
+                component,
+                endpoint,
+            } => {
+                format!(
+                    "{}/{}/{}/{}",
+                    MODEL_CARDS_BUCKET, namespace, component, endpoint
+                )
             }
         }
     }
@@ -137,12 +165,9 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
             bucket_name,
             key_path
         );
-        let bucket = self
-            .store
-            .get_or_create_bucket(bucket_name, None)
-            .await?;
+        let bucket = self.store.get_or_create_bucket(bucket_name, None).await?;
         let key = crate::storage::key_value_store::Key::from_raw(key_path.clone());
-        
+
         tracing::debug!(
             "KVStoreDiscoveryClient::register: Inserting into bucket={}, key={}",
             bucket_name,
@@ -356,7 +381,7 @@ mod tests {
         };
 
         let instance = client.register(spec).await.unwrap();
-        
+
         match instance {
             DiscoveryInstance::Endpoint(inst) => {
                 assert_eq!(inst.namespace, "test");
@@ -437,7 +462,7 @@ mod tests {
         let client_clone = client.clone();
         let register_task = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-            
+
             let spec = DiscoverySpec::Endpoint {
                 namespace: "test".to_string(),
                 component: "comp1".to_string(),
@@ -450,16 +475,14 @@ mod tests {
         // Wait for the added event
         let event = stream.next().await.unwrap().unwrap();
         match event {
-            DiscoveryEvent::Added(instance) => {
-                match instance {
-                    DiscoveryInstance::Endpoint(inst) => {
-                        assert_eq!(inst.namespace, "test");
-                        assert_eq!(inst.component, "comp1");
-                        assert_eq!(inst.endpoint, "ep1");
-                    }
-                    _ => panic!("Expected Endpoint instance"),
+            DiscoveryEvent::Added(instance) => match instance {
+                DiscoveryInstance::Endpoint(inst) => {
+                    assert_eq!(inst.namespace, "test");
+                    assert_eq!(inst.component, "comp1");
+                    assert_eq!(inst.endpoint, "ep1");
                 }
-            }
+                _ => panic!("Expected Endpoint instance"),
+            },
             _ => panic!("Expected Added event"),
         }
 
@@ -467,4 +490,3 @@ mod tests {
         cancel_token.cancel();
     }
 }
-

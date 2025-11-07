@@ -297,10 +297,10 @@ mod integration_tests {
         discovery::ModelWatcher, engines::make_echo_engine, entrypoint::EngineConfig,
         local_model::LocalModelBuilder,
     };
-    use dynamo_runtime::discovery::DiscoveryKey;
-    use dynamo_runtime::traits::DistributedRuntimeProvider;
     use dynamo_runtime::DistributedRuntime;
+    use dynamo_runtime::discovery::DiscoveryKey;
     use dynamo_runtime::pipeline::RouterMode;
+    use dynamo_runtime::traits::DistributedRuntimeProvider;
     use std::sync::Arc;
 
     #[tokio::test]

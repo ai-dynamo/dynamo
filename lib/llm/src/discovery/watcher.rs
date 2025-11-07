@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::Notify;
+use tokio::sync::mpsc::Sender;
 
 use anyhow::Context as _;
 use futures::StreamExt;
@@ -100,7 +100,11 @@ impl ModelWatcher {
     }
 
     /// Common watch logic with optional namespace filtering
-    pub async fn watch(&self, mut discovery_stream: DiscoveryStream, target_namespace: Option<&str>) {
+    pub async fn watch(
+        &self,
+        mut discovery_stream: DiscoveryStream,
+        target_namespace: Option<&str>,
+    ) {
         let global_namespace = target_namespace.is_none_or(is_global_namespace);
 
         while let Some(result) = discovery_stream.next().await {
@@ -128,7 +132,7 @@ impl ModelWatcher {
                                 component: component.clone(),
                                 name: endpoint.clone(),
                             };
-                            
+
                             match instance.deserialize_model_card::<ModelDeploymentCard>() {
                                 Ok(card) => (eid, *instance_id, card),
                                 Err(err) => {
@@ -138,7 +142,9 @@ impl ModelWatcher {
                             }
                         }
                         _ => {
-                            tracing::error!("Unexpected discovery instance type (expected ModelCard)");
+                            tracing::error!(
+                                "Unexpected discovery instance type (expected ModelCard)"
+                            );
                             continue;
                         }
                     };
@@ -203,7 +209,7 @@ impl ModelWatcher {
                 DiscoveryEvent::Removed(instance_id) => {
                     // Use instance_id hex as the HashMap key (matches what we saved with)
                     let key = format!("{:x}", instance_id);
-                    
+
                     match self
                         .handle_delete(&key, target_namespace, global_namespace)
                         .await
@@ -232,7 +238,7 @@ impl ModelWatcher {
         is_global_namespace: bool,
     ) -> anyhow::Result<Option<String>> {
         tracing::warn!("DISCOVERY_VALIDATION: handle_delete: key={}", key);
-        
+
         let card = match self.manager.remove_model_card(key) {
             Some(card) => card,
             None => {
@@ -325,7 +331,7 @@ impl ModelWatcher {
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
         tracing::warn!("DISCOVERY_VALIDATION: handle_put: key={}", key);
-        
+
         card.download_config().await?;
 
         let component = self
@@ -602,7 +608,9 @@ impl ModelWatcher {
                             name: endpoint.clone(),
                         },
                         _ => {
-                            tracing::error!("Unexpected discovery instance type (expected ModelCard)");
+                            tracing::error!(
+                                "Unexpected discovery instance type (expected ModelCard)"
+                            );
                             continue;
                         }
                     };
@@ -636,5 +644,3 @@ impl ModelWatcher {
         Ok(all.into_iter().map(|(_eid, card)| card).collect())
     }
 }
-
-

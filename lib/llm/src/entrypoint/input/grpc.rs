@@ -178,7 +178,9 @@ async fn run_watcher(
     );
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery_client();
-    let discovery_stream = discovery.list_and_watch(dynamo_runtime::discovery::DiscoveryKey::AllModelCards).await?;
+    let discovery_stream = discovery
+        .list_and_watch(dynamo_runtime::discovery::DiscoveryKey::AllModelCards)
+        .await?;
 
     // [gluo NOTE] This is different from http::run_watcher where it alters the HTTP service
     // endpoint being exposed, gRPC doesn't have the same concept as the KServe service
@@ -186,7 +188,9 @@ async fn run_watcher(
 
     // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(discovery_stream, target_namespace.as_deref()).await;
+        watch_obj
+            .watch(discovery_stream, target_namespace.as_deref())
+            .await;
     });
 
     Ok(())

@@ -65,11 +65,17 @@ impl Client {
 
     // Client with auto-discover instances using etcd
     pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
-        tracing::debug!("Client::new_dynamic: Creating dynamic client for endpoint: {}", endpoint.path());
+        tracing::debug!(
+            "Client::new_dynamic: Creating dynamic client for endpoint: {}",
+            endpoint.path()
+        );
         const INSTANCE_REFRESH_PERIOD: Duration = Duration::from_secs(1);
 
         let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
-        tracing::debug!("Client::new_dynamic: Got instance source for endpoint: {}", endpoint.path());
+        tracing::debug!(
+            "Client::new_dynamic: Got instance source for endpoint: {}",
+            endpoint.path()
+        );
 
         let client = Client {
             endpoint: endpoint.clone(),
@@ -77,9 +83,15 @@ impl Client {
             instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
             instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
         };
-        tracing::debug!("Client::new_dynamic: Starting instance source monitor for endpoint: {}", endpoint.path());
+        tracing::debug!(
+            "Client::new_dynamic: Starting instance source monitor for endpoint: {}",
+            endpoint.path()
+        );
         client.monitor_instance_source();
-        tracing::debug!("Client::new_dynamic: Successfully created dynamic client for endpoint: {}", endpoint.path());
+        tracing::debug!(
+            "Client::new_dynamic: Successfully created dynamic client for endpoint: {}",
+            endpoint.path()
+        );
         Ok(client)
     }
 
@@ -191,11 +203,16 @@ impl Client {
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
         let endpoint_path = self.endpoint.path();
-        tracing::debug!("monitor_instance_source: Starting monitor for endpoint: {}", endpoint_path);
+        tracing::debug!(
+            "monitor_instance_source: Starting monitor for endpoint: {}",
+            endpoint_path
+        );
         tokio::task::spawn(async move {
             let mut rx = match client.instance_source.as_ref() {
                 InstanceSource::Static => {
-                    tracing::error!("monitor_instance_source: Static instance source is not watchable");
+                    tracing::error!(
+                        "monitor_instance_source: Static instance source is not watchable"
+                    );
                     return;
                 }
                 InstanceSource::Dynamic(rx) => rx.clone(),
@@ -227,15 +244,25 @@ impl Client {
                     instance_ids
                 );
 
-                tracing::debug!("monitor_instance_source: instance source updated, endpoint={}", endpoint_path);
+                tracing::debug!(
+                    "monitor_instance_source: instance source updated, endpoint={}",
+                    endpoint_path
+                );
 
                 if let Err(err) = rx.changed().await {
-                    tracing::error!("monitor_instance_source: The Sender is dropped: {}, endpoint={}", err, endpoint_path);
+                    tracing::error!(
+                        "monitor_instance_source: The Sender is dropped: {}, endpoint={}",
+                        err,
+                        endpoint_path
+                    );
                     cancel_token.cancel();
                 }
                 iteration += 1;
             }
-            tracing::debug!("monitor_instance_source: Monitor loop exiting for endpoint: {}", endpoint_path);
+            tracing::debug!(
+                "monitor_instance_source: Monitor loop exiting for endpoint: {}",
+                endpoint_path
+            );
         });
     }
 
@@ -284,7 +311,9 @@ impl Client {
             discovery_key
         );
 
-        let mut discovery_stream = discovery_client.list_and_watch(discovery_key.clone()).await?;
+        let mut discovery_stream = discovery_client
+            .list_and_watch(discovery_key.clone())
+            .await?;
 
         tracing::debug!(
             "get_or_create_dynamic_instance_source: Got discovery stream for key: {:?}",
