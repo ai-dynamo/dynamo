@@ -103,20 +103,10 @@ pub fn extract_single_prompt(
             dynamo_async_openai::types::Prompt::IntegerArray(arr.clone())
         }
         dynamo_async_openai::types::Prompt::StringArray(arr) => {
-            if index < arr.len() {
-                dynamo_async_openai::types::Prompt::String(arr[index].clone())
-            } else {
-                // Fallback to empty string if index out of bounds
-                dynamo_async_openai::types::Prompt::String(String::new())
-            }
+            dynamo_async_openai::types::Prompt::String(arr[index].clone())
         }
         dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
-            if index < arr.len() {
-                dynamo_async_openai::types::Prompt::IntegerArray(arr[index].clone())
-            } else {
-                // Fallback to empty array if index out of bounds
-                dynamo_async_openai::types::Prompt::IntegerArray(vec![])
-            }
+            dynamo_async_openai::types::Prompt::IntegerArray(arr[index].clone())
         }
     }
 }
