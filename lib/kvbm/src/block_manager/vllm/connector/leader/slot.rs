@@ -989,6 +989,12 @@ impl VllmConnectorSlot {
         block_ids: &[BlockId],
         token_blocks: &[TokenBlock],
     ) -> Result<(), SlotError> {
+        // Check if slot is in Finishing state before creating operations
+        // If we're finishing, don't create new operations
+        if matches!(self.state, SlotState::Finishing | SlotState::Finished) {
+            return Ok(());
+        }
+
         assert!(block_ids.len() == token_blocks.len());
         let operation_id = uuid::Uuid::new_v4();
 
@@ -1173,8 +1179,8 @@ impl LocalTransferEngine {
         task_token: CancellationToken,
         kvbm_metrics: KvbmMetrics,
     ) -> anyhow::Result<()> {
-        let (onboard_tx, mut onboard_rx) = mpsc::unbounded_channel();
-        let (offload_tx, mut offload_rx) = mpsc::unbounded_channel();
+        let (onboard_tx, mut onboard_rx) = mpsc::unbounded_channel::<LocalOnboardRequest>();
+        let (offload_tx, mut offload_rx) = mpsc::unbounded_channel::<LocalOffloadRequest>();
 
         // Clone resources needed for tasks
         let block_manager_offload = self.block_manager.clone();
@@ -1212,6 +1218,10 @@ impl LocalTransferEngine {
                         tracing::debug!("LocalOffloadTask: received cancellation signal");
                         break;
                     }
+
+                    let request_id = req.request_id.clone();
+                    let operation_id = req.operation_id;
+
                     if let Err(e) = process_offload_request(
                         req,
                         &block_manager_offload,
@@ -1221,6 +1231,31 @@ impl LocalTransferEngine {
                     .await
                     {
                         tracing::error!("LocalOffloadTask: error processing request: {:?}", e);
+
+                        // Notify scheduler that this operation is "complete" (even though it failed)
+                        // Create a fake/immediate transfer request that completes instantly
+                        // This increments the workers' completed counter so they can progress
+                        let fake_xfer = BlockTransferRequest {
+                            from_pool: BlockTransferPool::Device, // Use valid Device->Host transfer type
+                            to_pool: BlockTransferPool::Host,     // (offload path, but no blocks)
+                            blocks: vec![],                       // Empty - nothing to transfer
+                            connector_req: Some(LeaderTransferRequest {
+                                request_id: request_id.clone(),
+                                uuid: operation_id,
+                                requirement: None,
+                                request_type: RequestType::Immediate, // Immediate = completes instantly
+                            }),
+                        };
+
+                        match leader_offload.transfer_blocks_request(fake_xfer).await {
+                            Ok(notify_receiver) => {
+                                // Wait for the fake transfer to "complete" (should be instant)
+                                let _ = notify_receiver.await;
+                            }
+                            Err(_xfer_err) => {
+                                // Failed to create completion notification - error already logged above
+                            }
+                        }
                     }
                 }
                 Ok(())
