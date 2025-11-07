@@ -114,7 +114,7 @@ spec:
         mainContainer:
           env: 
             - name: MODEL_PATH
-              value: /mnt/model-cache/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507-FP8/snapshots/e156cb4efae43fbee1a1ab073f946a1377e6b969
+              value: /mnt/model-cache/hub/models--Qwen--Qwen3-235B-A22B-FP8/snapshots/39eb2b067ea6b8e3e1dd97d3cd0c7ffeaf3e1a35
             - name: ENGINE_ARGS
               value: /engine_configs/prefill.yaml
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
@@ -126,7 +126,7 @@ spec:
             - |
               python3 -m dynamo.trtllm \
                 --model-path "${MODEL_PATH}" \
-                --served-model-name "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8" \
+                --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
                 --extra-engine-args "${ENGINE_ARGS}" \
                 --disaggregation-mode prefill \
                 --disaggregation-strategy prefill_first
@@ -166,7 +166,7 @@ spec:
         mainContainer:
           env: 
             - name: MODEL_PATH
-              value: /mnt/model-cache/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507-FP8/snapshots/e156cb4efae43fbee1a1ab073f946a1377e6b969
+              value: /mnt/model-cache/hub/models--Qwen--Qwen3-235B-A22B-FP8/snapshots/39eb2b067ea6b8e3e1dd97d3cd0c7ffeaf3e1a35
             - name: ENGINE_ARGS
               value: /engine_configs/decode.yaml
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
@@ -178,7 +178,7 @@ spec:
             - |
               python3 -m dynamo.trtllm \
                 --model-path "${MODEL_PATH}" \
-                --served-model-name "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8" \
+                --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
                 --extra-engine-args "${ENGINE_ARGS}" \
                 --disaggregation-mode decode \
                 --disaggregation-strategy prefill_first

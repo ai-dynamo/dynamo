@@ -23,13 +23,13 @@ spec:
                 name: hf-token-secret
           env:
             - name: MODEL_NAME
-              value: Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
+              value: Qwen/Qwen3-235B-A22B-FP8
             - name: HF_HOME
               value: /model-store
             - name: HF_HUB_ENABLE_HF_TRANSFER
               value: "1"
             - name: MODEL_REVISION
-              value: e156cb4efae43fbee1a1ab073f946a1377e6b969
+              value: 39eb2b067ea6b8e3e1dd97d3cd0c7ffeaf3e1a35
           args:
             - |
               set -eux
