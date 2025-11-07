@@ -66,20 +66,7 @@ runs:
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
         # Copy test results from container to host
-        echo "📥 Copying test results from container..."
-        if docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/test-results ./test-results; then
-          echo "✅ Successfully copied test results from container"
-        else
-          echo "⚠️  Failed to copy test results from container"
-        fi
-
-        # Debug: Check what was copied to host
-        echo "📁 Checking host test-results directory:"
-        if [[ -d "./test-results" ]]; then
-          ls -la ./test-results/
-        else
-          echo "⚠️  No test-results directory on host"
-        fi
+        docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/test-results ./test-results || echo "Failed to copy test results"
 
         # Clean up container
         docker rm -f ${{ env.CONTAINER_ID }}_pytest || echo "Failed to clean up container"
@@ -98,7 +85,6 @@ runs:
 
         # Check for JUnit XML file and determine test status
         JUNIT_FILE="test-results/pytest_test_report.xml"
-        ls -la test-results/
 
         if [[ -f "$JUNIT_FILE" ]]; then
           echo "✅ JUnit XML generated successfully"
