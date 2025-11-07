@@ -12,7 +12,7 @@ mod config;
 pub use config::NixlBackendConfig;
 
 use anyhow::Result;
-use nixl_sys::Agent as RawNixlAgent;
+use nixl_sys::{Agent as RawNixlAgent, Params};
 use std::collections::HashSet;
 
 /// A NIXL agent wrapper that tracks which backends were successfully initialized.
@@ -34,15 +34,128 @@ pub struct NixlAgent {
 }
 
 impl NixlAgent {
+    /// Generic helper function to create backend parameters from environment variables.
+    ///
+    /// Parses environment variables with the pattern:
+    /// `DYN_KVBM_NIXL_BACKEND_{BACKEND_NAME}_{PARAM}`
+    ///
+    /// For example:
+    /// - `DYN_KVBM_NIXL_BACKEND_POSIX_PATH=/my/path` -> `path` parameter for POSIX backend
+    /// - `DYN_KVBM_NIXL_BACKEND_UCX_DEVICE=mlx5_0`   -> `device` parameter for UCX backend
+    /// - `DYN_KVBM_NIXL_BACKEND_OBJ_ACCESS_KEY=...`  -> `access_key` parameter for OBJ backend
+    ///
+    /// Returns `None` if no custom parameters are found for this backend.
+    ///
+    /// This is public so it can be used when constructing custom configurations before
+    /// calling `new_with_backends_and_params()`.
+    pub fn create_backend_params_from_env(backend_name: &str) -> Result<Option<Params>> {
+        let prefix = format!("DYN_KVBM_NIXL_BACKEND_{}_", backend_name);
+        let mut params = Params::create()?;
+        let mut param_sources = Vec::new();
+        let mut found_any = false;
+
+        // Parse DYN_KVBM_NIXL_BACKEND_{BACKEND_NAME}_* variables
+        for (env_key, env_value) in std::env::vars() {
+            if let Some(param_name) = env_key.strip_prefix(&prefix) {
+                let param_key = param_name.to_lowercase();
+                params.add(&param_key, &env_value)?;
+
+                // Redact sensitive-looking parameters
+                let display_value = if param_key.contains("secret") || param_key.contains("key") && param_key != "access_key" {
+                    "<REDACTED>".to_string()
+                } else {
+                    env_value.clone()
+                };
+                param_sources.push(format!("{}={} (from {})", param_key, display_value, env_key));
+                found_any = true;
+            }
+        }
+        if !found_any {
+            return Ok(None);
+        }
+
+        tracing::debug!("{} backend parameters configured from environment:", backend_name);
+        for source in &param_sources {
+            tracing::debug!("   {}", source);
+        }
+
+        Ok(Some(params))
+    }
+
+    /// Create a new NIXL agent with the specified backends and explicit parameters.
+    ///
+    /// This method allows you to provide explicit `Params` for each backend. If a backend fails,
+    /// it logs a warning but continues with remaining backends. At least one backend must
+    /// succeed or this returns an error.
+    ///
+    /// # Arguments
+    /// * `name` - Agent name
+    /// * `backends` - List of (backend_name, params) tuples
+    ///
+    /// # Returns
+    /// A `NixlAgent` that tracks which backends were successfully initialized.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Agent creation fails
+    /// - All backend initialization attempts fail
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut obj_params = Params::create()?;
+    /// obj_params.add("bucket", "my-bucket")?;
+    /// obj_params.add("region", "us-west-2")?;
+    ///
+    /// let agent = NixlAgent::new_with_backends_and_params(
+    ///     "my-agent",
+    ///     &[("OBJ", obj_params)]
+    /// )?;
+    /// ```
+    pub fn new_with_backends_and_params(name: &str, backends: &[(&str, Params)]) -> Result<Self> {
+        let agent = RawNixlAgent::new(name)?;
+        let mut available_backends = HashSet::new();
+
+        for (backend, params) in backends {
+            let backend_upper = backend.to_uppercase();
+
+            match agent.create_backend(&backend_upper, params) {
+                Ok(_) => {
+                    available_backends.insert(backend_upper.clone());
+                    tracing::debug!("{} backend created with provided parameters", backend_upper);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to create {} backend with provided params: {}. Operations requiring this backend will fail.",
+                        backend_upper, e
+                    );
+                }
+            }
+        }
+
+        if available_backends.is_empty() {
+            let backend_names: Vec<_> = backends.iter().map(|(name, _)| *name).collect();
+            anyhow::bail!("Failed to initialize any NIXL backends from {:?}", backend_names);
+        }
+
+        Ok(Self {
+            agent,
+            available_backends,
+        })
+    }
+
     /// Create a new NIXL agent with the specified backends.
     ///
     /// Attempts to initialize all requested backends. If a backend fails, it logs
     /// a warning but continues with remaining backends. At least one backend must
     /// succeed or this returns an error.
     ///
+    /// This method will first check for custom parameters in environment variables
+    /// (DYN_KVBM_NIXL_BACKEND_{BACKEND_NAME}_{PARAM}), and if not found, will use
+    /// the default plugin parameters.
+    ///
     /// # Arguments
     /// * `name` - Agent name
-    /// * `backends` - List of backend names to try (e.g., `&["UCX", "GDS_MT, "POSIX"]`)
+    /// * `backends` - List of backend names to try (e.g., `&["UCX", "GDS_MT", "POSIX"]`)
     ///
     /// # Returns
     /// A `NixlAgent` that tracks which backends were successfully initialized.
@@ -57,22 +170,50 @@ impl NixlAgent {
 
         for backend in backends {
             let backend_upper = backend.to_uppercase();
-            match agent.get_plugin_params(&backend_upper) {
-                Ok((_, params)) => match agent.create_backend(&backend_upper, &params) {
-                    Ok(_) => {
-                        available_backends.insert(backend_upper);
+
+            // Try to get custom parameters from environment first
+            match Self::create_backend_params_from_env(&backend_upper) {
+                Ok(Some(custom_params)) => {
+                    // Custom parameters found - use them
+                    match agent.create_backend(&backend_upper, &custom_params) {
+                        Ok(_) => {
+                            available_backends.insert(backend_upper.clone());
+                            tracing::debug!("{} backend created with custom configuration from environment", backend_upper);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to create {} backend with custom params: {}. Check your DYN_KVBM_NIXL_BACKEND_{}_* environment variables.",
+                                backend_upper, e, backend_upper
+                            );
+                        }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "✗ Failed to create {} backend: {}. Operations requiring this backend will fail.",
-                            backend_upper, e
-                        );
+                }
+                Ok(None) => {
+                    // No custom parameters - fall back to default plugin parameters
+                    match agent.get_plugin_params(&backend_upper) {
+                        Ok((_, params)) => match agent.create_backend(&backend_upper, &params) {
+                            Ok(_) => {
+                                available_backends.insert(backend_upper);
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to create {} backend: {}. Operations requiring this backend will fail.",
+                                    backend_upper, e
+                                );
+                            }
+                        },
+                        Err(_) => {
+                            tracing::error!(
+                                "No {} plugin found. Operations requiring this backend will fail.",
+                                backend_upper
+                            );
+                        }
                     }
-                },
-                Err(_) => {
+                }
+                Err(e) => {
                     eprintln!(
-                        "✗ No {} plugin found. Operations requiring this backend will fail.",
-                        backend_upper
+                        "Failed to parse {} backend parameters from environment: {}",
+                        backend_upper, e
                     );
                 }
             }
@@ -88,11 +229,81 @@ impl NixlAgent {
         })
     }
 
+    /// Create a NIXL agent requiring ALL specified backends with explicit parameters.
+    ///
+    /// Unlike `new_with_backends_and_params()` which continues if some backends fail,
+    /// this method will return an error if ANY backend fails to initialize. Use this
+    /// in production when specific backends with specific configurations are mandatory.
+    ///
+    /// # Arguments
+    /// * `name` - Agent name
+    /// * `backends` - List of (backend_name, params) tuples that MUST be available
+    ///
+    /// # Returns
+    /// A `NixlAgent` with all requested backends initialized.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Agent creation fails
+    /// - Any backend fails to initialize
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut obj_params = Params::create()?;
+    /// obj_params.add("bucket", "my-bucket")?;
+    ///
+    /// let agent = NixlAgent::require_backends_with_params(
+    ///     "worker-0",
+    ///     &[("OBJ", obj_params)]
+    /// )?;
+    /// ```
+    pub fn require_backends_with_params(name: &str, backends: &[(&str, Params)]) -> Result<Self> {
+        let agent = RawNixlAgent::new(name)?;
+        let mut available_backends = HashSet::new();
+        let mut failed_backends = Vec::new();
+
+        for (backend, params) in backends {
+            let backend_upper = backend.to_uppercase();
+
+            match agent.create_backend(&backend_upper, params) {
+                Ok(_) => {
+                    available_backends.insert(backend_upper.clone());
+                    tracing::debug!("{} backend created with provided parameters", backend_upper);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create {} backend with provided params: {}", backend_upper, e);
+                    failed_backends
+                        .push((backend_upper.clone(), format!("create with provided params failed: {}", e)));
+                }
+            }
+        }
+
+        if !failed_backends.is_empty() {
+            let error_details: Vec<String> = failed_backends
+                .iter()
+                .map(|(name, reason)| format!("{}: {}", name, reason))
+                .collect();
+            anyhow::bail!(
+                "Failed to initialize required backends: [{}]",
+                error_details.join(", ")
+            );
+        }
+
+        Ok(Self {
+            agent,
+            available_backends,
+        })
+    }
+
     /// Create a NIXL agent requiring ALL specified backends to be available.
     ///
     /// Unlike `new_with_backends()` which continues if some backends fail, this method
     /// will return an error if ANY backend fails to initialize. Use this in production
     /// when specific backends are mandatory.
+    ///
+    /// This method will first check for custom parameters in environment variables
+    /// (DYN_KVBM_NIXL_BACKEND_{BACKEND_NAME}_{PARAM}), and if not found, will use
+    /// the default plugin parameters.
     ///
     /// # Arguments
     /// * `name` - Agent name
@@ -109,7 +320,7 @@ impl NixlAgent {
     /// # Example
     /// ```ignore
     /// // In production: require both UCX and GDS, fail if either is missing
-    /// let agent = NixlAgent::require_backends("worker-0", &["UCX", "GDS_MT])?;
+    /// let agent = NixlAgent::require_backends("worker-0", &["UCX", "GDS_MT"])?;
     /// ```
     pub fn require_backends(name: &str, backends: &[&str]) -> Result<Self> {
         let agent = RawNixlAgent::new(name)?;
@@ -118,21 +329,47 @@ impl NixlAgent {
 
         for backend in backends {
             let backend_upper = backend.to_uppercase();
-            match agent.get_plugin_params(&backend_upper) {
-                Ok((_, params)) => match agent.create_backend(&backend_upper, &params) {
-                    Ok(_) => {
-                        available_backends.insert(backend_upper);
+
+            // Try to get custom parameters from environment first
+            match Self::create_backend_params_from_env(&backend_upper) {
+                Ok(Some(custom_params)) => {
+                    // Custom parameters found - use them
+                    match agent.create_backend(&backend_upper, &custom_params) {
+                        Ok(_) => {
+                            available_backends.insert(backend_upper.clone());
+                            tracing::debug!("{} backend created with custom configuration from environment", backend_upper);
+                        }
+                        Err(e) => {
+                            tracing::error!("✗ Failed to create {} backend with custom params: {}", backend_upper, e);
+                            failed_backends
+                                .push((backend_upper.clone(), format!("create with custom params failed: {}", e)));
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("✗ Failed to create {} backend: {}", backend_upper, e);
-                        failed_backends
-                            .push((backend_upper.clone(), format!("create failed: {}", e)));
+                }
+                Ok(None) => {
+                    // No custom parameters - fall back to default plugin parameters
+                    match agent.get_plugin_params(&backend_upper) {
+                        Ok((_, params)) => match agent.create_backend(&backend_upper, &params) {
+                            Ok(_) => {
+                                available_backends.insert(backend_upper);
+                            }
+                            Err(e) => {
+                                tracing::error!("✗ Failed to create {} backend: {}", backend_upper, e);
+                                failed_backends
+                                    .push((backend_upper.clone(), format!("create failed: {}", e)));
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!("No {} plugin found", backend_upper);
+                            failed_backends
+                                .push((backend_upper.clone(), format!("plugin not found: {}", e)));
+                        }
                     }
-                },
+                }
                 Err(e) => {
-                    eprintln!("✗ No {} plugin found", backend_upper);
+                    tracing::error!("Failed to parse {} backend parameters from environment: {}", backend_upper, e);
                     failed_backends
-                        .push((backend_upper.clone(), format!("plugin not found: {}", e)));
+                        .push((backend_upper.clone(), format!("params parsing failed: {}", e)));
                 }
             }
         }
