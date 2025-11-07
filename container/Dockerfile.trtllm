@@ -59,9 +59,9 @@ ARG PYTHON_VERSION=3.12
 WORKDIR /workspace
 
 ARG ARCH_ALT
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+# ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+# ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+# ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
 # Install Python, build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
@@ -90,19 +90,24 @@ ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 # Copy UCX from dynamo_base image as plugin for NIXL
 # Copy NIXL source from dynamo_base image
 # Copy dynamo wheels for gitlab artifacts
-COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
-COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
-ENV PATH=/usr/local/ucx/bin:$PATH
+# COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
+# COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+# ENV PATH=/usr/local/ucx/bin:$PATH
 
 ENV DYNAMO_HOME=/workspace
+# ENV LD_LIBRARY_PATH=\
+# $NIXL_LIB_DIR:\
+# $NIXL_PLUGIN_DIR:\
+# /usr/local/ucx/lib:\
+# /usr/local/ucx/lib/ucx:\
+# /opt/hpcx/ompi/lib:\
+# $LD_LIBRARY_PATH
+
 ENV LD_LIBRARY_PATH=\
-$NIXL_LIB_DIR:\
-$NIXL_PLUGIN_DIR:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
 $LD_LIBRARY_PATH
-# ENV PATH="${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
+
+ENV PATH="/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 ### VIRTUAL ENVIRONMENT SETUP ###
@@ -131,8 +136,8 @@ RUN cd /opt/dynamo/wheelhouse/ && \
     # TRTLLM's NIXL installaion doesn't include NIXL python package, so install it from wheelhouse
     uv pip install --system --break-system-packages --no-cache \
         ai_dynamo_runtime-*.whl \
-        ai_dynamo-*.whl \
-        nixl/nixl-*.whl &&\
+        ai_dynamo-*.whl &&\
+        # nixl/nixl-*.whl &&\
     pip list
 
 # Install benchmarks
