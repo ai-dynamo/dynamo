@@ -141,4 +141,4 @@ kubectl port-forward svc/prometheus-grafana 3000:80 -n $MONITORING_NAMESPACE
 
 If everything is working, under Home > Dashboards > Dynamo Logs, you should see a dashboard that can be used to view the logs associated with our DynamoGraphDeployments
 
-The dashboard enables filtering by DynamoGraphDeployment, namespace, and component type (e.g frontend, worker, etc).
+The dashboard enables filtering by DynamoGraphDeployment, namespace, and component type (e.g., frontend, worker, etc.).

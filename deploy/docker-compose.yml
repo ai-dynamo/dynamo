@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Bare minimum infrastructure services for Dynamo.
-# For observability (metrics, tracing, dashboards), use docker-compose-observability.yml
+# For observability (metrics, tracing, dashboards), use docker-observability.yml
 
 networks:
   server:
