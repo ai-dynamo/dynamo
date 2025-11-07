@@ -4,8 +4,6 @@
 use derive_getters::Dissolve;
 use tokio_util::sync::CancellationToken;
 
-use crate::storage::key_value_store;
-
 use super::*;
 
 pub use async_nats::service::endpoint::Stats as EndpointStats;
@@ -193,26 +191,23 @@ impl EndpointConfigBuilder {
             result
         });
 
-        let info = Instance {
+        // Register this endpoint instance in the discovery plane
+        // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
+        // consistent registration/discovery across the system.
+        let discovery_client = endpoint.drt().discovery_client();
+        
+        let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
+            namespace: namespace_name.clone(),
             component: component_name.clone(),
             endpoint: endpoint_name.clone(),
-            namespace: namespace_name.clone(),
-            instance_id: connection_id,
-            transport: TransportType::NatsTcp(subject),
+            transport: TransportType::NatsTcp(subject.clone()),
         };
 
-        let info = serde_json::to_vec_pretty(&info)?;
-
-        let store = endpoint.drt().store();
-        let instances_bucket = store
-            .get_or_create_bucket(super::INSTANCE_ROOT_PATH, None)
-            .await?;
-        let key = key_value_store::Key::from_raw(endpoint.unique_path(connection_id));
-        if let Err(err) = instances_bucket.insert(&key, info.into(), 0).await {
+        if let Err(e) = discovery_client.register(discovery_spec).await {
             tracing::error!(
                 component_name,
                 endpoint_name,
-                error = %err,
+                error = %e,
                 "Unable to register service for discovery"
             );
             endpoint_shutdown_token.cancel();
@@ -220,6 +215,15 @@ impl EndpointConfigBuilder {
                 "Unable to register service for discovery. Check discovery service status"
             ));
         }
+        
+        tracing::warn!(
+            "DISCOVERY_VALIDATION: endpoint_registered: namespace={}, component={}, endpoint={}, instance_id={}",
+            namespace_name,
+            component_name,
+            endpoint_name,
+            connection_id
+        );
+        
         task.await??;
 
         Ok(())
