@@ -297,6 +297,8 @@ impl Handler for WorkerMetadataHandler {
     }
 }
 
+type TransferHandlerSender = Mutex<Option<oneshot::Sender<Arc<dyn BlockTransferHandler>>>>;
+
 // Leader sends allocation config -> allocate -> publish handler -> mark ready -> ACK
 struct LeaderMetadataHandler {
     state: Arc<WorkerState>,
@@ -307,7 +309,7 @@ struct LeaderMetadataHandler {
     device_id: usize,
     scheduler_client: Option<TransferSchedulerClient>,
     handler_cell: Arc<RwLock<Option<Arc<dyn BlockTransferHandler>>>>,
-    handler_tx: Arc<Mutex<Option<oneshot::Sender<Arc<dyn BlockTransferHandler>>>>>,
+    handler_tx: Arc<TransferHandlerSender>,
     started: AtomicBool,
 }
 
@@ -775,7 +777,7 @@ impl KvbmWorker {
         _device_layout_type: LayoutType,
         config: KvbmWorkerConfig,
         cancel_token: CancellationToken,
-        handler_tx: Arc<Mutex<Option<oneshot::Sender<Arc<dyn BlockTransferHandler>>>>>,
+        handler_tx: Arc<TransferHandlerSender>,
         layout_ready_tx: tokio::sync::Mutex<Option<oneshot::Sender<String>>>,
         scheduler_client: Option<TransferSchedulerClient>,
         bytes_per_block: usize,
