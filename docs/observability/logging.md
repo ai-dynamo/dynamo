@@ -24,18 +24,32 @@ JSONL is enabled logs additionally contain `span` creation and exit
 events as well as support for `trace_id` and `span_id` fields for
 distributed tracing.
 
-## Environment Variables for configuring Logging
+## Environment Variables
 
-| Environment Variable                | Description                                 | Example Settings                  |
-| ----------------------------------- | --------------------------------------------| ---------------------------------------------------- |
-| `DYN_LOGGING_JSONL`                | Enable JSONL logging format (default: READABLE)                  | `DYN_LOGGING_JSONL=true`                          |
-| `DYN_LOG_USE_LOCAL_TZ`             | Use local timezone for logging timestamps (default: UTC)         | `DYN_LOG_USE_LOCAL_TZ=1`                       |
-| `DYN_LOG`                          | Log levels per target `<default_level>,<module_path>=<level>,<module_path>=<level>`             | `DYN_LOG=info,dynamo_runtime::system_status_server:trace`  |
-| `DYN_LOGGING_CONFIG_PATH`          | Path to custom TOML logging configuration file            | `DYN_LOGGING_CONFIG_PATH=/path/to/config.toml`|
-| `OTEL_SERVICE_NAME`                | Service name for OpenTelemetry traces (default: `dynamo`) | `OTEL_SERVICE_NAME=dynamo-frontend` |
-| `OTEL_EXPORT_ENABLED`              | Enable OTLP trace exporting (set to `1` to enable) | `OTEL_EXPORT_ENABLED=1` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`             | OTLP exporter endpoint (default: http://localhost:4317) | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317` |
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `DYN_LOGGING_JSONL` | Enable JSONL logging format | `false` | `true` |
+| `DYN_LOG` | Log level: `info` or `debug` | `info` | `debug` |
+| `DYN_LOG_USE_LOCAL_TZ` | Use local timezone for timestamps | `false` | `true` |
+| `DYN_LOGGING_CONFIG_PATH` | Path to custom TOML logging configuration | none | `/path/to/config.toml` |
+| `OTEL_SERVICE_NAME` | Service name for OpenTelemetry traces | `dynamo` | `dynamo-frontend` |
+| `OTEL_EXPORT_ENABLED` | Enable OTLP trace exporting | `false` | `true` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP exporter endpoint | `http://localhost:4317` | `http://tempo:4317` |
 
+## Getting Started
+
+Enable structured JSONL logging:
+
+```bash
+export DYN_LOGGING_JSONL=true
+export DYN_LOG=debug
+
+# Start your Dynamo components
+python -m dynamo.frontend --http-port 8000 &
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
+```
+
+Logs will be written to stderr in JSONL format with trace context.
 
 ## Available Logging Levels
 
@@ -85,68 +99,55 @@ Resulting Log format:
 {"time":"2025-09-02T15:53:31.943747Z","level":"INFO","target":"log","message":"Scheduler config values: {'max_num_seqs': 256, 'max_num_batched_tokens': 2048}","log.file":"/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py","log.line":268,"log.target":"main.get_engine_cache_info"}
 ```
 
-## OpenTelemetry Distributed Tracing
+## Logging of OpenTelemetry Tracing
 
-When `DYN_LOGGING_JSONL` is enabled, Dynamo uses OpenTelemetry for distributed tracing. All logs include `trace_id` and `span_id` fields, and spans are automatically created for requests. By default, traces are **not exported**. To export traces to an observability backend (like Tempo, Jaeger, or Zipkin), set `OTEL_EXPORT_ENABLED=1`.
+When `DYN_LOGGING_JSONL` is enabled, Dynamo uses OpenTelemetry for distributed tracing. All logs include `trace_id` and `span_id` fields, and spans are automatically created for requests. This is useful for short debugging sessions where you want to examine trace context in logs without setting up a full tracing backend.
 
-### Behavior
+**Note:** This section has overlap with [Distributed Tracing with Tempo](tracing.md) since OpenTelemetry has aspects of both logging and tracing. For trace visualization in Grafana Tempo and persistent trace analysis, see [Distributed Tracing with Tempo](tracing.md).
 
-- **With `DYN_LOGGING_JSONL=true` only**: OpenTelemetry layer is active, generating trace context and span IDs for all requests. Traces appear in logs but are not exported anywhere.
-- **With `OTEL_EXPORT_ENABLED=1` and `DYN_LOGGING_JSONL=true`**: Same as above, plus traces are exported to an OTLP collector for visualization.
+### Configuration for Logging
 
-### Configuration
-
-To enable OTLP trace exporting:
-
-1. Set `OTEL_EXPORT_ENABLED=1` to enable trace export
-2. Optionally configure the endpoint using `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (default: `http://localhost:4317`)
-3. Optionally set `OTEL_SERVICE_NAME` to identify the service (useful in Kubernetes, default: `dynamo`)
-
-**Export Settings:**
-- **Protocol**: gRPC (Tonic)
-- **Service Name**: Value of `OTEL_SERVICE_NAME` env var, or `dynamo` if not set
-- **Endpoint**: Value of `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` env var, or `http://localhost:4317` if not set
-
-### Example: JSONL Logging Only (No Export)
+To see OpenTelemetry trace information in logs:
 
 ```bash
 export DYN_LOGGING_JSONL=true
-# OpenTelemetry is active, traces appear in logs, but nothing is exported
+export DYN_LOG=debug  # Set to debug to see detailed trace logs
+
+# Start your Dynamo components (e.g., frontend and worker)
+python -m dynamo.frontend --http-port 8000 &
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
 ```
 
-### Example: JSONL Logging + Trace Export to Tempo
-
-```bash
-export DYN_LOGGING_JSONL=true
-export OTEL_EXPORT_ENABLED=1
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317
-export OTEL_SERVICE_NAME=dynamo-frontend
-# OpenTelemetry is active, traces appear in logs AND are exported to Tempo
-```
-
-## Trace and Span Information
+This enables JSONL logging with `trace_id` and `span_id` fields. Traces appear in logs but are not exported to any backend.
 
 ### Example Request
 
-```sh
-curl -X POST http://localhost:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"
-      }
-    ],
-    "stream": true,
-    "max_tokens": 1000,
-  }'
+Send a request to generate logs with trace context:
+
+```bash
+curl -H 'Content-Type: application/json' \
+-H 'x-request-id: test-trace-001' \
+-d '{
+  "model": "Qwen/Qwen3-0.6B",
+  "max_completion_tokens": 100,
+  "messages": [
+    {"role": "user", "content": "What is the capital of France?"}
+  ]
+}' \
+http://localhost:8000/v1/chat/completions
 ```
+
+Check the logs (stderr) for JSONL output containing `trace_id`, `span_id`, and `x_request_id` fields.
+
+## Trace and Span Information in Logs
+
+This section shows how OpenTelemetry trace and span information appears in JSONL logs. These logs can be used to understand request flows even without a trace visualization backend.
+
+### Example Disaggregated Trace in Grafana
 
 When viewing the corresponding trace in Grafana, you should be able to see something like the following:
 
-![Trace Example](./grafana-disagg-trace.png)
+![Disaggregated Trace Example](grafana-disagg-trace.png)
 
 ### Trace Overview
 
@@ -208,7 +209,7 @@ When viewing the corresponding trace in Grafana, you should be able to see somet
 | **Busy Time** | 3,795,258 ns (3.79ms) |
 | **Idle Time** | 3,996,532,471 ns (3.99s) |
 
-### Frontend Logs
+### Frontend Logs with Trace Context
 
 The following shows the JSONL logs from the frontend service for the same request. Note the `trace_id` field (`b672ccf48683b392891c5cb4163d4b51`) that correlates all logs for this request, and the `span_id` field that identifies individual operations:
 
@@ -220,7 +221,7 @@ The following shows the JSONL logs from the frontend service for the same reques
 {"time":"2025-10-31T20:52:10.745545Z","level":"DEBUG","file":"/opt/dynamo/lib/runtime/src/pipeline/network/tcp/server.rs","line":230,"target":"dynamo_runtime::pipeline::network::tcp::server","message":"Registering new TcpStream on 10.0.4.65:41959","method":"POST","span_id":"5c20cc08e6afb2b7","span_name":"http-request","trace_id":"b672ccf48683b392891c5cb4163d4b51","uri":"/v1/chat/completions","version":"HTTP/1.1"}
 ```
 
-## Custom Request IDs
+## Custom Request IDs in Logs
 
 You can provide a custom request ID using the `x-request-id` header. This ID will be attached to all spans and logs for that request, making it easier to correlate traces with application-level request tracking.
 
@@ -238,7 +239,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
         "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"
       }
     ],
-    "stream": true,
+    "stream": false,
     "max_tokens": 1000
   }'
 ```

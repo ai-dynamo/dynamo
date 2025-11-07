@@ -101,11 +101,20 @@ To coordinate across a data center, Dynamo relies on etcd and NATS. To run Dynam
 
 To quickly setup etcd & NATS, you can also run:
 
-```
+```bash
 # At the root of the repository:
-# Edit deploy/docker-compose.yml to comment out "runtime: nvidia" of the dcgm-exporter service if the nvidia container runtime isn't deployed or to be used.
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+### Optional: Observability Stack
+
+For monitoring with metrics (Prometheus, Grafana) and distributed tracing (Tempo), deploy the observability stack:
+
+```bash
+docker compose -f deploy/docker-observability.yml up -d
+```
+
+This provides GPU metrics (DCGM), NATS metrics, Prometheus, and Grafana dashboards. Access Grafana at `http://localhost:3000` (username: `dynamo`, password: `dynamo`).
 
 ## 2. Select an engine
 
