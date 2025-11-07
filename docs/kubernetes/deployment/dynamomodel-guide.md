@@ -428,7 +428,7 @@ status:
    # Check operator logs
    kubectl logs -n dynamo-system deployment/dynamo-operator-controller-manager -f | grep "Failed to load"
    ```
-   **Solution:** 
+   **Solution:**
    - For S3: Verify bucket permissions, IAM role, credentials
    - For HuggingFace: Verify token is valid, repo exists and is accessible
 
@@ -539,12 +539,12 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
-    
+
     Worker:
       # This modelRef creates the link to DynamoModel
       modelRef:
         name: Qwen/Qwen3-0.6B  # ← Key linking field
-      
+
       componentType: worker
       replicas: 2
       resources:
@@ -613,10 +613,10 @@ For complete field specifications, validation rules, and detailed type definitio
 
 DynamoModel provides declarative model management for Dynamo deployments:
 
-✅ **Simple**: 2-step deployment of LoRA adapters  
-✅ **Automatic**: Endpoint discovery and loading handled by operator  
-✅ **Observable**: Rich status reporting and conditions  
-✅ **Integrated**: Works seamlessly with DynamoGraphDeployment  
+✅ **Simple**: 2-step deployment of LoRA adapters
+✅ **Automatic**: Endpoint discovery and loading handled by operator
+✅ **Observable**: Rich status reporting and conditions
+✅ **Integrated**: Works seamlessly with DynamoGraphDeployment
 
 **Next Steps:**
 - Try the [Quick Start](#quick-start) example
