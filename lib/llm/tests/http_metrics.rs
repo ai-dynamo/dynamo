@@ -298,7 +298,7 @@ mod integration_tests {
         local_model::LocalModelBuilder,
     };
     use dynamo_runtime::DistributedRuntime;
-    use dynamo_runtime::discovery::DiscoveryKey;
+    use dynamo_runtime::discovery::DiscoveryQuery;
     use dynamo_runtime::pipeline::RouterMode;
     use dynamo_runtime::traits::DistributedRuntimeProvider;
     use std::sync::Arc;
