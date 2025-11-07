@@ -79,10 +79,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let endpoint = &self.client.endpoint;
         let component = endpoint.component();
 
+        let cancellation_token = component.drt().child_token();
+
         // Watch for runtime config updates from model deployment cards via discovery interface
         let discovery = component.drt().discovery();
         let discovery_stream = discovery
-            .list_and_watch(DiscoveryQuery::AllModels, None)
+            .list_and_watch(DiscoveryQuery::AllModels, Some(cancellation_token.clone()))
             .await?;
         let mut config_events_rx =
             watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
@@ -94,7 +96,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
         let worker_load_states = self.worker_load_states.clone();
         let client = self.client.clone();
-        let cancellation_token = component.drt().child_token();
         let busy_threshold = self.busy_threshold;
 
         // Spawn background monitoring task

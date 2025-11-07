@@ -240,7 +240,9 @@ impl KvRouter {
             component: component.name().to_string(),
             endpoint: "generate".to_string(),
         };
-        let discovery_stream = discovery.list_and_watch(discovery_key, None).await?;
+        let discovery_stream = discovery
+            .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+            .await?;
         let runtime_configs_rx =
             watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
                 card.runtime_config

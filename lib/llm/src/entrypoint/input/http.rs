@@ -286,7 +286,10 @@ async fn run_watcher(
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
-        .list_and_watch(dynamo_runtime::discovery::DiscoveryQuery::AllModels, None)
+        .list_and_watch(
+            dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+            Some(runtime.primary_token()),
+        )
         .await?;
 
     // Create a channel to receive model type updates

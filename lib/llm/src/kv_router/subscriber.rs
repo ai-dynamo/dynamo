@@ -289,7 +289,9 @@ pub async fn start_kv_router_background(
         component: component.name().to_string(),
         endpoint: "generate".to_string(),
     };
-    let mut instance_event_stream = discovery_client.list_and_watch(discovery_key, None).await?;
+    let mut instance_event_stream = discovery_client
+        .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+        .await?;
 
     // Get instances_rx for tracking current workers
     let client = generate_endpoint.client().await?;

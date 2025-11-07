@@ -72,7 +72,10 @@ pub async fn prepare_engine(
             ));
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery
-                .list_and_watch(dynamo_runtime::discovery::DiscoveryQuery::AllModels, None)
+                .list_and_watch(
+                    dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+                    Some(runtime.primary_token()),
+                )
                 .await?;
             let inner_watch_obj = watch_obj.clone();
             let _watcher_task = tokio::spawn(async move {
