@@ -10,12 +10,12 @@
 use std::sync::Arc;
 
 use crate::component::Instance;
-use crate::discovery::{DiscoveryClient, DiscoveryKey};
+use crate::discovery::{Discovery, DiscoveryQuery};
 
 pub async fn list_all_instances(
-    discovery_client: Arc<dyn DiscoveryClient>,
+    discovery_client: Arc<dyn Discovery>,
 ) -> anyhow::Result<Vec<Instance>> {
-    let discovery_instances = discovery_client.list(DiscoveryKey::AllEndpoints).await?;
+    let discovery_instances = discovery_client.list(DiscoveryQuery::AllEndpoints).await?;
 
     let mut instances: Vec<Instance> = discovery_instances
         .into_iter()

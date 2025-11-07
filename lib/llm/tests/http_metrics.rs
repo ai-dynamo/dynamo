@@ -346,9 +346,9 @@ mod integration_tests {
             None,
         );
         // Start watching for model registrations via discovery interface
-        let discovery = distributed_runtime.discovery_client();
+        let discovery = distributed_runtime.discovery();
         let discovery_stream = discovery
-            .list_and_watch(DiscoveryKey::AllModelCards)
+            .list_and_watch(DiscoveryQuery::AllModels, None)
             .await
             .unwrap();
 

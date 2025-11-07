@@ -194,7 +194,7 @@ impl EndpointConfigBuilder {
         // Register this endpoint instance in the discovery plane
         // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
         // consistent registration/discovery across the system.
-        let discovery_client = endpoint.drt().discovery_client();
+        let discovery = endpoint.drt().discovery();
 
         let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
             namespace: namespace_name.clone(),
@@ -203,7 +203,7 @@ impl EndpointConfigBuilder {
             transport: TransportType::NatsTcp(subject.clone()),
         };
 
-        if let Err(e) = discovery_client.register(discovery_spec).await {
+        if let Err(e) = discovery.register(discovery_spec).await {
             tracing::error!(
                 component_name,
                 endpoint_name,

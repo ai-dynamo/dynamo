@@ -292,25 +292,25 @@ impl Client {
             endpoint.path()
         );
 
-        let discovery_client = drt.discovery_client();
-        let discovery_key = crate::discovery::DiscoveryKey::Endpoint {
+        let discovery = drt.discovery();
+        let discovery_query = crate::discovery::DiscoveryQuery::Endpoint {
             namespace: endpoint.component.namespace.name.clone(),
             component: endpoint.component.name.clone(),
             endpoint: endpoint.name.clone(),
         };
 
         tracing::debug!(
-            "get_or_create_dynamic_instance_source: Calling discovery_client.list_and_watch for key: {:?}",
-            discovery_key
+            "get_or_create_dynamic_instance_source: Calling discovery.list_and_watch for query: {:?}",
+            discovery_query
         );
 
-        let mut discovery_stream = discovery_client
-            .list_and_watch(discovery_key.clone())
+        let mut discovery_stream = discovery
+            .list_and_watch(discovery_query.clone(), None)
             .await?;
 
         tracing::debug!(
-            "get_or_create_dynamic_instance_source: Got discovery stream for key: {:?}",
-            discovery_key
+            "get_or_create_dynamic_instance_source: Got discovery stream for query: {:?}",
+            discovery_query
         );
 
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
@@ -318,29 +318,29 @@ impl Client {
         let secondary = endpoint.component.drt.runtime.secondary().clone();
 
         secondary.spawn(async move {
-            tracing::debug!("endpoint_watcher: Starting for discovery key: {:?}", discovery_key);
+            tracing::debug!("endpoint_watcher: Starting for discovery query: {:?}", discovery_query);
             let mut map: HashMap<u64, Instance> = HashMap::new();
             let mut event_count = 0;
 
             loop {
                 let discovery_event = tokio::select! {
                     _ = watch_tx.closed() => {
-                        tracing::debug!("endpoint_watcher: all watchers have closed; shutting down for discovery key: {:?}", discovery_key);
+                        tracing::debug!("endpoint_watcher: all watchers have closed; shutting down for discovery query: {:?}", discovery_query);
                         break;
                     }
                     discovery_event = discovery_stream.next() => {
-                        tracing::debug!("endpoint_watcher: Received stream event for discovery key: {:?}", discovery_key);
+                        tracing::debug!("endpoint_watcher: Received stream event for discovery query: {:?}", discovery_query);
                         match discovery_event {
                             Some(Ok(event)) => {
                                 tracing::debug!("endpoint_watcher: Got Ok event: {:?}", event);
                                 event
                             },
                             Some(Err(e)) => {
-                                tracing::error!("endpoint_watcher: discovery stream error: {}; shutting down for discovery key: {:?}", e, discovery_key);
+                                tracing::error!("endpoint_watcher: discovery stream error: {}; shutting down for discovery query: {:?}", e, discovery_query);
                                 break;
                             }
                             None => {
-                                tracing::debug!("endpoint_watcher: watch stream has closed; shutting down for discovery key: {:?}", discovery_key);
+                                tracing::debug!("endpoint_watcher: watch stream has closed; shutting down for discovery query: {:?}", discovery_query);
                                 break;
                             }
                         }
@@ -348,13 +348,13 @@ impl Client {
                 };
 
                 event_count += 1;
-                tracing::debug!("endpoint_watcher: Processing event #{} for discovery key: {:?}", event_count, discovery_key);
+                tracing::debug!("endpoint_watcher: Processing event #{} for discovery query: {:?}", event_count, discovery_query);
 
                 match discovery_event {
                     crate::discovery::DiscoveryEvent::Added(discovery_instance) => {
                         match discovery_instance {
                             crate::discovery::DiscoveryInstance::Endpoint(instance) => {
-                                tracing::info!(
+                                tracing::debug!(
                                     "endpoint_watcher: Added endpoint instance_id={}, namespace={}, component={}, endpoint={}",
                                     instance.instance_id,
                                     instance.namespace,
@@ -364,15 +364,15 @@ impl Client {
                                 map.insert(instance.instance_id, instance);
                             }
                             _ => {
-                                tracing::debug!("endpoint_watcher: Ignoring non-endpoint instance (ModelCard, etc.) for discovery key: {:?}", discovery_key);
+                                tracing::debug!("endpoint_watcher: Ignoring non-endpoint instance (Model, etc.) for discovery query: {:?}", discovery_query);
                             }
                         }
                     }
                     crate::discovery::DiscoveryEvent::Removed(instance_id) => {
-                        tracing::info!(
-                            "endpoint_watcher: Removed instance_id={} for discovery key: {:?}",
+                        tracing::debug!(
+                            "endpoint_watcher: Removed instance_id={} for discovery query: {:?}",
                             instance_id,
-                            discovery_key
+                            discovery_query
                         );
                         map.remove(&instance_id);
                     }
@@ -380,18 +380,18 @@ impl Client {
 
                 let instances: Vec<Instance> = map.values().cloned().collect();
                 tracing::debug!(
-                    "endpoint_watcher: Current map size={}, sending update for discovery key: {:?}",
+                    "endpoint_watcher: Current map size={}, sending update for discovery query: {:?}",
                     instances.len(),
-                    discovery_key
+                    discovery_query
                 );
 
                 if watch_tx.send(instances).is_err() {
-                    tracing::debug!("endpoint_watcher: Unable to send watch updates; shutting down for discovery key: {:?}", discovery_key);
+                    tracing::debug!("endpoint_watcher: Unable to send watch updates; shutting down for discovery query: {:?}", discovery_query);
                     break;
                 }
             }
 
-            tracing::debug!("endpoint_watcher: Completed for discovery key: {:?}, total events processed: {}", discovery_key, event_count);
+            tracing::debug!("endpoint_watcher: Completed for discovery query: {:?}, total events processed: {}", discovery_query, event_count);
             let _ = watch_tx.send(vec![]);
         });
 

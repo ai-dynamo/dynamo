@@ -8,7 +8,7 @@ use std::{collections::HashSet, time::Duration};
 use anyhow::Result;
 use dynamo_runtime::{
     component::Component,
-    discovery::DiscoveryKey,
+    discovery::DiscoveryQuery,
     prelude::*,
     traits::events::EventPublisher,
     transports::{
@@ -283,13 +283,13 @@ pub async fn start_kv_router_background(
 
     // Get the generate endpoint and watch for instance deletions
     let generate_endpoint = component.endpoint("generate");
-    let discovery_client = component.drt().discovery_client();
-    let discovery_key = DiscoveryKey::Endpoint {
+    let discovery_client = component.drt().discovery();
+    let discovery_key = DiscoveryQuery::Endpoint {
         namespace: component.namespace().name().to_string(),
         component: component.name().to_string(),
         endpoint: "generate".to_string(),
     };
-    let mut instance_event_stream = discovery_client.list_and_watch(discovery_key).await?;
+    let mut instance_event_stream = discovery_client.list_and_watch(discovery_key, None).await?;
 
     // Get instances_rx for tracking current workers
     let client = generate_endpoint.client().await?;

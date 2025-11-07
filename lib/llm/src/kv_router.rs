@@ -9,7 +9,7 @@ use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Component, InstanceSource},
-    discovery::{DiscoveryKey, watch_and_extract_field},
+    discovery::{DiscoveryQuery, watch_and_extract_field},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -234,13 +234,13 @@ impl KvRouter {
         };
 
         // Watch for runtime config updates via discovery interface
-        let discovery = component.drt().discovery_client();
-        let discovery_key = DiscoveryKey::EndpointModelCards {
+        let discovery = component.drt().discovery();
+        let discovery_key = DiscoveryQuery::EndpointModels {
             namespace: component.namespace().name().to_string(),
             component: component.name().to_string(),
             endpoint: "generate".to_string(),
         };
-        let discovery_stream = discovery.list_and_watch(discovery_key).await?;
+        let discovery_stream = discovery.list_and_watch(discovery_key, None).await?;
         let runtime_configs_rx =
             watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
                 card.runtime_config

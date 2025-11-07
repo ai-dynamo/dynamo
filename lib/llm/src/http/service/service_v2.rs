@@ -18,7 +18,7 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
-use dynamo_runtime::discovery::{DiscoveryClient, KVStoreDiscoveryClient};
+use dynamo_runtime::discovery::{Discovery, KVStoreDiscovery};
 use dynamo_runtime::logging::make_request_span;
 use dynamo_runtime::metrics::prometheus_names::name_prefix;
 use dynamo_runtime::storage::key_value_store::KeyValueStoreManager;
@@ -32,7 +32,7 @@ pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     store: KeyValueStoreManager,
-    discovery_client: Arc<dyn DiscoveryClient>,
+    discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
 }
 
@@ -74,12 +74,11 @@ impl StateFlags {
 
 impl State {
     pub fn new(manager: Arc<ModelManager>, store: KeyValueStoreManager) -> Self {
-        // Initialize discovery client backed by KV store
-        // Create a cancellation token for the discovery client's watch streams
+        // Initialize discovery backed by KV store
+        // Create a cancellation token for the discovery's watch streams
         let discovery_client = {
             let cancel_token = CancellationToken::new();
-            Arc::new(KVStoreDiscoveryClient::new(store.clone(), cancel_token))
-                as Arc<dyn DiscoveryClient>
+            Arc::new(KVStoreDiscovery::new(store.clone(), cancel_token)) as Arc<dyn Discovery>
         };
 
         Self {
@@ -113,7 +112,7 @@ impl State {
         &self.store
     }
 
-    pub fn discovery_client(&self) -> Arc<dyn DiscoveryClient> {
+    pub fn discovery(&self) -> Arc<dyn Discovery> {
         self.discovery_client.clone()
     }
 

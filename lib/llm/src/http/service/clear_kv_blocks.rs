@@ -6,7 +6,7 @@ use axum::{http::Method, response::IntoResponse, routing::post, Json, Router};
 use serde_json::json;
 use std::sync::Arc;
 
-use dynamo_runtime::{discovery::DiscoveryKey, pipeline::PushRouter, stream::StreamExt};
+use dynamo_runtime::{discovery::DiscoveryQuery, pipeline::PushRouter, stream::StreamExt};
 
 pub const CLEAR_KV_ENDPOINT: &str = "clear_kv_blocks";
 
@@ -150,8 +150,8 @@ async fn clear_kv_blocks_handler(
             }
         };
 
-        let discovery_client = distributed.discovery_client();
-        let discovery_key = DiscoveryKey::Endpoint {
+        let discovery_client = distributed.discovery();
+        let discovery_key = DiscoveryQuery::Endpoint {
             namespace: namespace.clone(),
             component: component.clone(),
             endpoint: CLEAR_KV_ENDPOINT.to_string(),

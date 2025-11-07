@@ -10,7 +10,7 @@ use futures::StreamExt;
 
 use dynamo_runtime::{
     DistributedRuntime,
-    discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryKey, DiscoveryStream},
+    discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoveryStream},
     pipeline::{
         ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
         network::egress::push_router::PushRouter,
@@ -120,7 +120,7 @@ impl ModelWatcher {
                 DiscoveryEvent::Added(instance) => {
                     // Extract EndpointId, instance_id, and card from the discovery instance
                     let (endpoint_id, instance_id, mut card) = match &instance {
-                        DiscoveryInstance::ModelCard {
+                        DiscoveryInstance::Model {
                             namespace,
                             component,
                             endpoint,
@@ -133,7 +133,7 @@ impl ModelWatcher {
                                 name: endpoint.clone(),
                             };
 
-                            match instance.deserialize_model_card::<ModelDeploymentCard>() {
+                            match instance.deserialize_model::<ModelDeploymentCard>() {
                                 Ok(card) => (eid, *instance_id, card),
                                 Err(err) => {
                                     tracing::error!(%err, instance_id, "Failed to deserialize model card");
@@ -584,16 +584,16 @@ impl ModelWatcher {
 
     /// All the registered ModelDeploymentCard with the EndpointId they are attached to, one per instance
     async fn all_cards(&self) -> anyhow::Result<Vec<(EndpointId, ModelDeploymentCard)>> {
-        let discovery = self.drt.discovery_client();
-        let instances = discovery.list(DiscoveryKey::AllModelCards).await?;
+        let discovery = self.drt.discovery();
+        let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
         let mut results = Vec::with_capacity(instances.len());
         for instance in instances {
-            match instance.deserialize_model_card::<ModelDeploymentCard>() {
+            match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
                     // Extract EndpointId from the instance
                     let endpoint_id = match &instance {
-                        dynamo_runtime::discovery::DiscoveryInstance::ModelCard {
+                        dynamo_runtime::discovery::DiscoveryInstance::Model {
                             namespace,
                             component,
                             endpoint,

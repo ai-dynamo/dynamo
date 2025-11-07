@@ -9,7 +9,7 @@ use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
-    discovery::DiscoveryClient,
+    discovery::Discovery,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     service::ServiceClient,
@@ -92,13 +92,13 @@ impl DistributedRuntime {
 
         let nats_client_for_metrics = nats_client.clone();
 
-        // Initialize discovery client backed by KV store
+        // Initialize discovery backed by KV store
         let discovery_client = {
-            use crate::discovery::KVStoreDiscoveryClient;
-            Arc::new(KVStoreDiscoveryClient::new(
+            use crate::discovery::KVStoreDiscovery;
+            Arc::new(KVStoreDiscovery::new(
                 store.clone(),
                 runtime.primary_token(),
-            )) as Arc<dyn DiscoveryClient>
+            )) as Arc<dyn Discovery>
         };
 
         let distributed_runtime = Self {
@@ -242,9 +242,8 @@ impl DistributedRuntime {
         Namespace::new(self.clone(), name.into(), self.is_static)
     }
 
-    /// Returns the discovery client for service registration and discovery
-    /// Currently uses MockDiscoveryClient, will be replaced with KeyValueDiscoveryClient or KubeDiscoveryClient
-    pub fn discovery_client(&self) -> Arc<dyn DiscoveryClient> {
+    /// Returns the discovery interface for service registration and discovery
+    pub fn discovery(&self) -> Arc<dyn Discovery> {
         self.discovery_client.clone()
     }
 

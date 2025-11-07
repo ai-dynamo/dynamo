@@ -414,8 +414,8 @@ impl LocalModel {
         self.card.model_input = model_input;
 
         // Register the Model Deployment Card via discovery interface
-        let discovery = endpoint.drt().discovery_client();
-        let spec = DiscoverySpec::from_model_card(
+        let discovery = endpoint.drt().discovery();
+        let spec = DiscoverySpec::from_model(
             endpoint.component().namespace().name().to_string(),
             endpoint.component().name().to_string(),
             endpoint.name().to_string(),

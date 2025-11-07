@@ -9,20 +9,19 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use super::{
-    DiscoveryClient, DiscoveryEvent, DiscoveryInstance, DiscoveryKey, DiscoverySpec,
-    DiscoveryStream,
+    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
 };
 
 const INSTANCES_BUCKET: &str = "v1/instances";
-const MODEL_CARDS_BUCKET: &str = "v1/mdc";
+const MODELS_BUCKET: &str = "v1/mdc";
 
-/// Discovery client implementation backed by a KeyValueStore
-pub struct KVStoreDiscoveryClient {
+/// Discovery implementation backed by a KeyValueStore
+pub struct KVStoreDiscovery {
     store: Arc<KeyValueStoreManager>,
     cancel_token: CancellationToken,
 }
 
-impl KVStoreDiscoveryClient {
+impl KVStoreDiscovery {
     pub fn new(store: KeyValueStoreManager, cancel_token: CancellationToken) -> Self {
         Self {
             store: Arc::new(store),
@@ -35,30 +34,25 @@ impl KVStoreDiscoveryClient {
         format!("{}/{}/{}/{:x}", namespace, component, endpoint, instance_id)
     }
 
-    /// Build the key path for a model card (relative to bucket, not absolute)
-    fn model_card_key(
-        namespace: &str,
-        component: &str,
-        endpoint: &str,
-        instance_id: u64,
-    ) -> String {
+    /// Build the key path for a model (relative to bucket, not absolute)
+    fn model_key(namespace: &str, component: &str, endpoint: &str, instance_id: u64) -> String {
         format!("{}/{}/{}/{:x}", namespace, component, endpoint, instance_id)
     }
 
-    /// Extract prefix for querying based on discovery key
-    fn key_prefix(key: &DiscoveryKey) -> String {
-        match key {
-            DiscoveryKey::AllEndpoints => INSTANCES_BUCKET.to_string(),
-            DiscoveryKey::NamespacedEndpoints { namespace } => {
+    /// Extract prefix for querying based on discovery query
+    fn query_prefix(query: &DiscoveryQuery) -> String {
+        match query {
+            DiscoveryQuery::AllEndpoints => INSTANCES_BUCKET.to_string(),
+            DiscoveryQuery::NamespacedEndpoints { namespace } => {
                 format!("{}/{}", INSTANCES_BUCKET, namespace)
             }
-            DiscoveryKey::ComponentEndpoints {
+            DiscoveryQuery::ComponentEndpoints {
                 namespace,
                 component,
             } => {
                 format!("{}/{}/{}", INSTANCES_BUCKET, namespace, component)
             }
-            DiscoveryKey::Endpoint {
+            DiscoveryQuery::Endpoint {
                 namespace,
                 component,
                 endpoint,
@@ -68,25 +62,22 @@ impl KVStoreDiscoveryClient {
                     INSTANCES_BUCKET, namespace, component, endpoint
                 )
             }
-            DiscoveryKey::AllModelCards => MODEL_CARDS_BUCKET.to_string(),
-            DiscoveryKey::NamespacedModelCards { namespace } => {
-                format!("{}/{}", MODEL_CARDS_BUCKET, namespace)
+            DiscoveryQuery::AllModels => MODELS_BUCKET.to_string(),
+            DiscoveryQuery::NamespacedModels { namespace } => {
+                format!("{}/{}", MODELS_BUCKET, namespace)
             }
-            DiscoveryKey::ComponentModelCards {
+            DiscoveryQuery::ComponentModels {
                 namespace,
                 component,
             } => {
-                format!("{}/{}/{}", MODEL_CARDS_BUCKET, namespace, component)
+                format!("{}/{}/{}", MODELS_BUCKET, namespace, component)
             }
-            DiscoveryKey::EndpointModelCards {
+            DiscoveryQuery::EndpointModels {
                 namespace,
                 component,
                 endpoint,
             } => {
-                format!(
-                    "{}/{}/{}/{}",
-                    MODEL_CARDS_BUCKET, namespace, component, endpoint
-                )
+                format!("{}/{}/{}/{}", MODELS_BUCKET, namespace, component, endpoint)
             }
         }
     }
@@ -129,7 +120,7 @@ impl KVStoreDiscoveryClient {
 }
 
 #[async_trait]
-impl DiscoveryClient for KVStoreDiscoveryClient {
+impl Discovery for KVStoreDiscovery {
     fn instance_id(&self) -> u64 {
         self.store.connection_id()
     }
@@ -147,7 +138,7 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                     inst.instance_id,
                 );
                 tracing::debug!(
-                    "KVStoreDiscoveryClient::register: Registering endpoint instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                    "KVStoreDiscovery::register: Registering endpoint instance_id={}, namespace={}, component={}, endpoint={}, key={}",
                     inst.instance_id,
                     inst.namespace,
                     inst.component,
@@ -156,37 +147,37 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                 );
                 (INSTANCES_BUCKET, key)
             }
-            DiscoveryInstance::ModelCard {
+            DiscoveryInstance::Model {
                 namespace,
                 component,
                 endpoint,
                 instance_id,
                 ..
             } => {
-                let key = Self::model_card_key(namespace, component, endpoint, *instance_id);
+                let key = Self::model_key(namespace, component, endpoint, *instance_id);
                 tracing::debug!(
-                    "KVStoreDiscoveryClient::register: Registering model card instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                    "KVStoreDiscovery::register: Registering model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
                     instance_id,
                     namespace,
                     component,
                     endpoint,
                     key
                 );
-                (MODEL_CARDS_BUCKET, key)
+                (MODELS_BUCKET, key)
             }
         };
 
         // Serialize the instance
         let instance_json = serde_json::to_vec(&instance)?;
         tracing::debug!(
-            "KVStoreDiscoveryClient::register: Serialized instance to {} bytes for key={}",
+            "KVStoreDiscovery::register: Serialized instance to {} bytes for key={}",
             instance_json.len(),
             key_path
         );
 
         // Store in the KV store with no TTL (instances persist until explicitly removed)
         tracing::debug!(
-            "KVStoreDiscoveryClient::register: Getting/creating bucket={} for key={}",
+            "KVStoreDiscovery::register: Getting/creating bucket={} for key={}",
             bucket_name,
             key_path
         );
@@ -194,14 +185,14 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
         let key = crate::storage::key_value_store::Key::from_raw(key_path.clone());
 
         tracing::debug!(
-            "KVStoreDiscoveryClient::register: Inserting into bucket={}, key={}",
+            "KVStoreDiscovery::register: Inserting into bucket={}, key={}",
             bucket_name,
             key_path
         );
         // Use revision 0 for initial registration
         let outcome = bucket.insert(&key, instance_json.into(), 0).await?;
-        tracing::info!(
-            "KVStoreDiscoveryClient::register: Successfully registered instance_id={}, key={}, outcome={:?}",
+        tracing::debug!(
+            "KVStoreDiscovery::register: Successfully registered instance_id={}, key={}, outcome={:?}",
             instance_id,
             key_path,
             outcome
@@ -210,12 +201,12 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
         Ok(instance)
     }
 
-    async fn list(&self, key: DiscoveryKey) -> Result<Vec<DiscoveryInstance>> {
-        let prefix = Self::key_prefix(&key);
+    async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
+        let prefix = Self::query_prefix(&query);
         let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
             INSTANCES_BUCKET
         } else {
-            MODEL_CARDS_BUCKET
+            MODELS_BUCKET
         };
 
         // Get bucket - if it doesn't exist, return empty list
@@ -242,48 +233,55 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
         Ok(instances)
     }
 
-    async fn list_and_watch(&self, key: DiscoveryKey) -> Result<DiscoveryStream> {
-        let prefix = Self::key_prefix(&key);
+    async fn list_and_watch(
+        &self,
+        query: DiscoveryQuery,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<DiscoveryStream> {
+        let prefix = Self::query_prefix(&query);
         let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
             INSTANCES_BUCKET
         } else {
-            MODEL_CARDS_BUCKET
+            MODELS_BUCKET
         };
 
         tracing::debug!(
-            "KVStoreDiscoveryClient::list_and_watch: Starting watch for key={:?}, prefix={}, bucket={}",
-            key,
+            "KVStoreDiscovery::list_and_watch: Starting watch for query={:?}, prefix={}, bucket={}",
+            query,
             prefix,
             bucket_name
         );
+
+        // Use the provided cancellation token, or fall back to the default token
+        let cancel_token = cancel_token.unwrap_or_else(|| self.cancel_token.clone());
 
         // Use the KeyValueStoreManager's watch mechanism
         let (_, mut rx) = self.store.clone().watch(
             bucket_name,
             None, // No TTL
-            self.cancel_token.clone(),
+            cancel_token,
         );
 
         tracing::debug!(
-            "KVStoreDiscoveryClient::list_and_watch: Got watch receiver for bucket={}",
+            "KVStoreDiscovery::list_and_watch: Got watch receiver for bucket={}",
             bucket_name
         );
 
         // Create a stream that filters and transforms WatchEvents to DiscoveryEvents
         let stream = async_stream::stream! {
             let mut event_count = 0;
-            tracing::debug!("KVStoreDiscoveryClient::list_and_watch: Stream started, waiting for events on prefix={}", prefix);
+            tracing::debug!("KVStoreDiscovery::list_and_watch: Stream started, waiting for events on prefix={}", prefix);
             while let Some(event) = rx.recv().await {
                 event_count += 1;
                 tracing::debug!(
-                    "KVStoreDiscoveryClient::list_and_watch: Received event #{} for prefix={}",
+                    "KVStoreDiscovery::list_and_watch: Received event #{} for prefix={}",
                     event_count,
                     prefix
                 );
                 let discovery_event = match event {
                     WatchEvent::Put(kv) => {
                         tracing::debug!(
-                            "KVStoreDiscoveryClient::list_and_watch: Put event, key={}, prefix={}, matches={}",
+                            "KVStoreDiscovery::list_and_watch: Put event, key={}, prefix={}, matches={}",
                             kv.key_str(),
                             prefix,
                             Self::matches_prefix(kv.key_str(), &prefix, bucket_name)
@@ -291,7 +289,7 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(kv.key_str(), &prefix, bucket_name) {
                             tracing::debug!(
-                                "KVStoreDiscoveryClient::list_and_watch: Skipping key {} (doesn't match prefix {})",
+                                "KVStoreDiscovery::list_and_watch: Skipping key {} (doesn't match prefix {})",
                                 kv.key_str(),
                                 prefix
                             );
@@ -300,8 +298,8 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
 
                         match Self::parse_instance(kv.value()) {
                             Ok(instance) => {
-                                tracing::info!(
-                                    "KVStoreDiscoveryClient::list_and_watch: Emitting Added event for instance_id={}, key={}",
+                                tracing::debug!(
+                                    "KVStoreDiscovery::list_and_watch: Emitting Added event for instance_id={}, key={}",
                                     instance.instance_id(),
                                     kv.key_str()
                                 );
@@ -319,14 +317,14 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                     }
                     WatchEvent::Delete(kv) => {
                         tracing::debug!(
-                            "KVStoreDiscoveryClient::list_and_watch: Delete event, key={}, prefix={}",
+                            "KVStoreDiscovery::list_and_watch: Delete event, key={}, prefix={}",
                             kv.key_str(),
                             prefix
                         );
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(kv.key_str(), &prefix, bucket_name) {
                             tracing::debug!(
-                                "KVStoreDiscoveryClient::list_and_watch: Skipping deleted key {} (doesn't match prefix {})",
+                                "KVStoreDiscovery::list_and_watch: Skipping deleted key {} (doesn't match prefix {})",
                                 kv.key_str(),
                                 prefix
                             );
@@ -341,8 +339,8 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                             Some(instance_id_hex) => {
                                 match u64::from_str_radix(instance_id_hex, 16) {
                                     Ok(instance_id) => {
-                                        tracing::info!(
-                                            "KVStoreDiscoveryClient::list_and_watch: Emitting Removed event for instance_id={}, key={}",
+                                        tracing::debug!(
+                                            "KVStoreDiscovery::list_and_watch: Emitting Removed event for instance_id={}, key={}",
                                             instance_id,
                                             kv.key_str()
                                         );
@@ -370,18 +368,18 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                 };
 
                 if let Some(event) = discovery_event {
-                    tracing::debug!("KVStoreDiscoveryClient::list_and_watch: Yielding event: {:?}", event);
+                    tracing::debug!("KVStoreDiscovery::list_and_watch: Yielding event: {:?}", event);
                     yield Ok(event);
                 } else {
-                    tracing::debug!("KVStoreDiscoveryClient::list_and_watch: Event was filtered out (None)");
+                    tracing::debug!("KVStoreDiscovery::list_and_watch: Event was filtered out (None)");
                 }
             }
-            tracing::debug!("KVStoreDiscoveryClient::list_and_watch: Stream ended after {} events for prefix={}", event_count, prefix);
+            tracing::debug!("KVStoreDiscovery::list_and_watch: Stream ended after {} events for prefix={}", event_count, prefix);
         };
 
         tracing::debug!(
-            "KVStoreDiscoveryClient::list_and_watch: Returning stream for key={:?}",
-            key
+            "KVStoreDiscovery::list_and_watch: Returning stream for query={:?}",
+            query
         );
         Ok(Box::pin(stream))
     }
@@ -396,7 +394,7 @@ mod tests {
     async fn test_kv_store_discovery_register_endpoint() {
         let store = KeyValueStoreManager::memory();
         let cancel_token = CancellationToken::new();
-        let client = KVStoreDiscoveryClient::new(store, cancel_token);
+        let client = KVStoreDiscovery::new(store, cancel_token);
 
         let spec = DiscoverySpec::Endpoint {
             namespace: "test".to_string(),
@@ -421,7 +419,7 @@ mod tests {
     async fn test_kv_store_discovery_list() {
         let store = KeyValueStoreManager::memory();
         let cancel_token = CancellationToken::new();
-        let client = KVStoreDiscoveryClient::new(store, cancel_token);
+        let client = KVStoreDiscovery::new(store, cancel_token);
 
         // Register multiple endpoints
         let spec1 = DiscoverySpec::Endpoint {
@@ -449,12 +447,12 @@ mod tests {
         client.register(spec3).await.unwrap();
 
         // List all endpoints
-        let all = client.list(DiscoveryKey::AllEndpoints).await.unwrap();
+        let all = client.list(DiscoveryQuery::AllEndpoints).await.unwrap();
         assert_eq!(all.len(), 3);
 
         // List namespaced endpoints
         let ns1 = client
-            .list(DiscoveryKey::NamespacedEndpoints {
+            .list(DiscoveryQuery::NamespacedEndpoints {
                 namespace: "ns1".to_string(),
             })
             .await
@@ -463,7 +461,7 @@ mod tests {
 
         // List component endpoints
         let comp1 = client
-            .list(DiscoveryKey::ComponentEndpoints {
+            .list(DiscoveryQuery::ComponentEndpoints {
                 namespace: "ns1".to_string(),
                 component: "comp1".to_string(),
             })
@@ -476,11 +474,11 @@ mod tests {
     async fn test_kv_store_discovery_watch() {
         let store = KeyValueStoreManager::memory();
         let cancel_token = CancellationToken::new();
-        let client = Arc::new(KVStoreDiscoveryClient::new(store, cancel_token.clone()));
+        let client = Arc::new(KVStoreDiscovery::new(store, cancel_token.clone()));
 
         // Start watching before registering
         let mut stream = client
-            .list_and_watch(DiscoveryKey::AllEndpoints)
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
             .await
             .unwrap();
 

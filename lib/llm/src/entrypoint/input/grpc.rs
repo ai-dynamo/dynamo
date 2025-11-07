@@ -177,9 +177,9 @@ async fn run_watcher(
         busy_threshold,
     );
     tracing::debug!("Waiting for remote model");
-    let discovery = runtime.discovery_client();
+    let discovery = runtime.discovery();
     let discovery_stream = discovery
-        .list_and_watch(dynamo_runtime::discovery::DiscoveryKey::AllModelCards)
+        .list_and_watch(dynamo_runtime::discovery::DiscoveryQuery::AllModels, None)
         .await?;
 
     // [gluo NOTE] This is different from http::run_watcher where it alters the HTTP service
