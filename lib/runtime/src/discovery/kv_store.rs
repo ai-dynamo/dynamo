@@ -1,16 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::storage::key_value_store::{KeyValueStoreManager, WatchEvent};
-use crate::{CancellationToken, Result};
-use async_trait::async_trait;
-use futures::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
+
+use anyhow::Result;
+use async_trait::async_trait;
+use futures::{Stream, StreamExt};
+use tokio_util::sync::CancellationToken;
 
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
 };
+use crate::storage::key_value_store::{KeyValueStoreManager, WatchEvent};
 
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";

@@ -39,7 +39,7 @@ use crate::{
 };
 
 use super::{
-    DistributedRuntime, Result, Runtime, error,
+    DistributedRuntime, Runtime,
     traits::*,
     transports::etcd::{COMPONENT_KEYWORD, ENDPOINT_KEYWORD},
     transports::nats::Slug,
@@ -302,7 +302,7 @@ impl Component {
 
     /// Scrape ServiceSet, which contains NATS stats as well as user defined stats
     /// embedded in data field of ServiceInfo.
-    pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {
+    pub async fn scrape_stats(&self, timeout: Duration) -> anyhow::Result<ServiceSet> {
         // Debug: scraping stats for component
         let service_name = self.service_name();
         let Some(service_client) = self.drt().service_client() else {
@@ -320,7 +320,7 @@ impl Component {
     /// then subsequent scrapes occur at a fixed interval of 9.8 seconds (MAX_WAIT_MS),
     /// which should be near or smaller than typical Prometheus scraping intervals to ensure
     /// metrics are fresh when Prometheus collects them.
-    pub fn start_scraping_nats_service_component_metrics(&self) -> Result<()> {
+    pub fn start_scraping_nats_service_component_metrics(&self) -> anyhow::Result<()> {
         const MAX_WAIT_MS: std::time::Duration = std::time::Duration::from_millis(9800); // Should be <= Prometheus scrape interval
 
         // If there is another component with the same service name, this will fail.
@@ -373,7 +373,7 @@ impl Component {
     /// Returns a stream of `ServiceInfo` objects.
     /// This should be consumed by a `[tokio::time::timeout_at`] because each services
     /// will only respond once, but there is no way to know when all services have responded.
-    pub async fn stats_stream(&self) -> Result<()> {
+    pub async fn stats_stream(&self) -> anyhow::Result<()> {
         unimplemented!("collect_stats")
     }
 
@@ -383,7 +383,7 @@ impl Component {
         // Pre-check to save cost of creating the service, but don't hold the lock
         if self
             .drt
-            .component_registry
+            .component_registry()
             .inner
             .lock()
             .await
@@ -400,7 +400,7 @@ impl Component {
         let (nats_service, stats_reg) =
             service::build_nats_service(nats_client, self, description).await?;
 
-        let mut guard = self.drt.component_registry.inner.lock().await;
+        let mut guard = self.drt.component_registry().inner.lock().await;
         if !guard.services.contains_key(&service_name) {
             // Normal case
             guard.services.insert(service_name.clone(), nats_service);
@@ -590,7 +590,7 @@ impl Endpoint {
         )
     }
 
-    pub async fn client(&self) -> Result<client::Client> {
+    pub async fn client(&self) -> anyhow::Result<client::Client> {
         if self.is_static {
             client::Client::new_static(self.clone()).await
         } else {
@@ -655,7 +655,11 @@ impl std::fmt::Display for Namespace {
 }
 
 impl Namespace {
-    pub(crate) fn new(runtime: DistributedRuntime, name: String, is_static: bool) -> Result<Self> {
+    pub(crate) fn new(
+        runtime: DistributedRuntime,
+        name: String,
+        is_static: bool,
+    ) -> anyhow::Result<Self> {
         Ok(NamespaceBuilder::default()
             .runtime(Arc::new(runtime))
             .name(name)
@@ -664,7 +668,7 @@ impl Namespace {
     }
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
-    pub fn component(&self, name: impl Into<String>) -> Result<Component> {
+    pub fn component(&self, name: impl Into<String>) -> anyhow::Result<Component> {
         Ok(ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
@@ -673,7 +677,7 @@ impl Namespace {
     }
 
     /// Create a [`Namespace`] in the parent namespace
-    pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
+    pub fn namespace(&self, name: impl Into<String>) -> anyhow::Result<Namespace> {
         Ok(NamespaceBuilder::default()
             .runtime(self.runtime.clone())
             .name(name.into())

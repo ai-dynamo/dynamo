@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub use crate::component::Component;
+use crate::component::Component;
+use crate::pipeline::PipelineError;
 use crate::storage::key_value_store::{
     EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, KeyValueStoreSelect,
     MemoryStore,
 };
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
-    ErrorContext,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::Discovery,
     metrics::PrometheusUpdateCallback,
@@ -16,16 +16,58 @@ use crate::{
     service::ServiceClient,
     transports::{etcd, nats, tcp},
 };
+use crate::{discovery, system_status_server, transports};
 
 use super::utils::GracefulShutdownTracker;
-use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
-use std::sync::OnceLock;
+use crate::SystemHealth;
+use crate::runtime::Runtime;
 
+use async_once_cell::OnceCell;
+use std::sync::{Arc, OnceLock, Weak};
+
+use anyhow::Result;
 use derive_getters::Dissolve;
 use figment::error;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+/// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
+/// communication protocols and transports.
+#[derive(Clone)]
+pub struct DistributedRuntime {
+    // local runtime
+    runtime: Runtime,
+
+    // we might consider a unifed transport manager here
+    etcd_client: Option<transports::etcd::Client>,
+    nats_client: Option<transports::nats::Client>,
+    store: KeyValueStoreManager,
+    tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
+
+    // Service discovery client
+    discovery_client: Arc<dyn discovery::Discovery>,
+
+    // local registry for components
+    // the registry allows us to use share runtime resources across instances of the same component object.
+    // take for example two instances of a client to the same remote component. The registry allows us to use
+    // a single endpoint watcher for both clients, this keeps the number background tasking watching specific
+    // paths in etcd to a minimum.
+    component_registry: component::Registry,
+
+    // Will only have static components that are not discoverable via etcd, they must be know at
+    // startup. Will not start etcd.
+    is_static: bool,
+
+    instance_sources: Arc<tokio::sync::Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
+
+    // Health Status
+    system_health: Arc<parking_lot::Mutex<SystemHealth>>,
+
+    // This hierarchy's own metrics registry
+    metrics_registry: MetricsRegistry,
+}
 
 impl MetricsHierarchy for DistributedRuntime {
     fn basename(&self) -> String {
@@ -229,6 +271,17 @@ impl DistributedRuntime {
         self.runtime.primary_token()
     }
 
+    // TODO: Don't hand out pointers, instead have methods to use the registry in friendly ways
+    // (without being aware of async locks and so on)
+    pub fn component_registry(&self) -> &component::Registry {
+        &self.component_registry
+    }
+
+    // TODO: Don't hand out pointers, instead provide system health related services.
+    pub fn system_health(&self) -> Arc<parking_lot::Mutex<SystemHealth>> {
+        self.system_health.clone()
+    }
+
     pub fn connection_id(&self) -> u64 {
         self.store.connection_id()
     }
@@ -258,7 +311,7 @@ impl DistributedRuntime {
             .get_or_try_init(async move {
                 let options = tcp::server::ServerOptions::default();
                 let server = tcp::server::TcpStreamServer::new(options).await?;
-                OK(server)
+                Ok::<_, PipelineError>(server)
             })
             .await?
             .clone())
