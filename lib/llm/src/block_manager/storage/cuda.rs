@@ -75,6 +75,8 @@ use std::{
 };
 
 use cudarc::driver::{CudaContext, sys};
+use cudarc::runtime::sys::{cudaError, cudaHostRegister};
+use nix::libc::{MAP_ANONYMOUS, MAP_FAILED, MAP_HUGETLB, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 
 use crate::block_manager::numa_allocator;
 
@@ -178,25 +180,63 @@ impl PinnedStorage {
         unsafe {
             ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
-            // Try NUMA-aware allocation if enabled, otherwise use direct allocation
-            let ptr = if numa_allocator::is_numa_enabled() {
-                let device_id = ctx.cu_device() as u32;
-                match numa_allocator::worker_pool::NumaWorkerPool::global()
-                    .allocate_pinned_for_gpu(size, device_id)
-                {
-                    Ok(ptr) => ptr,
-                    Err(e) => {
-                        tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
-                        cudarc::driver::result::malloc_host(
-                            size,
-                            sys::CU_MEMHOSTALLOC_WRITECOMBINED,
-                        )
-                        .map_err(StorageError::Cuda)? as *mut u8
+            let numa_aware = numa_allocator::is_numa_enabled();
+            let use_huge_pages =
+                std::env::var("DYN_KVBM_USE_HUGE_PAGES").unwrap_or("0".to_string()) == "1";
+
+            let ptr = match (numa_aware, use_huge_pages) {
+                (true, true) => {
+                    return Err(StorageError::InvalidConfig(
+                        "NUMA-aware and huge pages are not supported together".into(),
+                    ));
+                }
+                (true, false) => {
+                    let device_id = ctx.cu_device() as u32;
+                    match numa_allocator::worker_pool::NumaWorkerPool::global()
+                        .allocate_pinned_for_gpu(size, device_id)
+                    {
+                        Ok(ptr) => ptr,
+                        Err(e) => {
+                            tracing::warn!(
+                                "NUMA allocation failed: {}, using direct allocation",
+                                e
+                            );
+                            cudarc::driver::result::malloc_host(
+                                size,
+                                sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+                            )
+                            .map_err(StorageError::Cuda)? as *mut u8
+                        }
                     }
                 }
-            } else {
-                cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
-                    .map_err(StorageError::Cuda)? as *mut u8
+                (false, true) => {
+                    let ptr = nix::libc::mmap(
+                        std::ptr::null_mut(),
+                        size,
+                        PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB,
+                        -1,
+                        0,
+                    );
+
+                    if ptr == MAP_FAILED {
+                        return Err(StorageError::AllocationFailed(
+                            "Failed to allocate pinned memory".into(),
+                        ));
+                    }
+
+                    if cudaHostRegister(ptr, size, 0) != cudaError::cudaSuccess {
+                        return Err(StorageError::AllocationFailed(
+                            "Failed to register memory".into(),
+                        ));
+                    }
+
+                    ptr as *mut u8
+                }
+                (false, false) => {
+                    cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
+                        .map_err(StorageError::Cuda)? as *mut u8
+                }
             };
 
             assert!(!ptr.is_null(), "Failed to allocate pinned memory");
