@@ -217,7 +217,7 @@ impl Server {
                         mpsc::error::TrySendError::Full(data) => {
                             tracing::warn!(
                                 request_id,
-                                "response stream is full; backpressue alert"
+                                "response stream is full; backpressure alert"
                             );
                             // todo - add timeout - we are blocking all other streams
                             if (tx.send(data).await).is_err() {
