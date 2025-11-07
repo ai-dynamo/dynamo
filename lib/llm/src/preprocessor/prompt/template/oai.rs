@@ -121,13 +121,49 @@ fn may_be_fix_msg_content(messages: serde_json::Value) -> Value {
     Value::from_serialize(&updated_messages)
 }
 
+fn normalize_tool_arguments_in_messages(messages: &mut serde_json::Value) {
+    // Deserialize tool call arguments from JSON strings to objects/arrays before template rendering
+    // avoids double encoding and enables iteration
+    let Some(msgs) = messages.as_array_mut() else {
+        return;
+    };
+
+    for msg in msgs.iter_mut() {
+        if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
+            for tc in tool_calls {
+                if let Some(function) = tc.get_mut("function").and_then(|v| v.as_object_mut()) {
+                    if let Some(args) = function.get_mut("arguments") {
+                        if let Some(s) = args.as_str() {
+                            if let Result::Ok(parsed) = serde_json::from_str(s) {
+                                *args = parsed;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(function_call) = msg.get_mut("function_call").and_then(|v| v.as_object_mut()) {
+            if let Some(args) = function_call.get_mut("arguments") {
+                if let Some(s) = args.as_str() {
+                    if let Result::Ok(parsed) = serde_json::from_str(s) {
+                        *args = parsed;
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn model(&self) -> String {
         self.inner.model.clone()
     }
 
     fn messages(&self) -> Value {
-        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        let mut messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+
+        normalize_tool_arguments_in_messages(&mut messages_json);
 
         let needs_fixing = if let Some(arr) = messages_json.as_array() {
             arr.iter()
@@ -745,5 +781,115 @@ NORMAL MODE
     fn add_when_empty() {
         let s = dummy_state(vec![]);
         assert!(s.should_add_generation_prompt());
+    }
+
+    #[test]
+    fn test_normalize_tool_arguments_tojson() {
+        use minijinja::{Environment, context};
+
+        let tmpl = r#"{{ messages[0].tool_calls[0].function.arguments | tojson }}"#;
+
+        // Message with tool_calls containing JSON string arguments
+        let mut messages = serde_json::Value::Array(vec![serde_json::json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "type": "function",
+                "function": {
+                    "name": "get_current_weather",
+                    "arguments": "{\"format\":\"celsius\",\"location\":\"San Francisco, CA\"}"
+                }
+            }]
+        })]);
+
+        normalize_tool_arguments_in_messages(&mut messages);
+
+        let mut env = Environment::new();
+        env.add_filter("tojson", super::super::tokcfg::tojson);
+        env.add_template("t", tmpl).unwrap();
+        let out = env
+            .get_template("t")
+            .unwrap()
+            .render(context! { messages => messages.as_array().unwrap() })
+            .unwrap();
+
+        // Should produce clean JSON without double-encoding
+        assert_eq!(
+            out,
+            r#"{"format":"celsius","location":"San Francisco, CA"}"#
+        );
+    }
+
+    #[test]
+    fn test_normalize_tool_arguments_items_loop() {
+        use minijinja::{Environment, context};
+
+        let tmpl = r#"{% for k, v in messages[0].tool_calls[0].function.arguments|items %}{{k}}={{v}};{% endfor %}"#;
+
+        let mut messages = serde_json::Value::Array(vec![serde_json::json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "type": "function",
+                "function": {
+                    "name": "f",
+                    "arguments": "{\"a\":1,\"b\":\"x\"}"
+                }
+            }]
+        })]);
+
+        normalize_tool_arguments_in_messages(&mut messages);
+
+        let mut env = Environment::new();
+        env.add_template("t", tmpl).unwrap();
+        let out = env
+            .get_template("t")
+            .unwrap()
+            .render(context! { messages => messages.as_array().unwrap() })
+            .unwrap();
+
+        // Order-insensitive check: either a=1;b=x; or b=x;a=1;
+        assert!(out == "a=1;b=x;" || out == "b=x;a=1;");
+    }
+
+    #[test]
+    fn test_normalize_tool_arguments_legacy_function_call() {
+        // Test deprecated function_call format (OpenAI compat)
+        let mut messages = serde_json::Value::Array(vec![serde_json::json!({
+            "role": "assistant",
+            "function_call": {
+                "name": "get_weather",
+                "arguments": "{\"location\":\"NYC\"}"
+            }
+        })]);
+
+        normalize_tool_arguments_in_messages(&mut messages);
+
+        assert_eq!(
+            messages[0]["function_call"]["arguments"],
+            serde_json::json!({"location": "NYC"})
+        );
+    }
+
+    #[test]
+    fn test_normalize_tool_arguments_malformed_json_passthrough() {
+        // Malformed JSON should be left as a string
+        let mut messages = serde_json::Value::Array(vec![serde_json::json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "type": "function",
+                "function": {
+                    "name": "f",
+                    "arguments": "not valid json at all"
+                }
+            }]
+        })]);
+
+        normalize_tool_arguments_in_messages(&mut messages);
+
+        // Should remain as string
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["arguments"],
+            serde_json::Value::String("not valid json at all".to_string())
+        );
+
     }
 }
