@@ -380,6 +380,7 @@ jobs:
       - name: Run Fault Tolerance Tests
         run: |
           set -x
+          export KUBECONFIG=$(pwd)/.kubeconfig
           export NAMESPACE=$NAMESPACE
           export FRAMEWORK=${{ matrix.framework.name }}
           export IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
@@ -388,35 +389,24 @@ jobs:
           echo "Using namespace: $NAMESPACE"
           echo "Using image: $IMAGE"
 
-          # Login to Azure Container Registry to pull the image (disable tracing for security)
-          set +x
-          echo "${{ secrets.AZURE_ACR_PASSWORD }}" | docker login ${{ secrets.AZURE_ACR_HOSTNAME }} -u ${{ secrets.AZURE_ACR_USER }} --password-stdin > /dev/null 2>&1
-          set -x
+          # Install python3-venv package if not already installed
+          sudo apt-get update && sudo apt-get install -y python3-venv
 
-          # Run the tests inside the framework container which has all dependencies
-          # Mount kubeconfig, workspace, and run pytest
-          docker run --rm \
-            --network host \
-            -v $(pwd)/.kubeconfig:/root/.kube/config:ro \
-            -v $(pwd):/workspace \
-            -w /workspace \
-            -e KUBECONFIG=/root/.kube/config \
-            ${IMAGE} \
-            bash -c "
-              # Install kubectl for k8s operations
-              curl -LO https://dl.k8s.io/release/\$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl && \
-              chmod +x kubectl && mv kubectl /usr/local/bin/ && \
-              # Install test dependencies
-              pip install -q -r container/deps/requirements.test.txt && \
-              # Run the tests
-              pytest tests/fault_tolerance/deploy/test_deployment.py \
-                -m 'k8s and fault_tolerance' \
-                -k '${{ matrix.framework.test_scenario }}' \
-                -s -v \
-                --namespace ${NAMESPACE} \
-                --image ${IMAGE} \
-                --client-type legacy
-            "
+          # Set up Python virtual environment and install test dependencies
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r container/deps/requirements.test.txt
+          pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
+
+          # Run the pytest command (tests orchestrate K8s, don't need dynamo package)
+          pytest tests/fault_tolerance/deploy/test_deployment.py \
+            -m 'k8s and fault_tolerance' \
+            -k '${{ matrix.framework.test_scenario }}' \
+            -s -v \
+            --namespace ${NAMESPACE} \
+            --image ${IMAGE} \
+            --client-type legacy
       - name: Cleanup
         if: always()
         timeout-minutes: 5
