@@ -178,3 +178,72 @@ fn test_long_sequence_incremental_decode_with_prefill() {
         assert_eq!(output.trim(), output_text.to_string());
     }
 }
+
+#[test]
+fn test_decode_with_skip_special_tokens() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load remote HuggingFace tokenizer");
+
+    // Create a sequence with special tokens:
+    // <s> (token_id: 1) + "Hello world" + </s> (token_id: 2)
+    let text = "Hello world";
+    let encoding = tokenizer.encode(text).expect("Failed to encode text");
+    let mut token_ids = vec![1]; // <s>
+    token_ids.extend(encoding.token_ids());
+    token_ids.push(2); // </s>
+
+    // Decode with skip_special_tokens = false (should keep special tokens)
+    let decoded_with_special = tokenizer
+        .decode(&token_ids, false)
+        .expect("Failed to decode with skip_special_tokens=false");
+
+    // Decode with skip_special_tokens = true (should remove special tokens)
+    let decoded_without_special = tokenizer
+        .decode(&token_ids, true)
+        .expect("Failed to decode with skip_special_tokens=true");
+
+    // Print the decoded values for visibility
+    println!("Token IDs: {:?}", token_ids);
+    println!("Decoded WITH special tokens (skip=false): {:?}", decoded_with_special);
+    println!("Decoded WITHOUT special tokens (skip=true): {:?}", decoded_without_special);
+
+    // Verify that the version with special tokens contains the special token markers
+    assert!(
+        decoded_with_special.contains("<s>"),
+        "Expected decoded text with skip_special_tokens=false to contain '<s>', but got: {}",
+        decoded_with_special
+    );
+    assert!(
+        decoded_with_special.contains("</s>"),
+        "Expected decoded text with skip_special_tokens=false to contain '</s>', but got: {}",
+        decoded_with_special
+    );
+
+    // Verify that the version without special tokens does NOT contain the special token markers
+    assert!(
+        !decoded_without_special.contains("<s>"),
+        "Expected decoded text with skip_special_tokens=true to NOT contain '<s>', but got: {}",
+        decoded_without_special
+    );
+    assert!(
+        !decoded_without_special.contains("</s>"),
+        "Expected decoded text with skip_special_tokens=true to NOT contain '</s>', but got: {}",
+        decoded_without_special
+    );
+
+    // The text content should be present in both versions
+    assert!(
+        decoded_with_special.contains(text),
+        "Expected decoded text with skip_special_tokens=false to contain the original text"
+    );
+    assert!(
+        decoded_without_special.contains(text),
+        "Expected decoded text with skip_special_tokens=true to contain the original text"
+    );
+
+    // The version without special tokens should be shorter
+    assert!(
+        decoded_without_special.len() < decoded_with_special.len(),
+        "Expected decoded text with skip_special_tokens=true to be shorter than with skip_special_tokens=false"
+    );
+}
