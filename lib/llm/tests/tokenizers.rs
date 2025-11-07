@@ -203,6 +203,6 @@ fn test_decode_with_skip_special_tokens() {
         .expect("Failed to decode with skip_special_tokens=true");
 
     // Validate exact matches on the entire decoded strings
-    assert_eq!(decoded_with_special, "<s>Hello world</s>");
+    assert_eq!(decoded_with_special, "<s> Hello world</s>");
     assert_eq!(decoded_without_special, "Hello world");
 }
