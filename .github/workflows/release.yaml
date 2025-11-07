@@ -225,9 +225,10 @@ jobs:
           docker run -d --rm dynamo-base:0.0.0 sleep 10
           CONTAINER_ID=$(docker ps -a | grep dynamo-base:0.0.0 | awk '{print $1}')
           DIST_DIR=$(docker exec ${CONTAINER_ID} ls -1 /opt/dynamo/dist)
-          WHEELS=$(echo "$DIST_DIR" | tr '[:space:]' '\n')
-          DYNAMO_RUNTIME_WHL=$(echo $WHEELS | grep "ai_dynamo_runtime.*.whl")
-          DYNAMO_ANY_WHL=$(echo $WHEELS | grep "ai_dynamo.*any.whl")
-          docker cp ${CONTAINER_ID}:/opt/dynamo/wheelhouse/${DYNAMO_RUNTIME_WHL} .
-          docker cp ${CONTAINER_ID}:/opt/dynamo/wheelhouse/${DYNAMO_ANY_WHL} .
+          REGEX='(ai_dynamo.*any.whl).*(ai_dynamo_runtime.*.whl)'
+          [[ $DIST_DIR =~ $REGEX ]]
+          DYNAMO_ANY_WHL=$(echo ${BASH_REMATCH[1]})
+          DYNAMO_RUNTIME_WHL=$(echo ${BASH_REMATCH[2]})
+          docker cp ${CONTAINER_ID}:/opt/dynamo/dist/${DYNAMO_RUNTIME_WHL} .
+          docker cp ${CONTAINER_ID}:/opt/dynamo/dist/${DYNAMO_ANY_WHL} .
           ls | grep *.whl
