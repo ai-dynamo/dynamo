@@ -68,6 +68,7 @@ class TestProfileSlaAiconfigurator:
                 # Provide minimal model_info to avoid HF queries
                 self.model_info = ModelInfo(
                     model_size=16384.0,
+                    architecture="TestArchitecture",
                     is_moe=False,
                     max_context_length=16384,
                 )

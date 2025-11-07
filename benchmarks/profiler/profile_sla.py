@@ -316,7 +316,9 @@ async def run_profile(args):
                 logger.info(f"Dynamo config: {decode_config}")
 
                 parallel_mapping_tag = (
-                    mapping.label().replace("=", "").replace("/", "_")
+                    mapping.label()
+                    .replace("=", "")
+                    .replace("/", "_")  # safe chars for directory
                 )
                 work_dir = (
                     f"{args.output_dir}/decode_{num_gpus}gpus_{parallel_mapping_tag}"

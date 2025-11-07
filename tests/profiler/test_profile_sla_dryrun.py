@@ -75,6 +75,7 @@ class TestProfileSLADryRun:
                 # Provide minimal model_info to avoid HF queries
                 self.model_info = ModelInfo(
                     model_size=16384.0,
+                    architecture="TestArchitecture",
                     is_moe=False,
                     max_context_length=self.max_context_length,
                 )
@@ -115,6 +116,7 @@ class TestProfileSLADryRun:
                 self.deploy_after_profile = False
                 self.model_info = ModelInfo(
                     model_size=16384.0,
+                    architecture="TestArchitecture",
                     is_moe=False,
                     max_context_length=self.max_context_length,
                 )
@@ -169,6 +171,7 @@ class TestProfileSLADryRun:
                 self.deploy_after_profile = False
                 self.model_info = ModelInfo(
                     model_size=16384.0,
+                    architecture="TestArchitecture",
                     is_moe=False,
                     max_context_length=self.max_context_length,
                 )
@@ -216,6 +219,7 @@ class TestProfileSLADryRun:
                 self.deploy_after_profile = False
                 self.model_info = ModelInfo(
                     model_size=65536.0,
+                    architecture="TestMoEArchitecture",
                     is_moe=True,
                     max_context_length=self.max_context_length,
                     num_experts=16,
@@ -245,6 +249,7 @@ class TestProfileSLADryRun:
         """Mock model info for DeepSeek-R1-Distill-Llama-8B."""
         return ModelInfo(
             model_size=16384.0,  # 16GB model in MiB
+            architecture="LlamaForCausalLM",
             is_moe=False,
             max_context_length=16384,
         )
