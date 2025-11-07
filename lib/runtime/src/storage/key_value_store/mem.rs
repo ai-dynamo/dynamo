@@ -57,7 +57,7 @@ impl MemoryBucket {
 }
 
 impl MemoryStore {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         MemoryStore {
             inner: Arc::new(MemoryStoreInner {
@@ -107,6 +107,8 @@ impl KeyValueStore for MemoryStore {
     fn connection_id(&self) -> u64 {
         self.connection_id
     }
+
+    fn shutdown(&self) {}
 }
 
 #[async_trait]
@@ -205,8 +207,7 @@ impl KeyValueBucket for MemoryBucketRef {
                         yield WatchEvent::Put(item);
                     },
                     Some(MemoryEvent::Delete { key }) => {
-                        let item = KeyValue::new(key, bytes::Bytes::new());
-                        yield WatchEvent::Delete(item);
+                        yield WatchEvent::Delete(Key::from_raw(key));
                     }
                 }
             }
