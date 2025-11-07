@@ -15,7 +15,7 @@ use crate::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::{DistributedRuntime}
+use dynamo_runtime::{DistributedRuntime};
 use dynamo_runtime::{pipeline::RouterMode};
 
 /// Build and run an KServe gRPC service

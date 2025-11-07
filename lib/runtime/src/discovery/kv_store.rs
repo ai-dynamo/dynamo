@@ -268,16 +268,17 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                         }
                     }
                     WatchEvent::Delete(kv) => {
+                        let key_str = kv.as_ref();
                         tracing::debug!(
                             "KVStoreDiscoveryClient::list_and_watch: Delete event, key={}, prefix={}",
-                            kv.key_str(),
+                            key_str,
                             prefix
                         );
                         // Check if this key matches our prefix
-                        if !Self::matches_prefix(kv.key_str(), &prefix) {
+                        if !Self::matches_prefix(key_str, &prefix) {
                             tracing::debug!(
                                 "KVStoreDiscoveryClient::list_and_watch: Skipping deleted key {} (doesn't match prefix {})",
-                                kv.key_str(),
+                                key_str,
                                 prefix
                             );
                             continue;
@@ -286,7 +287,7 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                         // Extract instance_id from the key path, not the value
                         // Delete events have empty values in etcd, so we parse the instance_id from the key
                         // Key format: "v1/instances/namespace/component/endpoint/{instance_id:x}"
-                        let key_parts: Vec<&str> = kv.key_str().split('/').collect();
+                        let key_parts: Vec<&str> = key_str.split('/').collect();
                         match key_parts.last() {
                             Some(instance_id_hex) => {
                                 match u64::from_str_radix(instance_id_hex, 16) {
@@ -294,13 +295,13 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                                         tracing::info!(
                                             "KVStoreDiscoveryClient::list_and_watch: Emitting Removed event for instance_id={}, key={}",
                                             instance_id,
-                                            kv.key_str()
+                                            key_str
                                         );
                                         Some(DiscoveryEvent::Removed(instance_id))
                                     }
                                     Err(e) => {
                                         tracing::warn!(
-                                            key = %kv.key_str(),
+                                            key = %key_str,
                                             error = %e,
                                             "Failed to parse instance_id hex from deleted key"
                                         );
@@ -310,7 +311,7 @@ impl DiscoveryClient for KVStoreDiscoveryClient {
                             }
                             None => {
                                 tracing::warn!(
-                                    key = %kv.key_str(),
+                                    key = %key_str,
                                     "Delete event key has no path components"
                                 );
                                 None

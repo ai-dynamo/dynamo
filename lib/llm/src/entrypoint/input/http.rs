@@ -18,7 +18,6 @@ use crate::{
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::pipeline::RouterMode;
-use dynamo_runtime::storage::key_value_store::KeyValueStoreManager;
 
 /// Build and run an HTTP service
 pub async fn run(
