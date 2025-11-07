@@ -57,10 +57,6 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 ARG PYTHON_VERSION=3.12
 WORKDIR /workspace
-# ENV VIRTUAL_ENV=/opt/dynamo/venv
-
-# probably not going to work - TODO test this
-# ENV VIRTUAL_ENV=/usr/local/lib/python3.12/dist-packages
 
 ARG ARCH_ALT
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
@@ -166,6 +162,7 @@ COPY examples /workspace/examples
 COPY benchmarks /workspace/benchmarks
 COPY deploy /workspace/deploy
 COPY components/ /workspace/components/
+COPY recipes /workspace/recipes
 
 # Copy attribution files
 COPY ATTRIBUTION* LICENSE /workspace/
@@ -176,5 +173,5 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     # echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh && cd /workspace"]
 CMD []
