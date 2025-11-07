@@ -33,7 +33,8 @@ from dynamo.vllm.multimodal_handlers import (
     ProcessorHandler,
 )
 
-from .args import ENABLE_LMCACHE, Config, configure_ports, overwrite_args, parse_args
+from .args import ENABLE_LMCACHE, ENABLE_CHECKPOINTING, CHECKPOINT_DIR, Config, configure_ports, overwrite_args, parse_args
+from .engine import create_vllm_engine, initialize_engine
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
 from .publisher import StatLoggerFactory
@@ -233,13 +234,25 @@ def setup_vllm_engine(config, stat_logger=None):
     if stat_logger:
         factory.append(stat_logger)
 
-    engine_client = AsyncLLM.from_vllm_config(
+    # Create engine (standard or checkpointable based on env var)
+    engine_client = create_vllm_engine(
         vllm_config=vllm_config,
         usage_context=usage_context,
         stat_loggers=factory,
         disable_log_requests=engine_args.disable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
+        enable_checkpointing=ENABLE_CHECKPOINTING,
+        checkpoint_dir=CHECKPOINT_DIR,
     )
+    
+    # Log which mode we're in
+    if ENABLE_CHECKPOINTING:
+        logger.info(
+            f"VllmWorker for {config.served_model_name} has been initialized with checkpointing support"
+        )
+        if CHECKPOINT_DIR:
+            logger.info(f"Will restore from checkpoint: {CHECKPOINT_DIR}")
+    
     if ENABLE_LMCACHE:
         logger.info(
             f"VllmWorker for {config.served_model_name} has been initialized with LMCache"
@@ -316,6 +329,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
 
+    # Initialize engine (handles checkpoint creation/restoration if enabled)
+    synced_config = await initialize_engine(engine_client, ENABLE_CHECKPOINTING, CHECKPOINT_DIR)
+    if synced_config is not None:
+        vllm_config = synced_config
+    
     handler = PrefillWorkerHandler(
         runtime, component, engine_client, default_sampling_params
     )
@@ -413,6 +431,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(
         config, factory
     )
+
+    # Initialize engine (handles checkpoint creation/restoration if enabled)
+    synced_config = await initialize_engine(engine_client, ENABLE_CHECKPOINTING, CHECKPOINT_DIR)
+    if synced_config:
+        vllm_config = synced_config
 
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
@@ -522,7 +545,6 @@ def get_engine_cache_info(engine: AsyncLLM):
         logging.error(f"Failed to get configuration values from vLLM config: {e}")
         raise
 
-
 async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
     """Initialize multimodal processor component"""
     component = runtime.namespace(config.namespace).component(config.component)
@@ -621,7 +643,7 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     Supports two modes:
     1. --multimodal-worker: Receives embeddings from separate encoder
     2. --multimodal-encode-prefill-worker: Handles inline encoding (e.g., Llama 4)
-
+    
     Both can operate in aggregated (P+D) or disaggregated (P→D) mode.
     """
     component = runtime.namespace(config.namespace).component(config.component)

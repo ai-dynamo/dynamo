@@ -25,6 +25,10 @@ VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
 # Global LMCache configuration - initialize once on module import
 ENABLE_LMCACHE = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
 
+# Global checkpoint configuration - initialize once on module import
+ENABLE_CHECKPOINTING = os.getenv("ENABLE_CHECKPOINTING", "0").lower() in ("1", "true", "yes")
+CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", None)  # Optional: directory to restore from
+
 
 class Config:
     """Command line parameters or defaults"""
