@@ -162,10 +162,9 @@ when initializing and HTTP status code `HTTP/1.1 200 OK` once ready.
 ### Example Environment Setting
 
 ```
-export DYN_SYSTEM_ENABLED="true"
+export DYN_SYSTEM_PORT=9090
 export DYN_SYSTEM_STARTING_HEALTH_STATUS="notready"
 export DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS="[\"generate\"]"
-export DYN_SYSTEM_PORT=9090
 ```
 
 #### Example Request

@@ -204,6 +204,12 @@ def parse_args():
         default=False,
         help="Mark this as a decode worker which does not publish KV events and skips prefill cost estimation (default: False)",
     )
+    parser.add_argument(
+        "--store-kv",
+        type=str,
+        default=os.environ.get("DYN_STORE_KV", "etcd"),
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
 
     args = parser.parse_args()
     validate_worker_type_args(args)

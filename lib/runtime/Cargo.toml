@@ -63,6 +63,7 @@ bincode = { version = "1" }
 console-subscriber = { version = "0.4", optional = true }
 educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
+inotify = { version = "0.11" }
 local-ip-address = { version = "0.6.3" }
 log = { version = "0.4" }
 nid = { version = "3.0.0", features = ["serde"] }

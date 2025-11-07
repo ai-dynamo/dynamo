@@ -19,6 +19,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from benchmarks.profiler.profile_sla import run_profile  # noqa: E402
+from benchmarks.profiler.utils.model_info import ModelInfo  # noqa: E402
 from benchmarks.profiler.utils.search_space_autogen import (  # noqa: E402
     auto_generate_search_space,
 )
@@ -63,7 +64,6 @@ class TestProfileSLADryRun:
                 self.prefill_interpolation_granularity = 16
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
-                self.is_moe_model = False
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
@@ -72,6 +72,13 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
+                # Provide minimal model_info to avoid HF queries
+                self.model_info = ModelInfo(
+                    model_size=16384.0,
+                    architecture="TestArchitecture",
+                    is_moe=False,
+                    max_context_length=self.max_context_length,
+                )
 
         return Args()
 
@@ -99,7 +106,6 @@ class TestProfileSLADryRun:
                 self.prefill_interpolation_granularity = 16
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
-                self.is_moe_model = False
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
@@ -108,6 +114,12 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
+                self.model_info = ModelInfo(
+                    model_size=16384.0,
+                    architecture="TestArchitecture",
+                    is_moe=False,
+                    max_context_length=self.max_context_length,
+                )
 
         return Args()
 
@@ -149,7 +161,6 @@ class TestProfileSLADryRun:
                 self.prefill_interpolation_granularity = 16
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
-                self.is_moe_model = False
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
@@ -158,6 +169,12 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
+                self.model_info = ModelInfo(
+                    model_size=16384.0,
+                    architecture="TestArchitecture",
+                    is_moe=False,
+                    max_context_length=self.max_context_length,
+                )
 
         return Args()
 
@@ -192,7 +209,6 @@ class TestProfileSLADryRun:
                 self.prefill_interpolation_granularity = 16
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
-                self.is_moe_model = True
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
@@ -201,6 +217,13 @@ class TestProfileSLADryRun:
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
+                self.model_info = ModelInfo(
+                    model_size=65536.0,
+                    architecture="TestMoEArchitecture",
+                    is_moe=True,
+                    max_context_length=self.max_context_length,
+                    num_experts=16,
+                )
 
         return Args()
 
@@ -224,11 +247,12 @@ class TestProfileSLADryRun:
     @pytest.fixture
     def mock_model_info(self):
         """Mock model info for DeepSeek-R1-Distill-Llama-8B."""
-        return {
-            "model_size": 16384,  # 16GB model in MiB
-            "is_moe": False,
-            "max_context_length": 16384,  # 16K tokens
-        }
+        return ModelInfo(
+            model_size=16384.0,  # 16GB model in MiB
+            architecture="LlamaForCausalLM",
+            is_moe=False,
+            max_context_length=16384,
+        )
 
     @pytest.fixture
     def vllm_args_with_model_autogen(self):
@@ -242,12 +266,9 @@ class TestProfileSLADryRun:
                 self.namespace = "test-namespace"
                 self.model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # Specify model for autogen
                 self.dgd_image = ""
-                self.min_num_gpus_per_engine = (
-                    1  # Will be overridden by auto-generation
-                )
-                self.max_num_gpus_per_engine = (
-                    8  # Will be overridden by auto-generation
-                )
+                # Set to 0 to trigger auto-generation path
+                self.min_num_gpus_per_engine = 0
+                self.max_num_gpus_per_engine = 0
                 self.skip_existing_results = False
                 self.force_rerun = False
                 self.isl = 3000
@@ -258,15 +279,16 @@ class TestProfileSLADryRun:
                 self.prefill_interpolation_granularity = 16
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
-                self.is_moe_model = False
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
                 self.aic_model_name = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
-                self.num_gpus_per_node = 8  # Will be overridden by auto-generation
+                # Set to 0 to trigger auto-generation path
+                self.num_gpus_per_node = 0
                 self.deploy_after_profile = False
+                self.enable_gpu_discovery = True
 
         return Args()
 
@@ -308,12 +330,8 @@ class TestProfileSLADryRun:
                 self.namespace = "test-namespace"
                 self.model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # Specify model for autogen
                 self.dgd_image = ""
-                self.min_num_gpus_per_engine = (
-                    1  # Will be overridden by auto-generation
-                )
-                self.max_num_gpus_per_engine = (
-                    8  # Will be overridden by auto-generation
-                )
+                self.min_num_gpus_per_engine = 0
+                self.max_num_gpus_per_engine = 0
                 self.skip_existing_results = False
                 self.force_rerun = False
                 self.isl = 3000
@@ -324,15 +342,15 @@ class TestProfileSLADryRun:
                 self.prefill_interpolation_granularity = 16
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
-                self.is_moe_model = False
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
                 self.aic_model_name = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
-                self.num_gpus_per_node = 8  # Will be overridden by auto-generation
+                self.num_gpus_per_node = 0
                 self.deploy_after_profile = False
+                self.enable_gpu_discovery = True
 
         return Args()
 
@@ -374,12 +392,8 @@ class TestProfileSLADryRun:
                 self.namespace = "test-namespace"
                 self.model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # Specify model for autogen
                 self.dgd_image = ""
-                self.min_num_gpus_per_engine = (
-                    1  # Will be overridden by auto-generation
-                )
-                self.max_num_gpus_per_engine = (
-                    8  # Will be overridden by auto-generation
-                )
+                self.min_num_gpus_per_engine = 0
+                self.max_num_gpus_per_engine = 0
                 self.skip_existing_results = False
                 self.force_rerun = False
                 self.isl = 3000
@@ -390,15 +404,15 @@ class TestProfileSLADryRun:
                 self.prefill_interpolation_granularity = 16
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
-                self.is_moe_model = False
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
                 self.aic_model_name = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
-                self.num_gpus_per_node = 8  # Will be overridden by auto-generation
+                self.num_gpus_per_node = 0
                 self.deploy_after_profile = False
+                self.enable_gpu_discovery = True
 
         return Args()
 
