@@ -29,8 +29,8 @@ distributed tracing.
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
 | `DYN_LOGGING_JSONL` | Enable JSONL logging format | `false` | `true` |
-| `DYN_LOG` | Log level: `info` or `debug` | `info` | `debug` |
-| `DYN_LOG_USE_LOCAL_TZ` | Use local timezone for timestamps | `false` | `true` |
+| `DYN_LOG` | Log levels per target `<default_level>,<module_path>=<level>,<module_path>=<level>` | `info` | `DYN_LOG=info,dynamo_runtime::system_status_server:trace` |
+| `DYN_LOG_USE_LOCAL_TZ` | Use local timezone for timestamps (default is UTC) | `false` | `true` |
 | `DYN_LOGGING_CONFIG_PATH` | Path to custom TOML logging configuration | none | `/path/to/config.toml` |
 | `OTEL_SERVICE_NAME` | Service name for OpenTelemetry traces | `dynamo` | `dynamo-frontend` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP trace exporting | `false` | `true` |

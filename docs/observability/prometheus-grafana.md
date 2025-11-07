@@ -112,10 +112,10 @@ The following configuration files are located in the `deploy/observability/` dir
 - [docker-observability.yml](../../deploy/docker-observability.yml): Defines Prometheus, Grafana, Tempo, and exporters
 - [prometheus.yml](../../deploy/observability/prometheus.yml): Contains Prometheus scraping configuration
 - [grafana-datasources.yml](../../deploy/observability/grafana-datasources.yml): Contains Grafana datasource configuration
-- [grafana_dashboards/grafana-dashboard-providers.yml](../../deploy/observability/grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
-- [grafana_dashboards/grafana-dynamo-dashboard.json](../../deploy/observability/grafana_dashboards/grafana-dynamo-dashboard.json): A general Dynamo Dashboard for both SW and HW metrics
-- [grafana_dashboards/grafana-dcgm-metrics.json](../../deploy/observability/grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
-- [grafana_dashboards/grafana-kvbm-dashboard.json](../../deploy/observability/grafana_dashboards/grafana-kvbm-dashboard.json): Contains Grafana dashboard configuration for KVBM metrics
+- [grafana_dashboards/dashboard-providers.yml](../../deploy/observability/grafana_dashboards/dashboard-providers.yml): Contains Grafana dashboard provider configuration
+- [grafana_dashboards/dynamo.json](../../deploy/observability/grafana_dashboards/dynamo.json): A general Dynamo Dashboard for both SW and HW metrics
+- [grafana_dashboards/dcgm-metrics.json](../../deploy/observability/grafana_dashboards/dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
+- [grafana_dashboards/kvbm.json](../../deploy/observability/grafana_dashboards/kvbm.json): Contains Grafana dashboard configuration for KVBM metrics
 
 ### Configuration
 

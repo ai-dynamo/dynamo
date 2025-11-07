@@ -25,6 +25,8 @@ While this guide does not use Prometheus, it assumes Grafana is pre-installed wi
 
 ### 3. Environment Variables
 
+#### Kubernetes Setup Variables
+
 The following env variables are set:
 - `MONITORING_NAMESPACE`: The namespace where Loki is installed
 - `DYN_NAMESPACE`: The namespace where Dynamo Cloud Operator is installed
@@ -33,6 +35,14 @@ The following env variables are set:
 export MONITORING_NAMESPACE=monitoring
 export DYN_NAMESPACE=dynamo-system
 ```
+
+#### Dynamo Logging Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `DYN_LOGGING_JSONL` | Enable JSONL logging format (required for Loki) | `true` |
+| `DYN_LOG` | Log levels per target `<default_level>,<module_path>=<level>,<module_path>=<level>` | `DYN_LOG=info,dynamo_runtime::system_status_server:trace` |
+| `DYN_LOG_USE_LOCAL_TZ` | Use local timezone for timestamps | `true` |
 
 ## Installation Steps
 
