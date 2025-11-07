@@ -483,15 +483,58 @@ jobs:
         fi
       continue-on-error: true
     
+    - name: Setup Python for Log Analysis
+      if: always() && steps.deploy-operator-step.outcome == 'failure'
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install LogAI
+      if: always() && steps.deploy-operator-step.outcome == 'failure'
+      run: |
+        pip install --upgrade pip
+        pip install logai || echo "LogAI installation failed, will use fallback"
+        chmod +x .github/scripts/extract_log_errors.py
+    
+    - name: Extract Errors from Logs using LogAI
+      if: always() && steps.deploy-operator-step.outcome == 'failure'
+      id: extract-errors
+      run: |
+        set -x
+        
+        # Use LogAI to extract errors from logs
+        if [ -f "deploy-operator.log" ]; then
+          echo "Analyzing deploy-operator.log with LogAI..."
+          LOGAI_ERROR=$(python3 .github/scripts/extract_log_errors.py deploy-operator.log 2>&1 || echo "Log analysis failed")
+          echo "LOGAI_EXTRACTED_ERROR<<EOF" >> $GITHUB_ENV
+          echo "$LOGAI_ERROR" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          
+          echo "=== Extracted Errors ==="
+          echo "$LOGAI_ERROR"
+        else
+          echo "LOGAI_EXTRACTED_ERROR=Log file not found" >> $GITHUB_ENV
+        fi
+        
+        # Also preserve any manually captured error
+        if [ -n "$ERROR_MESSAGE" ]; then
+          echo "MANUAL_ERROR_MESSAGE=$ERROR_MESSAGE" >> $GITHUB_ENV
+        fi
+    
     - name: Create GitHub Annotation on Failure
-      if: steps.deploy-operator-step.outcome == 'failure'
+      if: always() && steps.deploy-operator-step.outcome == 'failure'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -x
         
-        # Extract error message from environment
-        ERROR_MESSAGE="${ERROR_MESSAGE:-Unknown error occurred during operator deployment}"
+        # Combine LogAI extracted errors with manual captures
+        ERROR_MESSAGE="${LOGAI_EXTRACTED_ERROR:-Unknown error occurred during operator deployment}"
+        
+        # Add manually captured error if available
+        if [ -n "$MANUAL_ERROR_MESSAGE" ]; then
+          ERROR_MESSAGE="${ERROR_MESSAGE}\n\nManually Captured Error:\n${MANUAL_ERROR_MESSAGE}"
+        fi
         
         # Get additional context from Kubernetes if namespace is set
         if [ -n "$NAMESPACE" ]; then
@@ -525,16 +568,16 @@ jobs:
             "status": "completed",
             "conclusion": "failure",
             "output": {
-              "title": "Operator Deployment Failed",
+              "title": "Operator Deployment Failed (LogAI Analysis)",
               "summary": "Failed to deploy dynamo-platform operator to namespace '"${NAMESPACE}"'",
-              "text": "**Job**: deploy-operator\n**Namespace**: '"${NAMESPACE}"'\n\n**Error Details**:\n```\n'"${ERROR_MESSAGE}"'\n```\n\n[View Job Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+              "text": "**Job**: deploy-operator\n**Namespace**: '"${NAMESPACE}"'\n**Analysis Method**: LogAI + Manual Capture\n\n**Error Details**:\n```\n'"${ERROR_MESSAGE}"'\n```\n\n[View Job Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
               "annotations": [{
                 "path": ".github/workflows/container-validation-backends.yml",
                 "start_line": 357,
                 "end_line": 425,
                 "annotation_level": "failure",
                 "message": "'"${ERROR_MESSAGE}"'",
-                "title": "Operator deployment failed"
+                "title": "Operator deployment failed (LogAI)"
               }]
             }
           }' | jq -r '.id')
@@ -542,7 +585,7 @@ jobs:
         echo "Created check run with ID: $CHECK_RUN_ID"
         
         # Also use the workflow command to create an error annotation
-        echo "::error file=.github/workflows/container-validation-backends.yml,line=367,title=Deploy Operator Failed::${ERROR_MESSAGE}"
+        echo "::error file=.github/workflows/container-validation-backends.yml,line=367,title=Deploy Operator Failed (LogAI)::${ERROR_MESSAGE}"
         
         # Fail the step
         exit 1
@@ -693,15 +736,58 @@ jobs:
         exit $TEST_RESULT
       continue-on-error: true
     
+    - name: Setup Python for Log Analysis
+      if: always() && steps.run-tests.outcome == 'failure'
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install LogAI
+      if: always() && steps.run-tests.outcome == 'failure'
+      run: |
+        pip install --upgrade pip
+        pip install logai || echo "LogAI installation failed, will use fallback"
+        chmod +x .github/scripts/extract_log_errors.py
+    
+    - name: Extract Errors from Logs using LogAI
+      if: always() && steps.run-tests.outcome == 'failure'
+      id: extract-test-errors
+      run: |
+        set -x
+        
+        # Use LogAI to extract errors from logs
+        if [ -f "test-output.log" ]; then
+          echo "Analyzing test-output.log with LogAI..."
+          LOGAI_ERROR=$(python3 .github/scripts/extract_log_errors.py test-output.log 2>&1 || echo "Log analysis failed")
+          echo "LOGAI_EXTRACTED_ERROR<<EOF" >> $GITHUB_ENV
+          echo "$LOGAI_ERROR" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          
+          echo "=== Extracted Errors ==="
+          echo "$LOGAI_ERROR"
+        else
+          echo "LOGAI_EXTRACTED_ERROR=Test log file not found" >> $GITHUB_ENV
+        fi
+        
+        # Also preserve any manually captured error
+        if [ -n "$ERROR_MESSAGE" ]; then
+          echo "MANUAL_ERROR_MESSAGE=$ERROR_MESSAGE" >> $GITHUB_ENV
+        fi
+    
     - name: Create GitHub Annotation on Failure
-      if: steps.run-tests.outcome == 'failure'
+      if: always() && steps.run-tests.outcome == 'failure'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -x
         
-        # Extract error message from environment or test output log
-        ERROR_MESSAGE="${ERROR_MESSAGE:-Unknown error occurred during deployment test}"
+        # Combine LogAI extracted errors with manual captures
+        ERROR_MESSAGE="${LOGAI_EXTRACTED_ERROR:-Unknown error occurred during deployment test}"
+        
+        # Add manually captured error if available
+        if [ -n "$MANUAL_ERROR_MESSAGE" ]; then
+          ERROR_MESSAGE="${ERROR_MESSAGE}\n\nManually Captured Error:\n${MANUAL_ERROR_MESSAGE}"
+        fi
         
         # Get additional context from pod logs if available
         if [ -n "$GRAPH_NAME" ] && [ -n "$NAMESPACE" ]; then
@@ -720,13 +806,13 @@ jobs:
         # Note: We use the workflow file path as the annotation target
         cat > annotation.json <<EOF
         {
-          "title": "Deployment Test Failed: ${{ env.FRAMEWORK }} (${{ matrix.profile }})",
+          "title": "Deployment Test Failed: ${{ env.FRAMEWORK }} (${{ matrix.profile }}) [LogAI]",
           "summary": "Deployment test failed for ${{ env.FRAMEWORK }} with profile ${{ matrix.profile }}",
-          "text": "**Job**: ${{ github.job }}\n**Framework**: ${{ env.FRAMEWORK }}\n**Profile**: ${{ matrix.profile }}\n**Namespace**: ${{ needs.deploy-operator.outputs.NAMESPACE }}\n\n**Error Details**:\n\`\`\`\n${ERROR_MESSAGE}\n\`\`\`\n\n[View Job Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+          "text": "**Job**: ${{ github.job }}\n**Framework**: ${{ env.FRAMEWORK }}\n**Profile**: ${{ matrix.profile }}\n**Namespace**: ${{ needs.deploy-operator.outputs.NAMESPACE }}\n**Analysis Method**: LogAI + Manual Capture\n\n**Error Details**:\n\`\`\`\n${ERROR_MESSAGE}\n\`\`\`\n\n[View Job Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
           "annotation_level": "failure",
           "file": ".github/workflows/container-validation-backends.yml",
-          "start_line": 426,
-          "end_line": 618
+          "start_line": 593,
+          "end_line": 807
         }
         EOF
         
@@ -736,21 +822,21 @@ jobs:
           -H "Accept: application/vnd.github.v3+json" \
           "https://api.github.com/repos/${{ github.repository }}/check-runs" \
           -d '{
-            "name": "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }})",
+            "name": "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }}) [LogAI]",
             "head_sha": "${{ github.sha }}",
             "status": "completed",
             "conclusion": "failure",
             "output": {
-              "title": "Deployment Test Failed: ${{ env.FRAMEWORK }} (${{ matrix.profile }})",
+              "title": "Deployment Test Failed: ${{ env.FRAMEWORK }} (${{ matrix.profile }}) [LogAI Analysis]",
               "summary": "Deployment test failed for ${{ env.FRAMEWORK }} with profile ${{ matrix.profile }}",
-              "text": "**Job**: ${{ github.job }}\n**Framework**: ${{ env.FRAMEWORK }}\n**Profile**: ${{ matrix.profile }}\n**Namespace**: ${{ needs.deploy-operator.outputs.NAMESPACE }}\n\n**Error Details**:\n```\n'"${ERROR_MESSAGE}"'\n```\n\n[View Job Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+              "text": "**Job**: ${{ github.job }}\n**Framework**: ${{ env.FRAMEWORK }}\n**Profile**: ${{ matrix.profile }}\n**Namespace**: ${{ needs.deploy-operator.outputs.NAMESPACE }}\n**Analysis Method**: LogAI + Manual Capture\n\n**Error Details**:\n```\n'"${ERROR_MESSAGE}"'\n```\n\n[View Job Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
               "annotations": [{
                 "path": ".github/workflows/container-validation-backends.yml",
-                "start_line": 426,
-                "end_line": 618,
+                "start_line": 593,
+                "end_line": 807,
                 "annotation_level": "failure",
                 "message": "'"${ERROR_MESSAGE}"'",
-                "title": "Deploy test failed for ${{ env.FRAMEWORK }} (${{ matrix.profile }})"
+                "title": "Deploy test failed for ${{ env.FRAMEWORK }} (${{ matrix.profile }}) [LogAI]"
               }]
             }
           }' | jq -r '.id')
@@ -758,7 +844,7 @@ jobs:
         echo "Created check run with ID: $CHECK_RUN_ID"
         
         # Also use the workflow command to create an error annotation
-        echo "::error file=.github/workflows/container-validation-backends.yml,line=460,title=Deploy Test Failed: ${{ env.FRAMEWORK }} (${{ matrix.profile }})::${ERROR_MESSAGE}"
+        echo "::error file=.github/workflows/container-validation-backends.yml,line=626,title=Deploy Test Failed (LogAI): ${{ env.FRAMEWORK }} (${{ matrix.profile }})::${ERROR_MESSAGE}"
         
         # Fail the step
         exit 1
