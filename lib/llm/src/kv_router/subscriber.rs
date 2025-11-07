@@ -274,14 +274,14 @@ pub async fn start_kv_router_background(
     cleanup_orphaned_consumers(&mut nats_queue, &etcd_client, &component, &consumer_uuid).await;
 
     // Watch for router deletions to clean up orphaned consumers
-    let (_prefix_str, _watcher, mut router_replicas_rx) = etcd_client
+    let (_prefix_str, mut router_replicas_rx) = etcd_client
         .kv_get_and_watch_prefix(&format!("{}/", KV_ROUTERS_ROOT_PATH))
         .await?
         .dissolve();
 
     // Get the generate endpoint and watch for instance deletions
     let generate_endpoint = component.endpoint("generate");
-    let (_instance_prefix, _instance_watcher, mut instance_event_rx) = etcd_client
+    let (_instance_prefix, mut instance_event_rx) = etcd_client
         .kv_get_and_watch_prefix(generate_endpoint.etcd_root())
         .await?
         .dissolve();

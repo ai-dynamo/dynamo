@@ -8,7 +8,6 @@ import signal
 from typing import Optional
 
 import uvloop
-from kvbm.vllm_integration.consolidator_config import get_consolidator_endpoints
 from prometheus_client import REGISTRY
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
@@ -26,7 +25,7 @@ from dynamo.llm import (
     fetch_llm,
     register_llm,
 )
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_handlers import (
     EncodeWorkerHandler,
@@ -71,16 +70,16 @@ async def graceful_shutdown(runtime):
     logging.info("DistributedRuntime shutdown complete")
 
 
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
+async def worker():
     config = parse_args()
 
-    await configure_ports(runtime, config)
+    loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, config.store_kv, False)
+
+    await configure_ports(config)
     overwrite_args(config)
 
     # Set up signal handler for graceful shutdown
-    loop = asyncio.get_running_loop()
-
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
 
@@ -216,7 +215,18 @@ def setup_vllm_engine(config, stat_logger=None):
     # Set up consolidator endpoints if KVBM is enabled
     consolidator_endpoints = None
     if config.has_connector("kvbm"):
-        consolidator_endpoints = get_consolidator_endpoints(vllm_config)
+        try:
+            from kvbm.vllm_integration.consolidator_config import (
+                get_consolidator_endpoints,
+            )
+
+            consolidator_endpoints = get_consolidator_endpoints(vllm_config)
+        except Exception as e:
+            logger.warning(
+                f"KVBM connector is enabled but failed to get consolidator endpoints: {e}. "
+                "Continuing without KV event consolidation. "
+                "Ensure 'kvbm' package is installed if this feature is needed."
+            )
     vllm_config.consolidator_endpoints = consolidator_endpoints
 
     factory = []

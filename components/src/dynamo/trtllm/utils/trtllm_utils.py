@@ -58,6 +58,7 @@ class Config:
         self.tool_call_parser: Optional[str] = None
         self.dump_config_to: Optional[str] = None
         self.custom_jinja_template: Optional[str] = None
+        self.store_kv: str = ""
 
     def __str__(self) -> str:
         return (
@@ -87,8 +88,9 @@ class Config:
             f"max_file_size_mb={self.max_file_size_mb}, "
             f"reasoning_parser={self.reasoning_parser}, "
             f"tool_call_parser={self.tool_call_parser}, "
-            f"dump_config_to={self.dump_config_to},"
-            f"custom_jinja_template={self.custom_jinja_template}"
+            f"dump_config_to={self.dump_config_to}, "
+            f"custom_jinja_template={self.custom_jinja_template}, "
+            f"store_kv={self.store_kv}"
         )
 
 
@@ -278,6 +280,12 @@ def cmd_line_args():
         default=None,
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
+    parser.add_argument(
+        "--store-kv",
+        type=str,
+        default=os.environ.get("DYN_STORE_KV", "etcd"),
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
 
     args = parser.parse_args()
 
@@ -337,6 +345,7 @@ def cmd_line_args():
     config.reasoning_parser = args.dyn_reasoning_parser
     config.tool_call_parser = args.dyn_tool_call_parser
     config.dump_config_to = args.dump_config_to
+    config.store_kv = args.store_kv
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:
