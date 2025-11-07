@@ -79,6 +79,7 @@ docs = [
     "sphinx-book-theme>=1.1",
     "sphinxcontrib-mermaid>=1.0",
     "sphinxcontrib-bibtex>=2.6",
+    "sphinx-reredirects>=1.0.0",
     # Markdown and notebook support
     "myst-parser>=4.0",
     "myst-nb>=1.2",
