@@ -29,6 +29,7 @@ from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
     apply_parallel_mapping_to_config,
     get_candidate_parallel_mappings,
 )
+from benchmarks.profiler.utils.defaults import EngineType
 from benchmarks.profiler.utils.dgd_generation import generate_dgd_config_with_planner
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.plot import (
@@ -63,6 +64,21 @@ class PrefillProfileData:
     parallel_mapping_labels: list[str] = field(default_factory=list)
     parallel_mappings: list[ParallelizationMapping] = field(default_factory=list)
 
+    def add_data(
+        self,
+        num_gpus: int,
+        ttft: float,
+        thpt_per_gpu: float,
+        parallel_mapping_label: str,
+        parallel_mapping: ParallelizationMapping,
+    ) -> None:
+        """Add a complete data point to the profile data."""
+        self.num_gpus.append(num_gpus)
+        self.ttft.append(ttft)
+        self.thpt_per_gpu.append(thpt_per_gpu)
+        self.parallel_mapping_labels.append(parallel_mapping_label)
+        self.parallel_mappings.append(parallel_mapping)
+
 
 @dataclass
 class DecodeProfileData:
@@ -75,6 +91,25 @@ class DecodeProfileData:
     kv_cache_size: list[int] = field(default_factory=list)
     parallel_mapping_labels: list[str] = field(default_factory=list)
     parallel_mappings: list[ParallelizationMapping] = field(default_factory=list)
+
+    def add_data(
+        self,
+        num_gpus: int,
+        itl: float,
+        thpt_per_gpu: float,
+        concurrency: int,
+        kv_cache_size: int,
+        parallel_mapping_label: str,
+        parallel_mapping: ParallelizationMapping,
+    ) -> None:
+        """Add a complete data point to the profile data."""
+        self.num_gpus.append(num_gpus)
+        self.itl.append(itl)
+        self.thpt_per_gpu.append(thpt_per_gpu)
+        self.concurrency.append(concurrency)
+        self.kv_cache_size.append(kv_cache_size)
+        self.parallel_mapping_labels.append(parallel_mapping_label)
+        self.parallel_mappings.append(parallel_mapping)
 
 
 logger = logging.getLogger(__name__)
@@ -193,7 +228,7 @@ async def run_profile(args):
         prefill_data = PrefillProfileData()
         logger.info("Profiling prefill...")
         base_prefill_config = config_modifier.convert_config(
-            config, "prefill", is_moe_model=args.model_info.is_moe
+            config, EngineType.PREFILL, is_moe_model=args.model_info.is_moe
         )
         frontend_port = config_modifier.get_port(config)
         itl: float | None = None
@@ -201,7 +236,7 @@ async def run_profile(args):
         for num_gpus in profile_num_gpus:
             logger.info(f"Profiling prefill with {num_gpus} GPUs...")
             candidate_mappings = get_candidate_parallel_mappings(
-                num_gpus, args.model_info, "prefill"
+                num_gpus, args.model_info, EngineType.PREFILL
             )
 
             for mapping in candidate_mappings:
@@ -209,7 +244,7 @@ async def run_profile(args):
                 prefill_config = apply_parallel_mapping_to_config(
                     base_prefill_config,
                     mapping,
-                    "prefill",
+                    EngineType.PREFILL,
                     config_modifier,
                     args.num_gpus_per_node,
                 )
@@ -282,11 +317,13 @@ async def run_profile(args):
                     logger.info("Deployment deleted")
 
                 if ttft is not None:
-                    prefill_data.num_gpus.append(num_gpus)
-                    prefill_data.ttft.append(ttft)
-                    prefill_data.thpt_per_gpu.append(args.isl / ttft / num_gpus * 1000)
-                    prefill_data.parallel_mapping_labels.append(mapping.label())
-                    prefill_data.parallel_mappings.append(mapping)
+                    prefill_data.add_data(
+                        num_gpus=num_gpus,
+                        ttft=ttft,
+                        thpt_per_gpu=args.isl / ttft / num_gpus * 1000,
+                        parallel_mapping_label=mapping.label(),
+                        parallel_mapping=mapping,
+                    )
 
         # Plot the results as a 2D scatter plot
         if prefill_data.num_gpus and prefill_data.ttft and prefill_data.thpt_per_gpu:
@@ -296,12 +333,12 @@ async def run_profile(args):
         decode_data = DecodeProfileData()
         logger.info("Profiling decode...")
         base_decode_config = config_modifier.convert_config(
-            config, "decode", is_moe_model=args.model_info.is_moe
+            config, EngineType.DECODE, is_moe_model=args.model_info.is_moe
         )
         for num_gpus in profile_num_gpus:
             logger.info(f"Profiling decode with {num_gpus} GPUs...")
             candidate_mappings = get_candidate_parallel_mappings(
-                num_gpus, args.model_info, "decode"
+                num_gpus, args.model_info, EngineType.DECODE
             )
 
             for mapping in candidate_mappings:
@@ -309,7 +346,7 @@ async def run_profile(args):
                 decode_config = apply_parallel_mapping_to_config(
                     base_decode_config,
                     mapping,
-                    "decode",
+                    EngineType.DECODE,
                     config_modifier,
                     args.num_gpus_per_node,
                 )
@@ -391,7 +428,7 @@ async def run_profile(args):
                                 args.isl,
                                 args.osl,
                                 num_request,
-                                mode="decode",
+                                mode=EngineType.DECODE,
                                 tp_size=(mapping.tp or num_gpus),
                             )
 
@@ -421,13 +458,15 @@ async def run_profile(args):
                                 )
 
                         if itl is not None and thpt_per_gpu is not None:
-                            decode_data.num_gpus.append(num_gpus)
-                            decode_data.itl.append(itl)
-                            decode_data.thpt_per_gpu.append(thpt_per_gpu)
-                            decode_data.concurrency.append(num_request)
-                            decode_data.kv_cache_size.append(max_kv_tokens)
-                            decode_data.parallel_mapping_labels.append(mapping.label())
-                            decode_data.parallel_mappings.append(mapping)
+                            decode_data.add_data(
+                                num_gpus=num_gpus,
+                                itl=itl,
+                                thpt_per_gpu=thpt_per_gpu,
+                                concurrency=num_request,
+                                kv_cache_size=max_kv_tokens,
+                                parallel_mapping_label=mapping.label(),
+                                parallel_mapping=mapping,
+                            )
 
                 if not args.dry_run and not args.use_ai_configurator:
                     logger.info("Cleaning up deployment...")
@@ -511,12 +550,12 @@ async def run_profile(args):
             f"Profiling prefill under best {best_prefill_gpus} GPU(s) with parallel mapping [{best_prefill_mapping.label()}] with different ISL..."
         )
         prefill_config = config_modifier.convert_config(
-            config, "prefill", is_moe_model=args.model_info.is_moe
+            config, EngineType.PREFILL, is_moe_model=args.model_info.is_moe
         )
         prefill_config = apply_parallel_mapping_to_config(
             prefill_config,
             best_prefill_mapping,
-            "prefill",
+            EngineType.PREFILL,
             config_modifier,
             args.num_gpus_per_node,
         )
@@ -594,12 +633,12 @@ async def run_profile(args):
             f"Profiling decode with {best_decode_gpus} GPUs with parallel mapping [{best_decode_mapping.label()}]..."
         )
         decode_config = config_modifier.convert_config(
-            config, "decode", is_moe_model=args.model_info.is_moe
+            config, EngineType.DECODE, is_moe_model=args.model_info.is_moe
         )
         decode_config = apply_parallel_mapping_to_config(
             decode_config,
             best_decode_mapping,
-            "decode",
+            EngineType.DECODE,
             config_modifier,
             args.num_gpus_per_node,
         )

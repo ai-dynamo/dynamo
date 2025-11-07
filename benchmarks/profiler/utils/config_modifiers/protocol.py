@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Literal, Protocol
+from typing import Protocol
 
+from benchmarks.profiler.utils.defaults import EngineType
 from dynamo.planner.defaults import SubComponentType
 
 
@@ -23,7 +24,7 @@ class ConfigModifierProtocol(Protocol):
     def convert_config(
         cls,
         config: dict,
-        target: Literal["prefill", "decode"],
+        target: EngineType,
         is_moe_model: bool = False,
     ) -> dict:
         ...

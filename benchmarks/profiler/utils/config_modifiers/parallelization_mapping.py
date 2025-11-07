@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
+from benchmarks.profiler.utils.defaults import EngineType
 from benchmarks.profiler.utils.model_info import ModelInfo
 
 logger = logging.getLogger(__name__)
@@ -167,9 +168,9 @@ def get_candidate_parallel_mappings(
 
     candidates: list[ParallelizationMapping] = []
     if is_moe:
-        if phase == "prefill":
+        if phase == EngineType.PREFILL:
             candidates = [ParallelizationMapping(tep=num_gpus)]
-        elif phase == "decode":
+        elif phase == EngineType.DECODE:
             candidates = [
                 ParallelizationMapping(dep=num_gpus),
                 ParallelizationMapping(tep=num_gpus),
@@ -211,9 +212,9 @@ def apply_parallel_mapping_to_config(
     cfg = copy.deepcopy(base_config)
     if mapping.tp is not None:
         cfg = config_modifier.set_config_tp_size(cfg, mapping.tp)
-    elif phase == "prefill" and mapping.tep is not None:
+    elif phase == EngineType.PREFILL and mapping.tep is not None:
         cfg = config_modifier.set_config_tep_size(cfg, mapping.tep, num_gpus_per_node)
-    elif phase == "decode" and mapping.dep is not None:
+    elif phase == EngineType.DECODE and mapping.dep is not None:
         cfg = config_modifier.set_config_dep_size(cfg, mapping.dep, num_gpus_per_node)
     else:
         pass
