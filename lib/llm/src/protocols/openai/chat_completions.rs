@@ -349,42 +349,24 @@ mod tests {
     }
 
     #[test]
-    fn test_skip_special_tokens_true_propagates() {
-        let json_str = json!({
-            "model": "test-model",
-            "messages": [
-                {"role": "user", "content": "Hello"}
-            ],
-            "skip_special_tokens": true
-        });
+    fn test_skip_special_tokens_propagates() {
+        for skip_value in [true, false] {
+            let json_str = json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Hello"}
+                ],
+                "skip_special_tokens": skip_value
+            });
 
-        let request: NvCreateChatCompletionRequest =
-            serde_json::from_value(json_str).expect("Failed to deserialize request");
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(json_str).expect("Failed to deserialize request");
 
-        let output_options = request
-            .extract_output_options()
-            .expect("Failed to extract output options");
+            let output_options = request
+                .extract_output_options()
+                .expect("Failed to extract output options");
 
-        assert_eq!(output_options.skip_special_tokens, Some(true));
-    }
-
-    #[test]
-    fn test_skip_special_tokens_false_propagates() {
-        let json_str = json!({
-            "model": "test-model",
-            "messages": [
-                {"role": "user", "content": "Hello"}
-            ],
-            "skip_special_tokens": false
-        });
-
-        let request: NvCreateChatCompletionRequest =
-            serde_json::from_value(json_str).expect("Failed to deserialize request");
-
-        let output_options = request
-            .extract_output_options()
-            .expect("Failed to extract output options");
-
-        assert_eq!(output_options.skip_special_tokens, Some(false));
+            assert_eq!(output_options.skip_special_tokens, Some(skip_value));
+        }
     }
 }
