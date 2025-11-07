@@ -53,8 +53,8 @@ impl DistributedRuntime {
 
         let runtime_clone = runtime.clone();
 
-        let (etcd_client, store) = match selected_kv_store {
-            KeyValueStoreSelect::Etcd(etcd_config) => {
+        let (etcd_client, store) = match (is_static, selected_kv_store) {
+            (false, KeyValueStoreSelect::Etcd(etcd_config)) => {
                 let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
                     // The returned error doesn't show because of a dropped runtime error, so
                     // log it first.
@@ -62,8 +62,10 @@ impl DistributedRuntime {
                 let store = KeyValueStoreManager::etcd(etcd_client.clone());
                 (Some(etcd_client), store)
             }
-            KeyValueStoreSelect::File(root) => (None, KeyValueStoreManager::file(root)),
-            KeyValueStoreSelect::Memory => (None, KeyValueStoreManager::memory()),
+            (false, KeyValueStoreSelect::File(root)) => (None, KeyValueStoreManager::file(root)),
+            (true, _) | (false, KeyValueStoreSelect::Memory) => {
+                (None, KeyValueStoreManager::memory())
+            }
         };
 
         let nats_client = Some(nats_config.clone().connect().await?);
