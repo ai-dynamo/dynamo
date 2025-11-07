@@ -370,11 +370,15 @@ jobs:
         BRANCH: ${{ github.ref_name }}
       run: |
         set -x
+        
+        # Redirect all output to a log file while still showing it
+        exec > >(tee -a deploy-operator.log) 2>&1
 
         # Set namespace using branch
         BRANCH_SANITIZED="${BRANCH/\//-}"
         NAMESPACE="gh-job-id-${{ github.run_id }}-${BRANCH_SANITIZED}-deploy-tests"
         echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+        echo "NAMESPACE=${NAMESPACE}" >> $GITHUB_ENV
 
         # Setup kubeconfig
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
@@ -409,19 +413,139 @@ jobs:
         kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
         # Create docker pull secret for operator image
         kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
+        
+        # Check if Helm is available
+        echo "Checking Helm availability..."
+        if ! command -v helm &> /dev/null; then
+          ERROR_MSG="Helm is not installed or not available in PATH. Helm installation may have failed during runner setup."
+          echo "$ERROR_MSG"
+          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
+          exit 1
+        fi
+        
+        echo "Helm version: $(helm version --short)"
+        
         # Install helm dependencies
-        helm repo add bitnami https://charts.bitnami.com/bitnami
+        echo "Installing Helm dependencies..."
+        if ! helm repo add bitnami https://charts.bitnami.com/bitnami 2>&1; then
+          ERROR_MSG="Failed to add Helm bitnami repository"
+          echo "$ERROR_MSG"
+          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
+          exit 1
+        fi
+        
         cd deploy/cloud/helm/platform/
-        helm dep build .
+        
+        if ! helm dep build . 2>&1; then
+          ERROR_MSG="Failed to build Helm dependencies"
+          echo "$ERROR_MSG"
+          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
+          exit 1
+        fi
+        
         # Install platform with namespace restriction for single profile testing
-        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+        echo "Installing dynamo-platform Helm chart..."
+        if ! helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
           --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
-          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret 2>&1; then
+          ERROR_MSG="Failed to install dynamo-platform Helm chart. This may be due to: pre-install hook timeout, image pull failures, or resource constraints."
+          echo "$ERROR_MSG"
+          
+          # Capture additional diagnostics
+          echo "=== Pod Status ==="
+          kubectl get pods -n ${NAMESPACE} -o wide || true
+          echo "=== Events ==="
+          kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' | tail -20 || true
+          echo "=== Helm Status ==="
+          helm status dynamo-platform -n ${NAMESPACE} || true
+          
+          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
+          exit 1
+        fi
+        
         # Wait for all deployments to be ready
-        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+        echo "Waiting for deployments to be ready..."
+        if ! timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch 2>&1; then
+          ERROR_MSG="Deployment rollout timed out after 300 seconds"
+          echo "$ERROR_MSG"
+          
+          # Capture diagnostics
+          echo "=== Pod Status ==="
+          kubectl get pods -n ${NAMESPACE} -o wide || true
+          echo "=== Deployment Status ==="
+          kubectl get deployments -n ${NAMESPACE} || true
+          
+          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
+          exit 1
+        fi
+      continue-on-error: true
+    
+    - name: Create GitHub Annotation on Failure
+      if: steps.deploy-operator-step.outcome == 'failure'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -x
+        
+        # Extract error message from environment
+        ERROR_MESSAGE="${ERROR_MESSAGE:-Unknown error occurred during operator deployment}"
+        
+        # Get additional context from Kubernetes if namespace is set
+        if [ -n "$NAMESPACE" ]; then
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          
+          # Get pod status
+          POD_STATUS=$(kubectl get pods -n $NAMESPACE -o json 2>/dev/null || echo "{}")
+          POD_ERRORS=$(echo "$POD_STATUS" | jq -r '.items[] | select(.status.phase != "Running") | "Pod: \(.metadata.name), Status: \(.status.phase), Reason: \(.status.containerStatuses[0].state.waiting.reason // .status.reason // "N/A"), Message: \(.status.containerStatuses[0].state.waiting.message // "N/A")"' 2>/dev/null | head -10 || echo "")
+          
+          if [ -n "$POD_ERRORS" ]; then
+            ERROR_MESSAGE="$ERROR_MESSAGE\n\nPod Status:\n$POD_ERRORS"
+          fi
+          
+          # Get recent events
+          EVENTS=$(kubectl get events -n $NAMESPACE --sort-by='.lastTimestamp' -o json 2>/dev/null || echo "{}")
+          ERROR_EVENTS=$(echo "$EVENTS" | jq -r '.items[] | select(.type == "Warning" or .type == "Error") | "\(.lastTimestamp) - \(.reason): \(.message)"' 2>/dev/null | tail -5 || echo "")
+          
+          if [ -n "$ERROR_EVENTS" ]; then
+            ERROR_MESSAGE="$ERROR_MESSAGE\n\nRecent Events:\n$ERROR_EVENTS"
+          fi
+        fi
+        
+        # Create a check run with the annotation
+        CHECK_RUN_ID=$(curl -s -X POST \
+          -H "Authorization: token $GITHUB_TOKEN" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${{ github.repository }}/check-runs" \
+          -d '{
+            "name": "Deploy Operator",
+            "head_sha": "${{ github.sha }}",
+            "status": "completed",
+            "conclusion": "failure",
+            "output": {
+              "title": "Operator Deployment Failed",
+              "summary": "Failed to deploy dynamo-platform operator to namespace '"${NAMESPACE}"'",
+              "text": "**Job**: deploy-operator\n**Namespace**: '"${NAMESPACE}"'\n\n**Error Details**:\n```\n'"${ERROR_MESSAGE}"'\n```\n\n[View Job Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+              "annotations": [{
+                "path": ".github/workflows/container-validation-backends.yml",
+                "start_line": 357,
+                "end_line": 425,
+                "annotation_level": "failure",
+                "message": "'"${ERROR_MESSAGE}"'",
+                "title": "Operator deployment failed"
+              }]
+            }
+          }' | jq -r '.id')
+        
+        echo "Created check run with ID: $CHECK_RUN_ID"
+        
+        # Also use the workflow command to create an error annotation
+        echo "::error file=.github/workflows/container-validation-backends.yml,line=367,title=Deploy Operator Failed::${ERROR_MESSAGE}"
+        
+        # Fail the step
+        exit 1
 
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
@@ -458,12 +582,16 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
         kubectl config get-contexts
     - name: Run Tests
+      id: run-tests
       env:
         NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       run: |
         set -x
         export KUBECONFIG=$(pwd)/.kubeconfig
         kubectl config set-context --current --namespace=$NAMESPACE
+
+        # Redirect all output to a log file while still showing it
+        exec > >(tee -a test-output.log) 2>&1
 
         cd examples/backends/$FRAMEWORK
         export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
@@ -516,8 +644,9 @@ jobs:
           ATTEMPT=$((ATTEMPT + 1))
         done
         if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-          echo "Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts"
-          echo "Last response: $MODELS_RESPONSE"
+          ERROR_MSG="Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts. Last response: $MODELS_RESPONSE"
+          echo "$ERROR_MSG"
+          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
           exit 1
         fi
         RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused -X POST "${LLM_URL}/v1/chat/completions" \
@@ -537,26 +666,102 @@ jobs:
           }' 2>&1)
         echo "Response: $RESPONSE"
         TEST_RESULT=0
+        ERROR_MSG=""
         if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
-          echo "Test failed: Response is not valid JSON"
-          echo "Got: $RESPONSE"
+          ERROR_MSG="Test failed: Response is not valid JSON. Got: $RESPONSE"
+          echo "$ERROR_MSG"
           TEST_RESULT=1
         elif ! echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
-          echo "Test failed: Message role is not 'assistant'"
-          echo "Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
+          ERROR_MSG="Test failed: Message role is not 'assistant'. Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
+          echo "$ERROR_MSG"
           TEST_RESULT=1
         elif ! echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
-          echo "Test failed: Model name is incorrect"
-          echo "Got: $(echo "$RESPONSE" | jq '.model')"
+          ERROR_MSG="Test failed: Model name is incorrect. Expected: ${MODEL_NAME}, Got: $(echo "$RESPONSE" | jq '.model')"
+          echo "$ERROR_MSG"
           TEST_RESULT=1
         elif ! echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 100' >/dev/null 2>&1; then
-          echo "Test failed: Response content length is not greater than 100 characters"
-          echo "Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
+          ERROR_MSG="Test failed: Response content length is not greater than 100 characters. Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
+          echo "$ERROR_MSG"
           TEST_RESULT=1
         else
           echo "Test passed: Response matches expected format and content"
         fi
+        
+        if [ $TEST_RESULT -ne 0 ]; then
+          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
+        fi
         exit $TEST_RESULT
+      continue-on-error: true
+    
+    - name: Create GitHub Annotation on Failure
+      if: steps.run-tests.outcome == 'failure'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -x
+        
+        # Extract error message from environment or test output log
+        ERROR_MESSAGE="${ERROR_MESSAGE:-Unknown error occurred during deployment test}"
+        
+        # Get additional context from pod logs if available
+        if [ -n "$GRAPH_NAME" ] && [ -n "$NAMESPACE" ]; then
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          POD_STATUS=$(kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $NAMESPACE -o json 2>/dev/null || echo "{}")
+          
+          # Extract pod error information if any pods are not ready
+          POD_ERRORS=$(echo "$POD_STATUS" | jq -r '.items[] | select(.status.phase != "Running") | "Pod: \(.metadata.name), Status: \(.status.phase), Reason: \(.status.reason // "N/A")"' 2>/dev/null || echo "")
+          
+          if [ -n "$POD_ERRORS" ]; then
+            ERROR_MESSAGE="$ERROR_MESSAGE\n\nPod Status:\n$POD_ERRORS"
+          fi
+        fi
+        
+        # Create annotation using GitHub API
+        # Note: We use the workflow file path as the annotation target
+        cat > annotation.json <<EOF
+        {
+          "title": "Deployment Test Failed: ${{ env.FRAMEWORK }} (${{ matrix.profile }})",
+          "summary": "Deployment test failed for ${{ env.FRAMEWORK }} with profile ${{ matrix.profile }}",
+          "text": "**Job**: ${{ github.job }}\n**Framework**: ${{ env.FRAMEWORK }}\n**Profile**: ${{ matrix.profile }}\n**Namespace**: ${{ needs.deploy-operator.outputs.NAMESPACE }}\n\n**Error Details**:\n\`\`\`\n${ERROR_MESSAGE}\n\`\`\`\n\n[View Job Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+          "annotation_level": "failure",
+          "file": ".github/workflows/container-validation-backends.yml",
+          "start_line": 426,
+          "end_line": 618
+        }
+        EOF
+        
+        # Create a check run with the annotation
+        CHECK_RUN_ID=$(curl -s -X POST \
+          -H "Authorization: token $GITHUB_TOKEN" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${{ github.repository }}/check-runs" \
+          -d '{
+            "name": "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }})",
+            "head_sha": "${{ github.sha }}",
+            "status": "completed",
+            "conclusion": "failure",
+            "output": {
+              "title": "Deployment Test Failed: ${{ env.FRAMEWORK }} (${{ matrix.profile }})",
+              "summary": "Deployment test failed for ${{ env.FRAMEWORK }} with profile ${{ matrix.profile }}",
+              "text": "**Job**: ${{ github.job }}\n**Framework**: ${{ env.FRAMEWORK }}\n**Profile**: ${{ matrix.profile }}\n**Namespace**: ${{ needs.deploy-operator.outputs.NAMESPACE }}\n\n**Error Details**:\n```\n'"${ERROR_MESSAGE}"'\n```\n\n[View Job Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+              "annotations": [{
+                "path": ".github/workflows/container-validation-backends.yml",
+                "start_line": 426,
+                "end_line": 618,
+                "annotation_level": "failure",
+                "message": "'"${ERROR_MESSAGE}"'",
+                "title": "Deploy test failed for ${{ env.FRAMEWORK }} (${{ matrix.profile }})"
+              }]
+            }
+          }' | jq -r '.id')
+        
+        echo "Created check run with ID: $CHECK_RUN_ID"
+        
+        # Also use the workflow command to create an error annotation
+        echo "::error file=.github/workflows/container-validation-backends.yml,line=460,title=Deploy Test Failed: ${{ env.FRAMEWORK }} (${{ matrix.profile }})::${ERROR_MESSAGE}"
+        
+        # Fail the step
+        exit 1
     - name: Cleanup
       if: always()
       timeout-minutes: 5
