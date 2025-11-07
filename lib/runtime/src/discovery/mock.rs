@@ -48,10 +48,9 @@ fn matches_key(instance: &DiscoveryInstance, key: &DiscoveryKey) -> bool {
     match (instance, key) {
         // Endpoint matching
         (DiscoveryInstance::Endpoint(_), DiscoveryKey::AllEndpoints) => true,
-        (
-            DiscoveryInstance::Endpoint(inst),
-            DiscoveryKey::NamespacedEndpoints { namespace },
-        ) => &inst.namespace == namespace,
+        (DiscoveryInstance::Endpoint(inst), DiscoveryKey::NamespacedEndpoints { namespace }) => {
+            &inst.namespace == namespace
+        }
         (
             DiscoveryInstance::Endpoint(inst),
             DiscoveryKey::ComponentEndpoints {
@@ -66,26 +65,60 @@ fn matches_key(instance: &DiscoveryInstance, key: &DiscoveryKey) -> bool {
                 component,
                 endpoint,
             },
-        ) => &inst.namespace == namespace && &inst.component == component && &inst.endpoint == endpoint,
-        
+        ) => {
+            &inst.namespace == namespace
+                && &inst.component == component
+                && &inst.endpoint == endpoint
+        }
+
         // ModelCard matching
         (DiscoveryInstance::ModelCard { .. }, DiscoveryKey::AllModelCards) => true,
         (
-            DiscoveryInstance::ModelCard { namespace: inst_ns, .. },
+            DiscoveryInstance::ModelCard {
+                namespace: inst_ns, ..
+            },
             DiscoveryKey::NamespacedModelCards { namespace },
         ) => inst_ns == namespace,
         (
-            DiscoveryInstance::ModelCard { namespace: inst_ns, component: inst_comp, .. },
-            DiscoveryKey::ComponentModelCards { namespace, component },
+            DiscoveryInstance::ModelCard {
+                namespace: inst_ns,
+                component: inst_comp,
+                ..
+            },
+            DiscoveryKey::ComponentModelCards {
+                namespace,
+                component,
+            },
         ) => inst_ns == namespace && inst_comp == component,
         (
-            DiscoveryInstance::ModelCard { namespace: inst_ns, component: inst_comp, endpoint: inst_ep, .. },
-            DiscoveryKey::EndpointModelCards { namespace, component, endpoint },
+            DiscoveryInstance::ModelCard {
+                namespace: inst_ns,
+                component: inst_comp,
+                endpoint: inst_ep,
+                ..
+            },
+            DiscoveryKey::EndpointModelCards {
+                namespace,
+                component,
+                endpoint,
+            },
         ) => inst_ns == namespace && inst_comp == component && inst_ep == endpoint,
-        
+
         // Cross-type matches return false
-        (DiscoveryInstance::Endpoint(_), DiscoveryKey::AllModelCards | DiscoveryKey::NamespacedModelCards { .. } | DiscoveryKey::ComponentModelCards { .. } | DiscoveryKey::EndpointModelCards { .. }) => false,
-        (DiscoveryInstance::ModelCard { .. }, DiscoveryKey::AllEndpoints | DiscoveryKey::NamespacedEndpoints { .. } | DiscoveryKey::ComponentEndpoints { .. } | DiscoveryKey::Endpoint { .. }) => false,
+        (
+            DiscoveryInstance::Endpoint(_),
+            DiscoveryKey::AllModelCards
+            | DiscoveryKey::NamespacedModelCards { .. }
+            | DiscoveryKey::ComponentModelCards { .. }
+            | DiscoveryKey::EndpointModelCards { .. },
+        ) => false,
+        (
+            DiscoveryInstance::ModelCard { .. },
+            DiscoveryKey::AllEndpoints
+            | DiscoveryKey::NamespacedEndpoints { .. }
+            | DiscoveryKey::ComponentEndpoints { .. }
+            | DiscoveryKey::Endpoint { .. },
+        ) => false,
     }
 }
 
