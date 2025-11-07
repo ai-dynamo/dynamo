@@ -61,12 +61,17 @@ impl NixlAgent {
                 params.add(&param_key, &env_value)?;
 
                 // Redact sensitive-looking parameters
-                let display_value = if param_key.contains("secret") || param_key.contains("key") && param_key != "access_key" {
+                let display_value = if param_key.contains("secret")
+                    || param_key.contains("key") && param_key != "access_key"
+                {
                     "<REDACTED>".to_string()
                 } else {
                     env_value.clone()
                 };
-                param_sources.push(format!("{}={} (from {})", param_key, display_value, env_key));
+                param_sources.push(format!(
+                    "{}={} (from {})",
+                    param_key, display_value, env_key
+                ));
                 found_any = true;
             }
         }
@@ -74,7 +79,10 @@ impl NixlAgent {
             return Ok(None);
         }
 
-        tracing::debug!("{} backend parameters configured from environment:", backend_name);
+        tracing::debug!(
+            "{} backend parameters configured from environment:",
+            backend_name
+        );
         for source in &param_sources {
             tracing::debug!("   {}", source);
         }
@@ -126,7 +134,8 @@ impl NixlAgent {
                 Err(e) => {
                     tracing::error!(
                         "Failed to create {} backend with provided params: {}. Operations requiring this backend will fail.",
-                        backend_upper, e
+                        backend_upper,
+                        e
                     );
                 }
             }
@@ -134,7 +143,10 @@ impl NixlAgent {
 
         if available_backends.is_empty() {
             let backend_names: Vec<_> = backends.iter().map(|(name, _)| *name).collect();
-            anyhow::bail!("Failed to initialize any NIXL backends from {:?}", backend_names);
+            anyhow::bail!(
+                "Failed to initialize any NIXL backends from {:?}",
+                backend_names
+            );
         }
 
         Ok(Self {
@@ -178,12 +190,17 @@ impl NixlAgent {
                     match agent.create_backend(&backend_upper, &custom_params) {
                         Ok(_) => {
                             available_backends.insert(backend_upper.clone());
-                            tracing::debug!("{} backend created with custom configuration from environment", backend_upper);
+                            tracing::debug!(
+                                "{} backend created with custom configuration from environment",
+                                backend_upper
+                            );
                         }
                         Err(e) => {
                             tracing::error!(
                                 "Failed to create {} backend with custom params: {}. Check your DYN_KVBM_NIXL_BACKEND_{}_* environment variables.",
-                                backend_upper, e, backend_upper
+                                backend_upper,
+                                e,
+                                backend_upper
                             );
                         }
                     }
@@ -198,7 +215,8 @@ impl NixlAgent {
                             Err(e) => {
                                 tracing::error!(
                                     "Failed to create {} backend: {}. Operations requiring this backend will fail.",
-                                    backend_upper, e
+                                    backend_upper,
+                                    e
                                 );
                             }
                         },
@@ -271,9 +289,15 @@ impl NixlAgent {
                     tracing::debug!("{} backend created with provided parameters", backend_upper);
                 }
                 Err(e) => {
-                    tracing::error!("Failed to create {} backend with provided params: {}", backend_upper, e);
-                    failed_backends
-                        .push((backend_upper.clone(), format!("create with provided params failed: {}", e)));
+                    tracing::error!(
+                        "Failed to create {} backend with provided params: {}",
+                        backend_upper,
+                        e
+                    );
+                    failed_backends.push((
+                        backend_upper.clone(),
+                        format!("create with provided params failed: {}", e),
+                    ));
                 }
             }
         }
@@ -337,12 +361,21 @@ impl NixlAgent {
                     match agent.create_backend(&backend_upper, &custom_params) {
                         Ok(_) => {
                             available_backends.insert(backend_upper.clone());
-                            tracing::debug!("{} backend created with custom configuration from environment", backend_upper);
+                            tracing::debug!(
+                                "{} backend created with custom configuration from environment",
+                                backend_upper
+                            );
                         }
                         Err(e) => {
-                            tracing::error!("✗ Failed to create {} backend with custom params: {}", backend_upper, e);
-                            failed_backends
-                                .push((backend_upper.clone(), format!("create with custom params failed: {}", e)));
+                            tracing::error!(
+                                "✗ Failed to create {} backend with custom params: {}",
+                                backend_upper,
+                                e
+                            );
+                            failed_backends.push((
+                                backend_upper.clone(),
+                                format!("create with custom params failed: {}", e),
+                            ));
                         }
                     }
                 }
@@ -354,7 +387,11 @@ impl NixlAgent {
                                 available_backends.insert(backend_upper);
                             }
                             Err(e) => {
-                                tracing::error!("✗ Failed to create {} backend: {}", backend_upper, e);
+                                tracing::error!(
+                                    "✗ Failed to create {} backend: {}",
+                                    backend_upper,
+                                    e
+                                );
                                 failed_backends
                                     .push((backend_upper.clone(), format!("create failed: {}", e)));
                             }
@@ -367,9 +404,15 @@ impl NixlAgent {
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Failed to parse {} backend parameters from environment: {}", backend_upper, e);
-                    failed_backends
-                        .push((backend_upper.clone(), format!("params parsing failed: {}", e)));
+                    tracing::error!(
+                        "Failed to parse {} backend parameters from environment: {}",
+                        backend_upper,
+                        e
+                    );
+                    failed_backends.push((
+                        backend_upper.clone(),
+                        format!("params parsing failed: {}", e),
+                    ));
                 }
             }
         }
