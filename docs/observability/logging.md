@@ -32,7 +32,7 @@ distributed tracing.
 | `DYN_LOG` | Log levels per target `<default_level>,<module_path>=<level>,<module_path>=<level>` | `info` | `DYN_LOG=info,dynamo_runtime::system_status_server:trace` |
 | `DYN_LOG_USE_LOCAL_TZ` | Use local timezone for timestamps (default is UTC) | `false` | `true` |
 | `DYN_LOGGING_CONFIG_PATH` | Path to custom TOML logging configuration | none | `/path/to/config.toml` |
-| `OTEL_SERVICE_NAME` | Service name for OpenTelemetry traces | `dynamo` | `dynamo-frontend` |
+| `OTEL_SERVICE_NAME` | Service name for trace and span information | `dynamo` | `dynamo-frontend` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP trace exporting | `false` | `true` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP exporter endpoint | `http://localhost:4317` | `http://tempo:4317` |
 
@@ -107,7 +107,7 @@ Resulting Log format:
 
 ## Logging of Trace and Span IDs
 
-When `DYN_LOGGING_JSONL` is enabled, all logs include OpenTelemetry compatible `trace_id` and `span_id` fields, and spans are automatically created for requests. This is useful for short debugging sessions where you want to examine trace context in logs without setting up a full tracing backend and for correlating log messages with traces.
+When `DYN_LOGGING_JSONL` is enabled, all logs include `trace_id` and `span_id` fields that are compatible with OpenTelemetry, and spans are automatically created for requests. This is useful for short debugging sessions where you want to examine trace context in logs without setting up a full tracing backend and for correlating log messages with traces.
 
 **Note:** This section has overlap with [Distributed Tracing with Tempo](tracing.md). For trace visualization in Grafana Tempo and persistent trace analysis, see [Distributed Tracing with Tempo](tracing.md).
 
@@ -220,7 +220,7 @@ When viewing the corresponding trace in Grafana, you should be able to see somet
 The following shows the JSONL logs from the frontend service for the same request. Note the `trace_id` field (`b672ccf48683b392891c5cb4163d4b51`) that correlates all logs for this request, and the `span_id` field that identifies individual operations:
 
 ```
-{"time":"2025-10-31T20:52:07.707164Z","level":"INFO","file":"/opt/dynamo/lib/runtime/src/logging.rs","line":806,"target":"dynamo_runtime::logging","message":"OpenTelemetry OTLP export enabled","endpoint":"http://tempo.tm.svc.cluster.local:4317","service":"frontend"}
+{"time":"2025-10-31T20:52:07.707164Z","level":"INFO","file":"/opt/dynamo/lib/runtime/src/logging.rs","line":806,"target":"dynamo_runtime::logging","message":"OTLP export enabled","endpoint":"http://tempo.tm.svc.cluster.local:4317","service":"frontend"}
 ...
 {"time":"2025-10-31T20:52:10.707164Z","level":"DEBUG","file":"/opt/dynamo/lib/runtime/src/pipeline/network/tcp/server.rs","line":230,"target":"dynamo_runtime::pipeline::network::tcp::server","message":"Registering new TcpStream on 10.0.4.65:41959","method":"POST","span_id":"5c20cc08e6afb2b7","span_name":"http-request","trace_id":"b672ccf48683b392891c5cb4163d4b51","uri":"/v1/chat/completions","version":"HTTP/1.1"}
 {"time":"2025-10-31T20:52:10.745264Z","level":"DEBUG","file":"/opt/dynamo/lib/llm/src/kv_router/prefill_router.rs","line":232,"target":"dynamo_llm::kv_router::prefill_router","message":"Prefill succeeded, using disaggregated params for decode","method":"POST","span_id":"5c20cc08e6afb2b7","span_name":"http-request","trace_id":"b672ccf48683b392891c5cb4163d4b51","uri":"/v1/chat/completions","version":"HTTP/1.1"}
