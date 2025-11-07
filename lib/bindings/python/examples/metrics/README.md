@@ -7,7 +7,7 @@ Example scripts demonstrating how to create and use Prometheus metrics in Python
 
 ## Documentation
 
-See the **[Metrics Developer Guide - Python Section](../../../../docs/observability/metrics-developer-guide.md#metrics-api-in-python)** for complete documentation.
+See the **[Metrics Developer Guide - Python Section](../../../../../docs/observability/metrics-developer-guide.md#metrics-api-in-python)** for complete documentation.
 
 ## Running Examples
 
