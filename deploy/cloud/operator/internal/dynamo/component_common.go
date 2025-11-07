@@ -96,6 +96,14 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 				},
 			},
 		},
+		{
+			Name: "POD_NAMESPACE",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.namespace",
+				},
+			},
+		},
 	}
 
 	if context.DiscoverBackend != "" {
