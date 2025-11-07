@@ -16,8 +16,8 @@ use crate::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::{DistributedRuntime};
-use dynamo_runtime::{pipeline::RouterMode};
+use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::pipeline::RouterMode;
 
 /// Build and run an HTTP service
 pub async fn run(
