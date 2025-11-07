@@ -25,7 +25,7 @@ from dynamo.llm import (
     fetch_llm,
     register_llm,
 )
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_handlers import (
     EncodeWorkerHandler,
@@ -70,16 +70,16 @@ async def graceful_shutdown(runtime):
     logging.info("DistributedRuntime shutdown complete")
 
 
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
+async def worker():
     config = parse_args()
+
+    loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, config.store_kv, False)
 
     await configure_ports(config)
     overwrite_args(config)
 
     # Set up signal handler for graceful shutdown
-    loop = asyncio.get_running_loop()
-
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
 

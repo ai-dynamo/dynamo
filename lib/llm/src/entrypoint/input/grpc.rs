@@ -16,18 +16,20 @@ use crate::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::{DistributedRuntime, Runtime, storage::key_value_store::KeyValueStoreManager};
-use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
+use dynamo_runtime::pipeline::RouterMode;
+use dynamo_runtime::{DistributedRuntime, storage::key_value_store::KeyValueStoreManager};
 
 /// Build and run an KServe gRPC service
-pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
+pub async fn run(
+    distributed_runtime: DistributedRuntime,
+    engine_config: EngineConfig,
+) -> anyhow::Result<()> {
     let grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .with_request_template(engine_config.local_model().request_template());
 
     let grpc_service = match engine_config {
         EngineConfig::Dynamic(_) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
             let store = Arc::new(distributed_runtime.store().clone());
             let grpc_service = grpc_service_builder.build()?;
             let router_config = engine_config.local_model().router_config();
@@ -39,7 +41,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(namespace.to_string())
             };
             run_watcher(
-                distributed_runtime,
+                distributed_runtime.clone(),
                 grpc_service.state().manager_clone(),
                 store,
                 router_config.router_mode,
@@ -55,8 +57,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let checksum = card.mdcsum();
             let router_mode = local_model.router_config().router_mode;
 
-            let dst_config = DistributedConfig::from_settings(true); // true means static
-            let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
             let grpc_service = grpc_service_builder.build()?;
             let manager = grpc_service.model_manager();
 
@@ -157,8 +157,10 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             grpc_service
         }
     };
-    grpc_service.run(runtime.primary_token()).await?;
-    runtime.shutdown(); // Cancel primary token
+    grpc_service
+        .run(distributed_runtime.primary_token())
+        .await?;
+    distributed_runtime.shutdown(); // Cancel primary token
     Ok(())
 }
 
