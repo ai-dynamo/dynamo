@@ -35,6 +35,8 @@ pub struct DeviceStorage {
     ptr: u64,
     device_id: u32,
     len: usize,
+    // TODO: This is a bit ugly. We need to translate our v1 device layout to v2.
+    device_storage_type: V1DeviceStorageType,
 }
 
 unsafe impl Send for DeviceStorage {}
@@ -62,6 +64,7 @@ impl DeviceStorage {
             ptr,
             device_id,
             len,
+            device_storage_type: V1DeviceStorageType::Owned,
         })
     }
 
@@ -99,20 +102,26 @@ impl DeviceStorage {
             ptr,
             device_id,
             len,
+            device_storage_type: v1_storage.device_storage_type().clone(),
         })
     }
 }
 
 impl Drop for DeviceStorage {
     fn drop(&mut self) {
-        if let Err(e) = self.ctx.bind_to_thread() {
-            tracing::debug!("failed to bind CUDA context for free: {e}");
-        }
-        unsafe {
-            if let Err(e) = cudarc::driver::result::free_sync(self.ptr) {
-                tracing::debug!("failed to free device memory: {e}");
+        match self.device_storage_type {
+            V1DeviceStorageType::Owned => {
+                if let Err(e) = self.ctx.bind_to_thread() {
+                    tracing::debug!("failed to bind CUDA context for free: {e}");
+                }
+                unsafe {
+                    if let Err(e) = cudarc::driver::result::free_sync(self.ptr) {
+                        tracing::debug!("failed to free device memory: {e}");
+                    }
+                }
             }
-        };
+            V1DeviceStorageType::Torch { .. } => {} // Do nothing.
+        }
     }
 }
 

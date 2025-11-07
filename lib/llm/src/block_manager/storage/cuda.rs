@@ -315,7 +315,7 @@ impl StorageAllocator<PinnedStorage> for PinnedAllocator {
 /// When building a [`DeviceStorage`] from a torch tensor, we need to ensure that
 /// the torch tensor is not GCed until the [`DeviceStorage`] is dropped.
 /// Because of this, we need to store a reference to the torch tensor in the [`DeviceStorage`]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum DeviceStorageType {
     Owned,                                   // Memory that we allocated ourselves.
     Torch { _tensor: Arc<dyn TorchTensor> }, // Memory that came from a torch tensor.
