@@ -14,6 +14,13 @@
 # limitations under the License.
 # Used to generate top-level secrets (overridden by custom-values.yaml)
 
+# Global configuration shared across all subcharts
+global:
+  # Kai Scheduler integration
+  kai-scheduler:
+    # -- Whether kai-scheduler is enabled. This value is shared across all charts and controls both the kai-scheduler deployment and the operator's queue RBAC permissions.
+    enabled: false
+
 # Subcharts configuration
 
 # Dynamo operator configuration
@@ -29,6 +36,7 @@ dynamo-operator:
 
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
   modelExpressURL: ""
+
   # -- Namespace access controls for the operator
   namespaceRestriction:
     # -- Whether to restrict operator to specific namespaces. By default, the operator will run with cluster-wide permissions. Only 1 instance of the operator should be deployed in the cluster. If you want to deploy multiple operator instances, you can set this to true and specify the target namespace (by default, the target namespace is the helm release namespace).
@@ -146,11 +154,6 @@ dynamo-operator:
 # Grove component - distributed inference orchestration
 grove:
   # -- Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide
-  enabled: false
-
-# Kai Scheduler component - advanced workload scheduling
-kai-scheduler:
-  # -- Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide
   enabled: false
 
 # etcd configuration - distributed key-value store for operator state
