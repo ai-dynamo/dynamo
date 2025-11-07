@@ -78,6 +78,39 @@ pub fn prompt_to_string(prompt: &dynamo_async_openai::types::Prompt) -> String {
     }
 }
 
+/// Get the batch size from a prompt (1 for single prompts, array length for batch prompts)
+pub fn get_prompt_batch_size(prompt: &dynamo_async_openai::types::Prompt) -> usize {
+    match prompt {
+        dynamo_async_openai::types::Prompt::String(_) => 1,
+        dynamo_async_openai::types::Prompt::IntegerArray(_) => 1,
+        dynamo_async_openai::types::Prompt::StringArray(arr) => arr.len(),
+        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => arr.len(),
+    }
+}
+
+/// Extract a single prompt from a batch at the given index.
+/// For single prompts, returns a clone regardless of index.
+/// For batch prompts, returns the prompt at the specified index.
+pub fn extract_single_prompt(
+    prompt: &dynamo_async_openai::types::Prompt,
+    index: usize,
+) -> dynamo_async_openai::types::Prompt {
+    match prompt {
+        dynamo_async_openai::types::Prompt::String(s) => {
+            dynamo_async_openai::types::Prompt::String(s.clone())
+        }
+        dynamo_async_openai::types::Prompt::IntegerArray(arr) => {
+            dynamo_async_openai::types::Prompt::IntegerArray(arr.clone())
+        }
+        dynamo_async_openai::types::Prompt::StringArray(arr) => {
+            dynamo_async_openai::types::Prompt::String(arr[index].clone())
+        }
+        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
+            dynamo_async_openai::types::Prompt::IntegerArray(arr[index].clone())
+        }
+    }
+}
+
 impl NvExtProvider for NvCreateCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
@@ -403,7 +436,11 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_top_k(self.get_top_k())?;
         // Cross-field validation
         validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
-
+        // total choices validation for completions batch requests
+        validate::validate_total_choices(
+            get_prompt_batch_size(&self.inner.prompt),
+            self.inner.n.unwrap_or(1),
+        )?;
         Ok(())
     }
 }

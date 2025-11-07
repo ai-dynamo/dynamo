@@ -17,12 +17,15 @@ use crate::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
+use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::storage::key_value_store::KeyValueStoreManager;
-use dynamo_runtime::{DistributedRuntime, Runtime};
-use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 
 /// Build and run an HTTP service
-pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
+pub async fn run(
+    distributed_runtime: DistributedRuntime,
+    engine_config: EngineConfig,
+) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
     let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
         (Some(tls_cert_path), Some(tls_key_path)) => {
@@ -63,7 +66,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 
     let http_service = match engine_config {
         EngineConfig::Dynamic(_) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
             // This allows the /health endpoint to query store for active instances
             http_service_builder = http_service_builder.store(distributed_runtime.store().clone());
             let http_service = http_service_builder.build()?;
@@ -80,7 +82,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(namespace.to_string())
             };
             run_watcher(
-                distributed_runtime,
+                distributed_runtime.clone(),
                 http_service.state().manager_clone(),
                 store,
                 router_config.router_mode,
@@ -96,11 +98,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         EngineConfig::StaticRemote(local_model) => {
             let card = local_model.card();
             let checksum = card.mdcsum();
-
             let router_mode = local_model.router_config().router_mode;
-
-            let dst_config = DistributedConfig::from_settings(true); // true means static
-            let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
             let http_service = http_service_builder.build()?;
             let manager = http_service.model_manager();
 
@@ -233,8 +231,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             http_service.custom_backend_metrics_polling_interval,
             http_service.custom_backend_registry.as_ref(),
         ) {
-            // Create DistributedRuntime for polling, matching the engine's mode
-            let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
             tracing::info!(
                 namespace_component_endpoint=%namespace_component_endpoint,
                 polling_interval_secs=polling_interval,
@@ -246,7 +242,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             // shutdown phase.
             Some(
                 crate::http::service::custom_backend_metrics::spawn_custom_backend_polling_task(
-                    drt,
+                    distributed_runtime.clone(),
                     namespace_component_endpoint.clone(),
                     polling_interval,
                     registry.clone(),
@@ -256,14 +252,16 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             None
         };
 
-    http_service.run(runtime.primary_token()).await?;
+    http_service
+        .run(distributed_runtime.primary_token())
+        .await?;
 
     // Abort the polling task if it was started
     if let Some(task) = polling_task {
         task.abort();
     }
 
-    runtime.shutdown(); // Cancel primary token
+    distributed_runtime.shutdown(); // Cancel primary token
     Ok(())
 }
 

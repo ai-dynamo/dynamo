@@ -38,6 +38,7 @@ class Config:
     migration_limit: int = 0
     kv_port: Optional[int] = None
     custom_jinja_template: Optional[str] = None
+    store_kv: str
 
     # mirror vLLM
     model: str
@@ -164,6 +165,12 @@ def parse_args() -> Config:
             "'USER: <image> please describe the image ASSISTANT:'."
         ),
     )
+    parser.add_argument(
+        "--store-kv",
+        type=str,
+        default=os.environ.get("DYN_STORE_KV", "etcd"),
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -233,6 +240,7 @@ def parse_args() -> Config:
     config.multimodal_worker = args.multimodal_worker
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.mm_prompt_template = args.mm_prompt_template
+    config.store_kv = args.store_kv
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
