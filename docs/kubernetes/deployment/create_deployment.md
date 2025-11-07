@@ -255,5 +255,5 @@ spec:
     uri: s3://my-bucket/loras/my-lora
 ```
 
-**For complete details on managing models and LoRA adapters, see:**  
+**For complete details on managing models and LoRA adapters, see:**
 📖 **[Managing Models with DynamoModel Guide](./dynamomodel-guide.md)**

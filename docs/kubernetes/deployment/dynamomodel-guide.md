@@ -119,7 +119,7 @@ spec:
     uri: s3://my-bucket/my-lora
 ```
 
-**For complete field specifications, validation rules, and all options, see:**  
+**For complete field specifications, validation rules, and all options, see:**
 📖 [DynamoModel API Reference](../api_reference.md#dynamomodel)
 
 ### Status Summary
