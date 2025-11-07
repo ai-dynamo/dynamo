@@ -688,8 +688,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							},
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponent:  "test-lws-component",
-							DynamoTag:        "test-tag",
 							BackendFramework: string(dynamo.BackendFrameworkVLLM),
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								Envs: []corev1.EnvVar{
@@ -736,11 +734,15 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									MainContainer: &corev1.Container{
 										Image: "test-image:latest",
 										Command: []string{
-											"sh",
-											"-c",
+											"some",
+											"dynamo",
+											"command",
 										},
 										Args: []string{
-											"some dynamo command",
+											"--tensor-parallel-size",
+											"4",
+											"--pipeline-parallel-size",
+											"1",
 										},
 										Env: []corev1.EnvVar{
 											{
@@ -819,8 +821,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									{
 										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
-										Command: []string{"sh", "-c"},
-										Args:    []string{"ray start --head --port=6379 && some dynamo command"},
+										Command: []string{"/bin/sh", "-c"},
+										Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1"},
 										Env: []corev1.EnvVar{
 											{Name: "DYN_NAMESPACE", Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
@@ -860,7 +862,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 													Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 												},
 											},
-											TimeoutSeconds:   30,
+											TimeoutSeconds:   4,
 											PeriodSeconds:    5,
 											SuccessThreshold: 0,
 											FailureThreshold: 1,
@@ -872,10 +874,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 													Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 												},
 											},
-											TimeoutSeconds:   30,
+											TimeoutSeconds:   4,
 											PeriodSeconds:    10,
 											SuccessThreshold: 0,
-											FailureThreshold: 60,
+											FailureThreshold: 3,
 										},
 										StartupProbe: &corev1.Probe{
 											ProbeHandler: corev1.ProbeHandler{
@@ -887,7 +889,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											TimeoutSeconds:   5,
 											PeriodSeconds:    10,
 											SuccessThreshold: 0,
-											FailureThreshold: 60,
+											FailureThreshold: 720,
 										},
 									},
 								},
@@ -933,7 +935,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									{
 										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
-										Command: []string{"sh", "-c"},
+										Command: []string{"/bin/sh", "-c"},
 										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 										Env: []corev1.EnvVar{
 											{Name: "DYN_NAMESPACE", Value: "default"},
@@ -990,7 +992,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
 						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-nil-id", Namespace: "default"},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponent: "test-comp", DynamoTag: "test",
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
@@ -1034,7 +1035,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
 						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-leader-err", Namespace: "default"},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponent: "test-comp", DynamoTag: "test",
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,

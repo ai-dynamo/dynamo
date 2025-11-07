@@ -28,6 +28,9 @@ impl<R: LogicalResources> LogicalBlockFactories<R> {
 
         let device_factory = if let Some(config) = resources.config.device_layout.take() {
             next_block_set_idx += 1;
+
+            let offload_filter = config.offload_filter.clone();
+
             let mut builder = layout_builder.clone();
             let config = Arc::new(builder.num_blocks(config.num_blocks).build()?);
 
@@ -37,6 +40,7 @@ impl<R: LogicalResources> LogicalBlockFactories<R> {
                 resources.worker_id,
                 logical_resources.clone(),
                 StorageType::Device(0),
+                offload_filter,
             );
 
             Some(factory)
@@ -46,6 +50,9 @@ impl<R: LogicalResources> LogicalBlockFactories<R> {
 
         let host_factory = if let Some(config) = resources.config.host_layout.take() {
             next_block_set_idx += 1;
+
+            let offload_filter = config.offload_filter.clone();
+
             let mut builder = layout_builder.clone();
             let config = Arc::new(builder.num_blocks(config.num_blocks).build()?);
             let factory = LogicalBlockFactory::new(
@@ -54,6 +61,7 @@ impl<R: LogicalResources> LogicalBlockFactories<R> {
                 resources.worker_id,
                 logical_resources.clone(),
                 StorageType::Pinned,
+                offload_filter,
             );
 
             Some(factory)
@@ -63,6 +71,9 @@ impl<R: LogicalResources> LogicalBlockFactories<R> {
 
         let disk_factory = if let Some(config) = resources.config.disk_layout.take() {
             next_block_set_idx += 1;
+
+            let offload_filter = config.offload_filter.clone();
+
             let mut builder = layout_builder.clone();
             let config = Arc::new(builder.num_blocks(config.num_blocks).build()?);
             let factory = LogicalBlockFactory::new(
@@ -71,6 +82,7 @@ impl<R: LogicalResources> LogicalBlockFactories<R> {
                 resources.worker_id,
                 logical_resources.clone(),
                 StorageType::Disk(0),
+                offload_filter,
             );
 
             Some(factory)

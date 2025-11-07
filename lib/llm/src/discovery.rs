@@ -4,14 +4,11 @@
 mod model_manager;
 pub use model_manager::{ModelManager, ModelManagerError};
 
-mod model_entry;
-pub use model_entry::ModelEntry;
-
 mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};
 
-/// The root etcd path for ModelEntry
-pub const MODEL_ROOT_PATH: &str = "models";
+mod worker_monitor;
+pub use worker_monitor::{KvWorkerMonitor, WorkerLoadState};
 
 /// The root etcd path for KV Router registrations
-pub const KV_ROUTERS_ROOT_PATH: &str = "kv_routers";
+pub const KV_ROUTERS_ROOT_PATH: &str = "v1/kv_routers";

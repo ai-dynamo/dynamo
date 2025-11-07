@@ -67,12 +67,12 @@ where
 ///
 /// # Example
 /// ```ignore
-/// // Watch for ModelEntry objects and extract runtime_config field
+/// // Watch for ModelDeploymentCard objects and extract runtime_config field
 /// let watcher = watch_prefix_with_extraction(
 ///     etcd_client,
-///     "models/",
+///     "v1/mdc/",
 ///     |kv| Some(kv.lease()),  // Use lease_id as key
-///     |entry: ModelEntry| entry.runtime_config,  // Extract runtime_config field
+///     |card: ModelDeploymentCard| card.runtime_config,  // Extract runtime_config field
 ///     cancellation_token,
 /// ).await?;
 /// ```
@@ -92,7 +92,7 @@ where
     let prefix = prefix.into();
 
     let prefix_watcher = client.kv_get_and_watch_prefix(&prefix).await?;
-    let (prefix_str, _watcher, mut events_rx) = prefix_watcher.dissolve();
+    let (prefix_str, mut events_rx) = prefix_watcher.dissolve();
 
     tokio::spawn(async move {
         let mut state: HashMap<K, V> = HashMap::new();
@@ -208,8 +208,8 @@ pub mod key_extractors {
     use etcd_client::KeyValue;
 
     /// Extract the lease ID as the key
-    pub fn lease_id(kv: &KeyValue) -> Option<i64> {
-        Some(kv.lease())
+    pub fn lease_id(kv: &KeyValue) -> Option<u64> {
+        Some(kv.lease() as u64)
     }
 
     /// Extract the key as a string (without prefix)

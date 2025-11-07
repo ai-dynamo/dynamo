@@ -4,24 +4,60 @@
 import asyncio
 import logging
 import os
-import uuid
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from copy import deepcopy
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, Dict, Final
 
-import msgspec
 from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from dynamo.llm import ZmqKvEventPublisher
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
-from .protocol import MyRequestOutput
+from .multimodal_utils.image_loader import ImageLoader
+
+# Multimodal data dictionary keys
+IMAGE_URL_KEY: Final = "image_url"
+VIDEO_URL_KEY: Final = "video_url"
+URL_VARIANT_KEY: Final = "Url"
+DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+def build_sampling_params(
+    request: Dict[str, Any], default_sampling_params: Dict[str, Any]
+) -> SamplingParams:
+    """
+    Build SamplingParams from a PreprocessedRequest.
+
+    Args:
+        request: The PreprocessedRequest dict with 'sampling_options' and 'stop_conditions'
+        default_sampling_params: Default sampling parameters to initialize with
+
+    Returns:
+        SamplingParams configured from the request
+    """
+    sampling_params = SamplingParams(**default_sampling_params)
+    sampling_params.detokenize = False
+
+    # Apply sampling_options
+    for key, value in request["sampling_options"].items():
+        if value is not None and hasattr(sampling_params, key):
+            setattr(sampling_params, key, value)
+
+    # Apply stop_conditions
+    for key, value in request["stop_conditions"].items():
+        if value is not None and hasattr(sampling_params, key):
+            # Do not add stop key to sampling params - dynamo handles stop conditions directly
+            if key == "stop":
+                continue
+            setattr(sampling_params, key, value)
+
+    return sampling_params
 
 
 class BaseWorkerHandler(ABC):
@@ -34,8 +70,9 @@ class BaseWorkerHandler(ABC):
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
-        self.kv_publisher = None
+        self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
+        self.image_loader = ImageLoader()
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -82,9 +119,60 @@ class BaseWorkerHandler(ABC):
         """Override in subclasses if cleanup is needed."""
         pass
 
-    async def generate_tokens(self, prompt, sampling_params, request_id):
+    async def _extract_multimodal_data(
+        self, request: Dict[str, Any]
+    ) -> Dict[str, Any] | None:
+        """
+        Extract and decode multimodal data from PreprocessedRequest.
+        """
+        if "multi_modal_data" not in request or request["multi_modal_data"] is None:
+            return None
+
+        mm_map = request["multi_modal_data"]
+        vllm_mm_data = {}
+
+        # Process image_url entries
+        images = []
+        for item in mm_map.get(IMAGE_URL_KEY, []):
+            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                url = item[URL_VARIANT_KEY]
+                try:
+                    # ImageLoader supports both data: and http(s): URLs with caching
+                    image = await self.image_loader.load_image(url)
+                    images.append(image)
+                    logger.debug(f"Loaded image from URL: {url[:80]}...")
+                except Exception:
+                    logger.exception(f"Failed to load image from {url[:80]}...")
+                    raise
+            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
+                # Decoded support from PRs #3971/#3988 (frontend decoding + NIXL transfer)
+                # Will contain NIXL metadata for direct memory access
+                # TODO: Implement NIXL read when PRs merge
+                logger.warning(
+                    "Decoded multimodal data not yet supported in standard worker"
+                )
+
+        if images:
+            # vLLM expects single image or list
+            vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+            logger.debug(f"Extracted {len(images)} image(s) for multimodal processing")
+
+        # Handle video_url entries (future expansion)
+        if VIDEO_URL_KEY in mm_map:
+            logger.warning("Video multimodal data not yet supported in standard worker")
+
+        return vllm_mm_data if vllm_mm_data else None
+
+    async def generate_tokens(
+        self, prompt, sampling_params, request_id, data_parallel_rank=None
+    ):
         try:
-            gen = self.engine_client.generate(prompt, sampling_params, request_id)
+            gen = self.engine_client.generate(
+                prompt,
+                sampling_params,
+                request_id,
+                data_parallel_rank=data_parallel_rank,
+            )
 
             num_output_tokens_so_far = 0
             try:
@@ -124,144 +212,43 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         component,
         engine,
         default_sampling_params,
-        prefill_worker_client=None,
-        prefill_router_client=None,
-        prefill_router_free_client=None,
     ):
         super().__init__(runtime, component, engine, default_sampling_params)
-        self.prefill_worker_client = prefill_worker_client
-        self.prefill_router_client = prefill_router_client
-        self.prefill_router_free_client = prefill_router_free_client
-        self.can_prefill = 0
-        self._prefill_check_task = None
-
-        if self.prefill_worker_client is not None:
-            self._prefill_check_task = asyncio.create_task(self._prefill_check_loop())
-
-    async def _prefill_check_loop(self):
-        """Background task that checks prefill worker availability every 5 seconds."""
-        while True:
-            try:
-                if self.prefill_worker_client is not None:
-                    self.can_prefill = len(self.prefill_worker_client.instance_ids())
-                    logger.debug(f"Current Prefill Workers: {self.can_prefill}")
-                else:
-                    self.can_prefill = 0
-            except asyncio.CancelledError:
-                logger.warning("Prefill check loop cancelled.")
-                raise
-            except Exception as e:
-                logger.error(f"Error in prefill check loop: {e}")
-
-            await asyncio.sleep(5)
-
-    def cleanup(self):
-        """Cancel background tasks."""
-        if self._prefill_check_task is not None:
-            self._prefill_check_task.cancel()
-        super().cleanup()
 
     async def generate(self, request, context):
-        request_id = str(uuid.uuid4().hex)
-        logger.debug(f"New Request ID: {request_id}")
+        # Use context ID for request tracking and correlation
+        request_id = context.id()
+        logger.debug(f"Decode Request ID: {request_id}")
 
-        prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
+        # Extract and decode multimodal data if present
+        multi_modal_data = await self._extract_multimodal_data(request)
 
-        sampling_params = SamplingParams(**self.default_sampling_params)
+        prompt = TokensPrompt(
+            prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
+        )
 
-        sampling_params.detokenize = False
-        for key, value in request["sampling_options"].items():
-            if value is not None and hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
+        # Build sampling params from request
+        sampling_params = build_sampling_params(request, self.default_sampling_params)
 
-        for key, value in request["stop_conditions"].items():
-            if value is not None and hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
-
-        # TODO: Change to prefill queue
-        # TODO: (PeaBrane) eventually, do not use a router_client and a free_client directly.
-        # This is least intrusive for now, but quite error prone. Should consider (major) refactoring
-        # TODO: (PeaBrane) longer term, decode workers should not handle prefill routing at all.
-        # Prefill routing logic should be integrated directly into the frontend service potentially.
-        if self.can_prefill:
-            # Create a copy for prefill with specific modifications
-            prefill_sampling_params = deepcopy(sampling_params)
-
-            if prefill_sampling_params.extra_args is None:
-                prefill_sampling_params.extra_args = {}
-            prefill_sampling_params.extra_args["kv_transfer_params"] = {
-                "do_remote_decode": True,
-            }
-            prefill_sampling_params.max_tokens = 1
-            prefill_sampling_params.min_tokens = 1
-
-            prefill_request = {
-                "token_ids": request["token_ids"],
-                "sampling_params": msgspec.to_builtins(prefill_sampling_params),
-                "request_id": request_id,
-            }
-
-            used_prefill_router = False
-            try:
-                prefill_worker_id = None
-                if (
-                    self.prefill_router_client is not None
-                    and self.prefill_router_client.instance_ids()
-                ):
-                    used_prefill_router = True
-                    best_worker_response = await anext(
-                        await self.prefill_router_client.generate(
-                            {
-                                "token_ids": request["token_ids"],
-                                "request_id": request_id,
-                            }
-                        )
-                    )
-                    prefill_worker_id = best_worker_response.data().get("worker_id")
-
-                if prefill_worker_id is not None:
-                    prefill_response = await anext(
-                        await self.prefill_worker_client.direct(
-                            prefill_request, prefill_worker_id, context=context
-                        )
-                    )
-                else:
-                    prefill_response = await anext(
-                        await self.prefill_worker_client.round_robin(
-                            prefill_request, context=context
-                        )
-                    )
-
-            except Exception as e:
-                if context.is_stopped() or context.is_killed():
-                    logger.debug(f"Aborted Remote Prefill Request ID: {request_id}")
-                    return
-                raise e
-
-            finally:
-                if used_prefill_router:
-                    await anext(
-                        await self.prefill_router_free_client.generate(
-                            {"request_id": request_id}
-                        )
-                    )
-                    logger.debug(f"Freed router state for request {request_id}")
-
-            prefill_response = MyRequestOutput.model_validate_json(
-                prefill_response.data()
-            )
-
-            # Modify original sampling_params for decode
+        # Extract disaggregated_params from request (set by prefill router in Rust frontend)
+        disaggregated_params = request.get("disaggregated_params")
+        if disaggregated_params:
+            # Prefill was performed - use the disaggregated params
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
-            sampling_params.extra_args[
+            sampling_params.extra_args["kv_transfer_params"] = disaggregated_params.get(
                 "kv_transfer_params"
-            ] = prefill_response.kv_transfer_params
+            )
+            logger.debug(
+                f"Using disaggregated params from prefill for request {request_id}"
+            )
+
+        dp_rank = request.get("dp_rank", None)
 
         async with self._abort_monitor(context, request_id):
             try:
                 async for tok in self.generate_tokens(
-                    prompt, sampling_params, request_id
+                    prompt, sampling_params, request_id, data_parallel_rank=dp_rank
                 ):
                     yield tok
             except EngineDeadError as e:
@@ -276,35 +263,60 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         super().__init__(runtime, component, engine, default_sampling_params)
 
     async def generate(self, request, context):
-        request_id = request["request_id"]
-        logger.debug(f"New Prefill Request ID: {request_id}")
+        # Use context ID for request tracking and correlation with decode phase
+        request_id = context.id()
+        logger.debug(f"Prefill Request ID: {request_id}")
 
-        prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
-        sampling_params = msgspec.convert(request["sampling_params"], SamplingParams)
+        # Extract and decode multimodal data if present
+        multi_modal_data = await self._extract_multimodal_data(request)
+
+        token_ids = request["token_ids"]
+        prompt = TokensPrompt(
+            prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
+        )
+
+        # Build sampling params from request using shared utility
+        sampling_params = build_sampling_params(request, self.default_sampling_params)
+
+        # Configure for prefill-only mode with remote decode
+        if sampling_params.extra_args is None:
+            sampling_params.extra_args = {}
+        sampling_params.extra_args["kv_transfer_params"] = {
+            "do_remote_decode": True,
+        }
+        # Override for prefill: only generate 1 token
+        sampling_params.max_tokens = 1
+        sampling_params.min_tokens = 1
+
+        dp_rank = request.get("dp_rank", None)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
-                gen = self.engine_client.generate(prompt, sampling_params, request_id)
+                gen = self.engine_client.generate(
+                    prompt, sampling_params, request_id, data_parallel_rank=dp_rank
+                )
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")
                 self.runtime.shutdown()
                 os._exit(1)
 
-            # Generate only 1 token in prefill
             try:
                 async for res in gen:
                     logger.debug(f"kv transfer params: {res.kv_transfer_params}")
-                    yield MyRequestOutput(
-                        request_id=res.request_id,
-                        prompt=res.prompt,
-                        prompt_token_ids=res.prompt_token_ids,
-                        prompt_logprobs=res.prompt_logprobs,
-                        outputs=res.outputs,
-                        finished=res.finished,
-                        metrics=res.metrics,
-                        kv_transfer_params=res.kv_transfer_params,
-                    ).model_dump_json()
+
+                    token_ids = res.outputs[0].token_ids if res.outputs else []
+
+                    output: Dict[str, Any] = {
+                        "token_ids": list(token_ids),
+                        "disaggregated_params": (
+                            {"kv_transfer_params": res.kv_transfer_params}
+                            if res.kv_transfer_params
+                            else None
+                        ),
+                    }
+
+                    yield output
             except asyncio.CancelledError:
                 # raise the error because we cannot migrate prefill requests
                 raise GeneratorExit(

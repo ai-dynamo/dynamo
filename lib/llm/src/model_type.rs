@@ -36,6 +36,7 @@ bitflags! {
         const Completions = 1 << 1;
         const Embedding = 1 << 2;
         const TensorBased = 1 << 3;
+        const Prefill = 1 << 4;
     }
 }
 
@@ -56,6 +57,9 @@ impl ModelType {
     pub fn supports_tensor(&self) -> bool {
         self.contains(ModelType::TensorBased)
     }
+    pub fn supports_prefill(&self) -> bool {
+        self.contains(ModelType::Prefill)
+    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
@@ -70,6 +74,31 @@ impl ModelType {
         }
         if self.supports_tensor() {
             result.push("tensor");
+        }
+        if self.supports_prefill() {
+            result.push("prefill");
+        }
+        result
+    }
+
+    /// Decompose the bitflag into it's component units:
+    /// Chat | Completion -> [Chat, Completion]
+    pub fn units(&self) -> Vec<ModelType> {
+        let mut result = Vec::new();
+        if self.supports_chat() {
+            result.push(ModelType::Chat);
+        }
+        if self.supports_completions() {
+            result.push(ModelType::Completions);
+        }
+        if self.supports_embedding() {
+            result.push(ModelType::Embedding);
+        }
+        if self.supports_tensor() {
+            result.push(ModelType::TensorBased);
+        }
+        if self.supports_prefill() {
+            result.push(ModelType::Prefill);
         }
         result
     }

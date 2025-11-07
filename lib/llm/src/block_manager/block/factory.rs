@@ -6,7 +6,7 @@ pub mod logical;
 
 pub use local::LocalBlockDataFactory;
 
-use crate::block_manager::LayoutConfig;
+use crate::block_manager::{LayoutConfig, OffloadFilter};
 
 use super::*;
 
@@ -47,6 +47,9 @@ pub trait BlockFactory<S: Storage, L: LocalityProvider> {
 
     /// Get the layout configuration information
     fn layout_config(&self) -> &LayoutConfig;
+
+    /// Get the offload filter for this factory
+    fn offload_filter(&self) -> Option<Arc<dyn OffloadFilter>>;
 }
 
 /// Extension trait for factories that can produce all blocks at once

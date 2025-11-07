@@ -3,24 +3,28 @@
 
 [workspace]
 members = [
-    "components/metrics",
     "launch/dynamo-run",
     "lib/llm",
     "lib/runtime",
+    "lib/config",
     "lib/tokens",
+    "lib/memory",
     "lib/async-openai",
     "lib/parsers",
     "lib/bindings/c",
+    "lib/bindings/python/codegen",
     "lib/engines/*",
+    "lib/kvbm",
+    "lib/config",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
 # - launch/dynamo-run
 # - lib/engines/*
 default-members = [
-    "components/metrics",
     "lib/llm",
     "lib/runtime",
+    "lib/config",
     "lib/tokens",
     "lib/async-openai",
     "lib/parsers",
@@ -29,7 +33,7 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.5.1"
+version = "0.6.1"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -40,15 +44,15 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.5.1" }
-dynamo-llm = { path = "lib/llm", version = "0.5.1" }
-dynamo-tokens = { path = "lib/tokens", version = "0.5.1" }
-dynamo-async-openai = { path = "lib/async-openai", version = "0.5.1", features = [
+dynamo-runtime = { path = "lib/runtime", version = "0.6.1" }
+dynamo-llm = { path = "lib/llm", version = "0.6.1" }
+dynamo-config = { path = "lib/config", version = "0.6.1" }
+dynamo-tokens = { path = "lib/tokens", version = "0.6.1" }
+dynamo-async-openai = { path = "lib/async-openai", version = "0.6.1", features = [
     "byot",
     "rustls",
 ] }
-dynamo-parsers = { path = "lib/parsers", version = "0.5.1" }
-
+dynamo-parsers = { path = "lib/parsers", version = "0.6.1" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -65,6 +69,8 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
+cudarc = { version = "0.17.1", features = ["cuda-12020"] }
+dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
@@ -77,12 +83,13 @@ hf-hub = { version = "0.4.2", default-features = false, features = [
 ] }
 
 # ModelExpress for model downloading
-modelexpress-client = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "a232220bf268a475d293914d407f4ae186f443e3", package = "modelexpress-client" }
-modelexpress-common = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "a232220bf268a475d293914d407f4ae186f443e3", package = "modelexpress-common" }
+modelexpress-client = { version = "0.2.0" }
+modelexpress-common = { version = "0.2.0" }
 
 humantime = { version = "2.2.0" }
 libc = { version = "0.2" }
 oneshot = { version = "0.1.11", features = ["std", "async"] }
+parking_lot = "0.12.5"
 prometheus = { version = "0.14" }
 rand = { version = "0.9.0" }
 reqwest = { version = "0.12.22", default-features = false, features = [
@@ -106,6 +113,10 @@ tracing-subscriber = { version = "0.3", features = [
     "local-time",
     "json",
 ] }
+tracing-opentelemetry = { version = "0.32.0" }
+opentelemetry = { version = "0.31.0", features = ["trace"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31.0", features = ["trace", "grpc-tonic"] }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }
@@ -116,7 +127,7 @@ insta.opt-level = 3
 
 [profile.dev]
 # release level optimizations otherwise everything feels slow
-opt-level = 3
+# opt-level = 3
 
 [profile.release]
 # These make the build much slower but shrink the binary, and could help performance

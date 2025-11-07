@@ -22,7 +22,7 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Support matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/support_matrix.md)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/2486)** | **[Support matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/reference/support-matrix.md)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
 
 # NVIDIA Dynamo
 
@@ -30,7 +30,7 @@ High-throughput, low-latency inference framework designed for serving generative
 
 ## Latest News
 
-- [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./components/backends/trtllm/gpt-oss.md)
+- [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./docs/backends/trtllm/gpt-oss.md)
 
 ## The Era of Multi-GPU, Multi-Node
 
@@ -56,25 +56,25 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 
 | Feature                                                                                           | vLLM | SGLang | TensorRT-LLM |
 | ------------------------------------------------------------------------------------------------- | ---- | ------ | ------------ |
-| [**Disaggregated Serving**](/docs/architecture/disagg_serving.md)                                 | ✅   | ✅     | ✅           |
-| [**Conditional Disaggregation**](/docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧   | 🚧     | 🚧           |
-| [**KV-Aware Routing**](/docs/architecture/kv_cache_routing.md)                                    | ✅   | ✅     | ✅           |
-| [**Load Based Planner**](/docs/architecture/load_planner.md)                                      | 🚧   | 🚧     | 🚧           |
-| [**SLA-Based Planner**](/docs/architecture/sla_planner.md)                                        | ✅   | ✅     | ✅           |
-| [**KVBM**](/docs/architecture/kvbm_architecture.md)                                               | ✅   | 🚧     | ✅           |
+| [**Disaggregated Serving**](/docs/design_docs/disagg_serving.md)                                 | ✅   | ✅     | ✅           |
+| [**Conditional Disaggregation**](/docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧   | 🚧     | 🚧           |
+| [**KV-Aware Routing**](/docs/router/kv_cache_routing.md)                                    | ✅   | ✅     | ✅           |
+| [**Load Based Planner**](docs/planner/load_planner.md)                                      | 🚧   | 🚧     | 🚧           |
+| [**SLA-Based Planner**](docs/planner/sla_planner.md)                                        | ✅   | ✅     | ✅           |
+| [**KVBM**](docs/kvbm/kvbm_architecture.md)                                               | ✅   | 🚧     | ✅           |
 
 To learn more about each framework and their capabilities, check out each framework's README!
 
-- **[vLLM](components/backends/vllm/README.md)**
-- **[SGLang](components/backends/sglang/README.md)**
-- **[TensorRT-LLM](components/backends/trtllm/README.md)**
+- **[vLLM](docs/backends/vllm/README.md)**
+- **[SGLang](docs/backends/sglang/README.md)**
+- **[TensorRT-LLM](docs/backends/trtllm/README.md)**
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
 # Installation
 
 The following examples require a few system level packages.
-Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/support_matrix.md](docs/support_matrix.md)
+Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/reference/support-matrix.md](docs/reference/support-matrix.md)
 
 ## 1. Initial setup
 
@@ -82,6 +82,14 @@ The Dynamo team recommends the `uv` Python package manager, although any way wor
 
 ```
 curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### Install Python development headers
+
+Backend engines require Python development headers for JIT compilation. Install them with:
+
+```bash
+sudo apt install python3-dev
 ```
 
 ### Install etcd and NATS (required)
@@ -101,7 +109,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## 2. Select an engine
 
-We publish Python wheels specialized for each of our supported engines: vllm, sglang, trtllm, and llama.cpp. The examples that follow use SGLang; continue reading for other engines.
+We publish Python wheels specialized for each of our supported engines: vllm, sglang, and trtllm. The examples that follow use SGLang; continue reading for other engines.
 
 ```
 uv venv venv
@@ -113,6 +121,16 @@ uv pip install "ai-dynamo[sglang]"  #replace with [vllm], [trtllm], etc.
 ```
 
 ## 3. Run Dynamo
+
+### Sanity check (optional)
+
+Before trying out Dynamo, you can verify your system configuration and dependencies:
+
+```bash
+./deploy/sanity_check.py
+```
+
+This is a quick check for system resources, development tools, LLM frameworks, and Dynamo components.
 
 ### Running an LLM API server
 
@@ -153,15 +171,15 @@ Rerun with `curl -N` and change `stream` in the request to `true` to get the res
 ### Deploying Dynamo
 
 - Follow the [Quickstart Guide](docs/kubernetes/README.md) to deploy on Kubernetes.
-- Check out [Backends](components/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
+- Check out [Backends](examples/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
 - Run some [Examples](examples) to learn about building components in Dynamo and exploring various integrations.
 
 ### Benchmarking Dynamo
 
 Dynamo provides comprehensive benchmarking tools to evaluate and optimize your deployments:
 
-- **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies (aggregated vs. disaggregated vs. vanilla vLLM) using GenAI-Perf
-- **[Pre-Deployment Profiling](docs/benchmarks/pre_deployment_profiling.md)** – Optimize configurations before deployment to meet SLA requirements
+- **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies (aggregated vs. disaggregated vs. vanilla vLLM) using AIPerf
+- **[SLA-Driven Dynamo Deployments](docs/planner/sla_planner_quickstart.md)** – Optimize your deployment to meet SLA requirements
 
 # Engines
 

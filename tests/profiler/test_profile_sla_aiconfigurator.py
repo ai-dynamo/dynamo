@@ -27,8 +27,10 @@ class TestProfileSlaAiconfigurator:
     def trtllm_args(self):
         class Args:
             def __init__(self):
+                self.model = ""
+                self.dgd_image = ""
                 self.backend = "trtllm"
-                self.config = "components/backends/trtllm/deploy/disagg.yaml"
+                self.config = "examples/backends/trtllm/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.min_num_gpus_per_engine = 1
@@ -48,15 +50,17 @@ class TestProfileSlaAiconfigurator:
                 self.use_ai_configurator = True
                 self.aic_system = "h200_sxm"
                 self.aic_model_name = "QWEN3_32B"
-                self.backend_version = "0.20.0"
+                self.aic_backend = ""
+                self.aic_backend_version = "0.20.0"
                 self.num_gpus_per_node = 8
+                self.deploy_after_profile = False
 
         return Args()
 
     @pytest.mark.pre_merge
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "missing_arg", ["aic_system", "aic_model_name", "backend_version"]
+        "missing_arg", ["aic_system", "aic_model_name", "aic_backend_version"]
     )
     async def test_aiconfigurator_missing_args(self, trtllm_args, missing_arg):
         # Check that validation error happens when a required arg is missing.
@@ -71,7 +75,7 @@ class TestProfileSlaAiconfigurator:
         [
             # these values don't exist in the aiconfigurator database.
             ("aic_system", "fake_gpu_system"),
-            ("backend_version", "0.1.0"),
+            ("aic_backend_version", "0.1.0"),
         ],
     )
     async def test_aiconfiguator_no_data(self, trtllm_args, arg_name, bad_value):
@@ -89,18 +93,18 @@ class TestProfileSlaAiconfigurator:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "backend, backend_version",
+        "backend, aic_backend_version",
         [
             ("trtllm", "0.20.0"),
             ("trtllm", "1.0.0rc3"),
         ],
     )
-    @pytest.mark.parametrize("model_name", ["QWEN3_32B", "GPT_7B", "LLAMA3.1_405B"])
+    @pytest.mark.parametrize("model_name", ["QWEN3_32B", "LLAMA3.1_405B"])
     async def test_trtllm_aiconfigurator_many(
-        self, trtllm_args, model_name, backend, backend_version
+        self, trtllm_args, model_name, backend, aic_backend_version
     ):
         # Test that profile_sla works with a variety of backend versions and model names.
         trtllm_args.aic_model_name = model_name
         trtllm_args.backend = backend
-        trtllm_args.backend_version = backend_version
+        trtllm_args.aic_backend_version = aic_backend_version
         await run_profile(trtllm_args)

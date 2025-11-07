@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import os
+import signal
 import traceback
 
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -16,6 +17,7 @@ configure_dynamo_logging
 logger = logging.getLogger(__name__)
 
 HEALTH_CHECK_INTERVAL = 2
+ENGINE_SHUTDOWN_TIMEOUT = 30  # seconds
 
 
 class VllmEngineMonitor:
@@ -44,6 +46,25 @@ class VllmEngineMonitor:
     def __del__(self):
         self._monitor_task.cancel()
 
+    def _shutdown_engine(self):
+        """
+        Shutdown the vLLM engine on crash scenarios to free resources.
+        """
+
+        # Has timeout protection via SIGALRM
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Engine shutdown timed out")
+
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(ENGINE_SHUTDOWN_TIMEOUT)
+
+        try:
+            self.engine_client.shutdown()
+        except Exception as e:
+            logger.warning(f"vLLM engine shutdown failed: {e}")
+        finally:
+            signal.alarm(0)
+
     async def _check_engine_health(self):
         while True:
             try:
@@ -53,6 +74,7 @@ class VllmEngineMonitor:
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 logger.error(f"vLLM AsyncLLM health check failed: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")
+                self._shutdown_engine()
                 self.runtime.shutdown()
                 os._exit(1)
             except asyncio.CancelledError:

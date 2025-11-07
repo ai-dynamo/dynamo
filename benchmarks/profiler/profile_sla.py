@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
 import asyncio
 import logging
 import math
@@ -22,11 +21,13 @@ import os
 import numpy as np
 import yaml
 
-from benchmarks.profiler.utils.config import CONFIG_MODIFIERS, WORKER_COMPONENT_NAMES
+from benchmarks.profiler.utils.aiperf import benchmark_decode, benchmark_prefill
+from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+from benchmarks.profiler.utils.dgd_generation import generate_dgd_config_with_planner
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
-from benchmarks.profiler.utils.genai_perf import benchmark_decode, benchmark_prefill
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
+    plot_pd_joint_results,
     plot_prefill_performance,
 )
 from benchmarks.profiler.utils.profile_cache import (
@@ -44,10 +45,12 @@ from benchmarks.profiler.utils.profile_prefill import (
     profile_prefill,
     profile_prefill_aiconfigurator,
 )
+from benchmarks.profiler.utils.profiler_argparse import create_profiler_parser
 from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -63,6 +66,10 @@ logger.addHandler(console_handler)
 async def run_profile(args):
     # List to track all created deployment clients for cleanup in case of failure
     deployment_clients = []
+
+    # Inherit aic_backend from backend if not explicitly set
+    if not args.aic_backend:
+        args.aic_backend = args.backend
 
     try:
         # Log MoE model support
@@ -86,25 +93,39 @@ async def run_profile(args):
         with open(args.config, "r") as f:
             config = yaml.safe_load(f)
 
+        if args.dgd_image:
+            config = config_modifier.update_image(config, args.dgd_image)
+            logger.info(f"Using DGD image: {args.dgd_image}")
+
+        profile_num_gpus = [
+            2**i
+            for i in range(int(math.log2(args.max_num_gpus_per_engine)) + 1)
+            if args.min_num_gpus_per_engine <= 2**i <= args.max_num_gpus_per_engine
+        ]
         if args.is_moe_model:
-            # For MoE models, use range with stride of num_gpus_per_node
-            profile_num_gpus = list(
-                range(
-                    args.min_num_gpus_per_engine,
-                    args.max_num_gpus_per_engine + 1,
-                    args.num_gpus_per_node,
-                )
-            )
+            # Filter GPU counts to only include divisors of num_experts
+            if hasattr(args, "num_experts") and args.num_experts is not None:
+                original_counts = profile_num_gpus.copy()
+                profile_num_gpus = [
+                    gpu_count
+                    for gpu_count in profile_num_gpus
+                    if args.num_experts % gpu_count == 0
+                ]
+                if not profile_num_gpus:
+                    error_msg = (
+                        f"No valid GPU counts found that divide evenly into num_experts={args.num_experts}. "
+                        f"Original candidates were {original_counts}. "
+                        f"Valid divisors in range would be: {[d for d in range(args.min_num_gpus_per_engine, args.max_num_gpus_per_engine + 1) if args.num_experts % d == 0]}"
+                    )
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+                if len(profile_num_gpus) < len(original_counts):
+                    logger.info(
+                        f"Filtered GPU counts from {original_counts} to {profile_num_gpus} "
+                        f"(only divisors of num_experts={args.num_experts})"
+                    )
             logger.info(f"Profiling MoE GPU counts (TEP/DEP): {profile_num_gpus}")
         else:
-            # For dense models, use powers of 2
-            profile_num_gpus = [
-                2**i
-                for i in range(int(math.log2(args.max_num_gpus_per_engine)) + 1)
-                if args.min_num_gpus_per_engine
-                <= 2**i
-                <= args.max_num_gpus_per_engine
-            ]
             logger.info(f"Profiling dense model GPU counts (TP): {profile_num_gpus}")
 
         os.makedirs(args.output_dir, exist_ok=True)
@@ -132,20 +153,20 @@ async def run_profile(args):
                 raise ValueError(
                     "Must provide --aic-model-name when using --use-ai-configurator."
                 )
-            if not args.backend_version:
+            if not args.aic_backend_version:
                 raise ValueError(
-                    "Must provide --backend-version when using --use-ai-configurator."
+                    "Must provide --aic-backend-version when using --use-ai-configurator."
                 )
 
             logger.info("Will use aiconfigurator to estimate perf.")
             ai_configurator_perf_estimator = AIConfiguratorPerfEstimator(
                 args.aic_model_name,
                 args.aic_system.lower(),
-                args.backend,
-                args.backend_version,
+                args.aic_backend,
+                args.aic_backend_version,
             )
         else:
-            if args.aic_system or args.aic_model_name or args.backend_version:
+            if args.aic_system or args.aic_model_name or args.aic_backend_version:
                 logger.warning(
                     "Will ignore --aic-system, --aic-model-name, and/or --backend-version "
                     "when not using --use-ai-configurator."
@@ -236,18 +257,18 @@ async def run_profile(args):
                     f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
                 )
 
-                # run genai-perf
+                # run ai-perf
                 base_url = client.get_service_url()
-                genai_perf_artifact_dir = f"{work_dir}/gap_isl{args.isl}"
-                gap_result = benchmark_prefill(
+                ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{args.isl}"
+                aiperf_result = benchmark_prefill(
                     args.isl,
-                    genai_perf_artifact_dir,
+                    ai_perf_artifact_dir,
                     model_name,
                     model_name,
                     base_url=base_url,
                 )
-                if gap_result is not None:
-                    ttft = gap_result["time_to_first_token"]["avg"]
+                if aiperf_result is not None:
+                    ttft = aiperf_result["time_to_first_token"]["avg"]
 
                 logger.info("Cleaning up deployment...")
                 await client.delete_deployment()
@@ -260,14 +281,10 @@ async def run_profile(args):
                 prefill_thpt_per_gpu.append(args.isl / ttft / num_gpus * 1000)
 
         # Plot the results as a 2D scatter plot
+        prefill_results = None
         if prefill_num_gpus and prefill_ttft and prefill_thpt_per_gpu:
-            plot_prefill_performance(
-                prefill_num_gpus,
-                prefill_ttft,
-                prefill_thpt_per_gpu,
-                args.ttft,
-                args.output_dir,
-            )
+            prefill_results = (prefill_num_gpus, prefill_ttft, prefill_thpt_per_gpu)
+            plot_prefill_performance(prefill_results, args.ttft, args.output_dir)
 
         # then profile decode
         decode_num_gpus = []
@@ -415,20 +432,21 @@ async def run_profile(args):
                         )
                     else:
                         base_url = client.get_service_url()
-                        genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
-                        gap_result = benchmark_decode(
+                        ai_perf_artifact_dir = f"{work_dir}/aiperf_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
+                        aiperf_result = benchmark_decode(
                             args.isl,
                             args.osl,
                             num_request,
-                            genai_perf_artifact_dir,
+                            ai_perf_artifact_dir,
                             model_name,
                             model_name,
                             base_url=base_url,
                         )
-                        if gap_result is not None:
-                            itl = gap_result["inter_token_latency"]["avg"]
+                        if aiperf_result is not None:
+                            itl = aiperf_result["inter_token_latency"]["avg"]
                             thpt_per_gpu = (
-                                gap_result["output_token_throughput"]["avg"] / num_gpus
+                                aiperf_result["output_token_throughput"]["avg"]
+                                / num_gpus
                             )
 
                     if itl is not None and thpt_per_gpu is not None:
@@ -454,6 +472,11 @@ async def run_profile(args):
         # Plot all decode results after profiling is complete
         if decode_results:
             plot_decode_performance(decode_results, args.itl, args.output_dir)
+
+        if prefill_results and decode_results:
+            plot_pd_joint_results(
+                args.isl, args.osl, prefill_results, decode_results, args.output_dir
+            )
 
         if args.dry_run:
             logger.info("Skipping recommendations in dry run mode")
@@ -589,10 +612,11 @@ async def run_profile(args):
             try:
                 await client.wait_for_deployment_ready()
                 logger.info("Deployment is ready")
+
                 skip_profile = False
             except TimeoutError:
                 logger.error(
-                    "Deployment failed to become ready within timeout, skipping profiling"
+                    "Deployment or model failed to become ready within timeout, skipping profiling"
                 )
                 skip_profile = True
 
@@ -705,6 +729,26 @@ async def run_profile(args):
             deployment_clients.remove(client)
             logger.info("Deployment deleted")
 
+        # generate DGD with planner based on profiling results
+        config = generate_dgd_config_with_planner(
+            config_path=args.config,
+            config_modifier=config_modifier,
+            best_prefill_gpus=best_prefill_gpus,
+            best_decode_gpus=best_decode_gpus,
+            output_dir=args.output_dir,
+            args=args,
+            is_moe_model=args.is_moe_model,
+            num_gpus_per_node=args.num_gpus_per_node,
+        )
+        logger.info(f"Final DGD config with planner: {config}")
+
+        # save DGD config with planner; support multi-document output when a ConfigMap is included
+        with open(f"{args.output_dir}/config_with_planner.yaml", "w") as f:
+            if isinstance(config, list):
+                yaml.dump_all(config, f)
+            else:
+                yaml.dump(config, f)
+
     except Exception as e:
         logger.error(f"Profile job failed with error: {e}")
         raise
@@ -716,130 +760,16 @@ async def run_profile(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Profile the TTFT and ITL of the Prefill and Decode engine with different parallelization mapping. When profiling prefill we mock/fix decode,when profiling decode we mock/fix prefill."
+    args = create_profiler_parser()
+
+    # setup file logging
+    os.makedirs(args.output_dir, exist_ok=True)
+    log_file_handler = logging.FileHandler(f"{args.output_dir}/profile_sla.log")
+    log_file_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S"
     )
-    parser.add_argument(
-        "--namespace",
-        type=str,
-        default="dynamo-sla-profiler",
-        help="Kubernetes namespace to deploy the DynamoGraphDeployment",
-    )
-    parser.add_argument(
-        "--backend",
-        type=str,
-        default="vllm",
-        choices=["vllm", "sglang", "trtllm"],
-        help="backend type, currently support [vllm, sglang, trtllm]",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the DynamoGraphDeployment config file",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="profiling_results",
-        help="Path to the output results directory",
-    )
-    parser.add_argument(
-        "--min-num-gpus-per-engine",
-        type=int,
-        default=1,
-        help="minimum number of GPUs per engine",
-    )
-    parser.add_argument(
-        "--max-num-gpus-per-engine",
-        type=int,
-        default=8,
-        help="maximum number of GPUs per engine",
-    )
-    parser.add_argument(
-        "--skip-existing-results",
-        action="store_true",
-        help="Skip TP sizes that already have results in the output directory",
-    )
-    parser.add_argument(
-        "--force-rerun",
-        action="store_true",
-        help="Force re-running all tests even if results already exist (overrides --skip-existing-results)",
-    )
-    parser.add_argument(
-        "--isl", type=int, default=3000, help="target input sequence length"
-    )
-    parser.add_argument(
-        "--osl", type=int, default=500, help="target output sequence length"
-    )
-    parser.add_argument(
-        "--ttft", type=int, default=50, help="target Time To First Token in ms"
-    )
-    parser.add_argument(
-        "--itl", type=int, default=10, help="target Inter Token Latency in ms"
-    )
-    # below are arguments used for interpolating TTFT and ITL under different ISL/OSL
-    parser.add_argument(
-        "--max-context-length",
-        type=int,
-        default=16384,
-        help="maximum context length supported by the served model",
-    )
-    parser.add_argument(
-        "--prefill-interpolation-granularity",
-        type=int,
-        default=16,
-        help="how many samples to benchmark to interpolate TTFT under different ISL",
-    )
-    parser.add_argument(
-        "--decode-interpolation-granularity",
-        type=int,
-        default=6,
-        help="how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length",
-    )
-    parser.add_argument(
-        "--service-name",
-        type=str,
-        default="",
-        help="Service name for port forwarding (default: {deployment_name}-frontend)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Dry run the profile job",
-    )
-    parser.add_argument(
-        "--is-moe-model",
-        action="store_true",
-        dest="is_moe_model",
-        help="Enable MoE (Mixture of Experts) model support, use TEP for prefill and DEP for decode",
-    )
-    parser.add_argument(
-        "--num-gpus-per-node",
-        type=int,
-        default=8,
-        help="Number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size",
-    )
-    parser.add_argument(
-        "--use-ai-configurator",
-        action="store_true",
-        help="Use ai-configurator to estimate benchmarking results instead of running actual deployment.",
-    )
-    parser.add_argument(
-        "--aic-system",
-        type=str,
-        help="Target system for use with aiconfigurator (e.g. h100_sxm, h200_sxm)",
-    )
-    parser.add_argument(
-        "--aic-model-name",
-        type=str,
-        help="aiconfigurator name of the target model (e.g. QWEN3_32B, DEEPSEEK_V3)",
-    )
-    parser.add_argument(
-        "--backend-version",
-        type=str,
-        help="Specify backend version when using aiconfigurator to estimate perf.",
-    )
-    args = parser.parse_args()
+    log_file_handler.setFormatter(formatter)
+    logger.addHandler(log_file_handler)
 
     asyncio.run(run_profile(args))

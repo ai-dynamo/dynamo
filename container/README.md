@@ -43,38 +43,77 @@ These targets are specified with `build.sh --target <target>` and correspond to 
 
 Additional targets are available in the Dockerfiles for specific build stages and use cases.
 
+| Feature | **dev + `run.sh`** | **local-dev + `run.sh`** | **local-dev + Dev Container** |
+|---------|-------------------|--------------------------|-------------------------------|
+| **Default User** | root | ubuntu | ubuntu |
+| **User Setup** | None | Matches UID/GID of `build.sh` user | Matches UID/GID of `build.sh` user |
+| **Permissions** | root | ubuntu with sudo | ubuntu with sudo |
+| **Home Directory** | `/root` | `/home/ubuntu` | `/home/ubuntu` |
+| **Working Directory** | `/workspace` | `/workspace` | `/workspace` |
+| **Rust Toolchain** | System install (`/usr/local/rustup`, `/usr/local/cargo`) | User install (`~/.rustup`, `~/.cargo`) | User install (`~/.rustup`, `~/.cargo`) |
+| **Python Env** | root owned | User owned venv | User owned venv |
+| **File Permissions** | root-level | user-level, safe | user-level, safe |
+| **Compatibility** | Legacy workflows, workspace not writable on NFS | workspace writable on NFS | workspace writable on NFS |
+
+## Environment Variables Across Build Stages
+
+Understanding how environment variables change across different build stages is crucial for development and debugging. The Dynamo build system uses a multi-stage Docker build process where environment variables are set, inherited, and overridden at different stages.
+
+### Build Stage Flow
+
 ```
-Feature           │ 1. dev + `run.sh`     │ 2. local-dev + `run.sh`  │ 3. local-dev + Dev Container
-──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-Default User      │ root                  │ ubuntu                   │ ubuntu
-──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-User Setup        │ None                  │ Matches UID/GID of       │ Matches UID/GID of
-                  │                       │ `build.sh` user          │ `build.sh` user
-──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-Permissions       │ root                  │ ubuntu with sudo         │ ubuntu with sudo
-──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-Home Directory    │ /root                 │ /home/ubuntu             │ /home/ubuntu
-──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-Working Directory │ /workspace            │ /workspace               │ /home/ubuntu/dynamo
-──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-Rust Toolchain    │ System install        │ User install (~/.rustup, │ User install (~/.rustup,
-                  │ (/usr/local/rustup,   │  ~/.cargo)               │  ~/.cargo)
-                  │  /usr/local/cargo)    │                          │
-──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-Python Env        │ root owned            │ User owned venv          │ User owned venv
-──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-File Permissions  │ root-level            │ user-level, safe         │ user-level, safe
-──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-Compatibility     │ Legacy workflows,     │ workspace writable on NFS│workspace writable on NFS
-                  │   workspace not       │                          │
-                  │   writable on NFS     │                          │
-──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
+Dockerfile → base → dev (dynamo-base image)
+              ↓
+Dockerfile.vllm → framework → runtime → dev (vllm dev image)
+                                         ↓
+Dockerfile.local_dev → local-dev (from vllm dev image)
 ```
+
+### Environment Variables by Stage
+
+| Variable | **base** | **base→dev** | **vllm→framework** | **vllm→runtime** | **vllm→dev** | **local-dev** |
+|----------|----------|--------------|--------------------|-----------------|--------------|--------------------|
+| **DYNAMO_HOME** | ❌ Not set | `/opt/dynamo` | ❌ Not set | `/opt/dynamo` | `/workspace` ✅ **OVERRIDE** | `/workspace` (inherited) |
+| **WORKSPACE_DIR** | ❌ Not set | ❌ Not set | ❌ Not set | ❌ Not set | `/workspace` | `/workspace` (inherited) |
+| **CARGO_TARGET_DIR** | ❌ Not set | `/opt/dynamo/target` | ❌ Not set | ❌ Not set | `/workspace/target` ✅ **OVERRIDE** | `/workspace/target` (inherited) |
+| **VIRTUAL_ENV** | `/opt/dynamo/venv` | (inherited) | `/opt/dynamo/venv` | `/opt/dynamo/venv` | `/opt/dynamo/venv` ✅ **REDEFINE** | `/opt/dynamo/venv` (inherited) |
+| **RUSTUP_HOME** | `/usr/local/rustup` | (inherited) | ❌ Not set | ❌ Not set | `/usr/local/rustup` | `/home/ubuntu/.rustup` ✅ **OVERRIDE** |
+| **CARGO_HOME** | `/usr/local/cargo` | (inherited) | ❌ Not set | ❌ Not set | `/usr/local/cargo` | `/home/ubuntu/.cargo` ✅ **OVERRIDE** |
+| **USERNAME** | ❌ Not set | ❌ Not set | ❌ Not set | ❌ Not set | ❌ Not set | `ubuntu` ✅ **NEW** |
+| **HOME** | (system default) | (system default) | (system default) | (system default) | (system default) | `/home/ubuntu` ✅ **NEW** |
+| **PATH** | (includes cargo) | (inherited) | (system default) | (includes venv, etcd, ucx) | `/usr/local/cargo/bin:$PATH` | `/home/ubuntu/.cargo/bin:$PATH` ✅ **OVERRIDE** |
+
+### Key Insights
+
+**1. DYNAMO_HOME Dual Purpose:**
+- `base→dev` and `vllm→runtime`: `/opt/dynamo` - For **installed/packaged** Dynamo (CI, production)
+- `vllm→dev` and `local-dev`: `/workspace` - For **development** with source code mounted from host
+
+**2. Rust Toolchain Location:**
+- `dev` target: System-wide at `/usr/local/rustup` and `/usr/local/cargo` (suitable for root)
+- `local-dev` target: User-specific at `/home/ubuntu/.rustup` and `/home/ubuntu/.cargo` (proper UID/GID ownership)
+
+**3. Build Artifacts Location:**
+- `base→dev`: `/opt/dynamo/target` - Build artifacts with installed package
+- `vllm→dev` onward: `/workspace/target` - Build artifacts in mounted workspace for persistence
+
+**4. Variables That Stay Constant:**
+- `VIRTUAL_ENV`: Always `/opt/dynamo/venv` (ownership changes in local-dev via rsync)
+- `WORKSPACE_DIR`: Always `/workspace` once set in vllm→dev
+- `DYNAMO_HOME`: Always `/workspace` once overridden in vllm→dev (for development)
+
+**5. local-dev Specific Changes:**
+From `Dockerfile.local_dev`, the Rust toolchain is moved to user home because:
+- Workspace mount points may change, breaking toolchain paths
+- User needs ownership of cargo binaries and registry for package installation
+- Toolchain requires consistent system paths that don't depend on workspace location
+
+The Python venv ownership is also updated via rsync in local-dev to match the user's UID/GID, ensuring package installation permissions work correctly.
 
 ## Usage Guidelines
 
 - **Use dev + `run.sh`**: for command-line testing. Runs as root user
-- **Use local-dev + `run.sh`**: for command-line development and Docker mounted partitions using your local user ID
+- **Use local-dev + `run.sh`**: for command-line development and Docker mounted partitions using your local user ID. Add `-it` flag for interactive sessions
 - **Use local-dev + Dev Container**: VS Code/Cursor Dev Container Plugin, using your local user ID
 
 ## Example Commands
@@ -86,7 +125,7 @@ run.sh ...
 
 ### 2. local-dev + `run.sh` (runs as the local user):
 ```bash
-run.sh --mount-workspace --image dynamo:latest-vllm-local-dev ...
+run.sh --mount-workspace -it --image dynamo:latest-vllm-local-dev ...
 ```
 
 ### 3. local-dev + Dev Container Extension:
@@ -169,30 +208,31 @@ The `run.sh` script launches Docker containers with the appropriate configuratio
 - **User Management**: Root or user-based container execution
 - **Network Configuration**: Configurable networking modes (host, bridge, none, container sharing)
 - **Resource Limits**: Memory, file descriptors, and IPC configuration
+- **Interactive Mode**: Use `-it` flag for interactive terminal sessions (required for shells, debugging, and interactive development)
 
 **Common Usage Examples:**
 
 ```bash
-# Basic container launch (inference/production, runs as root user)
+# Basic container launch (inference/production, runs as root user, non-interactive)
 ./run.sh --image dynamo:latest-vllm -v $HOME/.cache:/home/ubuntu/.cache
 
-# Mount workspace for development (use local-dev image for local host user permissions)
-./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
+# Interactive development with workspace mounted (use -it for interactive terminal)
+./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 
 # Use specific image and framework for development
-./run.sh --image v0.1.0.dev.08cc44965-vllm-local-dev --framework vllm --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image v0.1.0.dev.08cc44965-vllm-local-dev --framework vllm --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 
 # Interactive development shell with workspace mounted
 ./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache -it -- bash
 
 # Development with custom environment variables
-./run.sh --image dynamo:latest-vllm-local-dev -e CUDA_VISIBLE_DEVICES=0,1 --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image dynamo:latest-vllm-local-dev -e CUDA_VISIBLE_DEVICES=0,1 --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 
 # Dry run to see docker command
 ./run.sh --dry-run
 
 # Development with custom volume mounts
-./run.sh --image dynamo:latest-vllm-local-dev -v /host/path:/container/path --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image dynamo:latest-vllm-local-dev -v /host/path:/container/path --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 ```
 
 ### Network Configuration Options
@@ -215,7 +255,7 @@ The `run.sh` script supports different networking modes via the `--network` flag
 
 #### Bridge Networking (Isolated)
 ```bash
-# CI/testing with isolated bridge networking and host cache sharing
+# CI/testing with isolated bridge networking and host cache sharing (no -it for automated CI)
 ./run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache
 ```
 **Use cases:**
@@ -229,10 +269,10 @@ The `run.sh` script supports different networking modes via the `--network` flag
 #### No Networking ⚠️ **LIMITED FUNCTIONALITY**
 ```bash
 # Complete network isolation - no external connectivity
-./run.sh --image dynamo:latest-vllm --network none --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image dynamo:latest-vllm --network none --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 
 # Same with local user permissions
-./run.sh --image dynamo:latest-vllm-local-dev --network none --mount-workspace -v $HOME/.cache:/home/ubuntu/.cache
+./run.sh --image dynamo:latest-vllm-local-dev --network none --mount-workspace -it -v $HOME/.cache:/home/ubuntu/.cache
 ```
 **⚠️ WARNING: `--network none` severely limits Dynamo functionality:**
 - **No model downloads** - HuggingFace models cannot be downloaded
@@ -306,7 +346,7 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 # 1. Build image for CI
 ./build.sh --framework vllm --no-cache
 
-# 2. Run tests with network isolation for reproducible results
+# 2. Run tests with network isolation for reproducible results (no -it needed for CI)
 ./run.sh --image dynamo:latest-vllm --mount-workspace --network bridge -v $HOME/.cache:/home/ubuntu/.cache -- python -m pytest tests/
 
 # 3. Inside the container with bridge networking, start services

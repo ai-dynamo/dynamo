@@ -677,16 +677,10 @@ spec:
                 componentType:
                   description: ComponentType indicates the role of this component (for example, "main").
                   type: string
-                dynamoComponent:
-                  description: |-
-                    DynamoComponent selects the Dynamo component from the archive to deploy.
-                    Typically corresponds to a component defined in the packaged Dynamo artifacts.
-                  type: string
                 dynamoNamespace:
-                  description: Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
-                  type: string
-                dynamoTag:
-                  description: 'contains the tag of the DynamoComponent: for example, "my_package:MyService"'
+                  description: |-
+                    DynamoNamespace is deprecated and will be removed in a future version.
+                    The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
                   type: string
                 envFromSecret:
                   description: |-
@@ -9816,6 +9810,9 @@ spec:
                       x-kubernetes-list-type: map
                   required: []
                   type: object
+                globalDynamoNamespace:
+                  description: GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+                  type: boolean
                 ingress:
                   description: Ingress config to expose the component outside the cluster (or through a service mesh).
                   properties:
@@ -10181,6 +10178,26 @@ spec:
                     Resources requested and limits for this component, including CPU, memory,
                     GPUs/devices, and any runtime-specific resources.
                   properties:
+                    claims:
+                      items:
+                        description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                        properties:
+                          name:
+                            description: |-
+                              Name must match the name of one entry in pod.spec.resourceClaims of
+                              the Pod where this field is used. It makes that resource available
+                              inside a container.
+                            type: string
+                          request:
+                            description: |-
+                              Request is the name chosen for a request in the referenced claim.
+                              If empty, everything from the claim is made available, otherwise
+                              only the result of this request.
+                            type: string
+                        required:
+                          - name
+                        type: object
+                      type: array
                     limits:
                       properties:
                         cpu:

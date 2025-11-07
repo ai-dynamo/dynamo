@@ -267,7 +267,7 @@ helm: manifests kustomize helmify
 	$(KUSTOMIZE) build config/default | $(HELMIFY) -image-pull-secrets charts/dynamo-kubernetes-operator
 
 ######################### CRD Reference Docs
-CRD_REF_DOCS_VERSION ?= v0.0.12
+CRD_REF_DOCS_VERSION ?= latest
 CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 
 .PHONY: crd-ref-docs
@@ -287,10 +287,10 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 		--renderer=markdown \
 		--output-path=./docs/api_reference.md
 	@echo "✅ Generated API reference at ./docs/api_reference.md"
-	# concatenate header.md and api_reference.md
-	cat docs/header.md ./docs/api_reference.md > ../../../docs/kubernetes/api_reference.md
+	# concatenate header.md, api_reference.md, and footer.md
+	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../../docs/kubernetes/api_reference.md
 	rm ./docs/api_reference.md
-	@echo "✅ Concatenated header.md and api_reference.md"
+	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
 
 .PHONY: coverage
 coverage: test

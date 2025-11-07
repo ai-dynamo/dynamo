@@ -7,7 +7,7 @@ mod benchmarks {
 
     use criterion::{BenchmarkId, Criterion, criterion_group};
     use cudarc::driver::{CudaContext, CudaStream};
-    use nixl_sys;
+
     use tokio::runtime::Runtime;
     use tokio_util::task::TaskTracker;
 

@@ -37,15 +37,16 @@ use super::block::{
     locality::LocalityProvider,
     transfer::{PoolConfig, TransferContext},
 };
-use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::pool::{BlockPool, BlockPoolError};
 use super::storage::{Cuda, Storage};
 use super::{DeviceStorage, DiskStorage, KvManagerModelConfig, PinnedStorage};
 use nixl_sys::Agent as NixlAgent;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use tokio::runtime::Handle;
 use tokio::sync::{
-    Mutex,
     mpsc::{self, error::TryRecvError},
     oneshot,
 };
@@ -56,12 +57,16 @@ use std::any::Any;
 
 use std::collections::BTreeSet;
 
+pub mod filter;
 mod pending;
 pub mod request;
 
+use filter::OffloadFilter;
 use pending::{LocalTransferManager, PendingTransfer, TransferBatcher, TransferManager};
 use request::{BlockResult, OffloadRequest, OffloadRequestKey, OnboardRequest};
 
+use derive_builder::Builder;
+use derive_getters::Getters;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 pub const MAX_CONCURRENT_TRANSFERS: usize = 4;
@@ -71,9 +76,12 @@ pub const MAX_TRANSFER_BATCH_SIZE: usize = 16;
 pub struct OffloadManagerConfig {
     pub nixl_agent: Arc<Option<NixlAgent>>,
     pub async_rt_handle: Handle,
-    pub metrics: Arc<BlockManagerMetrics>,
     pub cancellation_token: CancellationToken,
     pub model_config: KvManagerModelConfig,
+    /// Optional KVBM-level metrics for tracking offload/onboard operations
+    pub kvbm_metrics: Option<crate::block_manager::metrics_kvbm::KvbmMetrics>,
+    /// If true, offload directly from device (G1) to disk (G3), bypassing host (G2)
+    pub bypass_cpu_mem: bool,
 }
 
 /// The offload manager handles all block transfers between different cache levels.
@@ -87,6 +95,10 @@ pub struct OffloadManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
     device_offload_tx: mpsc::UnboundedSender<OffloadRequest<DeviceStorage, Locality, Metadata>>,
     host_offload_tx: mpsc::UnboundedSender<OffloadRequest<PinnedStorage, Locality, Metadata>>,
 
+    /// Queue of device-to-disk direct offloading requests (bypass CPU memory)
+    device_to_disk_offload_tx:
+        mpsc::UnboundedSender<OffloadRequest<DeviceStorage, Locality, Metadata>>,
+
     /// Queue of pending onboarding requests.
     host_onboard_tx:
         mpsc::UnboundedSender<OnboardRequest<PinnedStorage, DeviceStorage, Locality, Metadata>>,
@@ -94,20 +106,26 @@ pub struct OffloadManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
         mpsc::UnboundedSender<OnboardRequest<DiskStorage, DeviceStorage, Locality, Metadata>>,
 
     /// An incrementing counter for offloaded blocks. Within the same priority, blocks with lower tick values are processed first.
-    tick: Arc<Mutex<u64>>,
+    tick: Arc<AtomicU64>,
+
+    /// If true, offload directly from device (G1) to disk (G3), bypassing host (G2)
+    bypass_cpu_mem: bool,
 }
 
 impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
     OffloadManager<Locality, Metadata>
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         disk: Option<Arc<dyn BlockPool<DiskStorage, Locality, Metadata>>>,
         host: Option<Arc<dyn BlockPool<PinnedStorage, Locality, Metadata>>>,
         device: Option<Arc<dyn BlockPool<DeviceStorage, Locality, Metadata>>>,
+        filters: OffloadFilters,
         config: OffloadManagerConfig,
     ) -> Result<Arc<Self>> {
         let (device_offload_tx, device_offload_rx) = mpsc::unbounded_channel();
         let (host_offload_tx, host_offload_rx) = mpsc::unbounded_channel();
+        let (device_to_disk_offload_tx, device_to_disk_offload_rx) = mpsc::unbounded_channel();
 
         let (host_onboard_tx, host_onboard_rx) = mpsc::unbounded_channel();
         let (disk_onboard_tx, disk_onboard_rx) = mpsc::unbounded_channel();
@@ -118,9 +136,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             device,
             device_offload_tx,
             host_offload_tx,
+            device_to_disk_offload_tx,
             host_onboard_tx,
             disk_onboard_tx,
-            tick: Arc::new(Mutex::new(0)),
+            tick: Arc::new(AtomicU64::new(0)),
+            bypass_cpu_mem: config.bypass_cpu_mem,
         });
 
         let cuda_ctx = Cuda::device_or_create(0)?;
@@ -141,10 +161,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Some(pool_config),
         ));
 
-        let device_metrics = config.metrics.pool("device");
-        let host_metrics = config.metrics.pool("host");
-        let disk_metrics = config.metrics.pool("disk");
-
         // Device -> Host offload
         let device_to_host_task = OffloadManager::offload_worker(
             this.device.clone(),
@@ -156,14 +172,16 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     MAX_CONCURRENT_TRANSFERS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
-                    device_metrics.clone(),
-                    "offload_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
-            device_metrics.clone(),
+            filters.device.clone(),
+            config
+                .kvbm_metrics
+                .as_ref()
+                .map(|m| m.offload_blocks_d2h.clone()),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -192,14 +210,16 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     MAX_CONCURRENT_TRANSFERS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
-                    host_metrics.clone(),
-                    "offload_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
-            host_metrics.clone(),
+            filters.host.clone(),
+            config
+                .kvbm_metrics
+                .as_ref()
+                .map(|m| m.offload_blocks_h2d.clone()),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -221,14 +241,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     MAX_CONCURRENT_TRANSFERS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
-                    host_metrics.clone(),
-                    "onboard_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
-            host_metrics.clone(),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -250,14 +267,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     MAX_CONCURRENT_TRANSFERS,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
-                    disk_metrics.clone(),
-                    "onboard_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
-            disk_metrics.clone(),
             config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -268,6 +282,43 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         )?
         .detach();
 
+        // Device -> Disk direct offload (bypass CPU memory)
+        if config.bypass_cpu_mem {
+            tracing::info!(
+                "G1->G3 direct offload enabled: Device will offload directly to Disk, bypassing Host memory (CPU cache disabled)"
+            );
+
+            let device_to_disk_task = OffloadManager::offload_worker(
+                this.device.clone(),
+                this.disk.clone(),
+                device_to_disk_offload_rx,
+                Arc::new(TransferBatcher::new(
+                    LocalTransferManager::new(
+                        transfer_ctx.clone(),
+                        MAX_CONCURRENT_TRANSFERS,
+                        &config.async_rt_handle,
+                        config.cancellation_token.clone(),
+                    )?,
+                    MAX_TRANSFER_BATCH_SIZE,
+                    &config.async_rt_handle,
+                    config.cancellation_token.clone(),
+                )),
+                filters.device.clone(),
+                config
+                    .kvbm_metrics
+                    .as_ref()
+                    .map(|m| m.offload_blocks_d2d.clone()),
+                config.cancellation_token.clone(),
+            );
+            CriticalTaskExecutionHandle::new_with_runtime(
+                |_| device_to_disk_task,
+                config.cancellation_token.clone(),
+                "Device -> Disk direct offload worker (bypass CPU)",
+                &config.async_rt_handle,
+            )?
+            .detach();
+        }
+
         Ok(this)
     }
 
@@ -276,7 +327,8 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         target_pool: Option<Arc<dyn BlockPool<Target, Locality, Metadata>>>,
         mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Locality, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Locality, Metadata>>,
-        pool_metrics: Arc<PoolMetrics>,
+        offload_filter: Option<Arc<dyn OffloadFilter>>,
+        offload_metric: Option<prometheus::IntCounter>,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
@@ -298,7 +350,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 match offload_rx.try_recv() {
                     Ok(request) => {
                         queue.insert(request);
-                        pool_metrics.gauge("offload_queue_size").inc();
                     }
                     Err(TryRecvError::Empty) => {
                         break;
@@ -309,7 +360,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 
             // If there is a request, process it.
             if let Some(request) = queue.pop_first() {
-                pool_metrics.gauge("offload_queue_size").dec();
                 // Try to upgrade the block to a strong reference.
                 let block = match request.block.upgrade() {
                     Some(block) => Some(ImmutableBlock::new(block)),
@@ -331,6 +381,12 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                         continue;
                     }
 
+                    if let Some(offload_filter) = offload_filter.as_ref()
+                        && !offload_filter.should_offload(request.sequence_hash)
+                    {
+                        continue;
+                    }
+
                     let target_block = 'target_block: {
                         if let Ok(blocks) = target_pool.allocate_blocks(1).await
                             && let Some(block) = blocks.into_iter().next()
@@ -345,11 +401,16 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     };
 
                     if let Some(target_block) = target_block {
-                        pool_metrics.counter("offload_processed").inc();
                         tracing::debug!(
                             "Offloading block with sequence hash {} to target pool.",
                             request.sequence_hash
                         );
+
+                        // Track the offload metric if available
+                        if let Some(ref metric) = offload_metric {
+                            metric.inc();
+                        }
+
                         transfer_manager
                             .enqueue_transfer(PendingTransfer::new(
                                 vec![block],
@@ -366,7 +427,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     _ = cancellation_token.cancelled() => return Ok(()),
                     Some(request) = offload_rx.recv() => {
                         queue.insert(request);
-                        pool_metrics.gauge("offload_queue_size").inc();
                     }
                 }
             }
@@ -378,7 +438,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         target_pool: Option<Arc<dyn BlockPool<Target, Locality, Metadata>>>,
         mut onboard_rx: mpsc::UnboundedReceiver<OnboardRequest<Source, Target, Locality, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Locality, Metadata>>,
-        pool_metrics: Arc<PoolMetrics>,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
@@ -390,10 +449,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             tokio::select! {
                 _ = cancellation_token.cancelled() => return Ok::<(), anyhow::Error>(()),
                 Some(request) = onboard_rx.recv() => {
-
-                    pool_metrics
-                        .gauge("onboard_queue_size")
-                        .set(onboard_rx.len() as i64);
 
                     // Try to allocate blocks on the device.
                     let target_blocks = if let Some(targets) = request.targets {
@@ -407,10 +462,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                             }
                         }
                     };
-
-                    pool_metrics
-                        .counter("onboard_processed")
-                        .inc_by(request.blocks.len() as u64);
 
                     tracing::debug!("Onboarding {} blocks to target pool.", request.blocks.len());
 
@@ -443,14 +494,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             }
         }
 
-        let mut tick = self.tick.lock().await;
+        let tick = self.tick.fetch_add(1, Ordering::Relaxed);
         let key = OffloadRequestKey {
             priority,
-            timestamp: *tick,
+            timestamp: tick,
         };
-        // Increment a counter for each block. Within the same priority, blocks with lower counter values are processed first.
-        *tick += 1;
-        drop(tick);
 
         // This can get called by all pools, regardless of whether or not they have a place to offload to.
         // Because of this, we need to check the block type here.
@@ -460,22 +508,42 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         if let Some(device_block) =
             any_block.downcast_ref::<ImmutableBlock<DeviceStorage, Locality, Metadata>>()
         {
-            // The host pool doesn't exist, so we can't offload to it.
-            if self.device_offload_tx.is_closed() {
-                return Ok(());
+            // Check if we should bypass CPU memory and go directly to disk
+            if self.bypass_cpu_mem && self.disk.is_some() {
+                // Offload directly from Device (G1) to Disk (G3), bypassing Host (G2)
+                if self.device_to_disk_offload_tx.is_closed() {
+                    return Ok(());
+                }
+
+                let request = OffloadRequest {
+                    block: Arc::downgrade(device_block.mutable_block()),
+                    sequence_hash: device_block.sequence_hash(),
+                    key,
+                };
+
+                tracing::debug!(
+                    "Offloading device block {} directly to disk (bypassing host memory)",
+                    device_block.sequence_hash()
+                );
+                self.device_to_disk_offload_tx.send(request).unwrap();
+            } else {
+                // Standard path: Device (G1) -> Host (G2)
+                if self.device_offload_tx.is_closed() {
+                    return Ok(());
+                }
+
+                let request = OffloadRequest {
+                    block: Arc::downgrade(device_block.mutable_block()),
+                    sequence_hash: device_block.sequence_hash(),
+                    key,
+                };
+
+                self.device_offload_tx.send(request).unwrap();
             }
-
-            let request = OffloadRequest {
-                block: Arc::downgrade(device_block.mutable_block()),
-                sequence_hash: device_block.sequence_hash(),
-                key,
-            };
-
-            self.device_offload_tx.send(request).unwrap();
         } else if let Some(host_block) =
             any_block.downcast_ref::<ImmutableBlock<PinnedStorage, Locality, Metadata>>()
         {
-            // The disk pool doesn't exist, so we can't offload to it.
+            // Host (G2) -> Disk (G3) offload
             if self.host_offload_tx.is_closed() {
                 return Ok(());
             }
@@ -584,7 +652,48 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
     }
 }
 
-#[cfg(all(test, feature = "testing-cuda"))]
+#[derive(Debug, Clone, Getters, Builder)]
+#[builder(pattern = "owned", build_fn(validate = "Self::validate"))]
+pub struct OffloadFilters {
+    #[builder(default)]
+    device: Option<Arc<dyn OffloadFilter>>,
+    #[builder(default)]
+    host: Option<Arc<dyn OffloadFilter>>,
+    #[builder(default)]
+    disk: Option<Arc<dyn OffloadFilter>>,
+}
+
+impl OffloadFilters {
+    pub fn builder() -> OffloadFiltersBuilder {
+        OffloadFiltersBuilder::default()
+    }
+}
+
+impl OffloadFiltersBuilder {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(disk) = self.disk.as_ref()
+            && disk.is_some()
+        {
+            return Err("Disk offload filter is not supported.".to_string());
+        }
+
+        let host_is_none = if let Some(host) = self.host.as_ref() {
+            host.is_none()
+        } else {
+            true
+        };
+
+        if host_is_none {
+            tracing::warn!(
+                "Host to Disk offload filter is not provided. All blocks in host will be offloaded to disk. This may result in excessive disk offloading and accelerated SSD degradation."
+            );
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "testing-cuda", feature = "testing-nixl"))]
 mod tests {
     use super::*;
 
@@ -604,8 +713,7 @@ mod tests {
     use nixl_sys::{MemoryRegion, NixlDescriptor};
 
     use aligned_vec::avec;
-    use cudarc::runtime::sys::{cudaMemcpy, cudaMemcpyKind, cudaMemset};
-    use prometheus::Registry;
+    use cudarc::runtime::sys::{cudaDeviceSynchronize, cudaMemcpy, cudaMemcpyKind, cudaMemset};
     use rstest::*;
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -685,6 +793,7 @@ mod tests {
             inner_dim,
             LayoutType::FullyContiguous,
             BlockRegistrationDuplicationSetting::Disabled,
+            false,
         )
     }
 
@@ -696,6 +805,7 @@ mod tests {
         inner_dim: Option<usize>,
         layout_type: LayoutType,
         duplication_setting: BlockRegistrationDuplicationSetting,
+        bypass_cpu_mem: bool,
     ) -> Result<(
         Arc<OffloadManager<Local, BasicMetadata>>,
         DevicePool,
@@ -762,15 +872,17 @@ mod tests {
         let config = OffloadManagerConfig {
             nixl_agent: agent_arc,
             async_rt_handle,
-            metrics: BlockManagerMetrics::new(&Arc::new(Registry::new()))?,
             cancellation_token: CancellationToken::new(),
             model_config: minimal_config,
+            kvbm_metrics: None,
+            bypass_cpu_mem,
         };
 
         let manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
+            OffloadFilters::builder().build()?,
             config,
         )?;
 
@@ -955,6 +1067,7 @@ mod tests {
             None,
             layout_type,
             BlockRegistrationDuplicationSetting::Disabled,
+            false,
         )?;
 
         let device_pool = device_pool.as_ref().unwrap();
@@ -992,6 +1105,71 @@ mod tests {
         );
 
         check_block_contents(&immutable_device_block, &host_blocks[0], 42)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_offload_device_to_disk_bypass_cpu() -> Result<()> {
+        let (offload_manager, device_pool, host_pool, disk_pool) = build_pools_with_layout(
+            4,
+            Some(4),
+            Some(4),
+            None,
+            LayoutType::FullyContiguous,
+            BlockRegistrationDuplicationSetting::Disabled,
+            true,
+        )?;
+
+        let device_pool = device_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
+        let disk_pool = disk_pool.as_ref().unwrap();
+
+        // Create a block and register it with the offload manager
+        let block = completed_block(device_pool, [0, 1, 2, 3]).await?;
+
+        let immutable_device_block = device_pool
+            .register_blocks(vec![block])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(anyhow::anyhow!("Failed to register block"))?;
+
+        populate_block(&immutable_device_block, 42)?;
+
+        // Synchronize ALL CUDA streams to ensure populate_block completes before offload starts
+        // This is critical because cudaMemset uses the default stream, but GDS transfer uses a different stream
+        unsafe {
+            cudaDeviceSynchronize().result()?;
+        }
+
+        // Offloads should only go to G3 directly since bypass_cpu_mem is true in offload_manager config
+        offload_manager.offload(&immutable_device_block, 0).await?;
+
+        // Wait for it to be processed.
+        // TODO: This is a bit of a hack, and may lead to non-deterministic behavior.
+        // In theory, the offload + memcpy should take much less time than this.
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+        // Check that the block exists in the host pool
+        let disk_blocks = disk_pool
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
+            .await?;
+
+        assert_eq!(disk_blocks.len(), 1);
+        assert_eq!(
+            disk_blocks[0].sequence_hash(),
+            immutable_device_block.sequence_hash()
+        );
+
+        check_block_contents(&immutable_device_block, &disk_blocks[0], 42)?;
+
+        let host_blocks = host_pool
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
+            .await?;
+
+        // since host is bypassed, there should be no host blocks
+        assert_eq!(host_blocks.len(), 0);
 
         Ok(())
     }
@@ -1057,6 +1235,7 @@ mod tests {
             None,
             layout_type,
             BlockRegistrationDuplicationSetting::Disabled,
+            false,
         )?;
 
         let device_pool = device_pool.as_ref().unwrap();
@@ -1106,6 +1285,8 @@ mod tests {
         // Check that this is the same block.
         check_block_contents(&immutable_host_block, &device_blocks[0], 42)?;
 
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
         Ok(())
     }
 
@@ -1122,6 +1303,7 @@ mod tests {
             None,
             layout_type,
             BlockRegistrationDuplicationSetting::Disabled,
+            false,
         )?;
 
         let device_pool = device_pool.as_ref().unwrap();
@@ -1250,6 +1432,7 @@ mod tests {
             None,
             layout_type,
             BlockRegistrationDuplicationSetting::Disabled,
+            false,
         )?;
 
         let host_pool = host_pool.as_ref().unwrap();
@@ -1296,6 +1479,7 @@ mod tests {
             None,
             layout_type,
             BlockRegistrationDuplicationSetting::Disabled,
+            false,
         )?;
 
         let device_pool = device_pool.as_ref().unwrap();
@@ -1346,6 +1530,7 @@ mod tests {
             None,
             layout_type,
             BlockRegistrationDuplicationSetting::Disabled,
+            false,
         )?;
 
         let disk_pool = disk_pool.as_ref().unwrap();
@@ -1455,6 +1640,7 @@ mod tests {
                 Some(GDS_ALIGNMENT), // Use GDS-friendly alignment
                 layout_type,
                 BlockRegistrationDuplicationSetting::Disabled,
+                false,
             )?;
 
             let host_pool = host_pool.as_ref().unwrap();
@@ -1561,6 +1747,7 @@ mod tests {
                 None,    // inner_dim
                 LayoutType::FullyContiguous,
                 BlockRegistrationDuplicationSetting::Disabled,
+                false,
             )?;
 
             let disk_pool = disk_pool
@@ -1631,6 +1818,7 @@ mod tests {
                 None,
                 LayoutType::FullyContiguous,
                 BlockRegistrationDuplicationSetting::Disabled,
+                false,
             );
 
             match result {
@@ -1661,6 +1849,7 @@ mod tests {
                 None,    // inner_dim
                 LayoutType::FullyContiguous,
                 BlockRegistrationDuplicationSetting::Disabled,
+                false,
             );
 
             // This should succeed, but we'll test behavior under constrained conditions
@@ -1696,6 +1885,7 @@ mod tests {
                 Some(4096), // GDS-friendly alignment
                 LayoutType::FullyContiguous,
                 BlockRegistrationDuplicationSetting::Disabled,
+                false,
             )?;
 
             let host_pool = host_pool.as_ref().unwrap();
@@ -1770,6 +1960,7 @@ mod tests {
                     outer_contiguous: false,
                 }, // Most complex
                 BlockRegistrationDuplicationSetting::Disabled,
+                false,
             )
         }
 

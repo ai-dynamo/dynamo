@@ -29,12 +29,13 @@
 //!
 //! TODO: Top-level Overview of Endpoints/Functions
 
+use std::fmt;
+
 use crate::{
     config::HealthStatus,
-    discovery::Lease,
-    metrics::{MetricsRegistry, prometheus_names},
+    metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
     service::ServiceSet,
-    transports::etcd::EtcdPath,
+    transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
 };
 
 use super::{
@@ -70,12 +71,9 @@ pub mod service;
 
 pub use client::{Client, InstanceSource};
 
-/// The root etcd path where each instance registers itself in etcd.
+/// The root key-value path where each instance registers itself in.
 /// An instance is namespace+component+endpoint+lease_id and must be unique.
-pub const INSTANCE_ROOT_PATH: &str = "instances";
-
-/// The root etcd path where each namespace is registered in etcd.
-pub const ETCD_ROOT_PATH: &str = "dynamo://";
+pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -86,7 +84,7 @@ pub enum TransportType {
 #[derive(Default)]
 pub struct RegistryInner {
     services: HashMap<String, Service>,
-    stats_handlers: HashMap<String, Arc<std::sync::Mutex<HashMap<String, EndpointStatsHandler>>>>,
+    stats_handlers: HashMap<String, Arc<parking_lot::Mutex<HashMap<String, EndpointStatsHandler>>>>,
 }
 
 #[derive(Clone)]
@@ -94,17 +92,17 @@ pub struct Registry {
     inner: Arc<tokio::sync::Mutex<RegistryInner>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Instance {
     pub component: String,
     pub endpoint: String,
     pub namespace: String,
-    pub instance_id: i64,
+    pub instance_id: u64,
     pub transport: TransportType,
 }
 
 impl Instance {
-    pub fn id(&self) -> i64 {
+    pub fn id(&self) -> u64 {
         self.instance_id
     }
     pub fn endpoint_id(&self) -> EndpointId {
@@ -113,6 +111,30 @@ impl Instance {
             component: self.component.clone(),
             name: self.endpoint.clone(),
         }
+    }
+}
+
+impl fmt::Display for Instance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}/{}/{}/{}",
+            self.namespace, self.component, self.endpoint, self.instance_id
+        )
+    }
+}
+
+/// Sort by string name
+impl std::cmp::Ord for Instance {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.to_string().cmp(&other.to_string())
+    }
+}
+
+impl PartialOrd for Instance {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Since Ord is fully implemented, the comparison is always total.
+        Some(self.cmp(other))
     }
 }
 
@@ -147,6 +169,10 @@ pub struct Component {
     // A static component's endpoints cannot be discovered via etcd, they are
     // fixed at startup time.
     is_static: bool,
+
+    /// This hierarchy's own metrics registry
+    #[builder(default = "crate::MetricsRegistry::new()")]
+    metrics_registry: crate::MetricsRegistry,
 }
 
 impl Hash for Component {
@@ -185,23 +211,31 @@ impl RuntimeProvider for Component {
     }
 }
 
-impl MetricsRegistry for Component {
+impl MetricsHierarchy for Component {
     fn basename(&self) -> String {
         self.name.clone()
     }
 
-    fn parent_hierarchy(&self) -> Vec<String> {
-        [
-            self.namespace.parent_hierarchy(),
-            vec![self.namespace.basename()],
-        ]
-        .concat()
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        let mut parents = vec![];
+
+        // Get all ancestors of namespace (DRT, parent namespaces, etc.)
+        parents.extend(self.namespace.parent_hierarchies());
+
+        // Add namespace itself
+        parents.push(&self.namespace as &dyn MetricsHierarchy);
+
+        parents
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        &self.metrics_registry
     }
 }
 
 impl Component {
-    /// The component part of an instance path in etcd.
-    pub fn etcd_root(&self) -> String {
+    /// The component part of an instance path in key-value store.
+    pub fn instance_root(&self) -> String {
         let ns = self.namespace.name();
         let cp = &self.name;
         format!("{INSTANCE_ROOT_PATH}/{ns}/{cp}")
@@ -239,31 +273,28 @@ impl Component {
             name: endpoint.into(),
             is_static: self.is_static,
             labels: Vec::new(),
+            metrics_registry: crate::MetricsRegistry::new(),
         }
     }
 
     pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
-        let Some(etcd_client) = self.drt.etcd_client() else {
+        let client = self.drt.store();
+        let Some(bucket) = client.get_bucket(&self.instance_root()).await? else {
             return Ok(vec![]);
         };
-        let mut out = vec![];
-        // The extra slash is important to only list exact component matches, not substrings.
-        for kv in etcd_client
-            .kv_get_prefix(format!("{}/", self.etcd_root()))
-            .await?
-        {
-            let val = match serde_json::from_slice::<Instance>(kv.value()) {
+        let entries = bucket.entries().await?;
+        let mut instances = Vec::with_capacity(entries.len());
+        for (name, bytes) in entries.into_iter() {
+            let val = match serde_json::from_slice::<Instance>(&bytes) {
                 Ok(val) => val,
                 Err(err) => {
-                    anyhow::bail!(
-                        "Error converting etcd response to Instance: {err}. {}",
-                        kv.value_str()?
-                    );
+                    anyhow::bail!("Error converting storage response to Instance: {err}. {name}",);
                 }
             };
-            out.push(val);
+            instances.push(val);
         }
-        Ok(out)
+        instances.sort();
+        Ok(instances)
     }
 
     /// Scrape ServiceSet, which contains NATS stats as well as user defined stats
@@ -271,7 +302,9 @@ impl Component {
     pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {
         // Debug: scraping stats for component
         let service_name = self.service_name();
-        let service_client = self.drt().service_client();
+        let Some(service_client) = self.drt().service_client() else {
+            anyhow::bail!("ServiceSet is gathered via NATS, do not call this in non-NATS setups.");
+        };
         service_client
             .collect_services(&service_name, timeout)
             .await
@@ -291,15 +324,6 @@ impl Component {
         let component_metrics = ComponentNatsServerPrometheusMetrics::new(self)?;
 
         let component_clone = self.clone();
-        let mut hierarchies = self.parent_hierarchy();
-        hierarchies.push(self.hierarchy());
-        debug_assert!(
-            hierarchies
-                .last()
-                .map(|x| x.as_str())
-                .unwrap_or_default()
-                .eq_ignore_ascii_case(&self.service_name())
-        ); // it happens that in component, hierarchy and service name are the same
 
         // Start a background task that scrapes stats every 5 seconds
         let m = component_metrics.clone();
@@ -350,8 +374,48 @@ impl Component {
         unimplemented!("collect_stats")
     }
 
-    pub fn service_builder(&self) -> service::ServiceConfigBuilder {
-        service::ServiceConfigBuilder::from_component(self.clone())
+    pub async fn add_stats_service(&mut self) -> anyhow::Result<()> {
+        let service_name = self.service_name();
+
+        // Pre-check to save cost of creating the service, but don't hold the lock
+        if self
+            .drt
+            .component_registry
+            .inner
+            .lock()
+            .await
+            .services
+            .contains_key(&service_name)
+        {
+            anyhow::bail!("Service {service_name} already exists");
+        }
+
+        let Some(nats_client) = self.drt.nats_client() else {
+            anyhow::bail!("Cannot create NATS service without NATS.");
+        };
+        let description = None;
+        let (nats_service, stats_reg) =
+            service::build_nats_service(nats_client, self, description).await?;
+
+        let mut guard = self.drt.component_registry.inner.lock().await;
+        if !guard.services.contains_key(&service_name) {
+            // Normal case
+            guard.services.insert(service_name.clone(), nats_service);
+            guard.stats_handlers.insert(service_name.clone(), stats_reg);
+            drop(guard);
+        } else {
+            drop(guard);
+            let _ = nats_service.stop().await;
+            return Err(anyhow::anyhow!(
+                "Service create race for {service_name}, now already exists"
+            ));
+        }
+
+        // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
+        if let Err(err) = self.start_scraping_nats_service_component_metrics() {
+            tracing::debug!(service_name, error = %err, "Metrics registration failed");
+        }
+        Ok(())
     }
 }
 
@@ -373,6 +437,9 @@ pub struct Endpoint {
 
     /// Additional labels for metrics
     labels: Vec<(String, String)>,
+
+    /// This hierarchy's own metrics registry
+    metrics_registry: crate::MetricsRegistry,
 }
 
 impl Hash for Endpoint {
@@ -405,17 +472,25 @@ impl RuntimeProvider for Endpoint {
     }
 }
 
-impl MetricsRegistry for Endpoint {
+impl MetricsHierarchy for Endpoint {
     fn basename(&self) -> String {
         self.name.clone()
     }
 
-    fn parent_hierarchy(&self) -> Vec<String> {
-        [
-            self.component.parent_hierarchy(),
-            vec![self.component.basename()],
-        ]
-        .concat()
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        let mut parents = vec![];
+
+        // Get all ancestors of component (DRT, Namespace, etc.)
+        parents.extend(self.component.parent_hierarchies());
+
+        // Add component itself
+        parents.push(&self.component as &dyn MetricsHierarchy);
+
+        parents
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        &self.metrics_registry
     }
 }
 
@@ -448,7 +523,7 @@ impl Endpoint {
 
     /// The endpoint part of an instance path in etcd
     pub fn etcd_root(&self) -> String {
-        let component_path = self.component.etcd_root();
+        let component_path = self.component.instance_root();
         let endpoint_name = &self.name;
         format!("{component_path}/{endpoint_name}")
     }
@@ -464,12 +539,12 @@ impl Endpoint {
     }
 
     /// The fully path of an instance in etcd
-    pub fn etcd_path_with_lease_id(&self, lease_id: i64) -> String {
+    pub fn etcd_path_with_lease_id(&self, lease_id: u64) -> String {
         format!("{INSTANCE_ROOT_PATH}/{}", self.unique_path(lease_id))
     }
 
     /// Full path of this endpoint with forward slash separators, including lease id
-    pub fn unique_path(&self, lease_id: i64) -> String {
+    pub fn unique_path(&self, lease_id: u64) -> String {
         let ns = self.component.namespace().name();
         let cp = self.component.name();
         let ep = self.name();
@@ -491,7 +566,7 @@ impl Endpoint {
         }
     }
 
-    pub fn name_with_id(&self, lease_id: i64) -> String {
+    pub fn name_with_id(&self, lease_id: u64) -> String {
         if self.is_static {
             self.name.clone()
         } else {
@@ -504,7 +579,7 @@ impl Endpoint {
     }
 
     /// Subject to an instance of the [Endpoint] with a specific lease id
-    pub fn subject_to(&self, lease_id: i64) -> String {
+    pub fn subject_to(&self, lease_id: u64) -> String {
         format!(
             "{}.{}",
             self.component.service_name(),
@@ -542,6 +617,10 @@ pub struct Namespace {
     /// Additional labels for metrics
     #[builder(default = "Vec::new()")]
     labels: Vec<(String, String)>,
+
+    /// This hierarchy's own metrics registry
+    #[builder(default = "crate::MetricsRegistry::new()")]
+    metrics_registry: crate::MetricsRegistry,
 }
 
 impl DistributedRuntimeProvider for Namespace {
@@ -601,7 +680,7 @@ impl Namespace {
     }
 
     pub fn etcd_path(&self) -> String {
-        format!("{}{}", ETCD_ROOT_PATH, self.name())
+        format!("{ETCD_ROOT_PATH}{}", self.name())
     }
 
     pub fn name(&self) -> String {

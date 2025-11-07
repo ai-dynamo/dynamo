@@ -11,12 +11,6 @@
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
-# For static mode (no etcd auto-discovery):
-# - python -m dynamo.frontend --model-name Qwen3-0.6B-Q8_0.gguf --model-path ~/llms/Qwen3-0.6B --static-endpoint dynamo.backend.generate
-# Worker example:
-# - cd lib/bindings/python/examples/hello_world
-# - python server_sglang_static.py
-#
 # For TLS:
 # - python -m dynamo.frontend --http-port 8443 --tls-cert-path cert.pem --tls-key-path key.pem
 #
@@ -27,9 +21,12 @@ import logging
 import os
 import pathlib
 import re
+import signal
 
 import uvloop
 
+from dynamo.common.config_dump import dump_config
+from dynamo.common.config_dump.config_dumper import add_config_dump_args
 from dynamo.llm import (
     EngineType,
     EntrypointArgs,
@@ -43,7 +40,11 @@ from dynamo.runtime import DistributedRuntime
 
 from . import __version__
 
-DYNAMO_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
+DYN_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
+CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR = (
+    "CUSTOM_BACKEND_METRICS_POLLING_INTERVAL"
+)
+CUSTOM_BACKEND_ENDPOINT_ENV_VAR = "CUSTOM_BACKEND_ENDPOINT"
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,7 @@ def parse_args():
     parser.add_argument(
         "--namespace",
         type=str,
-        default=os.environ.get(DYNAMO_NAMESPACE_ENV_VAR),
+        default=os.environ.get(DYN_NAMESPACE_ENV_VAR),
         help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery).",
     )
     parser.add_argument(
@@ -207,6 +208,23 @@ def parse_args():
         default=False,
         help="Start KServe gRPC server.",
     )
+    add_config_dump_args(parser)
+    parser.add_argument(
+        "--custom-backend-metrics-endpoint",
+        type=str,
+        default=os.environ.get(
+            CUSTOM_BACKEND_ENDPOINT_ENV_VAR, "nim.backend.runtime_stats"
+        ),
+        help=f"Custom backend endpoint to poll for metrics in format 'namespace.component.endpoint' (default: 'nim.backend.runtime_stats'). Required if --custom-backend-metrics-polling-interval is specified. All metrics will be prefixed with 'dynamo_component_' in Prometheus. Can be set via {CUSTOM_BACKEND_ENDPOINT_ENV_VAR} env var.",
+    )
+    parser.add_argument(
+        "--custom-backend-metrics-polling-interval",
+        type=float,
+        default=float(
+            os.environ.get(CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR, "0")
+        ),
+        help=f"Interval in seconds for polling custom backend metrics. Set to > 0 to enable polling (default: 0=disabled, suggested: 9.2s which is less than typical Prometheus scrape interval). Can be set via {CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR} env var.",
+    )
 
     flags = parser.parse_args()
 
@@ -214,12 +232,17 @@ def parse_args():
         parser.error("--static-endpoint requires both --model-name and --model-path")
     if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
         parser.error("--tls-cert-path and --tls-key-path must be provided together")
+    if flags.custom_backend_metrics_polling_interval < 0:
+        parser.error(
+            "--custom-backend-metrics-polling-interval must be >= 0 (0=disabled)"
+        )
 
     return flags
 
 
 async def async_main():
     flags = parse_args()
+    dump_config(flags.dump_config_to, flags)
     is_static = bool(flags.static_endpoint)  # true if the string has a value
 
     # Configure Dynamo frontend HTTP service metrics prefix
@@ -228,7 +251,15 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
-    runtime = DistributedRuntime(asyncio.get_running_loop(), is_static)
+    loop = asyncio.get_running_loop()
+
+    runtime = DistributedRuntime(loop, is_static)
+
+    def signal_handler():
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
 
     if flags.router_mode == "kv":
         router_mode = RouterMode.KV
@@ -270,6 +301,14 @@ async def async_main():
         kwargs["tls_key_path"] = flags.tls_key_path
     if flags.namespace:
         kwargs["namespace"] = flags.namespace
+    if flags.custom_backend_metrics_endpoint:
+        kwargs[
+            "custom_backend_metrics_endpoint"
+        ] = flags.custom_backend_metrics_endpoint
+    if flags.custom_backend_metrics_polling_interval:
+        kwargs[
+            "custom_backend_metrics_polling_interval"
+        ] = flags.custom_backend_metrics_polling_interval
 
     if is_static:
         # out=dyn://<static_endpoint>
@@ -289,6 +328,10 @@ async def async_main():
             await run_input(runtime, "http", engine)
     except asyncio.exceptions.CancelledError:
         pass
+
+
+async def graceful_shutdown(runtime):
+    runtime.shutdown()
 
 
 def main():

@@ -163,7 +163,7 @@ class VllmBaseWorker:
         ).replace("*", "127.0.0.1")
 
         zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=endpoint.lease_id(),
+            worker_id=endpoint.connection_id(),
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
         )
@@ -266,21 +266,19 @@ class VllmPDWorker(VllmBaseWorker):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
-        embeddings, descriptor = None, None
-
-        # Process embeddings using the connector
-        # Create a descriptor based on the embedding shape.
-        embeddings = torch.empty(
-            request.embeddings_shape,
-            dtype=self.EMBEDDINGS_DTYPE,
-            device=self.EMBEDDINGS_DEVICE,
-        )
-        descriptor = connect.Descriptor(embeddings)
-
         if (
             request.multimodal_input.image_url is None
             and request.multimodal_input.video_url is None
         ):
+            # Process embeddings using the connector
+            # Create a descriptor based on the embedding shape.
+            embeddings = torch.empty(
+                request.embeddings_shape,
+                dtype=self.EMBEDDINGS_DTYPE,
+                device=self.EMBEDDINGS_DEVICE,
+            )
+            descriptor = connect.Descriptor(embeddings)
+
             if descriptor is None:
                 raise RuntimeError(
                     "Descriptor is None in PD worker - cannot process embeddings"

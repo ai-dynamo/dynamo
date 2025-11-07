@@ -1,26 +1,33 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from .decode_handler import DecodeWorkerHandler
+# Embedding handlers
+from .embedding import EmbeddingWorkerHandler
 
 # Base handlers
 from .handler_base import BaseWorkerHandler
 
+# LLM handlers
+from .llm import DecodeWorkerHandler, PrefillWorkerHandler
+
 # Multimodal handlers
-from .multimodal_encode_worker_handler import MultimodalEncodeWorkerHandler
-from .multimodal_processor_handler import MultimodalProcessorHandler
-from .multimodal_worker_handler import (
+from .multimodal import (
+    MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
+    MultimodalProcessorHandler,
     MultimodalWorkerHandler,
 )
-from .prefill_handler import PrefillWorkerHandler
 
 __all__ = [
     "BaseWorkerHandler",
+    # LLM handlers
     "DecodeWorkerHandler",
     "PrefillWorkerHandler",
-    "MultimodalProcessorHandler",
+    # Embedding handlers
+    "EmbeddingWorkerHandler",
+    # Multimodal handlers
     "MultimodalEncodeWorkerHandler",
-    "MultimodalWorkerHandler",
     "MultimodalPrefillWorkerHandler",
+    "MultimodalProcessorHandler",
+    "MultimodalWorkerHandler",
 ]
