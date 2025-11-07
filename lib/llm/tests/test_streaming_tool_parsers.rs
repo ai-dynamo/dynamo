@@ -846,4 +846,39 @@ mod tests {
             "finish_reason validation failed for tool call case"
         );
     }
+
+    #[tokio::test]
+    async fn test_qwen_finish_reason_length_vllm() {
+        let file_paths = vec![
+            format!(
+                "{}/vllm/qwen3-0.6B/chat_completion_stream_finish_length.json",
+                DATA_ROOT_PATH
+            ),
+            format!(
+                "{}/vllm/qwen3-0.6B/chat_completion_incomplete_tool.json",
+                DATA_ROOT_PATH
+            ),
+        ];
+
+        for file_path in file_paths {
+            let test_data = load_test_data(&file_path);
+
+            // Create a stream from the mock chunks
+            let input_stream = stream::iter(test_data.stream_chunks);
+
+            // Parse the response stream with tool parsing enabled
+            let output_chunks =
+                parse_response_stream(input_stream, true, false, Some("hermes".to_string()), None)
+                    .await;
+
+            // Verify we got output chunks
+            assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+            // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is Length
+            assert!(
+                validate_finish_reason(&output_chunks, FinishReason::Length),
+                "finish_reason validation failed for length finish case"
+            );
+        }
+    }
 }

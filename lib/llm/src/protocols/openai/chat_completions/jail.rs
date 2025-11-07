@@ -73,6 +73,8 @@ struct ChoiceJailState {
     accumulated_content: String,
     /// Buffer for partial marker matches across chunks
     partial_match_buffer: String,
+    /// Stream finish reason
+    stream_finish_reason: Option<FinishReason>,
 }
 
 fn create_choice_stream(
@@ -107,6 +109,7 @@ impl ChoiceJailState {
             is_jailed: false,
             accumulated_content: String::new(),
             partial_match_buffer: String::new(),
+            stream_finish_reason: None,
         }
     }
 
@@ -131,7 +134,6 @@ impl ChoiceJailState {
         jail_stream: &JailedStream,
     ) -> Vec<ChoiceEmission> {
         let mut emissions = Vec::new();
-
         if !self.is_jailed {
             // Use the marker matcher to detect complete/partial markers
             let match_result = jail_stream
@@ -153,7 +155,7 @@ impl ChoiceJailState {
                             choice.delta.role,
                             &prefix,
                             None,
-                            None,
+                            choice.finish_reason,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -193,7 +195,7 @@ impl ChoiceJailState {
                                 choice.delta.role,
                                 trailing_part,
                                 None,
-                                None,
+                                choice.finish_reason,
                                 choice.logprobs.clone(),
                             );
                             emissions.push(ChoiceEmission::Trailing(trailing_choice));
@@ -225,7 +227,7 @@ impl ChoiceJailState {
                             choice.delta.role,
                             &prefix,
                             None,
-                            None,
+                            choice.finish_reason,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -268,7 +270,7 @@ impl ChoiceJailState {
                                 choice.delta.role,
                                 &content,
                                 None,
-                                None,
+                                choice.finish_reason,
                                 choice.logprobs.clone(),
                             );
                             emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
@@ -313,7 +315,7 @@ impl ChoiceJailState {
                         choice.delta.role,
                         trailing_part,
                         None,
-                        None,
+                        choice.finish_reason,
                         choice.logprobs.clone(),
                     );
                     emissions.push(ChoiceEmission::Trailing(trailing_choice));
@@ -324,7 +326,6 @@ impl ChoiceJailState {
             }
             // If not unjailing, don't emit anything (still accumulating)
         }
-
         emissions
     }
 
@@ -343,7 +344,7 @@ impl ChoiceJailState {
                 Some(Role::Assistant),
                 &self.accumulated_content,
                 None,
-                None,
+                self.stream_finish_reason, // For the accumulated content, assign the original stream finish reason, otherwise it will get lost
                 None,
             );
 
@@ -463,6 +464,7 @@ impl JailedStream {
             // Pin the stream for iteration (stack pinning is more efficient)
             tokio::pin!(stream);
 
+
             // Process each item in the stream
             while let Some(response) = stream.next().await {
                 if let Some(chat_response) = response.data.as_ref() {
@@ -480,6 +482,9 @@ impl JailedStream {
                                     last_annotated_event = response.event.clone();
                                     last_annotated_comment = response.comment.clone();
                                 }
+
+                            // Track actual stream finish reason in the choice state
+                            choice_state.stream_finish_reason = choice.finish_reason;
 
                             // Process this choice and get emissions
                             let emissions = choice_state.process_content(choice, content, &self).await;
@@ -721,7 +726,6 @@ impl JailedStream {
                     }),
                 })
                 .collect();
-
             // Create choice with tool calls
             let choice = create_choice_stream(
                 choice_index,
@@ -740,7 +744,7 @@ impl JailedStream {
             Some(Role::Assistant),
             accumulated_content,
             None,
-            None,
+            base_choice.finish_reason,
             base_choice.logprobs.clone(),
         )
     }
@@ -786,7 +790,7 @@ impl JailedStream {
                 // If this chunk has finish_reason and the choice had tool calls, override to ToolCalls
                 if let Some(ref mut data) = response.data {
                     for choice in &mut data.choices {
-                        if choice.finish_reason.is_some()
+                        if choice.finish_reason.is_some() && choice.finish_reason == Some(FinishReason::Stop)
                             && has_tool_calls_per_choice.get(&choice.index).copied().unwrap_or(false)
                         {
                             choice.finish_reason = Some(FinishReason::ToolCalls);
