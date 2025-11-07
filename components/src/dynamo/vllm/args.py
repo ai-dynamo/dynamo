@@ -226,7 +226,6 @@ def parse_args() -> Config:
         config.component = "encoder"
         config.endpoint = "generate"
     elif args.multimodal_decode_worker:
-        # Multimodal decode worker in disaggregated mode
         # Uses "decoder" component name because prefill worker connects to "decoder"
         # (prefill uses "backend" to receive from encoder)
         config.component = "decoder"

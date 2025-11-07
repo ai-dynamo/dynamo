@@ -69,10 +69,6 @@ echo "Model: $MODEL_NAME"
 echo "Prompt Template: $PROMPT_TEMPLATE"
 echo "=================================================="
 
-#export UCX_TLS=sm,self,tcp
-
-echo "UCX Transport: $UCX_TLS (local same-machine mode)"
-echo "=================================================="
 
 # Start frontend (no router mode)
 echo "Starting frontend..."
@@ -88,11 +84,11 @@ if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
     EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 2048"
 fi
 
-# Start encode worker 
+# Start encode worker
 echo "Starting encode worker on GPU 1..."
 CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-encode-worker --model $MODEL_NAME  $EXTRA_ARGS &
 
-# Start prefill worker 
+# Start prefill worker
 echo "Starting prefill worker on GPU 2..."
 CUDA_VISIBLE_DEVICES=2 python -m dynamo.vllm --multimodal-worker --is-prefill-worker --model $MODEL_NAME $EXTRA_ARGS &
 

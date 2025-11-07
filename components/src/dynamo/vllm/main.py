@@ -636,15 +636,6 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
 
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
 
-    """
-
-    is_prefill_worker: 
-    handler: MultimodalPDWorkerHandler with decode_worker_client
-
-    if-decode-worker:
-    handler: MultimodalDecodeWorkerHandler
-    """
-
     # Set up decode worker client for disaggregated mode
     decode_worker_client = None
     if config.is_prefill_worker:
