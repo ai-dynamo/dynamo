@@ -13,6 +13,8 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --connecto
 
 # run prefill worker on GPU 1 with KVBM enabled using 20GB of CPU cache
 # NOTE: remove --enforce-eager for production use
+DYN_VLLM_KV_EVENT_PORT=20081 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 DYN_KVBM_CPU_CACHE_GB=20 \
 CUDA_VISIBLE_DEVICES=1 \
   python3 -m dynamo.vllm \

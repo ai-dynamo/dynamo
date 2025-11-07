@@ -85,8 +85,6 @@ pub const MAX_TOOLS: usize = 128;
 // Metadata validation constants removed - we are no longer restricting the metadata field char limits
 /// Maximum allowed length for function names
 pub const MAX_FUNCTION_NAME_LENGTH: usize = 64;
-/// Maximum allowed value for Prompt IntegerArray elements
-pub const MAX_PROMPT_TOKEN_ID: u32 = 50256;
 /// Minimum allowed value for `repetition_penalty`
 pub const MIN_REPETITION_PENALTY: f32 = 0.0;
 /// Maximum allowed value for `repetition_penalty`
@@ -440,16 +438,6 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
             if arr.is_empty() {
                 anyhow::bail!("Prompt integer array cannot be empty");
             }
-            for (i, &token_id) in arr.iter().enumerate() {
-                if token_id > MAX_PROMPT_TOKEN_ID {
-                    anyhow::bail!(
-                        "Token ID at index {} must be between 0 and {}, got {}",
-                        i,
-                        MAX_PROMPT_TOKEN_ID,
-                        token_id
-                    );
-                }
-            }
         }
         dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
             if arr.is_empty() {
@@ -458,17 +446,6 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
             for (i, inner_arr) in arr.iter().enumerate() {
                 if inner_arr.is_empty() {
                     anyhow::bail!("Prompt integer array at index {} cannot be empty", i);
-                }
-                for (j, &token_id) in inner_arr.iter().enumerate() {
-                    if token_id > MAX_PROMPT_TOKEN_ID {
-                        anyhow::bail!(
-                            "Token ID at index [{}][{}] must be between 0 and {}, got {}",
-                            i,
-                            j,
-                            MAX_PROMPT_TOKEN_ID,
-                            token_id
-                        );
-                    }
                 }
             }
         }
