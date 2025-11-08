@@ -96,7 +96,6 @@ class kvbm:
 
 
 class kvrouter:
-
     # Number of KV cache events applied to the index (including status)
     KV_CACHE_EVENTS_APPLIED = "kv_cache_events_applied"
 
