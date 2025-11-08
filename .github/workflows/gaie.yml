@@ -213,7 +213,7 @@ jobs:
           # Create ephemeral namespace for Dynamo
           PROFILE_SANITIZED="${PROFILE//_/-}"
           echo "NAMESPACE=gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED}" >> $GITHUB_ENV
-          echo "DEPLOYMENT_FILE=deploy/${PROFILE}.yaml" >> $GITHUB_ENV
+          echo "DEPLOYMENT_FILE=${PROFILE}.yaml" >> $GITHUB_ENV
           kubectl delete namespace gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED} || true
           kubectl create namespace gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED}
           kubectl label namespaces gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED} \
@@ -290,6 +290,8 @@ jobs:
           DYNAMO_DIR: ${{ env.DYNAMO_DIR }}
         run: |
           set -euo pipefail
+          echo "GAIE_DIR=${GAIE_DIR}"
+          echo "DYNAMO_DIR=${DYNAMO_DIR}"
           cd ${DYNAMO_DIR}/deploy/inference-gateway
           ./build-epp-dynamo.sh
           EPP_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}"
