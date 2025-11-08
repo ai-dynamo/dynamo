@@ -1,0 +1,310 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Nightly CI pipeline
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # Every day at 12:00 AM PST (08:00 UTC)
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-nightly-${{ github.run_id }}
+  cancel-in-progress: false  # Nightlies should finish even if out of date
+
+jobs:
+
+  # --- Build Stage: All Frameworks, All Architectures ---
+  build:
+    name: Build (${{ matrix.framework }} | ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: vllm
+            arch: amd64
+            runner: gpu-l40-amd64
+          - framework: vllm
+            arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+          - framework: trtllm
+            arch: amd64
+            runner: gpu-l40-amd64
+          - framework: trtllm
+            arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+          - framework: sglang
+            arch: amd64
+            runner: gpu-l40-amd64
+          - framework: sglang
+            arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+    env:
+      IMAGE_TAG: nightly-${{ matrix.framework }}-${{ matrix.arch }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker Image (${{ matrix.framework }} | ${{ matrix.arch }})
+        id: build
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ matrix.framework }}
+          target: runtime
+          platform: linux/${{ matrix.arch }}
+          base_image_tag: ${{ matrix.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+          runtime_image_tag: ${{ matrix.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
+          cuda_version: ${{ matrix.arch == 'arm64' && '129' || '' }}
+          torch_backend: ${{ matrix.arch == 'arm64' && 'cu129' || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: ${{ env.IMAGE_TAG }}
+
+      - name: Tag and Push Nightly Image
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:nightly-${{ matrix.framework }}-${{ matrix.arch }}
+          aws_push: 'false'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+  # --- Unit Tests Stage ---
+  unit_tests:
+    name: Unit Tests (${{ matrix.framework }} | ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: vllm
+            arch: amd64
+            runner: gpu-l40-amd64
+          - framework: vllm
+            arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+          - framework: trtllm
+            arch: amd64
+            runner: gpu-l40-amd64
+          - framework: trtllm
+            arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+          - framework: sglang
+            arch: amd64
+            runner: gpu-l40-amd64
+          - framework: sglang
+            arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+    steps:
+      - name: Run Unit Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-${{ matrix.framework }}-${{ matrix.arch }}
+          pytest_marks: "${{ matrix.framework }} and unit and nightly"
+          framework: ${{ matrix.framework }}
+          test_type: unit
+          platform_arch: ${{ matrix.arch }}
+
+  # --- Integration Tests Stage ---
+  integration_tests:
+    name: Integration Tests (${{ matrix.framework }} | ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: vllm
+            arch: amd64
+            runner: gpu-l40-amd64
+          - framework: trtllm
+            arch: amd64
+            runner: gpu-l40-amd64
+          - framework: sglang
+            arch: amd64
+            runner: gpu-l40-amd64
+    steps:
+      - name: Run Integration Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-${{ matrix.framework }}-${{ matrix.arch }}
+          pytest_marks: "${{ matrix.framework }} and integration and nightly"
+          framework: ${{ matrix.framework }}
+          test_type: integration
+          platform_arch: ${{ matrix.arch }}
+
+  # --- E2E Tests: Single GPU (gpu_1) ---
+  e2e_tests_single_gpu:
+    name: E2E Tests (Single GPU) (${{ matrix.framework }} | ${{ matrix.arch }})
+    runs-on: gpu-l40-amd64
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: vllm
+            arch: amd64
+          - framework: trtllm
+            arch: amd64
+          - framework: sglang
+            arch: amd64
+    steps:
+      - name: Run E2E Tests (gpu_1)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-${{ matrix.framework }}-${{ matrix.arch }}
+          pytest_marks: "nightly and ${{ matrix.framework }} and e2e and gpu_1"
+          framework: ${{ matrix.framework }}
+          test_type: e2e
+          platform_arch: ${{ matrix.arch }}
+
+  # --- E2E Tests: Multi-GPU (gpu_2) ---
+  # NOTE: No dedicated multi-GPU runner available; these are run on gpu-l40-amd64 for now.
+  e2e_tests_multi_gpu:
+    name: E2E Tests (Multi-GPU) (${{ matrix.framework }} | ${{ matrix.arch }})
+    runs-on: gpu-l40-amd64
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: vllm
+            arch: amd64
+          - framework: trtllm
+            arch: amd64
+          - framework: sglang
+            arch: amd64
+    steps:
+      - name: Run E2E Tests (gpu_2) # (Simulated multi-GPU on gpu-l40-amd64)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-${{ matrix.framework }}-${{ matrix.arch }}
+          pytest_marks: "nightly and ${{ matrix.framework }} and e2e and gpu_2"
+          framework: ${{ matrix.framework }}
+          test_type: e2e
+          platform_arch: ${{ matrix.arch }}
+
+  # --- Component Tests Stage ---
+  component_tests:
+    name: Component Tests (${{ matrix.framework }} | ${{ matrix.arch }} | ${{ matrix.component }})
+    runs-on: ${{ matrix.runner }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: vllm
+            arch: amd64
+            runner: gpu-l40-amd64
+            components: [router, planner, kvbm]
+          - framework: vllm
+            arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            components: [router, planner, kvbm]
+          - framework: trtllm
+            arch: amd64
+            runner: gpu-l40-amd64
+            components: [router, planner, kvbm]
+          - framework: trtllm
+            arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            components: [router, planner, kvbm]
+          - framework: sglang
+            arch: amd64
+            runner: gpu-l40-amd64
+            components: [router, planner, kvbm]
+          - framework: sglang
+            arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            components: [router, planner, kvbm]
+    steps:
+      - name: Run Component Tests (${{ matrix.component }})
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-${{ matrix.framework }}-${{ matrix.arch }}
+          pytest_marks: "nightly and ${{ matrix.component }}"
+          framework: ${{ matrix.framework }}
+          test_type: component
+          platform_arch: ${{ matrix.arch }}
+
+  # --- Results Summary Job ---
+  results_summary:
+    name: Results Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - build
+      - unit_tests
+      - integration_tests
+      - e2e_tests_single_gpu
+      - e2e_tests_multi_gpu
+      - component_tests
+    steps:
+      - name: Gather job metadata
+        id: gather
+        run: |
+          set -e
+          echo "# Nightly CI Results Summary" > results.md
+          echo "" >> results.md
+          echo "| Stage            | Status   | Runner                | Duration (min) | Artifacts                  |" >> results.md
+          echo "|------------------|----------|-----------------------|----------------|----------------------------|" >> results.md
+
+          # Helper function
+          job_summary() {
+            local label="$1"; local job="$2"; local runner="$3"; local path="$4"
+            # Strip quotes and [ ] from runners
+            runner=$(echo "$runner" | tr -d '[]')
+            # Extract status and duration
+            status=$(jq -r ".jobs.$job.conclusion" workflow.json)
+            duration=$(jq -r ".jobs.$job.durationMs" workflow.json)
+            minutes="N/A"
+            if [ "$duration" != "null" ]; then minutes=$(awk "BEGIN{print $duration/60000}"); fi
+            artifacts="[See Actions]($path)"
+            echo "| $label | $status | $runner | $minutes | $artifacts |" >> results.md
+          }
+
+          # Download workflow summary JSON using GitHub API
+          gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs -q ".jobs[] | {id, name, runner_name, conclusion, started_at, completed_at}" > jobs.jsonl
+          gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }} > workflow.json
+
+          while read job_entry; do
+            job_id=$(echo "$job_entry" | jq -r '.id')
+            name=$(echo "$job_entry" | jq -r '.name')
+            runner=$(echo "$job_entry" | jq -r '.runner_name')
+            status=$(echo "$job_entry" | jq -r '.conclusion')
+            # Compute duration
+            started=$(echo "$job_entry" | jq -r '.started_at')
+            completed=$(echo "$job_entry" | jq -r '.completed_at')
+            minutes="N/A"
+            if [[ "$started" != "null" && "$completed" != "null" ]]; then
+              start_epoch=$(date -d "$started" +%s)
+              end_epoch=$(date -d "$completed" +%s)
+              minutes=$(( (end_epoch - start_epoch)/60 ))
+            fi
+            artifact_link="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#job-$job_id"
+            printf "| %s | %s | %s | %s | [Log & Artifacts](%s) |\n" "$name" "$status" "$runner" "$minutes" "$artifact_link" >> results.md
+          done < jobs.jsonl
+
+          echo "" >> results.md
+          echo "---" >> results.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Display workflow summary
+        run: |
+          cat results.md
+        shell: bash
+      - name: Upload results summary as job summary
+        run: |
+          cat results.md >> $GITHUB_STEP_SUMMARY
+        shell: bash
