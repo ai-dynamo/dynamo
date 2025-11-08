@@ -323,9 +323,7 @@ class VllmV1ConfigModifier:
         # Concurrency / batch size
         args = set_argument_value(args, "--max-num-seqs", str(max_batch_size))
         # Token cap per step
-        args = set_argument_value(
-            args, "--max-num-batched-tokens", str(max_num_tokens)
-        )
+        args = set_argument_value(args, "--max-num-batched-tokens", str(max_num_tokens))
 
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()

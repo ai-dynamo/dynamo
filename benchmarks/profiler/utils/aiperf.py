@@ -18,8 +18,7 @@ import logging
 import os
 import random
 import subprocess
-from typing import Optional
-from typing import Tuple
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -238,7 +237,9 @@ def get_prefill_ttft(
             max_ttft = float(aiperf_result["time_to_first_token"]["max"])
             return max_ttft / float(attn_dp_num_req_ratio)
         except (KeyError, TypeError, ValueError):
-            logger.warning("Failed to extract avg TTFT from AIPerf result for DEP prefill")
+            logger.warning(
+                "Failed to extract avg TTFT from AIPerf result for DEP prefill"
+            )
             return None
 
     # Default path (non-DEP): use AIPerf's TTFT metric
@@ -254,6 +255,7 @@ def get_prefill_ttft(
     except (KeyError, TypeError, ValueError):
         logger.warning("Failed to extract TTFT from AIPerf result")
         return None
+
 
 def get_decode_itl_and_thpt_per_gpu(
     isl: int,
@@ -288,6 +290,7 @@ def get_decode_itl_and_thpt_per_gpu(
     except (KeyError, TypeError, ValueError):
         logger.warning("Failed to extract decode metrics from AIPerf result")
         return None, None
+
 
 def benchmark_decode(
     isl,

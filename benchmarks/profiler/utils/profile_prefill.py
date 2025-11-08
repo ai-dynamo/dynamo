@@ -48,7 +48,9 @@ def _profile_prefill_helper(
         if ttft is not None:
             prefill_isl.append(isl)
             prefill_ttft.append(ttft)
-            prefill_thpt_per_gpu.append(isl / ttft / num_gpus * 1000 * attention_dp_size)
+            prefill_thpt_per_gpu.append(
+                isl / ttft / num_gpus * 1000 * attention_dp_size
+            )
 
     # Interpolate prefill_ttft vs prefill_isl with quadratic function (y=ax^2+bx+c)
     if len(prefill_isl) > 2:

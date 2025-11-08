@@ -322,7 +322,11 @@ async def run_profile(args):
                     prefill_data.add_data(
                         num_gpus=num_gpus,
                         ttft=ttft,
-                        thpt_per_gpu=args.isl / ttft / num_gpus * 1000 * mapping.get_attn_dp_size(),
+                        thpt_per_gpu=args.isl
+                        / ttft
+                        / num_gpus
+                        * 1000
+                        * mapping.get_attn_dp_size(),
                         parallel_mapping_label=mapping.label(),
                         parallel_mapping=mapping,
                     )

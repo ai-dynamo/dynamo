@@ -219,8 +219,8 @@ def apply_parallel_mapping_to_config(
         cfg = config_modifier.set_config_dep_size(cfg, mapping.dep, num_gpus_per_node)
     else:
         raise ValueError(f"Invalid mapping: {mapping.label()}")
-    
-    # for prefill,set batch size to attention_dp_size 
+
+    # for prefill,set batch size to attention_dp_size
     # (this assume prompt is long enough to saturate the GPU, which is usually valid in disagg)
     # set max num tokens to 32768 to avoid chunked prefill
     if phase == EngineType.PREFILL:
