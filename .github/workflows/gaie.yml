@@ -48,24 +48,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y curl bash openssl gettext git jq ca-certificates apt-transport-https lsb-release gnupg
-
+          sudo apt-get update && sudo apt-get install -y \
+            curl bash openssl gettext git jq ca-certificates apt-transport-https lsb-release gnupg \
+            build-essential
           # Install Azure CLI
           curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-
           # Install yq
           curl -L https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
           sudo install -m 0755 yq /usr/local/bin/yq
-
           # Install Helm
           curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
           sudo chmod 700 get_helm.sh
           sudo ./get_helm.sh
-
           # Install kubectl
           KUBECTL_VER=$(curl -L -s https://dl.k8s.io/release/stable.txt)
           curl -LO "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/amd64/kubectl"
           sudo install -m 0755 kubectl /usr/local/bin/kubectl
+
+      - name: Install Rust toolchain and cbindgen
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Install Rust (cargo + rustc)
+          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+          # Make cargo available to later steps
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          # Install cbindgen (needed in build-epp-dynamo.sh)
+          "$HOME/.cargo/bin/cargo" install cbindgen
 
       - name: Login to NGC
         if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
