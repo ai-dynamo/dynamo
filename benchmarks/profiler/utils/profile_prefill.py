@@ -27,6 +27,7 @@ def _profile_prefill_helper(
     max_context_length,
     interpolation_granularity,
     get_ttft: Callable[[int], Optional[float]],
+    attention_dp_size: int = 1,
 ):
     prefill_isl = []
     prefill_ttft = []
@@ -47,7 +48,7 @@ def _profile_prefill_helper(
         if ttft is not None:
             prefill_isl.append(isl)
             prefill_ttft.append(ttft)
-            prefill_thpt_per_gpu.append(isl / ttft / num_gpus * 1000)
+            prefill_thpt_per_gpu.append(isl / ttft / num_gpus * 1000 * attention_dp_size)
 
     # Interpolate prefill_ttft vs prefill_isl with quadratic function (y=ax^2+bx+c)
     if len(prefill_isl) > 2:
@@ -107,6 +108,7 @@ def profile_prefill(
         max_context_length,
         interpolation_granularity,
         get_ttft,
+        attention_dp_size=attention_dp_size,
     )
 
 

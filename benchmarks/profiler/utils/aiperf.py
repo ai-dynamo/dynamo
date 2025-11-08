@@ -234,11 +234,9 @@ def get_prefill_ttft(
             concurrency=total_concurrency,
             request_count=total_concurrency,
         )
-        if aiperf_result is None:
-            return None
         try:
-            avg_ttft = float(aiperf_result["time_to_first_token"]["max"])
-            return avg_ttft / float(attn_dp_num_req_ratio)
+            max_ttft = float(aiperf_result["time_to_first_token"]["max"])
+            return max_ttft / float(attn_dp_num_req_ratio)
         except (KeyError, TypeError, ValueError):
             logger.warning("Failed to extract avg TTFT from AIPerf result for DEP prefill")
             return None
@@ -251,8 +249,6 @@ def get_prefill_ttft(
         tokenizer,
         base_url=base_url,
     )
-    if aiperf_result is None:
-        return None
     try:
         return float(aiperf_result["time_to_first_token"]["avg"])
     except (KeyError, TypeError, ValueError):

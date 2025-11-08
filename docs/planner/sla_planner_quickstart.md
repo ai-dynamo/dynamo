@@ -383,7 +383,7 @@ For advanced use cases, you can manually deploy using the standalone planner tem
 python3 -m deploy.utils.download_pvc_results \
   --namespace $NAMESPACE \
   --output-dir ./profiling_data \
-  --folder /data
+  --folder /data/
 
 # Update backend planner manifest as needed, then deploy
 kubectl apply -f examples/backends/<backend>/deploy/disagg_planner.yaml -n $NAMESPACE
