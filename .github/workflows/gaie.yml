@@ -50,7 +50,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update && sudo apt-get install -y \
             curl bash openssl gettext git jq ca-certificates apt-transport-https lsb-release gnupg \
-            build-essential
+            build-essential protobuf-compiler
           # Install Azure CLI
           curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
           # Install yq
