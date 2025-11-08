@@ -229,6 +229,18 @@ jobs:
             nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
           kubectl config set-context --current --namespace=gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED} --kubeconfig "$KUBECONFIG"
 
+      - name: Create image pull secret for Dynamo Operator
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+        run: |
+          set -euo pipefail
+          kubectl create secret docker-registry docker-imagepullsecret \
+            --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} \
+            --docker-username=${{ secrets.AZURE_ACR_USER }} \
+            --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} \
+            --namespace=${NAMESPACE} || true
+
       - name: Install Dynamo Operator Helm chart
         shell: bash
         env:
@@ -239,12 +251,14 @@ jobs:
           cd deploy/cloud/helm/platform/
           helm dep build .
           helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+            --debug \
+            --timeout 10m \
+            --wait \
             --set dynamo-operator.namespaceRestriction.enabled=true \
             --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
             --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
             --set dynamo-operator.controllerManager.manager.image.tag=${{ env.OPERATOR_IMAGE_TAG }} \
             --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
-          timeout 300s kubectl rollout status deployment -n ${NAMESPACE} --watch
 
       - name: Configure image pull secrets and deploy vllm graph
         shell: bash
@@ -256,11 +270,6 @@ jobs:
           export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${VLLM_IMAGE_TAG}"
           # Secrets
           kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n ${KUBE_NS} || true
-          kubectl create secret docker-registry docker-imagepullsecret \
-            --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} \
-            --docker-username=${{ secrets.AZURE_ACR_USER }} \
-            --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} \
-            --namespace=${KUBE_NS} || true
           # Deploy vllm backend graph
           pwd
           ls
