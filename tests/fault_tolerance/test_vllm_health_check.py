@@ -206,20 +206,26 @@ def test_vllm_health_check_active(request, runtime_services):
             if vllm_child:
                 try:
                     vllm_child.wait(timeout=30)
-                    logger.info(f"vLLM engine process {vllm_child.pid} has been terminated")
+                    logger.info(
+                        f"vLLM engine process {vllm_child.pid} has been terminated"
+                    )
                 except Exception as e:
                     logger.error(f"Failed to wait for vLLM engine process to die: {e}")
                     pytest.fail(f"vLLM engine process did not terminate: {e}")
 
             # Step 5: Send a request that should fail due to the dead engine.
             try:
-                test_response = send_completion_request("How old are you?", 100, timeout=60)
+                test_response = send_completion_request(
+                    "How old are you?", 100, timeout=60
+                )
                 # Verify the response indicates an error (non-2xx status code)
                 if test_response.status_code < 400:
                     pytest.fail(
                         f"Expected error response after killing vLLM engine, but got status {test_response.status_code}"
                     )
-                logger.info(f"Request correctly failed with status {test_response.status_code}: {test_response.text}")
+                logger.info(
+                    f"Request correctly failed with status {test_response.status_code}: {test_response.text}"
+                )
             except requests.exceptions.RequestException as e:
                 # It's also acceptable for the request to raise an exception
                 logger.info(f"Request correctly failed with exception: {e}")
