@@ -34,7 +34,6 @@ class distributed_runtime:
     # Total uptime of the DistributedRuntime in seconds
     UPTIME_SECONDS = "uptime_seconds"
 
-
 class frontend_service:
     """Frontend service metrics (LLM HTTP service)"""
 
@@ -55,6 +54,8 @@ class frontend_service:
     INPUT_SEQUENCE_TOKENS = "input_sequence_tokens"
     # Output sequence length in tokens
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
+    # Total number of output tokens generated (counter that updates in real-time)
+    OUTPUT_TOKENS_TOTAL = "output_tokens_total"
     # Time to first token in seconds
     TIME_TO_FIRST_TOKEN_SECONDS = "time_to_first_token_seconds"
     # Inter-token latency in seconds
@@ -75,20 +76,26 @@ class frontend_service:
     # Request migration limit for a worker serving the model (MDC)
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
 
+class kvbm:
+    """KVBM"""
 
-class kvbm_connector:
-    """KVBM connector"""
-
-    # KVBM connector leader
-    KVBM_CONNECTOR_LEADER = "kvbm_connector_leader"
-    # KVBM connector worker
-    KVBM_CONNECTOR_WORKER = "kvbm_connector_worker"
-
+    # The number of offload blocks from device to host
+    OFFLOAD_BLOCKS_D2H = "offload_blocks_d2h"
+    # The number of offload blocks from host to disk
+    OFFLOAD_BLOCKS_H2D = "offload_blocks_h2d"
+    # The number of offload blocks from device to disk (bypassing host memory)
+    OFFLOAD_BLOCKS_D2D = "offload_blocks_d2d"
+    # The number of onboard blocks from host to device
+    ONBOARD_BLOCKS_H2D = "onboard_blocks_h2d"
+    # The number of onboard blocks from disk to device
+    ONBOARD_BLOCKS_D2D = "onboard_blocks_d2d"
+    # The number of matched tokens
+    MATCHED_TOKENS = "matched_tokens"
 
 class kvrouter:
+
     # Number of KV cache events applied to the index (including status)
     KV_CACHE_EVENTS_APPLIED = "kv_cache_events_applied"
-
 
 class kvstats:
     """KvStats metrics from LLM workers"""
@@ -104,7 +111,6 @@ class kvstats:
     # GPU prefix cache hit rate as a percentage (0.0-1.0)
     GPU_PREFIX_CACHE_HIT_RATE = "kvstats_gpu_prefix_cache_hit_rate"
 
-
 class labels:
     """Automatically inserted Prometheus label names used across the metrics system"""
 
@@ -115,7 +121,6 @@ class labels:
     # Label for endpoint identification
     ENDPOINT = "dynamo_endpoint"
 
-
 class name_prefix:
     """Metric name prefixes used across the metrics system"""
 
@@ -123,7 +128,6 @@ class name_prefix:
     COMPONENT = "dynamo_component"
     # Prefix for frontend service metrics
     FRONTEND = "dynamo_frontend"
-
 
 class nats_client:
     """NATS client metrics. DistributedRuntime contains a NATS client shared by all children)"""
@@ -144,7 +148,6 @@ class nats_client:
     # Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)
     CONNECTION_STATE = "nats_client_connection_state"
 
-
 class nats_service:
     """NATS service metrics, from the $SRV.STATS.<service_name> requests on NATS server"""
 
@@ -163,7 +166,6 @@ class nats_service:
     # Number of active endpoints (derived from ServiceInfo.endpoints)
     ACTIVE_ENDPOINTS = "nats_service_active_endpoints"
 
-
 class task_tracker:
     """Task tracker Prometheus metric name suffixes"""
 
@@ -179,7 +181,6 @@ class task_tracker:
     TASKS_FAILED_TOTAL = "tasks_failed_total"
     # Total number of rejected tasks
     TASKS_REJECTED_TOTAL = "tasks_rejected_total"
-
 
 class work_handler:
     """Work handler Prometheus metric names"""
