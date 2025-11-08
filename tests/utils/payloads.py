@@ -30,8 +30,9 @@ class BasePayload:
     """Generic payload body plus expectations and repeat count."""
 
     body: Dict[str, Any]
-    expected_response: List[str]
     expected_log: List[str]
+    expected_response_all: List[str] = None  # All must match (AND logic)
+    expected_response_any: List[str] = None  # At least one must match (OR logic)
     repeat_count: int = 1
     timeout: int = 60
 
@@ -40,6 +41,13 @@ class BasePayload:
     port: int = 8000
     endpoint: str = ""
     method: str = "POST"
+
+    def __post_init__(self):
+        # Initialize expected_response fields if None
+        if self.expected_response_all is None:
+            self.expected_response_all = []
+        if self.expected_response_any is None:
+            self.expected_response_any = []
 
     def url(self) -> str:
         ep = self.endpoint.lstrip("/")
@@ -51,24 +59,47 @@ class BasePayload:
             p.body = {**p.body, "model": model}
         return p
 
+    @property
+    def expected_response(self) -> List[str]:
+        """Backward compatibility - maps to expected_response_all"""
+        return self.expected_response_all
+
     def response_handler(self, response: Any) -> str:
         """Extract a text representation of the response for logging/validation."""
         raise NotImplementedError("Subclasses must implement response_handler()")
 
     def validate(self, response: Any, content: str) -> None:
-        """Default validation: ensure expected substrings appear in content."""
-        if self.expected_response:
+        """Validate expected substrings appear in content using AND/OR logic."""
+        # Check AND logic (all must be present)
+        if self.expected_response_all:
             missing_expected = []
-            for expected in self.expected_response:
+            for expected in self.expected_response_all:
                 if not content or expected not in content:
                     missing_expected.append(expected)
             if missing_expected:
                 preview = (content or "")[:1000]
                 raise AssertionError(
-                    f"Expected content not found in response. Missing: {missing_expected}. "
+                    f"Expected content (ALL) not found in response. Missing: {missing_expected}. "
                     f"Content preview (first 1000 chars): {preview!r}"
                 )
-        logger.info(f"SUCCESS: All expected_responses: {self.expected_response} found.")
+            logger.info(
+                f"SUCCESS: All expected_response_all: {self.expected_response_all} found."
+            )
+
+        # Check OR logic (at least one must be present)
+        if self.expected_response_any:
+            found = any(
+                expected in (content or "") for expected in self.expected_response_any
+            )
+            if not found:
+                preview = (content or "")[:1000]
+                raise AssertionError(
+                    f"Expected content (ANY) not found in response. None of {self.expected_response_any} matched. "
+                    f"Content preview (first 1000 chars): {preview!r}"
+                )
+            logger.info(
+                f"SUCCESS: At least one from expected_response_any: {self.expected_response_any} found."
+            )
 
     def process_response(self, response: Any) -> str:
         """Convenience: run response_handler then validate; return content."""

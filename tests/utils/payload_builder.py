@@ -17,7 +17,8 @@ TEXT_PROMPT = "Tell me a short joke about AI."
 
 def chat_payload_default(
     repeat_count: int = 2,
-    expected_response: Optional[List[str]] = None,
+    expected_response_all: Optional[List[str]] = None,
+    expected_response_any: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
     max_tokens: int = 300,
     temperature: float = 0,
@@ -37,13 +38,15 @@ def chat_payload_default(
         },
         repeat_count=repeat_count,
         expected_log=expected_log or [],
-        expected_response=expected_response or ["AI"],
+        expected_response_all=expected_response_all or [],
+        expected_response_any=expected_response_any or ["AI", "joke", "short", "robot"],
     )
 
 
 def completion_payload_default(
     repeat_count: int = 2,
-    expected_response: Optional[List[str]] = None,
+    expected_response_all: Optional[List[str]] = None,
+    expected_response_any: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
     max_tokens: int = 300,
     temperature: float = 0,
@@ -58,7 +61,8 @@ def completion_payload_default(
         },
         repeat_count=repeat_count,
         expected_log=expected_log or [],
-        expected_response=expected_response or ["AI"],
+        expected_response_all=expected_response_all or [],
+        expected_response_any=expected_response_any or ["AI", "joke", "short", "robot"],
     )
 
 
@@ -73,7 +77,8 @@ def metric_payload_default(
         body={},
         repeat_count=repeat_count,
         expected_log=expected_log or [],
-        expected_response=[],
+        expected_response_all=[],
+        expected_response_any=[],
         min_num_requests=min_num_requests,
         backend=backend,
         port=port,
@@ -83,7 +88,8 @@ def metric_payload_default(
 def chat_payload(
     content: Union[str, List[Dict[str, Any]]],
     repeat_count: int = 1,
-    expected_response: Optional[List[str]] = None,
+    expected_response_all: Optional[List[str]] = None,
+    expected_response_any: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
     max_tokens: int = 300,
     temperature: Optional[float] = None,
@@ -106,14 +112,16 @@ def chat_payload(
         body=body,
         repeat_count=repeat_count,
         expected_log=expected_log or [],
-        expected_response=expected_response or [],
+        expected_response_all=expected_response_all or [],
+        expected_response_any=expected_response_any or [],
     )
 
 
 def completion_payload(
     prompt: str,
     repeat_count: int = 3,
-    expected_response: Optional[List[str]] = None,
+    expected_response_all: Optional[List[str]] = None,
+    expected_response_any: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
     max_tokens: int = 150,
     temperature: float = 0.1,
@@ -128,13 +136,15 @@ def completion_payload(
         },
         repeat_count=repeat_count,
         expected_log=expected_log or [],
-        expected_response=expected_response or [],
+        expected_response_all=expected_response_all or [],
+        expected_response_any=expected_response_any or [],
     )
 
 
 def embedding_payload_default(
     repeat_count: int = 3,
-    expected_response: Optional[List[str]] = None,
+    expected_response_all: Optional[List[str]] = None,
+    expected_response_any: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
 ) -> EmbeddingPayload:
     return EmbeddingPayload(
@@ -143,15 +153,17 @@ def embedding_payload_default(
         },
         repeat_count=repeat_count,
         expected_log=expected_log or [],
-        expected_response=expected_response
+        expected_response_all=expected_response_all
         or ["Generated 2 embeddings with dimension"],
+        expected_response_any=expected_response_any or [],
     )
 
 
 def embedding_payload(
     input_text: Union[str, List[str]],
     repeat_count: int = 3,
-    expected_response: Optional[List[str]] = None,
+    expected_response_all: Optional[List[str]] = None,
+    expected_response_any: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
 ) -> EmbeddingPayload:
     # Normalize input to list for consistent processing
@@ -168,8 +180,9 @@ def embedding_payload(
         },
         repeat_count=repeat_count,
         expected_log=expected_log or [],
-        expected_response=expected_response
+        expected_response_all=expected_response_all
         or [f"Generated {expected_count} embeddings with dimension"],
+        expected_response_any=expected_response_any or [],
     )
 
 
@@ -181,7 +194,8 @@ def make_chat_health_check(port: int, model: str):
     def _check_chat_endpoint(remaining_timeout: float = 30.0) -> bool:
         payload = chat_payload_default(
             repeat_count=1,
-            expected_response=[],
+            expected_response_all=[],
+            expected_response_any=[],
             max_tokens=8,
             temperature=0.0,
             stream=False,
@@ -195,7 +209,7 @@ def make_chat_health_check(port: int, model: str):
                 method=payload.method,
                 log_level=10,
             )
-            # Validate structure only; expected_response is empty
+            # Validate structure only; expected_response_all is empty
             _ = payload.response_handler(resp)
             return True
         except Exception:
@@ -208,7 +222,8 @@ def make_completions_health_check(port: int, model: str):
     def _check_completions_endpoint(remaining_timeout: float = 30.0) -> bool:
         payload = completion_payload_default(
             repeat_count=1,
-            expected_response=[],
+            expected_response_all=[],
+            expected_response_any=[],
             max_tokens=8,
             temperature=0.0,
             stream=False,
