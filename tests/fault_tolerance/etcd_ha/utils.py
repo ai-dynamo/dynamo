@@ -28,6 +28,8 @@ class DynamoFrontendProcess(ManagedProcess):
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["ETCD_ENDPOINTS"] = ",".join(etcd_endpoints)
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
+        env.pop("DYN_SYSTEM_PORT", None)
 
         log_dir = f"{request.node.name}_frontend"
 
