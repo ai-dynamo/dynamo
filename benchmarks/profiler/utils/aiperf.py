@@ -64,6 +64,8 @@ def _get_common_aiperf_cmd(
         artifact_dir,
         "--random-seed",
         str(seed),
+        "--request-timeout-seconds",
+        "1800",
     ]
 
 
