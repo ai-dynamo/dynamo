@@ -31,8 +31,8 @@ class BasePayload:
 
     body: Dict[str, Any]
     expected_log: List[str]
-    expected_response_all: List[str] = None  # All must match (AND logic)
-    expected_response_any: List[str] = None  # At least one must match (OR logic)
+    expected_response_all: List[str] | None = None  # All must match (AND logic)
+    expected_response_any: List[str] | None = None  # At least one must match (OR logic)
     repeat_count: int = 1
     timeout: int = 60
 
@@ -60,7 +60,7 @@ class BasePayload:
         return p
 
     @property
-    def expected_response(self) -> List[str]:
+    def expected_response(self) -> List[str] | None:
         """Backward compatibility - maps to expected_response_all"""
         return self.expected_response_all
 
