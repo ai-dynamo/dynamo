@@ -320,6 +320,10 @@ impl Leader for KvConnectorLeaderRecorder {
         Ok(output)
     }
 
+    fn update_connector_output(&mut self) -> anyhow::Result<()> {
+        self.connector_leader.update_connector_output()
+    }
+
     fn has_slot(&self, request_id: String) -> bool {
         let input_copy = HasSlotInput {
             request_id: request_id.clone(),
