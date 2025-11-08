@@ -143,7 +143,7 @@ impl DistributedRuntime {
         if let Some(cancel_token) = cancel_token {
             // System server is enabled - start both the state and HTTP server
             let host = config.system_host.clone();
-            let port = config.system_port;
+            let port = config.system_port as u16;
 
             // Start system status server (it creates SystemStatusState internally)
             match crate::system_status_server::spawn_system_status_server(
@@ -379,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_enabled() {
         // Test uptime with system status server enabled
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("true"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", Some("8081"))], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 
