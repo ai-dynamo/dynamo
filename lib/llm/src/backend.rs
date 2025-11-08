@@ -94,12 +94,13 @@ impl Backend {
         stream: ManyOut<ExecutionOutputStream>,
         prompt_token_ids: &[TokenIdType],
         stop_conditions: StopConditions,
+        skip_special_tokens: bool,
     ) -> anyhow::Result<DecoderUnfoldState> {
         let Some(tokenizer) = self.tokenizer.as_ref() else {
             anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
         };
         let decoder = Decoder::new(
-            tokenizer.decode_stream(prompt_token_ids, false),
+            tokenizer.decode_stream(prompt_token_ids, skip_special_tokens),
             stop_conditions,
         );
 
@@ -129,10 +130,18 @@ impl
 
         let prompt_token_ids = request.token_ids.clone();
 
+        // TODO: Consider updating default to true to match behavior of other frameworks
+        let skip_special_tokens = request.output_options.skip_special_tokens.unwrap_or(false);
+
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
-        let state = self.decoder(next_stream, &prompt_token_ids, stop_conditions)?;
+        let state = self.decoder(
+            next_stream,
+            &prompt_token_ids,
+            stop_conditions,
+            skip_special_tokens,
+        )?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
             match state.stream.next().await {

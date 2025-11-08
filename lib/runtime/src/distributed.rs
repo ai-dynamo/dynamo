@@ -3,7 +3,8 @@
 
 pub use crate::component::Component;
 use crate::storage::key_value_store::{
-    EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, MemoryStore,
+    EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, KeyValueStoreSelect,
+    MemoryStore,
 };
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
@@ -48,23 +49,22 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let (etcd_config, nats_config, is_static) = config.dissolve();
+        let (selected_kv_store, nats_config, is_static) = config.dissolve();
 
         let runtime_clone = runtime.clone();
 
-        // TODO: Here is where we will later select the KeyValueStore impl
-        let (etcd_client, store) = if is_static {
-            (None, KeyValueStoreManager::memory())
-        } else {
-            match etcd::Client::new(etcd_config.clone(), runtime_clone).await {
-                Ok(etcd_client) => {
-                    let store = KeyValueStoreManager::etcd(etcd_client.clone());
-                    (Some(etcd_client), store)
-                }
-                Err(err) => {
-                    tracing::info!(%err, "Did not connect to etcd. Using memory storage.");
-                    (None, KeyValueStoreManager::memory())
-                }
+        let (etcd_client, store) = match (is_static, selected_kv_store) {
+            (false, KeyValueStoreSelect::Etcd(etcd_config)) => {
+                let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
+                    // The returned error doesn't show because of a dropped runtime error, so
+                    // log it first.
+                    tracing::error!(%err, "Could not connect to etcd. Pass `--store-kv ..` to use a different backend or start etcd."))?;
+                let store = KeyValueStoreManager::etcd(etcd_client.clone());
+                (Some(etcd_client), store)
+            }
+            (false, KeyValueStoreSelect::File(root)) => (None, KeyValueStoreManager::file(root)),
+            (true, _) | (false, KeyValueStoreSelect::Memory) => {
+                (None, KeyValueStoreManager::memory())
             }
         };
 
@@ -143,7 +143,7 @@ impl DistributedRuntime {
         if let Some(cancel_token) = cancel_token {
             // System server is enabled - start both the state and HTTP server
             let host = config.system_host.clone();
-            let port = config.system_port;
+            let port = config.system_port as u16;
 
             // Start system status server (it creates SystemStatusState internally)
             match crate::system_status_server::spawn_system_status_server(
@@ -234,6 +234,7 @@ impl DistributedRuntime {
 
     pub fn shutdown(&self) {
         self.runtime.shutdown();
+        self.store.shutdown();
     }
 
     /// Create a [`Namespace`]
@@ -302,7 +303,7 @@ impl DistributedRuntime {
 
 #[derive(Dissolve)]
 pub struct DistributedConfig {
-    pub etcd_config: etcd::ClientOptions,
+    pub store_backend: KeyValueStoreSelect,
     pub nats_config: nats::ClientOptions,
     pub is_static: bool,
 }
@@ -310,22 +311,22 @@ pub struct DistributedConfig {
 impl DistributedConfig {
     pub fn from_settings(is_static: bool) -> DistributedConfig {
         DistributedConfig {
-            etcd_config: etcd::ClientOptions::default(),
+            store_backend: KeyValueStoreSelect::Etcd(Box::default()),
             nats_config: nats::ClientOptions::default(),
             is_static,
         }
     }
 
     pub fn for_cli() -> DistributedConfig {
-        let mut config = DistributedConfig {
-            etcd_config: etcd::ClientOptions::default(),
+        let etcd_config = etcd::ClientOptions {
+            attach_lease: false,
+            ..Default::default()
+        };
+        DistributedConfig {
+            store_backend: KeyValueStoreSelect::Etcd(Box::new(etcd_config)),
             nats_config: nats::ClientOptions::default(),
             is_static: false,
-        };
-
-        config.etcd_config.attach_lease = false;
-
-        config
+        }
     }
 }
 
@@ -378,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_enabled() {
         // Test uptime with system status server enabled
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("true"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", Some("8081"))], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 

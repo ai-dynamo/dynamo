@@ -24,9 +24,8 @@ use crate::{
 };
 
 use dynamo_runtime::{
-    DistributedRuntime, Runtime,
+    DistributedRuntime,
     component::Client,
-    distributed::DistributedConfig,
     engine::{AsyncEngineStream, Data},
     pipeline::{
         Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
@@ -55,23 +54,25 @@ impl PreparedEngine {
 
 /// Turns an EngineConfig into an OpenAI chat-completions and completions supported StreamingEngine.
 pub async fn prepare_engine(
-    runtime: Runtime,
+    distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
         EngineConfig::Dynamic(local_model) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-
             let store = Arc::new(distributed_runtime.store().clone());
             let model_manager = Arc::new(ModelManager::new());
             let watch_obj = Arc::new(ModelWatcher::new(
-                distributed_runtime,
+                distributed_runtime.clone(),
                 model_manager.clone(),
                 dynamo_runtime::pipeline::RouterMode::RoundRobin,
                 None,
                 None,
             ));
-            let (_, receiver) = store.watch(model_card::ROOT_PATH, None, runtime.primary_token());
+            let (_, receiver) = store.watch(
+                model_card::ROOT_PATH,
+                None,
+                distributed_runtime.primary_token(),
+            );
             let inner_watch_obj = watch_obj.clone();
             let _watcher_task = tokio::spawn(async move {
                 inner_watch_obj.watch(receiver, None).await;
@@ -97,9 +98,6 @@ pub async fn prepare_engine(
             // The card should have been loaded at 'build' phase earlier
             let card = local_model.card();
             let router_mode = local_model.router_config().router_mode;
-
-            let dst_config = DistributedConfig::from_settings(true);
-            let distributed_runtime = DistributedRuntime::new(runtime, dst_config).await?;
 
             let endpoint_id = local_model.endpoint_id();
             let component = distributed_runtime
