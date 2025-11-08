@@ -47,8 +47,6 @@ pub struct ImageMetadata {
     #[allow(dead_code)] // used in followup MR
     pub(crate) format: Option<ImageFormat>,
     #[allow(dead_code)] // used in followup MR
-    pub(crate) color_type: ColorType,
-    #[allow(dead_code)] // used in followup MR
     pub(crate) layout: ImageLayout,
 }
 
@@ -68,7 +66,7 @@ impl Decoder for ImageDecoder {
         let img = reader.decode()?;
         let n_channels = img.color().channel_count();
 
-        let (data, color_type) = match n_channels {
+        let (data, _color_type) = match n_channels {
             1 => (img.to_luma8().into_raw(), ColorType::L8),
             2 => (img.to_luma_alpha8().into_raw(), ColorType::La8),
             3 => (img.to_rgb8().into_raw(), ColorType::Rgb8),
@@ -82,7 +80,6 @@ impl Decoder for ImageDecoder {
         let mut decoded: DecodedMediaData = array.try_into()?;
         decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
             format,
-            color_type,
             layout: ImageLayout::HWC,
         }));
         Ok(decoded)
