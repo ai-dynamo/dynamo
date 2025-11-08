@@ -128,8 +128,7 @@ when initializing and HTTP status code `HTTP/1.1 200 OK` once ready.
 
 | **Environment Variable** | **Description**     | **Example Settings**                             |
 | -------------------------| ------------------- | ------------------------------------------------ |
-| `DYN_SYSTEM_ENABLED`     | Enables the system status server.                                            | `true`, `false`                           |
-| `DYN_SYSTEM_PORT`        | Specifies the port for the system status server.                              | `9090`                                   |
+| `DYN_SYSTEM_PORT`        | Specifies the port for the system status server (automatically enables it when set to a positive value). | `9090`, `8081`                           |
 | `DYN_SYSTEM_STARTING_HEALTH_STATUS`     | Sets the initial health status of the system (ready/not ready).                | `ready`, `notready`      |
 | `DYN_SYSTEM_HEALTH_PATH`                | Custom path for the health endpoint.                                         | `/custom/health`           |
 | `DYN_SYSTEM_LIVE_PATH`                   | Custom path for the liveness endpoint.                                       | `/custom/live`            |
@@ -138,10 +137,9 @@ when initializing and HTTP status code `HTTP/1.1 200 OK` once ready.
 ### Example Environment Setting
 
 ```
-export DYN_SYSTEM_ENABLED="true"
+export DYN_SYSTEM_PORT=9090
 export DYN_SYSTEM_STARTING_HEALTH_STATUS="notready"
 export DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS="[\"generate\"]"
-export DYN_SYSTEM_PORT=9090
 ```
 
 #### Example Request

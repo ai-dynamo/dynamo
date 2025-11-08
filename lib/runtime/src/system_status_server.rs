@@ -551,8 +551,7 @@ mod integration_tests {
                 // Ensure system status server was spawned by DRT
                 assert!(
                     system_info_opt.is_some(),
-                    "System status server was not spawned by DRT. Expected DRT to spawn server when DYN_SYSTEM_ENABLED=true, but system_status_server_info() returned None. Environment: DYN_SYSTEM_ENABLED={:?}, DYN_SYSTEM_PORT={:?}",
-                    std::env::var("DYN_SYSTEM_ENABLED"),
+                    "System status server was not spawned by DRT. Expected DRT to spawn server when DYN_SYSTEM_PORT is set to a positive value, but system_status_server_info() returned None. Environment: DYN_SYSTEM_PORT={:?}",
                     std::env::var("DYN_SYSTEM_PORT")
                 );
 

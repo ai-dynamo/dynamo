@@ -22,8 +22,13 @@ class DynamoFrontendProcess(ManagedProcess):
         log_dir = f"{request.node.name}_frontend"
         shutil.rmtree(log_dir, ignore_errors=True)
 
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
+        env = os.environ.copy()
+        env.pop("DYN_SYSTEM_PORT", None)
+
         super().__init__(
             command=command,
+            env=env,
             display_output=True,
             terminate_existing=True,
             log_dir=log_dir,
@@ -39,7 +44,6 @@ class EchoTensorWorkerProcess(ManagedProcess):
 
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = "8083"
 

@@ -225,7 +225,7 @@ else
 
             if [ "$USE_TRTLLM" = true ]; then
                 echo "[$MODE_CAPITALIZED Worker-$i] Using GPUs: $GPU_DEVICES"
-                # Run TensorRT-LLM engine with trtllm-llmapi-launch for proper initialization
+                # Run TensorRT-LLM engine
                 TRTLLM_ARGS=()
                 TRTLLM_ARGS+=("--model-path" "$MODEL_PATH")
                 TRTLLM_ARGS+=("--tensor-parallel-size" "$TENSOR_PARALLEL_SIZE")
@@ -234,7 +234,7 @@ else
                 fi
                 TRTLLM_ARGS+=("${EXTRA_ARGS[@]}")
 
-                exec env CUDA_VISIBLE_DEVICES=$GPU_DEVICES trtllm-llmapi-launch python -m dynamo.trtllm \
+                exec env CUDA_VISIBLE_DEVICES=$GPU_DEVICES trtllm-llmapi-launch python3 -m dynamo.trtllm \
                     "${TRTLLM_ARGS[@]}"
             else
                 echo "[$MODE_CAPITALIZED Worker-$i] Using GPUs: $GPU_DEVICES"
@@ -252,12 +252,18 @@ else
                 fi
                 VLLM_ARGS+=("${EXTRA_ARGS[@]}")
 
-                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES python -m dynamo.vllm \
+                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES python3 -m dynamo.vllm \
                     "${VLLM_ARGS[@]}"
             fi
         } &
         PIDS+=($!)
         echo "Started $MODE worker $i (PID: $!)"
+
+        # Add delay between TensorRT-LLM worker launches to avoid MPI initialization conflicts
+        if [ "$USE_TRTLLM" = true ] && [ "$i" -lt "$NUM_WORKERS" ]; then
+            echo "Waiting 2 seconds before launching next TensorRT-LLM worker..."
+            sleep 2
+        fi
     done
 fi
 

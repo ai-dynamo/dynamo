@@ -60,6 +60,20 @@ trtllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "disaggregated_same_gpu": TRTLLMConfig(
+        name="disaggregated_same_gpu",
+        directory=trtllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
+        model="Qwen/Qwen3-0.6B",
+        models_port=8000,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(port=8081, min_num_requests=6, backend="trtllm"),
+            metric_payload_default(port=8082, min_num_requests=6, backend="trtllm"),
+        ],
+    ),
     "aggregated_router": TRTLLMConfig(
         name="aggregated_router",
         directory=trtllm_dir,

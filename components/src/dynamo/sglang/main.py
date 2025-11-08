@@ -11,14 +11,14 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.llm import ModelInput, ModelType
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
 from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang.publisher import setup_sgl_metrics
+from dynamo.sglang.publisher import setup_prometheus_registry, setup_sgl_metrics
 from dynamo.sglang.register import register_llm_with_readiness_gate
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
@@ -33,9 +33,12 @@ from dynamo.sglang.request_handlers import (
 configure_dynamo_logging()
 
 
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
+async def worker():
+    config = await parse_args(sys.argv[1:])
+    dump_config(config.dynamo_args.dump_config_to, config)
+
     loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, config.dynamo_args.store_kv, False)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -44,9 +47,6 @@ async def worker(runtime: DistributedRuntime):
         loop.add_signal_handler(sig, signal_handler)
 
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
-
-    config = await parse_args(sys.argv[1:])
-    dump_config(config.dynamo_args.dump_config_to, config)
 
     if config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config)
@@ -94,11 +94,13 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     # publisher instantiates the metrics and kv event publishers
-    # Note that when engine.server_args.enable_metrics is True, it'll also
-    # gather internal SGLang Prometheus metrics from all worker processes.
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
+
+    # Register Prometheus metrics callback if enabled
+    if engine.server_args.enable_metrics:
+        setup_prometheus_registry(engine, generate_endpoint)
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -145,6 +147,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     engine = sgl.Engine(server_args=server_args)
 
+    # Perform dummy warmup for prefill worker to avoid initial TTFT hit
+    await _warmup_prefill_engine(engine, server_args)
+
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
@@ -156,6 +161,10 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
+
+    # Register Prometheus metrics callback if enabled
+    if engine.server_args.enable_metrics:
+        setup_prometheus_registry(engine, generate_endpoint)
 
     handler = PrefillWorkerHandler(component, engine, config, publisher)
 
@@ -202,6 +211,10 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
+
+    # Register Prometheus metrics callback if enabled
+    if engine.server_args.enable_metrics:
+        setup_prometheus_registry(engine, generate_endpoint)
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -403,6 +416,41 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
         raise
     finally:
         handler.cleanup()
+
+
+async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
+    """Perform warmup request for prefill engine to reduce initial TTFT."""
+    logging.info("Start of prefill disaggregation warmup ...")
+    try:
+        from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+        from sglang.srt.sampling.sampling_params import SamplingParams
+
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            max_new_tokens=8,
+            ignore_eos=True,
+        )
+
+        # Timeout: 1800s (30 min) for deep gemm precache
+        async def _do_warmup():
+            results = await engine.async_generate(
+                input_ids=[0, 1, 2, 3],
+                sampling_params=sampling_params,
+                stream=True,
+                bootstrap_host=FAKE_BOOTSTRAP_HOST,
+                bootstrap_port=server_args.disaggregation_bootstrap_port,
+                bootstrap_room=999999,
+            )
+            # Consume the stream
+            async for _ in results:
+                pass
+
+        await asyncio.wait_for(_do_warmup(), timeout=1800)
+        logging.info("Prefill warmup completed")
+    except asyncio.TimeoutError:
+        logging.warning("Prefill warmup timed out after 1800s")
+    except Exception as e:
+        logging.warning(f"Prefill warmup failed: {e}")
 
 
 async def graceful_shutdown(runtime):

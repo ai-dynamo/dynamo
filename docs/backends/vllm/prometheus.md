@@ -44,8 +44,7 @@ To see the actual metrics available in your vLLM version:
 ### 1. Launch vLLM with Metrics Enabled
 
 ```bash
-# Set environment variables
-export DYN_SYSTEM_ENABLED=true
+# Set system metrics port (automatically enables metrics server)
 export DYN_SYSTEM_PORT=8081
 
 # Start vLLM worker (metrics enabled by default via --disable-log-stats=false)

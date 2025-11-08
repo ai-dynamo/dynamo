@@ -52,14 +52,13 @@ async fn live_handler(
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
-    let instances = match list_all_instances(state.store()).await {
+    let instances = match list_all_instances(state.discovery()).await {
         Ok(instances) => instances,
         Err(err) => {
-            tracing::warn!(%err, "Failed to fetch instances from store");
+            tracing::warn!(%err, "Failed to fetch instances from discovery");
             vec![]
         }
     };
-
     let mut endpoints: Vec<String> = instances
         .iter()
         .map(|instance| instance.endpoint_id().as_url())
