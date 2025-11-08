@@ -6,7 +6,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from benchmarks.profiler.utils.aiperf import benchmark_prefill
+from benchmarks.profiler.utils.aiperf import get_prefill_ttft
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.plot import plot_prefill_interpolation
 
@@ -86,19 +86,20 @@ def profile_prefill(
     num_gpus,
     max_context_length,
     interpolation_granularity,
+    attention_dp_size: int = 1,
+    attn_dp_num_req_ratio: int = 4,
 ):
     def get_ttft(isl):
         ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{isl}"
-        aiperf_result = benchmark_prefill(
+        return get_prefill_ttft(
             isl,
             ai_perf_artifact_dir,
             model_name,
             tokenizer,
             base_url=url,
+            attention_dp_size=attention_dp_size,
+            attn_dp_num_req_ratio=attn_dp_num_req_ratio,
         )
-        if aiperf_result is not None:
-            return aiperf_result["time_to_first_token"]["avg"]
-        return None
 
     return _profile_prefill_helper(
         work_dir,

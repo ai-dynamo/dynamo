@@ -22,7 +22,10 @@ from dataclasses import dataclass, field
 import numpy as np
 import yaml
 
-from benchmarks.profiler.utils.aiperf import benchmark_decode, benchmark_prefill
+from benchmarks.profiler.utils.aiperf import (
+    get_decode_itl_and_thpt_per_gpu,
+    get_prefill_ttft,
+)
 from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
     ParallelizationMapping,
@@ -270,7 +273,7 @@ async def run_profile(args):
                     logger.info("Using ai-configurator to estimate prefill latency.")
                     perf_dict = ai_configurator_perf_estimator.estimate_prefill_perf(
                         args.isl,
-                        tp_size=(mapping.tp or num_gpus),
+                        tp_size=mapping.get_tp_size(),
                     )
                     ttft = perf_dict["context_latency"]
                     logger.info(f"Estimated prefill TTFT: {ttft:.2f}ms")
@@ -301,15 +304,14 @@ async def run_profile(args):
                     # run ai-perf
                     base_url = client.get_service_url()
                     ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{args.isl}"
-                    aiperf_result = benchmark_prefill(
+                    ttft = get_prefill_ttft(
                         args.isl,
                         ai_perf_artifact_dir,
                         model_name,
                         model_name,
-                        base_url=base_url,
+                        base_url,
+                        attention_dp_size=mapping.get_attn_dp_size(),
                     )
-                    if aiperf_result is not None:
-                        ttft = aiperf_result["time_to_first_token"]["avg"]
 
                     logger.info("Cleaning up deployment...")
                     await client.delete_deployment()
@@ -373,7 +375,7 @@ async def run_profile(args):
                     # Compute max_concurrency and max_kv_tokens to know which
                     # num_request to sweep over.
                     max_concurrency = ai_configurator_perf_estimator.get_max_batch_size(
-                        args.isl, args.osl, tp_size=(mapping.tp or num_gpus)
+                        args.isl, args.osl, tp_size=mapping.get_tp_size()
                     )
                     max_kv_tokens = max_concurrency * (args.isl + args.osl)
 
@@ -400,7 +402,7 @@ async def run_profile(args):
 
                     # Compute max_concurrency and max_kv_tokens to know which
                     # num_request to sweep over.
-                    attention_dp_size = mapping.get_attn_dp_size(num_gpus)
+                    attention_dp_size = mapping.get_attn_dp_size()
                     max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
                         f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
                         attention_dp_size=attention_dp_size,
@@ -408,7 +410,7 @@ async def run_profile(args):
                     max_concurrency = max_kv_tokens // (args.isl + args.osl)
 
                 if not args.dry_run:
-                    attention_dp_size = mapping.get_attn_dp_size(num_gpus)
+                    attention_dp_size = mapping.get_attn_dp_size()
                     sweep_num_request = get_num_request_range(
                         attention_dp_size,
                         max_concurrency,
@@ -429,7 +431,7 @@ async def run_profile(args):
                                 args.osl,
                                 num_request,
                                 mode=EngineType.DECODE,
-                                tp_size=(mapping.tp or num_gpus),
+                                tp_size=mapping.get_tp_size(),
                             )
 
                             itl = perf_dict["tpot"]
@@ -441,7 +443,7 @@ async def run_profile(args):
                         else:
                             base_url = client.get_service_url()
                             ai_perf_artifact_dir = f"{work_dir}/aiperf_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
-                            aiperf_result = benchmark_decode(
+                            itl, thpt_per_gpu = get_decode_itl_and_thpt_per_gpu(
                                 args.isl,
                                 args.osl,
                                 num_request,
@@ -449,13 +451,8 @@ async def run_profile(args):
                                 model_name,
                                 model_name,
                                 base_url=base_url,
+                                num_gpus=num_gpus,
                             )
-                            if aiperf_result is not None:
-                                itl = aiperf_result["inter_token_latency"]["avg"]
-                                thpt_per_gpu = (
-                                    aiperf_result["output_token_throughput"]["avg"]
-                                    / num_gpus
-                                )
 
                         if itl is not None and thpt_per_gpu is not None:
                             decode_data.add_data(
@@ -577,7 +574,7 @@ async def run_profile(args):
                 sweep_max_context_length,
                 args.prefill_interpolation_granularity,
                 ai_configurator_perf_estimator,
-                tp_size=(best_prefill_mapping.tp or best_prefill_gpus),
+                tp_size=best_prefill_mapping.get_tp_size(),
             )
         else:
             client = DynamoDeploymentClient(
@@ -619,6 +616,7 @@ async def run_profile(args):
                 best_prefill_gpus,
                 sweep_max_context_length,
                 args.prefill_interpolation_granularity,
+                attention_dp_size=best_prefill_mapping.get_attn_dp_size(),
             )
 
             logger.info("Cleaning up deployment...")
@@ -654,9 +652,9 @@ async def run_profile(args):
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
         elif args.use_ai_configurator:
-            attention_dp_size = best_decode_mapping.get_attn_dp_size(best_decode_gpus)
+            attention_dp_size = best_decode_mapping.get_attn_dp_size()
             max_kv_tokens = ai_configurator_perf_estimator.get_max_kv_tokens(
-                args.isl, args.osl, tp_size=(best_decode_mapping.tp or best_decode_gpus)
+                args.isl, args.osl, tp_size=best_decode_mapping.get_tp_size()
             )
             profile_decode_aiconfigurator(
                 work_dir,
@@ -666,7 +664,7 @@ async def run_profile(args):
                 args.decode_interpolation_granularity,
                 ai_configurator_perf_estimator,
                 attention_dp_size,
-                tp_size=(best_decode_mapping.tp or best_decode_gpus),
+                tp_size=best_decode_mapping.get_tp_size(),
             )
         else:
             client = DynamoDeploymentClient(
@@ -689,7 +687,7 @@ async def run_profile(args):
                 f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
             )
 
-            attention_dp_size = best_decode_mapping.get_attn_dp_size(best_decode_gpus)
+            attention_dp_size = best_decode_mapping.get_attn_dp_size()
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
                 f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
                 attention_dp_size=attention_dp_size,
