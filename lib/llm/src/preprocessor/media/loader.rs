@@ -41,7 +41,7 @@ pub struct MediaLoader {
     media_decoder: MediaDecoder,
     http_client: reqwest::Client,
     media_fetcher: MediaFetcher,
-    nixl_agent: NixlAgent,
+    nixl_agent: Option<NixlAgent>,
 }
 
 impl MediaLoader {
@@ -55,7 +55,15 @@ impl MediaLoader {
 
         let http_client = http_client_builder.build()?;
 
-        let nixl_agent = get_nixl_agent()?;
+        let nixl_agent = match get_nixl_agent() {
+            Ok(agent) => Some(agent),
+            Err(e) => {
+                tracing::warn!(
+                    "Error when creating NIXL agent (will not be able to register media data): {e}"
+                );
+                None
+            }
+        };
 
         Ok(Self {
             media_decoder,
@@ -96,6 +104,10 @@ impl MediaLoader {
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
         // TODO: request-level options
     ) -> Result<RdmaMediaDataDescriptor> {
+        if self.nixl_agent.is_none() {
+            anyhow::bail!("NIXL agent is not available, cannot decode and register media data");
+        }
+
         // fetch the media, decode and NIXL-register
         let decoded = match oai_content_part {
             ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
@@ -116,7 +128,7 @@ impl MediaLoader {
             _ => anyhow::bail!("Unsupported media type"),
         };
 
-        let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
+        let rdma_descriptor = decoded.into_rdma_descriptor(self.nixl_agent.as_ref().unwrap())?;
         Ok(rdma_descriptor)
     }
 }
@@ -148,7 +160,7 @@ mod tests {
             ..Default::default()
         };
 
-        let loader = MediaLoader::new(media_decoder, fetcher).unwrap();
+        let loader: MediaLoader = MediaLoader::new(media_decoder, fetcher).unwrap();
 
         let image_url = ImageUrl::from(format!("{}/llm-optimize-deploy-graphic.png", server.url()));
         let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
@@ -156,13 +168,14 @@ mod tests {
         );
 
         let result = loader.fetch_and_decode_media_part(&content_part).await;
-        assert!(
-            result.is_ok(),
-            "Failed to fetch and decode image: {:?}",
-            result.err()
-        );
-
-        let descriptor = result.unwrap();
+        let descriptor = match result {
+            Ok(descriptor) => descriptor,
+            Err(e) if e.to_string().contains("NIXL agent is not available") => {
+                eprintln!("Skipping test: NIXL agent not available");
+                return;
+            }
+            Err(e) => panic!("Failed to fetch and decode image: {}", e),
+        };
         assert_eq!(descriptor.tensor_info.dtype, DataType::UINT8);
 
         // Verify image dimensions: 1,999px × 1,125px (width × height)

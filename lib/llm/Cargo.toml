@@ -98,7 +98,7 @@ dialoguer = { version = "0.11", default-features = false, features = [
 
 # block_manager
 aligned-vec = { version = "0.6.4", optional = true }
-nixl-sys = { version = "=0.7.0", optional = true }
+nixl-sys = { git = "https://github.com/ai-dynamo/nixl", rev = "ae3f8af", optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
