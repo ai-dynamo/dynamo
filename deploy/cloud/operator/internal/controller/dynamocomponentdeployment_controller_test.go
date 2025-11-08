@@ -734,11 +734,15 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									MainContainer: &corev1.Container{
 										Image: "test-image:latest",
 										Command: []string{
-											"sh",
-											"-c",
+											"some",
+											"dynamo",
+											"command",
 										},
 										Args: []string{
-											"some dynamo command",
+											"--tensor-parallel-size",
+											"4",
+											"--pipeline-parallel-size",
+											"1",
 										},
 										Env: []corev1.EnvVar{
 											{
@@ -817,13 +821,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									{
 										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
-										Command: []string{"sh", "-c"},
-										Args:    []string{"ray start --head --port=6379 && some dynamo command"},
+										Command: []string{"/bin/sh", "-c"},
+										Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1"},
 										Env: []corev1.EnvVar{
 											{Name: "DYN_NAMESPACE", Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
-											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
 											{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"},
@@ -858,7 +861,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 													Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 												},
 											},
-											TimeoutSeconds:   30,
+											TimeoutSeconds:   4,
 											PeriodSeconds:    5,
 											SuccessThreshold: 0,
 											FailureThreshold: 1,
@@ -870,10 +873,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 													Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 												},
 											},
-											TimeoutSeconds:   30,
+											TimeoutSeconds:   4,
 											PeriodSeconds:    10,
 											SuccessThreshold: 0,
-											FailureThreshold: 60,
+											FailureThreshold: 3,
 										},
 										StartupProbe: &corev1.Probe{
 											ProbeHandler: corev1.ProbeHandler{
@@ -931,13 +934,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									{
 										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
-										Command: []string{"sh", "-c"},
+										Command: []string{"/bin/sh", "-c"},
 										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 										Env: []corev1.EnvVar{
 											{Name: "DYN_NAMESPACE", Value: "default"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
-											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
 											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
 											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
 											{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"},

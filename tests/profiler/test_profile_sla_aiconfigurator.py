@@ -18,6 +18,19 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from benchmarks.profiler.profile_sla import run_profile  # noqa: E402
+from benchmarks.profiler.utils.model_info import ModelInfo  # noqa: E402
+
+
+# Override the logger fixture from conftest.py to prevent directory creation
+@pytest.fixture(autouse=True)
+def logger(request):
+    """Override the logger fixture to prevent test directory creation.
+
+    This replaces the logger fixture from tests/conftest.py that creates
+    directories named after each test.
+    """
+    # Simply do nothing - no directories created, no file handlers added
+    yield
 
 
 class TestProfileSlaAiconfigurator:
@@ -27,8 +40,10 @@ class TestProfileSlaAiconfigurator:
     def trtllm_args(self):
         class Args:
             def __init__(self):
+                self.model = ""
+                self.dgd_image = ""
                 self.backend = "trtllm"
-                self.config = "components/backends/trtllm/deploy/disagg.yaml"
+                self.config = "examples/backends/trtllm/deploy/disagg.yaml"
                 self.output_dir = "/tmp/test_profiling_results"
                 self.namespace = "test-namespace"
                 self.min_num_gpus_per_engine = 1
@@ -39,11 +54,9 @@ class TestProfileSlaAiconfigurator:
                 self.osl = 500
                 self.ttft = 50
                 self.itl = 10
-                self.max_context_length = 16384
                 self.prefill_interpolation_granularity = 16
                 self.decode_interpolation_granularity = 6
                 self.service_name = ""
-                self.is_moe_model = False
                 self.dry_run = False
                 self.use_ai_configurator = True
                 self.aic_system = "h200_sxm"
@@ -52,6 +65,13 @@ class TestProfileSlaAiconfigurator:
                 self.aic_backend_version = "0.20.0"
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
+                # Provide minimal model_info to avoid HF queries
+                self.model_info = ModelInfo(
+                    model_size=16384.0,
+                    architecture="TestArchitecture",
+                    is_moe=False,
+                    max_context_length=16384,
+                )
 
         return Args()
 

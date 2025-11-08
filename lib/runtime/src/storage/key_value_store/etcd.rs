@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Duration;
 
-use crate::{storage::key_value_store::Key, transports::etcd::Client};
+use crate::{
+    storage::key_value_store::{Key, KeyValue, WatchEvent},
+    transports::etcd::Client,
+};
 use async_stream::stream;
 use async_trait::async_trait;
 use etcd_client::{Compare, CompareOp, EventType, PutOptions, Txn, TxnOp, WatchOptions};
@@ -25,31 +28,35 @@ impl EtcdStore {
 
 #[async_trait]
 impl KeyValueStore for EtcdStore {
+    type Bucket = EtcdBucket;
+
     /// A "bucket" in etcd is a path prefix
     async fn get_or_create_bucket(
         &self,
         bucket_name: &str,
         _ttl: Option<Duration>, // TODO ttl not used yet
-    ) -> Result<Box<dyn KeyValueBucket>, StoreError> {
-        Ok(self.get_bucket(bucket_name).await?.unwrap())
+    ) -> Result<Self::Bucket, StoreError> {
+        Ok(EtcdBucket {
+            client: self.client.clone(),
+            bucket_name: bucket_name.to_string(),
+        })
     }
 
     /// A "bucket" in etcd is a path prefix. This creates an EtcdBucket object without doing
     /// any network calls.
-    async fn get_bucket(
-        &self,
-        bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError> {
-        Ok(Some(Box::new(EtcdBucket {
+    async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError> {
+        Ok(Some(EtcdBucket {
             client: self.client.clone(),
             bucket_name: bucket_name.to_string(),
-        })))
+        }))
     }
 
     fn connection_id(&self) -> u64 {
-        // This conversion from i64 to u64 is safe because etcd lease IDs are u64 internally.
-        // They present as i64 because of the limitations of the etcd grpc/HTTP JSON API.
-        self.client.lease_id() as u64
+        self.client.lease_id()
+    }
+
+    fn shutdown(&self) {
+        // Revoke the lease? etcd will do it for us on disconnect.
     }
 }
 
@@ -63,7 +70,7 @@ impl KeyValueBucket for EtcdBucket {
     async fn insert(
         &self,
         key: &Key,
-        value: &str,
+        value: bytes::Bytes,
         // "version" in etcd speak. revision is a global cluster-wide value
         revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
@@ -104,23 +111,39 @@ impl KeyValueBucket for EtcdBucket {
 
     async fn watch(
         &self,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StoreError>
-    {
-        let k = make_key(&self.bucket_name, &"".into());
-        tracing::trace!("etcd watch: {k}");
-        let (_watcher, mut watch_stream) = self
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
+        let prefix = make_key(&self.bucket_name, &"".into());
+        tracing::trace!("etcd watch: {prefix}");
+        let (watcher, mut watch_stream) = self
             .client
             .etcd_client()
             .clone()
-            .watch(k.as_bytes(), Some(WatchOptions::new().with_prefix()))
+            .watch(prefix.as_bytes(), Some(WatchOptions::new().with_prefix()))
             .await
             .map_err(|e| StoreError::EtcdError(e.to_string()))?;
         let output = stream! {
+            let _watcher = watcher; // Keep it alive. Not sure if necessary.
             while let Ok(Some(resp)) = watch_stream.message().await {
                 for e in resp.events() {
-                    if matches!(e.event_type(), EventType::Put) && e.kv().is_some() {
-                        let b: bytes::Bytes = e.kv().unwrap().value().to_vec().into();
-                        yield b;
+                    let Some(kv) = e.kv() else {
+                        continue;
+                    };
+                    let (k_bytes, v_bytes) = kv.clone().into_key_value();
+                    let key = match String::from_utf8(k_bytes) {
+                        Ok(k) => k,
+                        Err(err) => {
+                            tracing::error!(%err, prefix, "Invalid UTF8 in etcd key");
+                            continue;
+                        }
+                    };
+                    match e.event_type() {
+                        EventType::Put => {
+                            let item = KeyValue::new(key, v_bytes.into());
+                            yield WatchEvent::Put(item);
+                        }
+                        EventType::Delete => {
+                            yield WatchEvent::Delete(Key::from_raw(key));
+                        }
                     }
                 }
             }
@@ -150,12 +173,16 @@ impl KeyValueBucket for EtcdBucket {
 }
 
 impl EtcdBucket {
-    async fn create(&self, key: &Key, value: &str) -> Result<StoreOutcome, StoreError> {
+    async fn create(
+        &self,
+        key: &Key,
+        value: impl Into<Vec<u8>>,
+    ) -> Result<StoreOutcome, StoreError> {
         let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd create: {k}");
 
         // Use atomic transaction to check and create in one operation
-        let put_options = PutOptions::new().with_lease(self.client.primary_lease().id());
+        let put_options = PutOptions::new().with_lease(self.client.lease_id() as i64);
 
         // Build transaction that creates key only if it doesn't exist
         let txn = Txn::new()
@@ -196,7 +223,7 @@ impl EtcdBucket {
     async fn update(
         &self,
         key: &Key,
-        value: &str,
+        value: impl AsRef<[u8]>,
         revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
         let version = revision;
@@ -224,7 +251,7 @@ impl EtcdBucket {
         }
 
         let put_options = PutOptions::new()
-            .with_lease(self.client.primary_lease().id())
+            .with_lease(self.client.lease_id() as i64)
             .with_prev_key();
         let mut put_resp = self
             .client
@@ -309,7 +336,7 @@ mod concurrent_create_tests {
                 let result = bucket_clone
                     .lock()
                     .await
-                    .insert(&key_clone, &value_clone, 0)
+                    .insert(&key_clone, value_clone.into(), 0)
                     .await;
 
                 match result {

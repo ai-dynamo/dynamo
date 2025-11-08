@@ -48,6 +48,8 @@ def get_aiperf_cmd_for_trace(
         url,
         "--input-file",
         f"{input_dataset}",
+        "--custom-dataset-type",
+        "mooncake_trace",
         "--fixed-schedule-auto-offset",
         "--random-seed",
         str(seed),

@@ -119,16 +119,14 @@ class SGLangComponentName:
 
 
 class TrtllmComponentName:
-    # Note: Planner only supports DECODE_FIRST strategy in TRT-LLM:
-    # - Decode worker is the first worker (tensorrt_llm)
-    # - Prefill worker is the next worker (tensorrt_llm_next)
+    # Unified frontend architecture (consistent with vLLM/SGLang):
+    # - Prefill workers use "prefill" component
+    # - Decode workers use "tensorrt_llm" component
     prefill_worker_k8s_name = "TRTLLMPrefillWorker"
-    prefill_worker_component_name = (
-        "tensorrt_llm_next"  # Prefill is "next" with DECODE_FIRST
-    )
+    prefill_worker_component_name = "prefill"
     prefill_worker_endpoint = "generate"
     decode_worker_k8s_name = "TRTLLMDecodeWorker"
-    decode_worker_component_name = "tensorrt_llm"  # Decode is "first" with DECODE_FIRST
+    decode_worker_component_name = "tensorrt_llm"
     decode_worker_endpoint = "generate"
 
 

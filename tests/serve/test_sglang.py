@@ -9,6 +9,7 @@ import pytest
 
 from tests.serve.common import (
     SERVE_TEST_DIR,
+    WORKSPACE_DIR,
     params_with_model_mark,
     run_serve_deployment,
 )
@@ -19,6 +20,7 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     embedding_payload,
     embedding_payload_default,
+    metric_payload_default,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,18 +33,26 @@ class SGLangConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["SGLANG:EngineCore"])
 
 
-sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/components/backends/sglang")
+sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
+    WORKSPACE_DIR, "examples/backends/sglang"
+)
 
 sglang_configs = {
     "aggregated": SGLangConfig(
+        # Uses backend agg.sh (with metrics enabled) for testing standard
+        # aggregated deployment with metrics collection
         name="aggregated",
-        directory=SERVE_TEST_DIR,
-        script_name="sglang_agg.sh",
+        directory=sglang_dir,
+        script_name="agg.sh",
         marks=[pytest.mark.gpu_1],
-        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
-        request_payloads=[chat_payload_default(), completion_payload_default()],
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="sglang"),
+        ],
     ),
     "disaggregated": SGLangConfig(
         name="disaggregated",
@@ -53,6 +63,25 @@ sglang_configs = {
         env={},
         models_port=8000,
         request_payloads=[chat_payload_default(), completion_payload_default()],
+    ),
+    "disaggregated_same_gpu": SGLangConfig(
+        # Uses disagg_same_gpu.sh for single-GPU disaggregated testing
+        # Validates metrics from both prefill (port 8081) and decode (port 8082) workers
+        name="disaggregated_same_gpu",
+        directory=sglang_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.skip(reason="unstable")],
+        model="Qwen/Qwen3-0.6B",
+        env={},
+        models_port=8000,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            # Validate dynamo_component_* and sglang:* metrics from prefill worker (port 8081)
+            metric_payload_default(min_num_requests=6, backend="sglang", port=8081),
+            # Validate dynamo_component_* and sglang:* metrics from decode worker (port 8082)
+            metric_payload_default(min_num_requests=6, backend="sglang", port=8082),
+        ],
     ),
     "kv_events": SGLangConfig(
         name="kv_events",
@@ -67,7 +96,7 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(
                 expected_log=[
-                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+\)",
+                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+(?:, [^)]*)?\)",
                     r"Event processor for worker_id \d+ processing event: Stored\(",
                     r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
@@ -79,8 +108,10 @@ sglang_configs = {
         # marker 'CUSTOM_TEMPLATE_ACTIVE|' is applied to user messages.
         # The backend (launch/template_verifier.*) checks for this marker
         # and returns "Successfully Applied Chat Template" if found.
+        # Uses SERVE_TEST_DIR (not sglang_dir) because template_verifier.sh/.py
+        # are test-specific mock scripts in tests/serve/launch/
         name="template_verification",
-        directory=SERVE_TEST_DIR,
+        directory=SERVE_TEST_DIR,  # special directory for test-specific scripts
         script_name="template_verifier.sh",
         marks=[pytest.mark.gpu_1],
         model="Qwen/Qwen3-0.6B",

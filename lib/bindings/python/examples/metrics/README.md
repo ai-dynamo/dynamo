@@ -92,7 +92,7 @@ When you need to add or modify metrics in Method 1 (ForwardPassMetrics Pub/Sub v
        // ... existing gauges ...
 
        // Manually create and register new Prometheus gauge
-       let new_metric_gauge = component.create_gauge(
+       let new_metric_gauge = component.metrics().create_gauge(
            "new_metric_name",
            "Description of new metric",
            &[],  // labels
@@ -117,7 +117,7 @@ When you need to add or modify metrics in Method 1 (ForwardPassMetrics Pub/Sub v
    }
    ```
 
-4. **`components/backends/sglang/.../publisher.py`** - Update Python code to compute new metric:
+4. **`components/src/dynamo/sglang/publisher.py`** - Update Python code to compute new metric:
    ```python
    def collect_metrics():
        worker_stats = WorkerStats(
@@ -268,7 +268,7 @@ Dynamic Registration provides type hints (via `.pyi` stub files) for typed metri
 ```mermaid
 graph TB
     subgraph "Python Layer"
-        PY[Python Application<br/>components/backends/sglang/main.py]
+        PY[Python Application<br/>components/src/dynamo/sglang/main.py]
         style PY fill:#3776ab,color:#fff
     end
 
@@ -345,7 +345,7 @@ graph TD
     end
 
     PY -->|endpoint.metrics.create_intgauge| PM
-    PM -->|endpoint.create_intgauge| EP
+    PM -->|endpoint.metrics.create_intgauge| EP
     EP -->|create & register| PROM
     PM -->|wrap & return| MT
     MT -->|return to Python| PY
@@ -379,19 +379,18 @@ maturin develop
 
 ```bash
 cd ~/dynamo/lib/bindings/python/examples/metrics
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 ./server_with_loop.py
+DYN_SYSTEM_PORT=8081 ./server_with_loop.py
 ```
 
 #### Run Example B: Callback-based Updates
 
 ```bash
 cd ~/dynamo/lib/bindings/python/examples/metrics
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 ./server_with_callback.py
+DYN_SYSTEM_PORT=8081 ./server_with_callback.py
 ```
 
-**Note:** The environment variables are required:
-- `DYN_SYSTEM_ENABLED=true` - Enables the system status server
-- `DYN_SYSTEM_PORT=8081` - Sets the port for the metrics endpoint
+**Note:** The environment variable is required:
+- `DYN_SYSTEM_PORT=8081` - Sets the port for the metrics endpoint (automatically enables the system status server)
 
 #### Check the Metrics
 

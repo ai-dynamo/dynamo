@@ -17,9 +17,6 @@ This includes:
 
 - `setup_benchmarking_resources.sh` — Sets up benchmarking and profiling resources in your existing Dynamo namespace
 - `manifests/`
-  - `serviceaccount.yaml` — ServiceAccount `dynamo-sa` for benchmarking and profiling jobs
-  - `role.yaml` — Role `dynamo-role` with necessary permissions
-  - `rolebinding.yaml` — RoleBinding `dynamo-binding`
   - `pvc.yaml` — PVC `dynamo-pvc` for storing profiler results and configurations
   - `pvc-access-pod.yaml` — short‑lived pod for copying profiler results from the PVC
 - `kubernetes.py` — helper used by tooling to apply/read resources (e.g., access pod for PVC downloads)
@@ -63,9 +60,6 @@ deploy/utils/setup_benchmarking_resources.sh
 
 This script applies the following manifests to your existing Dynamo namespace:
 
-- `deploy/utils/manifests/serviceaccount.yaml` - ServiceAccount `dynamo-sa`
-- `deploy/utils/manifests/role.yaml` - Role `dynamo-role`
-- `deploy/utils/manifests/rolebinding.yaml` - RoleBinding `dynamo-binding`
 - `deploy/utils/manifests/pvc.yaml` - PVC `dynamo-pvc`
 
 If `HF_TOKEN` is provided, it also creates a secret for HuggingFace model access.
@@ -73,7 +67,6 @@ If `HF_TOKEN` is provided, it also creates a secret for HuggingFace model access
 After running the setup script, verify the resources by checking:
 
 ```bash
-kubectl get serviceaccount dynamo-sa -n $NAMESPACE
 kubectl get pvc dynamo-pvc -n $NAMESPACE
 ```
 
@@ -99,16 +92,29 @@ python3 -m deploy.utils.inject_manifest \
   --dest /data/configs/disagg.yaml
 ```
 
-**Download benchmark/profiling results:**
+**Download benchmark results:**
 
 ```bash
-# After benchmarking or profiling completes, download results
+# After benchmarking completes, download results
 python3 -m deploy.utils.download_pvc_results \
   --namespace $NAMESPACE \
-  --output-dir ./pvc_files \
+  --output-dir ./benchmarks/results \
   --folder /data/results \
   --no-config   # optional: skip *.yaml/*.yml in the download
 ```
+
+**Download profiling results (optional, for local inspection):**
+
+```bash
+# Optional: Download profiling data for local analysis
+# The planner reads directly from the PVC, so this is only needed for inspection
+python3 -m deploy.utils.download_pvc_results \
+  --namespace $NAMESPACE \
+  --output-dir ./profiling_data \
+  --folder /data
+```
+
+> **Note on Profiling Results**: When using DGDR (DynamoGraphDeploymentRequest) for SLA-driven profiling, profiling data is stored in `/data/` on the PVC. The planner component reads this data directly from the PVC, so downloading is **optional** - only needed if you want to inspect the profiling results locally (e.g., view performance plots, check configurations).
 
 #### Path Requirements
 
@@ -116,8 +122,8 @@ python3 -m deploy.utils.download_pvc_results \
 
 **Common path patterns:**
 - `/data/configs/` - Configuration files (DGD manifests)
-- `/data/results/` - Benchmark results
-- `/data/profiling_results/` - Profiling data
+- `/data/results/` - Benchmark results (for download after benchmarking jobs)
+- `/data/` - Profiling data (used directly by planner, typically not downloaded)
 - `/data/benchmarking/` - Benchmarking artifacts
 
 **User-friendly error messages**: If you forget the `/data/` prefix, the script will show a helpful error message with the correct path and example commands.
@@ -126,9 +132,8 @@ python3 -m deploy.utils.download_pvc_results \
 
 For complete benchmarking and profiling workflows:
 - **Benchmarking Guide**: See [docs/benchmarks/benchmarking.md](../../docs/benchmarks/benchmarking.md) for comparing DynamoGraphDeployments and external endpoints
-- **Pre-Deployment Profiling**: See [docs/benchmarks/pre_deployment_profiling.md](../../docs/benchmarks/pre_deployment_profiling.md) for optimizing configurations before deployment
+- **Pre-Deployment Profiling**: See [docs/benchmarks/sla_driven_profiling.md](../../docs/benchmarks/sla_driven_profiling.md) for optimizing configurations before deployment
 
 ## Notes
 
-- Profiling job manifest remains in `benchmarks/profiler/deploy/profile_sla_job.yaml` and relies on the ServiceAccount/PVC created by the setup script.
 - This setup is focused on benchmarking and profiling resources only - the main Dynamo platform must be installed separately.

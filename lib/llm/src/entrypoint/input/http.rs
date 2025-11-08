@@ -17,12 +17,15 @@ use crate::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::transports::etcd;
-use dynamo_runtime::{DistributedRuntime, Runtime};
-use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
+use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::pipeline::RouterMode;
+use dynamo_runtime::storage::key_value_store::KeyValueStoreManager;
 
 /// Build and run an HTTP service
-pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
+pub async fn run(
+    distributed_runtime: DistributedRuntime,
+    engine_config: EngineConfig,
+) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
     let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
         (Some(tls_cert_path), Some(tls_key_path)) => {
@@ -63,51 +66,39 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 
     let http_service = match engine_config {
         EngineConfig::Dynamic(_) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-            let etcd_client = distributed_runtime.etcd_client();
-            // This allows the /health endpoint to query etcd for active instances
-            http_service_builder = http_service_builder.with_etcd_client(etcd_client.clone());
+            // This allows the /health endpoint to query store for active instances
+            http_service_builder = http_service_builder.store(distributed_runtime.store().clone());
             let http_service = http_service_builder.build()?;
-            match etcd_client {
-                Some(ref etcd_client) => {
-                    let router_config = engine_config.local_model().router_config();
-                    // Listen for models registering themselves in etcd, add them to HTTP service
-                    // Check if we should filter by namespace (based on the local model's namespace)
-                    // Get namespace from the model, fallback to endpoint_id namespace if not set
-                    let namespace = engine_config.local_model().namespace().unwrap_or("");
-                    let target_namespace = if is_global_namespace(namespace) {
-                        None
-                    } else {
-                        Some(namespace.to_string())
-                    };
-                    run_watcher(
-                        distributed_runtime,
-                        http_service.state().manager_clone(),
-                        etcd_client.clone(),
-                        model_card::ROOT_PATH,
-                        router_config.router_mode,
-                        Some(router_config.kv_router_config),
-                        router_config.busy_threshold,
-                        target_namespace,
-                        Arc::new(http_service.clone()),
-                        http_service.state().metrics_clone(),
-                    )
-                    .await?;
-                }
-                None => {
-                    // Static endpoints don't need discovery
-                }
-            }
+            let store = Arc::new(distributed_runtime.store().clone());
+
+            let router_config = engine_config.local_model().router_config();
+            // Listen for models registering themselves, add them to HTTP service
+            // Check if we should filter by namespace (based on the local model's namespace)
+            // Get namespace from the model, fallback to endpoint_id namespace if not set
+            let namespace = engine_config.local_model().namespace().unwrap_or("");
+            let target_namespace = if is_global_namespace(namespace) {
+                None
+            } else {
+                Some(namespace.to_string())
+            };
+            run_watcher(
+                distributed_runtime.clone(),
+                http_service.state().manager_clone(),
+                store,
+                router_config.router_mode,
+                Some(router_config.kv_router_config),
+                router_config.busy_threshold,
+                target_namespace,
+                Arc::new(http_service.clone()),
+                http_service.state().metrics_clone(),
+            )
+            .await?;
             http_service
         }
         EngineConfig::StaticRemote(local_model) => {
             let card = local_model.card();
             let checksum = card.mdcsum();
-
             let router_mode = local_model.router_config().router_mode;
-
-            let dst_config = DistributedConfig::from_settings(true); // true means static
-            let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
             let http_service = http_service_builder.build()?;
             let manager = http_service.model_manager();
 
@@ -121,7 +112,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(
                     manager
                         .kv_chooser_for(
-                            local_model.display_name(),
                             &component,
                             card.kv_cache_block_size,
                             Some(local_model.router_config().kv_router_config),
@@ -143,6 +133,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 None,
                 kv_chooser.clone(),
                 tokenizer_hf.clone(),
+                None, // No prefill chooser in http static mode
             )
             .await?;
             manager.add_chat_completions_model(
@@ -151,12 +142,19 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 chat_engine,
             )?;
 
-            let completions_engine =
-                entrypoint::build_routed_pipeline::<
-                    NvCreateCompletionRequest,
-                    NvCreateCompletionResponse,
-                >(card, &client, router_mode, None, kv_chooser, tokenizer_hf)
-                .await?;
+            let completions_engine = entrypoint::build_routed_pipeline::<
+                NvCreateCompletionRequest,
+                NvCreateCompletionResponse,
+            >(
+                card,
+                &client,
+                router_mode,
+                None,
+                kv_chooser,
+                tokenizer_hf,
+                None, // No prefill chooser in http static mode
+            )
+            .await?;
             manager.add_completions_model(
                 local_model.display_name(),
                 checksum,
@@ -174,8 +172,8 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
-            manager.add_completions_model(model.service_name(), checksum, engine.clone())?;
-            manager.add_chat_completions_model(model.service_name(), checksum, engine)?;
+            manager.add_completions_model(model.display_name(), checksum, engine.clone())?;
+            manager.add_chat_completions_model(model.display_name(), checksum, engine)?;
 
             // Enable all endpoints
             for endpoint_type in EndpointType::all() {
@@ -199,14 +197,14 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                     NvCreateChatCompletionStreamResponse,
                 >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
                 .await?;
-            manager.add_chat_completions_model(model.service_name(), checksum, chat_pipeline)?;
+            manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
             >(model.card(), inner_engine, tokenizer_hf)
             .await?;
-            manager.add_completions_model(model.service_name(), checksum, cmpl_pipeline)?;
+            manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
             // Enable all endpoints
             for endpoint_type in EndpointType::all() {
                 http_service.enable_model_endpoint(endpoint_type, true);
@@ -233,18 +231,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             http_service.custom_backend_metrics_polling_interval,
             http_service.custom_backend_registry.as_ref(),
         ) {
-            // Create DistributedRuntime for polling, matching the engine's mode
-            // Check if we have etcd_client to determine if we're in dynamic or static mode
-            let drt = if http_service.state().etcd_client().is_some() {
-                // Dynamic mode: use from_settings() which respects environment (includes etcd)
-                DistributedRuntime::from_settings(runtime.clone()).await?
-            } else {
-                // Static mode: no etcd
-                let dst_config =
-                    dynamo_runtime::distributed::DistributedConfig::from_settings(true);
-                DistributedRuntime::new(runtime.clone(), dst_config).await?
-            };
-
             tracing::info!(
                 namespace_component_endpoint=%namespace_component_endpoint,
                 polling_interval_secs=polling_interval,
@@ -256,7 +242,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             // shutdown phase.
             Some(
                 crate::http::service::custom_backend_metrics::spawn_custom_backend_polling_task(
-                    drt,
+                    distributed_runtime.clone(),
                     namespace_component_endpoint.clone(),
                     polling_interval,
                     registry.clone(),
@@ -266,25 +252,26 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             None
         };
 
-    http_service.run(runtime.primary_token()).await?;
+    http_service
+        .run(distributed_runtime.primary_token())
+        .await?;
 
     // Abort the polling task if it was started
     if let Some(task) = polling_task {
         task.abort();
     }
 
-    runtime.shutdown(); // Cancel primary token
+    distributed_runtime.shutdown(); // Cancel primary token
     Ok(())
 }
 
-/// Spawns a task that watches for new models in etcd at network_prefix,
+/// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
 #[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
-    etcd_client: etcd::Client,
-    network_prefix: &str,
+    store: Arc<KeyValueStoreManager>,
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
     busy_threshold: Option<f64>,
@@ -292,6 +279,7 @@ async fn run_watcher(
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
 ) -> anyhow::Result<()> {
+    let cancellation_token = runtime.primary_token();
     let mut watch_obj = ModelWatcher::new(
         runtime,
         model_manager,
@@ -299,13 +287,11 @@ async fn run_watcher(
         kv_router_config,
         busy_threshold,
     );
-    tracing::info!("Watching for remote model at {network_prefix}");
-    let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
-    let (_prefix, _watcher, receiver) = models_watcher.dissolve();
+    tracing::debug!("Waiting for remote model");
+    let (_, receiver) = store.watch(model_card::ROOT_PATH, None, cancellation_token);
 
     // Create a channel to receive model type updates
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-
     watch_obj.set_notify_on_model_update(tx);
 
     // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics

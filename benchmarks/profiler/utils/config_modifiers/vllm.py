@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from typing import Literal
+
+import yaml
 
 from benchmarks.profiler.utils.config import (
     Config,
@@ -10,12 +11,15 @@ from benchmarks.profiler.utils.config import (
     break_arguments,
     get_service_name_by_type,
     get_worker_service_from_config,
+    set_argument_value,
     setup_worker_service_resources,
+    update_image,
     validate_and_get_worker_args,
 )
 from benchmarks.profiler.utils.defaults import (
     DEFAULT_MODEL_NAME,
     DYNAMO_RUN_DEFAULT_PORT,
+    EngineType,
 )
 from dynamo.planner.defaults import SubComponentType
 
@@ -30,12 +34,52 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
+DEFAULT_VLLM_CONFIG_PATH = "examples/backends/vllm/deploy/disagg.yaml"
+
+
 class VllmV1ConfigModifier:
+    @classmethod
+    def load_default_config(cls) -> dict:
+        with open(DEFAULT_VLLM_CONFIG_PATH, "r") as f:
+            return yaml.safe_load(f)
+
+    @classmethod
+    def update_model(cls, config, model_name: str) -> dict:
+        # change the model to serve
+        cfg = Config.model_validate(config)
+
+        # Update model for both prefill and decode workers
+        for sub_component_type in [SubComponentType.PREFILL, SubComponentType.DECODE]:
+            try:
+                worker_service = get_worker_service_from_config(
+                    cfg, backend="vllm", sub_component_type=sub_component_type
+                )
+                args = validate_and_get_worker_args(worker_service, backend="vllm")
+                args = break_arguments(args)
+
+                # Update --model (vllm uses --model instead of --model-path and --served-model-name)
+                args = set_argument_value(args, "--model", model_name)
+
+                worker_service.extraPodSpec.mainContainer.args = args
+            except (ValueError, KeyError):
+                # Service might not exist (e.g., in aggregated mode)
+                logger.debug(
+                    f"Skipping {sub_component_type} service as it doesn't exist"
+                )
+                continue
+
+        return cfg.model_dump()
+
+    @classmethod
+    def update_image(cls, config, image: str) -> dict:
+        """Update container image for all DGD services (frontend, planner, workers)."""
+        return update_image(config, image)
+
     @classmethod
     def convert_config(
         cls,
         config: dict,
-        target: Literal["prefill", "decode"],
+        target: EngineType,
         is_moe_model: bool = False,
     ) -> dict:
         if is_moe_model:
@@ -52,7 +96,7 @@ class VllmV1ConfigModifier:
         if "Planner" in cfg.spec.services:
             del cfg.spec.services["Planner"]
 
-        if target == "prefill":
+        if target == EngineType.PREFILL:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "vllm", SubComponentType.PREFILL
@@ -89,7 +133,7 @@ class VllmV1ConfigModifier:
 
             worker_service.extraPodSpec.mainContainer.args = args
 
-        elif target == "decode":
+        elif target == EngineType.DECODE:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "vllm", SubComponentType.PREFILL

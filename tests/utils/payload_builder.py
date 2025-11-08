@@ -66,6 +66,8 @@ def metric_payload_default(
     min_num_requests: int,
     repeat_count: int = 1,
     expected_log: Optional[List[str]] = None,
+    backend: Optional[str] = None,
+    port: int = 8081,
 ) -> MetricsPayload:
     return MetricsPayload(
         body={},
@@ -73,6 +75,8 @@ def metric_payload_default(
         expected_log=expected_log or [],
         expected_response=[],
         min_num_requests=min_num_requests,
+        backend=backend,
+        port=port,
     )
 
 
