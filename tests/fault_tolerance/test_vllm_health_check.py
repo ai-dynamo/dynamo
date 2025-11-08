@@ -162,7 +162,6 @@ def send_completion_request(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.skip(reason="Flaky, temporarily disabled")
 def test_vllm_health_check_active(request, runtime_services):
     """
     End-to-end test for worker fault tolerance with migration support.
@@ -192,25 +191,53 @@ def test_vllm_health_check_active(request, runtime_services):
             # Step 4: Find and kill vLLM engine processes to force the EngineDeadError condition.
             children = worker.subprocesses()
             logger.info(f"Worker children: {[child.pid for child in children]}")
+            vllm_child = None
             for child in children:
                 cmdline = child.cmdline()
                 if len(cmdline) > 0 and cmdline[0] == "VLLM::EngineCore":
                     logger.warning(
                         f"Killing vLLM engine process {{ pid: {child.pid}, cmdline: '{' '.join(cmdline)}' }}"
                     )
+                    vllm_child = child
                     child.kill()
                     break
 
-            time.sleep(2)  # Give some time for the worker to stabilize
+            # Wait for the vLLM engine process to actually die
+            if vllm_child:
+                try:
+                    vllm_child.wait(timeout=30)
+                    logger.info(f"vLLM engine process {vllm_child.pid} has been terminated")
+                except Exception as e:
+                    logger.error(f"Failed to wait for vLLM engine process to die: {e}")
+                    pytest.fail(f"vLLM engine process did not terminate: {e}")
 
-            # Step 5: Send a request triggering the handler to shutdown everything.
-            test_response = send_completion_request("How old are you?", 100, timeout=60)
-            logger.error(f"Test request failed: {test_response}")
+            # Step 5: Send a request that should fail due to the dead engine.
+            try:
+                test_response = send_completion_request("How old are you?", 100, timeout=60)
+                # Verify the response indicates an error (non-2xx status code)
+                if test_response.status_code < 400:
+                    pytest.fail(
+                        f"Expected error response after killing vLLM engine, but got status {test_response.status_code}"
+                    )
+                logger.info(f"Request correctly failed with status {test_response.status_code}: {test_response.text}")
+            except requests.exceptions.RequestException as e:
+                # It's also acceptable for the request to raise an exception
+                logger.info(f"Request correctly failed with exception: {e}")
 
-            # Step 6: Ensure the worker process has been stopped as a result of the EngineDeadError condition.
-            if worker.is_running():
+            # Step 6: Wait for the worker process to stop as a result of the EngineDeadError condition.
+            max_wait = 60  # seconds
+            poll_interval = 0.5  # seconds
+            elapsed = 0
+            while elapsed < max_wait:
+                if not worker.is_running():
+                    logger.info(f"Worker stopped after {elapsed:.1f} seconds")
+                    break
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+            else:
+                # Loop completed without break - worker still running
                 pytest.fail(
-                    "Worker should not be running after killing vLLM engine process."
+                    f"Worker should not be running after killing vLLM engine process (waited {max_wait}s)"
                 )
 
 
