@@ -73,13 +73,14 @@ func ExtractCandidates(endpointSlices *discoveryv1.EndpointSliceList, port int32
 	return candidates, serviceNames
 }
 
-// FindModelsForBaseModel finds all DynamoModels that reference a specific base model
+// FindModelsForBaseModel finds all DynamoModels that match a specific index value
 // Uses field indexer for efficient O(1) lookup
+// The indexValue can be a base model name or hash, depending on the indexField
 func FindModelsForBaseModel(
 	ctx context.Context,
 	c client.Client,
 	namespace string,
-	baseModelName string,
+	indexValue string,
 	indexField string,
 ) ([]reconcile.Request, error) {
 	logs := log.FromContext(ctx)
@@ -87,9 +88,9 @@ func FindModelsForBaseModel(
 	models := &v1alpha1.DynamoModelList{}
 	if err := c.List(ctx, models,
 		client.InNamespace(namespace),
-		client.MatchingFields{indexField: baseModelName},
+		client.MatchingFields{indexField: indexValue},
 	); err != nil {
-		logs.Error(err, "Failed to list DynamoModels", "baseModel", baseModelName)
+		logs.Error(err, "Failed to list DynamoModels", "indexField", indexField, "indexValue", indexValue)
 		return nil, err
 	}
 
@@ -104,8 +105,9 @@ func FindModelsForBaseModel(
 	}
 
 	if len(requests) > 0 {
-		logs.V(1).Info("Found DynamoModels for base model",
-			"baseModel", baseModelName,
+		logs.V(1).Info("Found DynamoModels for index value",
+			"indexField", indexField,
+			"indexValue", indexValue,
 			"count", len(requests))
 	}
 

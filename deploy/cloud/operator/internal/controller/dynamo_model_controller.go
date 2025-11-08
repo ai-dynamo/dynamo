@@ -58,7 +58,7 @@ const (
 	ReasonNoServicesFound     = "NoServicesFound"
 
 	// Field index names
-	dynamoModelBaseModelIndex = ".spec.baseModelName"
+	dynamoModelBaseModelHashIndex = ".spec.baseModelNameHash"
 
 	// Requeue duration for retries when endpoints are not ready
 	requeueAfterDuration = 30 * time.Second
@@ -234,15 +234,18 @@ func (r *DynamoModelReconciler) updateCondition(model *v1alpha1.DynamoModel, con
 
 // SetupWithManager sets up the controller with the Manager
 func (r *DynamoModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Register field indexer for DynamoModels by base model name
-	// This allows efficient O(1) queries: "get all DynamoModels for base-model X"
+	// Register field indexer for DynamoModels by hash of base model name
+	// This allows efficient O(1) queries: "get all DynamoModels for EndpointSlice with hash X"
+	// The hash matches the label on EndpointSlices: nvidia.com/dynamo-base-model-hash
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&v1alpha1.DynamoModel{},
-		dynamoModelBaseModelIndex,
+		dynamoModelBaseModelHashIndex,
 		func(obj client.Object) []string {
 			model := obj.(*v1alpha1.DynamoModel)
-			return []string{model.Spec.BaseModelName}
+			// Hash the base model name using the same function used for EndpointSlice labels
+			hash := dynamo.HashModelName(model.Spec.BaseModelName)
+			return []string{hash}
 		},
 	); err != nil {
 		return err
@@ -266,21 +269,24 @@ func (r *DynamoModelReconciler) findModelsForEndpointSlice(ctx context.Context, 
 	slice := obj.(*discoveryv1.EndpointSlice)
 	logs := log.FromContext(ctx).WithValues("endpointSlice", slice.Name, "namespace", slice.Namespace)
 
-	// Get the service name from the EndpointSlice label
-	// Since service name = base model name, we can directly use it to find models
-	serviceName, ok := slice.Labels[discoveryv1.LabelServiceName]
+	// Get the base model hash from the EndpointSlice label
+	// This hash is set when the Service is created and matches our index
+	baseModelHash, ok := slice.Labels[consts.KubeLabelDynamoBaseModelHash]
 	if !ok {
 		return nil
 	}
 
-	// Find all DynamoModels for this base model using field indexer
-	requests, err := modelendpoint.FindModelsForBaseModel(ctx, r.Client, slice.Namespace, serviceName, dynamoModelBaseModelIndex)
+	// Find all DynamoModels with this base model hash using field indexer
+	// The indexer hashes each model's BaseModelName and we query by that hash
+	requests, err := modelendpoint.FindModelsForBaseModel(ctx, r.Client, slice.Namespace, baseModelHash, dynamoModelBaseModelHashIndex)
 	if err != nil {
 		return nil
 	}
 
 	if len(requests) > 0 {
-		logs.V(1).Info("EndpointSlice change triggered DynamoModel reconciliation", "modelCount", len(requests), "baseModel", serviceName)
+		logs.V(1).Info("EndpointSlice change triggered DynamoModel reconciliation",
+			"modelCount", len(requests),
+			"baseModelHash", baseModelHash)
 	}
 
 	return requests
