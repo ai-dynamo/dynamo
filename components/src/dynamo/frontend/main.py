@@ -251,6 +251,16 @@ async def async_main():
     dump_config(flags.dump_config_to, flags)
     is_static = bool(flags.static_endpoint)  # true if the string has a value
 
+    # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
+    if os.environ.get("DYN_SYSTEM_PORT"):
+        logger.warning(
+            "=" * 80 + "\n"
+            "WARNING: DYN_SYSTEM_PORT is set but NOT used by the frontend!\n"
+            "The frontend does not expose a system metrics server.\n"
+            "Only backend workers should set DYN_SYSTEM_PORT.\n"
+            "Use --http-port to configure the frontend HTTP API port.\n" + "=" * 80
+        )
+
     # Configure Dynamo frontend HTTP service metrics prefix
     if flags.metrics_prefix is not None:
         prefix = flags.metrics_prefix.strip()

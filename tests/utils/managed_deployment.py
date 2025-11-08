@@ -18,7 +18,22 @@ from kr8s.objects import Pod as kr8s_Pod
 from kr8s.objects import Service as kr8s_Service
 from kubernetes_asyncio import client, config
 
-from dynamo.common.utils.paths import get_workspace_dir
+
+def _get_workspace_dir() -> str:
+    """Get workspace directory without depending on dynamo.common package.
+
+    This allows tests to run without requiring dynamo package to be installed.
+    """
+    # Start from this file's location and walk up to find workspace root
+    current = os.path.dirname(os.path.abspath(__file__))
+    while current != os.path.dirname(current):  # Stop at filesystem root
+        # Workspace root has pyproject.toml
+        if os.path.exists(os.path.join(current, "pyproject.toml")):
+            return current
+        current = os.path.dirname(current)
+
+    # Fallback: assume workspace is 3 levels up from tests/utils/
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class ServiceSpec:
@@ -877,8 +892,8 @@ async def main():
         datefmt=DATE_FORMAT,  # ISO 8601 UTC format
     )
 
-    # Get workspace directory using centralized logic
-    workspace_dir = get_workspace_dir()
+    # Get workspace directory
+    workspace_dir = _get_workspace_dir()
 
     deployment_spec = DeploymentSpec(
         os.path.join(workspace_dir, "examples/backends/vllm/deploy/agg.yaml")
