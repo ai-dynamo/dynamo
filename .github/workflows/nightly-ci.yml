@@ -264,6 +264,12 @@ jobs:
     if: needs.build-vllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-vllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -280,6 +286,12 @@ jobs:
     if: needs.build-vllm-arm64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-vllm-arm64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -296,6 +308,12 @@ jobs:
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-trtllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -312,6 +330,12 @@ jobs:
     if: needs.build-trtllm-arm64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-trtllm-arm64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -328,6 +352,12 @@ jobs:
     if: needs.build-sglang-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-sglang-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -344,6 +374,12 @@ jobs:
     if: needs.build-sglang-arm64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-sglang-arm64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -362,6 +398,12 @@ jobs:
     if: needs.build-vllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-vllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
@@ -378,6 +420,12 @@ jobs:
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-trtllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
@@ -394,6 +442,12 @@ jobs:
     if: needs.build-sglang-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-sglang-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
@@ -412,6 +466,12 @@ jobs:
     if: needs.build-vllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-vllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
@@ -428,6 +488,12 @@ jobs:
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-trtllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
@@ -444,6 +510,12 @@ jobs:
     if: needs.build-sglang-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-sglang-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
@@ -462,6 +534,12 @@ jobs:
     if: needs.build-vllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-vllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
@@ -478,6 +556,12 @@ jobs:
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-trtllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
@@ -494,6 +578,12 @@ jobs:
     if: needs.build-sglang-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-sglang-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
@@ -512,6 +602,12 @@ jobs:
     if: needs.build-vllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-vllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -528,6 +624,12 @@ jobs:
     if: needs.build-vllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-vllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -544,6 +646,12 @@ jobs:
     if: needs.build-vllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-vllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -560,6 +668,12 @@ jobs:
     if: needs.build-vllm-arm64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-vllm-arm64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -576,6 +690,12 @@ jobs:
     if: needs.build-vllm-arm64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-vllm-arm64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -592,6 +712,12 @@ jobs:
     if: needs.build-vllm-arm64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-vllm-arm64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -608,6 +734,12 @@ jobs:
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-trtllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -624,6 +756,12 @@ jobs:
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-trtllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -640,6 +778,12 @@ jobs:
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-trtllm-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -656,6 +800,12 @@ jobs:
     if: needs.build-trtllm-arm64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-trtllm-arm64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -672,6 +822,12 @@ jobs:
     if: needs.build-trtllm-arm64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-trtllm-arm64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -688,6 +844,12 @@ jobs:
     if: needs.build-trtllm-arm64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-trtllm-arm64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -704,6 +866,12 @@ jobs:
     if: needs.build-sglang-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-sglang-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -720,6 +888,12 @@ jobs:
     if: needs.build-sglang-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-sglang-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -736,6 +910,12 @@ jobs:
     if: needs.build-sglang-amd64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-sglang-amd64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -752,6 +932,12 @@ jobs:
     if: needs.build-sglang-arm64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-sglang-arm64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -768,6 +954,12 @@ jobs:
     if: needs.build-sglang-arm64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-sglang-arm64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -784,6 +976,12 @@ jobs:
     if: needs.build-sglang-arm64.result == 'success'
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/pull-image
+        with:
+          image_tag: nightly-sglang-arm64
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
