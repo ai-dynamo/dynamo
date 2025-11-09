@@ -19,9 +19,7 @@ This includes:
 - `manifests/`
   - `pvc.yaml` — PVC `dynamo-pvc` for storing profiler results and configurations
   - `pvc-access-pod.yaml` — short‑lived pod for copying profiler results from the PVC
-- `kubernetes.py` — helper used by tooling to apply/read resources (e.g., access pod for PVC downloads)
-- `inject_manifest.py` — utility for injecting deployment configurations into the PVC for profiling
-- `download_pvc_results.py` — utility for downloading benchmark/profiling results from the PVC
+- `kubernetes.py` — helper used by tooling to apply/read resources (e.g., access pod for PVC access)
 - `dynamo_deployment.py` — utilities for working with DynamoGraphDeployment resources
 - `requirements.txt` — Python dependencies for benchmarking utilities
 
@@ -70,37 +68,44 @@ After running the setup script, verify the resources by checking:
 kubectl get pvc dynamo-pvc -n $NAMESPACE
 ```
 
-### PVC Manipulation Scripts
+### Working with the PVC
 
-These scripts interact with the Persistent Volume Claim (PVC) that stores configuration files and benchmark/profiling results. They're essential for the Dynamo benchmarking and profiling workflows.
+The Persistent Volume Claim (PVC) stores configuration files and benchmark/profiling results. Use `kubectl cp` to copy files to and from the PVC.
 
-#### Why These Scripts Are Needed
+#### Setting Up PVC Access
 
-1. **For Pre-Deployment Profiling**: The profiling job needs access to your Dynamo deployment configurations (DGD manifests) to test different parallelization strategies
-2. **For Retrieving Results**: Both benchmarking and profiling jobs write their results to the PVC, which you need to download for analysis
-
-#### Script Usage
-
-**Inject deployment configurations for profiling:**
+First, create a temporary access pod to interact with the PVC:
 
 ```bash
-# The profiling job reads your DGD config from the PVC
-# IMPORTANT: All paths must start with /data/ for security reasons
-python3 -m deploy.utils.inject_manifest \
-  --namespace $NAMESPACE \
-  --src ./my-disagg.yaml \
-  --dest /data/configs/disagg.yaml
+# Create access pod
+kubectl apply -f deploy/utils/manifests/pvc-access-pod.yaml -n $NAMESPACE
+
+# Wait for pod to be ready
+kubectl wait --for=condition=Ready pod/pvc-access-pod -n $NAMESPACE --timeout=60s
 ```
+
+#### Copying Files to the PVC
+
+**Copy deployment configurations for profiling:**
+
+```bash
+# Copy a single file
+kubectl cp ./my-disagg.yaml $NAMESPACE/pvc-access-pod:/data/configs/disagg.yaml
+
+# Copy an entire directory
+kubectl cp ./configs/ $NAMESPACE/pvc-access-pod:/data/configs/
+```
+
+#### Downloading Files from the PVC
 
 **Download benchmark results:**
 
 ```bash
-# After benchmarking completes, download results
-python3 -m deploy.utils.download_pvc_results \
-  --namespace $NAMESPACE \
-  --output-dir ./benchmarks/results \
-  --folder /data/results \
-  --no-config   # optional: skip *.yaml/*.yml in the download
+# Download entire results directory
+kubectl cp $NAMESPACE/pvc-access-pod:/data/results ./benchmarks/results
+
+# Download a specific subdirectory
+kubectl cp $NAMESPACE/pvc-access-pod:/data/results/benchmark-name ./benchmarks/results/benchmark-name
 ```
 
 **Download profiling results (optional, for local inspection):**
@@ -108,25 +113,26 @@ python3 -m deploy.utils.download_pvc_results \
 ```bash
 # Optional: Download profiling data for local analysis
 # The planner reads directly from the PVC, so this is only needed for inspection
-python3 -m deploy.utils.download_pvc_results \
-  --namespace $NAMESPACE \
-  --output-dir ./profiling_data \
-  --folder /data
+kubectl cp $NAMESPACE/pvc-access-pod:/data ./profiling_data
 ```
 
 > **Note on Profiling Results**: When using DGDR (DynamoGraphDeploymentRequest) for SLA-driven profiling, profiling data is stored in `/data/` on the PVC. The planner component reads this data directly from the PVC, so downloading is **optional** - only needed if you want to inspect the profiling results locally (e.g., view performance plots, check configurations).
 
-#### Path Requirements
+#### Cleanup Access Pod
 
-**Important**: The PVC is mounted at `/data` in the access pod for security reasons. All destination paths must start with `/data/`.
+When finished, delete the access pod:
 
-**Common path patterns:**
+```bash
+kubectl delete pod pvc-access-pod -n $NAMESPACE
+```
+
+#### Path Structure
+
+**Common path patterns in the PVC:**
 - `/data/configs/` - Configuration files (DGD manifests)
 - `/data/results/` - Benchmark results (for download after benchmarking jobs)
 - `/data/` - Profiling data (used directly by planner, typically not downloaded)
 - `/data/benchmarking/` - Benchmarking artifacts
-
-**User-friendly error messages**: If you forget the `/data/` prefix, the script will show a helpful error message with the correct path and example commands.
 
 #### Next Steps
 
