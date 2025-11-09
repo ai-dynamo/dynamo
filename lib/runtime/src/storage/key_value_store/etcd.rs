@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::{
     storage::key_value_store::{Key, KeyValue, WatchEvent},
-    transports::etcd::Client,
+    transports::etcd,
 };
 use async_stream::stream;
 use async_trait::async_trait;
@@ -17,11 +17,11 @@ use super::{KeyValueBucket, KeyValueStore, StoreError, StoreOutcome};
 
 #[derive(Clone)]
 pub struct EtcdStore {
-    client: Client,
+    client: etcd::Client,
 }
 
 impl EtcdStore {
-    pub fn new(client: Client) -> Self {
+    pub fn new(client: etcd::Client) -> Self {
         Self { client }
     }
 }
@@ -61,7 +61,7 @@ impl KeyValueStore for EtcdStore {
 }
 
 pub struct EtcdBucket {
-    client: Client,
+    client: etcd::Client,
     bucket_name: String,
 }
 
@@ -114,36 +114,37 @@ impl KeyValueBucket for EtcdBucket {
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
         let prefix = make_key(&self.bucket_name, &"".into());
         tracing::trace!("etcd watch: {prefix}");
-        let (watcher, mut watch_stream) = self
+        let watcher = self
             .client
-            .etcd_client()
-            .clone()
-            .watch(prefix.as_bytes(), Some(WatchOptions::new().with_prefix()))
+            .kv_watch_prefix(&prefix)
             .await
             .map_err(|e| StoreError::EtcdError(e.to_string()))?;
+        let (_, mut watch_stream) = watcher.dissolve();
         let output = stream! {
-            let _watcher = watcher; // Keep it alive. Not sure if necessary.
-            while let Ok(Some(resp)) = watch_stream.message().await {
-                for e in resp.events() {
-                    let Some(kv) = e.kv() else {
-                        continue;
-                    };
-                    let (k_bytes, v_bytes) = kv.clone().into_key_value();
-                    let key = match String::from_utf8(k_bytes) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            tracing::error!(%err, prefix, "Invalid UTF8 in etcd key");
-                            continue;
-                        }
-                    };
-                    match e.event_type() {
-                        EventType::Put => {
-                            let item = KeyValue::new(key, v_bytes.into());
-                            yield WatchEvent::Put(item);
-                        }
-                        EventType::Delete => {
-                            yield WatchEvent::Delete(Key::from_raw(key));
-                        }
+            while let Some(event) = watch_stream.recv().await {
+                match event {
+                    etcd::WatchEvent::Put(kv) => {
+                        let (k, v) = kv.into_key_value();
+                        let key = match String::from_utf8(k) {
+                            Ok(k) => k,
+                            Err(err) => {
+                                tracing::error!(%err, prefix, "Invalid UTF8 in etcd key");
+                                continue;
+                            }
+                        };
+                        let item = KeyValue::new(key, v.into());
+                        yield WatchEvent::Put(item);
+                    }
+                    etcd::WatchEvent::Delete(kv) => {
+                        let (k, _) = kv.into_key_value();
+                        let key = match String::from_utf8(k) {
+                            Ok(k) => k,
+                            Err(err) => {
+                                tracing::error!(%err, prefix, "Invalid UTF8 in etcd key");
+                                continue;
+                            }
+                        };
+                        yield WatchEvent::Delete(Key::from_raw(key));
                     }
                 }
             }
