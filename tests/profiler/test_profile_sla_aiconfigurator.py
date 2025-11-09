@@ -100,7 +100,13 @@ class TestProfileSlaAiconfigurator:
             ("trtllm", "1.0.0rc3"),
         ],
     )
-    @pytest.mark.parametrize("hf_model_id", ["Qwen/Qwen3-32B", "meta-llama/Llama-3.1-405B"])
+    @pytest.mark.parametrize(
+        "hf_model_id",
+        [
+            "Qwen/Qwen3-32B",
+            "meta-llama/Llama-3.1-405B",
+        ],
+    )
     async def test_trtllm_aiconfigurator_many(
         self, trtllm_args, hf_model_id, backend, aic_backend_version
     ):
