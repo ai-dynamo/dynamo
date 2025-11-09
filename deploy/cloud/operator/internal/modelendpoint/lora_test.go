@@ -36,17 +36,17 @@ func TestLoadLoRA_URLConstruction(t *testing.T) {
 		{
 			name:            "address without trailing slash",
 			baseAddress:     "http://10.0.1.5:9090",
-			expectedURLPath: "/loras",
+			expectedURLPath: "/v1/loras",
 		},
 		{
 			name:            "address with trailing slash",
 			baseAddress:     "http://10.0.1.5:9090/",
-			expectedURLPath: "/loras",
+			expectedURLPath: "/v1/loras",
 		},
 		{
 			name:            "address with path",
 			baseAddress:     "http://10.0.1.5:9090/api",
-			expectedURLPath: "/api/loras",
+			expectedURLPath: "/api/v1/loras",
 		},
 	}
 
@@ -219,17 +219,17 @@ func TestUnloadLoRA_URLConstruction(t *testing.T) {
 		{
 			name:            "simple model name",
 			modelName:       "my-lora",
-			expectedURLPath: "/loras/my-lora",
+			expectedURLPath: "/v1/loras/my-lora",
 		},
 		{
 			name:            "model name with special chars",
 			modelName:       "my-lora-v1.0",
-			expectedURLPath: "/loras/my-lora-v1.0",
+			expectedURLPath: "/v1/loras/my-lora-v1.0",
 		},
 		{
 			name:            "model name with slashes (URL encoded)",
 			modelName:       "org/model",
-			expectedURLPath: "/loras/org/model",
+			expectedURLPath: "/v1/loras/org/model",
 		},
 	}
 

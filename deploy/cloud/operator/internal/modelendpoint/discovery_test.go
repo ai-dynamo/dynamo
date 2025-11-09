@@ -146,7 +146,7 @@ func TestExtractCandidates(t *testing.T) {
 			expectedServiceNames: map[string]bool{},
 		},
 		{
-			name: "endpoint not ready - skipped",
+			name: "endpoint not ready - included",
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
@@ -166,11 +166,11 @@ func TestExtractCandidates(t *testing.T) {
 				},
 			},
 			port:                 9090,
-			expectedCandidates:   0,
+			expectedCandidates:   1,
 			expectedServiceNames: map[string]bool{},
 		},
 		{
-			name: "endpoint with nil ready condition - skipped",
+			name: "endpoint with nil ready condition - included",
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
@@ -190,7 +190,7 @@ func TestExtractCandidates(t *testing.T) {
 				},
 			},
 			port:                 9090,
-			expectedCandidates:   0,
+			expectedCandidates:   1,
 			expectedServiceNames: map[string]bool{},
 		},
 		{
@@ -287,7 +287,7 @@ func TestExtractCandidates(t *testing.T) {
 							{
 								Addresses: []string{"10.0.1.6"},
 								Conditions: discoveryv1.EndpointConditions{
-									Ready: &falseVal, // Not ready - should be skipped
+									Ready: &falseVal, // Not ready - now included (readiness determined by probing)
 								},
 								TargetRef: &corev1.ObjectReference{
 									Kind: "Pod",
@@ -326,16 +326,16 @@ func TestExtractCandidates(t *testing.T) {
 				},
 			},
 			port:               9090,
-			expectedCandidates: 2, // Only testPodWorker0 and testPodWorker2 should be included
+			expectedCandidates: 3, // testPodWorker0, testPodWorker1 (unready), and testPodWorker2
 			expectedServiceNames: map[string]bool{
 				"my-service": true,
 			},
 			validateCandidates: func(t *testing.T, candidates []Candidate) {
-				if len(candidates) != 2 {
-					t.Fatalf("expected 2 candidates, got %d", len(candidates))
+				if len(candidates) != 3 {
+					t.Fatalf("expected 3 candidates, got %d", len(candidates))
 				}
-				// Verify only valid pods are included
-				validPods := map[string]bool{testPodWorker0: false, testPodWorker2: false}
+				// Verify only valid pods are included (all 3 pod-backed endpoints)
+				validPods := map[string]bool{testPodWorker0: false, testPodWorker1: false, testPodWorker2: false}
 				for _, c := range candidates {
 					if _, exists := validPods[c.PodName]; exists {
 						validPods[c.PodName] = true

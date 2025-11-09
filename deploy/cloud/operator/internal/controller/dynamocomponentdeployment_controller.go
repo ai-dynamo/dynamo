@@ -35,9 +35,7 @@ import (
 	"emperror.dev/errors"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -79,7 +77,7 @@ const (
 type DynamoComponentDeploymentReconciler struct {
 	client.Client
 	Recorder              record.EventRecorder
-	Config                controller_common.Config
+	Config                commonController.Config
 	EtcdStorage           etcdStorage
 	DockerSecretRetriever dockerSecretRetriever
 }
@@ -942,13 +940,13 @@ func (r *DynamoComponentDeploymentReconciler) getGenericServiceName(dynamoCompon
 
 func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) map[string]string {
 	labels := map[string]string{}
-	if dynamoComponentDeployment != nil && dynamoComponentDeployment.Labels != nil {
-		for k, v := range dynamoComponentDeployment.Labels {
-			labels[k] = v
-		}
-	}
-	// Add base model label if modelRef is specified
 	if dynamoComponentDeployment != nil {
+		if dynamoComponentDeployment.Spec.Labels != nil {
+			maps.Copy(labels, dynamoComponentDeployment.Spec.Labels)
+		}
+		if dynamoComponentDeployment.Labels != nil {
+			maps.Copy(labels, dynamoComponentDeployment.Labels)
+		}
 		dynamo.AddBaseModelLabel(labels, dynamoComponentDeployment.Spec.ModelRef)
 	}
 	return labels
@@ -956,17 +954,13 @@ func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeplo
 
 func (r *DynamoComponentDeploymentReconciler) getKubeAnnotations(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) map[string]string {
 	annotations := map[string]string{}
-	var extraAnnotations map[string]string
-	if dynamoComponentDeployment.Spec.ExtraPodMetadata != nil {
-		extraAnnotations = dynamoComponentDeployment.Spec.ExtraPodMetadata.Annotations
-	} else {
-		extraAnnotations = map[string]string{}
-	}
-	for k, v := range extraAnnotations {
-		annotations[k] = v
-	}
-	// Add base model annotation if modelRef is specified (for human readability)
 	if dynamoComponentDeployment != nil {
+		if dynamoComponentDeployment.Spec.Annotations != nil {
+			maps.Copy(annotations, dynamoComponentDeployment.Spec.Annotations)
+		}
+		if dynamoComponentDeployment.Spec.ExtraPodMetadata != nil && dynamoComponentDeployment.Spec.ExtraPodMetadata.Annotations != nil {
+			maps.Copy(annotations, dynamoComponentDeployment.Spec.ExtraPodMetadata.Annotations)
+		}
 		dynamo.AddBaseModelAnnotation(annotations, dynamoComponentDeployment.Spec.ModelRef)
 	}
 	return annotations
@@ -1180,7 +1174,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
 
-	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, consts.MultinodeDeploymentTypeLWS)
+	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS)
 	if err != nil {
 		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
@@ -1358,7 +1352,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		WithEventFilter(controller_common.EphemeralDeploymentEventFilter(r.Config))
+		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config))
 
 	if r.Config.LWS.Enabled {
 		m.Owns(&leaderworkersetv1.LeaderWorkerSet{}, builder.WithPredicates(predicate.Funcs{

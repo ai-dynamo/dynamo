@@ -32,7 +32,8 @@ import (
 )
 
 // ExtractCandidates extracts endpoint candidates from EndpointSlices
-// Only returns endpoints that are pod-ready
+// Returns all pod-backed endpoints regardless of ready status
+// The readiness will be determined by probing (for LoRA models) or set to false (for base models)
 func ExtractCandidates(endpointSlices *discoveryv1.EndpointSliceList, port int32) ([]Candidate, map[string]bool) {
 	var candidates []Candidate
 	serviceNames := make(map[string]bool)
@@ -45,12 +46,6 @@ func ExtractCandidates(endpointSlices *discoveryv1.EndpointSliceList, port int32
 
 		for _, ep := range slice.Endpoints {
 			if len(ep.Addresses) == 0 {
-				continue
-			}
-
-			// Only consider endpoints that are ready at the pod level
-			podReady := ep.Conditions.Ready != nil && *ep.Conditions.Ready
-			if !podReady {
 				continue
 			}
 

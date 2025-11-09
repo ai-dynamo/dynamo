@@ -47,7 +47,8 @@ func (c *Client) loadLoRA(ctx context.Context, address, modelName, sourceURI str
 	}
 
 	// Build URL robustly using url.JoinPath to handle trailing slashes
-	apiURL, err := url.JoinPath(address, "/loras")
+	// Pass path segments without leading slash to preserve any existing path in address (e.g., /v1)
+	apiURL, err := url.JoinPath(address, "v1", "loras")
 	if err != nil {
 		return fmt.Errorf("failed to construct load LoRA URL: %w", err)
 	}
@@ -83,7 +84,8 @@ func (c *Client) unloadLoRA(ctx context.Context, address, modelName string) erro
 	logs := log.FromContext(ctx)
 
 	// Build URL robustly using url.JoinPath to handle trailing slashes and encode modelName
-	apiURL, err := url.JoinPath(address, "/loras", modelName)
+	// Pass path segments without leading slash to preserve any existing path in address (e.g., /v1)
+	apiURL, err := url.JoinPath(address, "v1", "loras", modelName)
 	if err != nil {
 		logs.V(1).Info("Failed to construct unload LoRA URL", "error", err)
 		return fmt.Errorf("failed to construct unload LoRA URL: %w", err)
