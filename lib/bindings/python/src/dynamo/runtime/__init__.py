@@ -25,7 +25,7 @@ def dynamo_worker(static=False):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
-            runtime = DistributedRuntime(loop, static)
+            runtime = DistributedRuntime(loop, "etcd", static)
 
             await func(runtime, *args, **kwargs)
 

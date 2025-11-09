@@ -8,6 +8,7 @@ use std::{collections::HashSet, time::Duration};
 use anyhow::Result;
 use dynamo_runtime::{
     component::Component,
+    discovery::DiscoveryQuery,
     prelude::*,
     traits::events::EventPublisher,
     transports::{
@@ -15,6 +16,7 @@ use dynamo_runtime::{
         nats::{NatsQueue, Slug},
     },
 };
+use futures::StreamExt;
 use rand::Rng;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -281,10 +283,15 @@ pub async fn start_kv_router_background(
 
     // Get the generate endpoint and watch for instance deletions
     let generate_endpoint = component.endpoint("generate");
-    let (_instance_prefix, mut instance_event_rx) = etcd_client
-        .kv_get_and_watch_prefix(generate_endpoint.etcd_root())
-        .await?
-        .dissolve();
+    let discovery_client = component.drt().discovery();
+    let discovery_key = DiscoveryQuery::Endpoint {
+        namespace: component.namespace().name().to_string(),
+        component: component.name().to_string(),
+        endpoint: "generate".to_string(),
+    };
+    let mut instance_event_stream = discovery_client
+        .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+        .await?;
 
     // Get instances_rx for tracking current workers
     let client = generate_endpoint.client().await?;
@@ -337,25 +344,20 @@ pub async fn start_kv_router_background(
                 }
 
                 // Handle generate endpoint instance deletion events
-                Some(event) = instance_event_rx.recv() => {
-                    let WatchEvent::Delete(kv) = event else {
+                Some(discovery_event_result) = instance_event_stream.next() => {
+                    let Ok(discovery_event) = discovery_event_result else {
                         continue;
                     };
 
-                    let key = String::from_utf8_lossy(kv.key());
-
-                    let Some(worker_id_str) = key.split(&['/', ':'][..]).next_back() else {
-                        tracing::warn!("Could not extract worker ID from instance key: {key}");
+                    let dynamo_runtime::discovery::DiscoveryEvent::Removed(worker_id) = discovery_event else {
                         continue;
                     };
 
-                    // Parse as hexadecimal (base 16)
-                    let Ok(worker_id) = u64::from_str_radix(worker_id_str, 16) else {
-                        tracing::warn!("Could not parse worker ID from instance key: {key}");
-                        continue;
-                    };
+                    tracing::warn!(
+                        worker_id = worker_id,
+                        "DISCOVERY: Generate endpoint instance removed, removing worker"
+                    );
 
-                    tracing::info!("Generate endpoint instance deleted, removing worker {worker_id}");
                     if let Err(e) = remove_worker_tx.send(worker_id).await {
                         tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
                     }

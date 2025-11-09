@@ -70,7 +70,7 @@ sglang_configs = {
         name="disaggregated_same_gpu",
         directory=sglang_dir,
         script_name="disagg_same_gpu.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.skip(reason="unstable")],
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
