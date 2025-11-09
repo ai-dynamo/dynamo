@@ -171,7 +171,11 @@ def logger(request):
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
+    Auto-applies nightly marker to tests with certain markers.
     """
+    # Markers that should automatically get 'nightly' marker
+    auto_nightly_markers = {"pre_merge", "post_merge"}
+
     # Collect models via explicit pytest mark from final filtered items only
     models_to_download = set()
     for item in items:
@@ -180,6 +184,16 @@ def pytest_collection_modifyitems(config, items):
             getattr(m, "name", "") == "skip" for m in getattr(item, "own_markers", [])
         ):
             continue
+
+        # Auto-apply nightly marker if test has any of the trigger markers
+        item_marker_names = {m.name for m in item.own_markers}
+        if (
+            item_marker_names & auto_nightly_markers
+            and "nightly" not in item_marker_names
+        ):
+            item.add_marker(pytest.mark.nightly)
+
+        # Collect models for pre-download
         model_mark = item.get_closest_marker("model")
         if model_mark and model_mark.args:
             models_to_download.add(model_mark.args[0])
