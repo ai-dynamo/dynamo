@@ -5,58 +5,35 @@ name: Nightly CI pipeline
 
 on:
   schedule:
-    - cron: '0 8 * * *'  # Every day at 12:00 AM PST (08:00 UTC)
+    - cron: '0 8 * * *'
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-nightly-${{ github.run_id }}
-  cancel-in-progress: false  # Nightlies should finish even if out of date
+  cancel-in-progress: false
+
+############################## BUILD JOBS ##############################
 
 jobs:
-
-  # --- Build Stage: All Frameworks, All Architectures ---
-  build:
-    name: Build (${{ matrix.framework }} | ${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - framework: vllm
-            arch: amd64
-            runner: gpu-l40-amd64
-          - framework: vllm
-            arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-          - framework: trtllm
-            arch: amd64
-            runner: gpu-l40-amd64
-          - framework: trtllm
-            arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-          - framework: sglang
-            arch: amd64
-            runner: gpu-l40-amd64
-          - framework: sglang
-            arch: arm64
-            runner: cpu-arm-r8g-4xlarge
+  build-vllm-amd64:
+    name: Build (vllm.amd64)
+    runs-on: gpu-l40-amd64
     env:
-      IMAGE_TAG: nightly-${{ matrix.framework }}-${{ matrix.arch }}
+      FRAMEWORK: vllm
+      ARCH: amd64
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Build Docker Image (${{ matrix.framework }} | ${{ matrix.arch }})
+      - uses: actions/checkout@v4
+      - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
         with:
-          framework: ${{ matrix.framework }}
+          framework: ${{ env.FRAMEWORK }}
           target: runtime
-          platform: linux/${{ matrix.arch }}
-          base_image_tag: ${{ matrix.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ matrix.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ matrix.arch == 'arm64' && '129' || '' }}
-          torch_backend: ${{ matrix.arch == 'arm64' && 'cu129' || '' }}
+          platform: linux/${{ env.ARCH }}
+          base_image_tag: ${{ env.ARCH == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+          runtime_image_tag: ${{ env.ARCH == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
+          cuda_version: ${{ env.ARCH == 'arm64' && '129' || '' }}
+          torch_backend: ${{ env.ARCH == 'arm64' && 'cu129' || '' }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -64,13 +41,12 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: ${{ env.IMAGE_TAG }}
-
+          image_tag: nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Image
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:nightly-${{ matrix.framework }}-${{ matrix.arch }}
+          push_tag: ai-dynamo/dynamo:nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
           aws_push: 'false'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -79,178 +55,760 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-  # --- Unit Tests Stage ---
-  unit_tests:
-    name: Unit Tests (${{ matrix.framework }} | ${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - framework: vllm
-            arch: amd64
-            runner: gpu-l40-amd64
-          - framework: vllm
-            arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-          - framework: trtllm
-            arch: amd64
-            runner: gpu-l40-amd64
-          - framework: trtllm
-            arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-          - framework: sglang
-            arch: amd64
-            runner: gpu-l40-amd64
-          - framework: sglang
-            arch: arm64
-            runner: cpu-arm-r8g-4xlarge
+  build-vllm-arm64:
+    name: Build (vllm.arm64)
+    runs-on: cpu-arm-r8g-4xlarge
+    env:
+      FRAMEWORK: vllm
+      ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker Image
+        id: build
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ env.FRAMEWORK }}
+          target: runtime
+          platform: linux/${{ env.ARCH }}
+          base_image_tag: ${{ env.ARCH == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+          runtime_image_tag: ${{ env.ARCH == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
+          cuda_version: ${{ env.ARCH == 'arm64' && '129' || '' }}
+          torch_backend: ${{ env.ARCH == 'arm64' && 'cu129' || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+      - name: Tag and Push Nightly Image
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          aws_push: 'false'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+  build-trtllm-amd64:
+    name: Build (trtllm.amd64)
+    runs-on: gpu-l40-amd64
+    env:
+      FRAMEWORK: trtllm
+      ARCH: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker Image
+        id: build
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ env.FRAMEWORK }}
+          target: runtime
+          platform: linux/${{ env.ARCH }}
+          base_image_tag: ${{ env.ARCH == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+          runtime_image_tag: ${{ env.ARCH == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
+          cuda_version: ${{ env.ARCH == 'arm64' && '129' || '' }}
+          torch_backend: ${{ env.ARCH == 'arm64' && 'cu129' || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+      - name: Tag and Push Nightly Image
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          aws_push: 'false'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+  build-trtllm-arm64:
+    name: Build (trtllm.arm64)
+    runs-on: cpu-arm-r8g-4xlarge
+    env:
+      FRAMEWORK: trtllm
+      ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker Image
+        id: build
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ env.FRAMEWORK }}
+          target: runtime
+          platform: linux/${{ env.ARCH }}
+          base_image_tag: ${{ env.ARCH == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+          runtime_image_tag: ${{ env.ARCH == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
+          cuda_version: ${{ env.ARCH == 'arm64' && '129' || '' }}
+          torch_backend: ${{ env.ARCH == 'arm64' && 'cu129' || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+      - name: Tag and Push Nightly Image
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          aws_push: 'false'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+  build-sglang-amd64:
+    name: Build (sglang.amd64)
+    runs-on: gpu-l40-amd64
+    env:
+      FRAMEWORK: sglang
+      ARCH: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker Image
+        id: build
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ env.FRAMEWORK }}
+          target: runtime
+          platform: linux/${{ env.ARCH }}
+          base_image_tag: ${{ env.ARCH == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+          runtime_image_tag: ${{ env.ARCH == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
+          cuda_version: ${{ env.ARCH == 'arm64' && '129' || '' }}
+          torch_backend: ${{ env.ARCH == 'arm64' && 'cu129' || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+      - name: Tag and Push Nightly Image
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          aws_push: 'false'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+  build-sglang-arm64:
+    name: Build (sglang.arm64)
+    runs-on: cpu-arm-r8g-4xlarge
+    env:
+      FRAMEWORK: sglang
+      ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker Image
+        id: build
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ env.FRAMEWORK }}
+          target: runtime
+          platform: linux/${{ env.ARCH }}
+          base_image_tag: ${{ env.ARCH == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+          runtime_image_tag: ${{ env.ARCH == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
+          cuda_version: ${{ env.ARCH == 'arm64' && '129' || '' }}
+          torch_backend: ${{ env.ARCH == 'arm64' && 'cu129' || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+      - name: Tag and Push Nightly Image
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          aws_push: 'false'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+  ############################## UNIT TEST JOBS ##############################
+
+  unit-vllm-amd64:
+    name: Unit Tests (vllm.amd64)
+    runs-on: gpu-l40-amd64
+    needs: build-vllm-amd64
+    if: needs.build-vllm-amd64.result == 'success'
     steps:
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "${{ matrix.framework }} and unit and nightly"
-          framework: ${{ matrix.framework }}
+          image_tag: nightly-vllm-amd64
+          pytest_marks: "vllm and unit and nightly"
+          framework: vllm
           test_type: unit
-          platform_arch: ${{ matrix.arch }}
+          platform_arch: amd64
 
-  # --- Integration Tests Stage ---
-  integration_tests:
-    name: Integration Tests (${{ matrix.framework }} | ${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - framework: vllm
-            arch: amd64
-            runner: gpu-l40-amd64
-          - framework: trtllm
-            arch: amd64
-            runner: gpu-l40-amd64
-          - framework: sglang
-            arch: amd64
-            runner: gpu-l40-amd64
+  unit-vllm-arm64:
+    name: Unit Tests (vllm.arm64)
+    runs-on: cpu-arm-r8g-4xlarge
+    needs: build-vllm-arm64
+    if: needs.build-vllm-arm64.result == 'success'
+    steps:
+      - name: Run Unit Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-vllm-arm64
+          pytest_marks: "vllm and unit and nightly"
+          framework: vllm
+          test_type: unit
+          platform_arch: arm64
+
+  unit-trtllm-amd64:
+    name: Unit Tests (trtllm.amd64)
+    runs-on: gpu-l40-amd64
+    needs: build-trtllm-amd64
+    if: needs.build-trtllm-amd64.result == 'success'
+    steps:
+      - name: Run Unit Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-trtllm-amd64
+          pytest_marks: "trtllm and unit and nightly"
+          framework: trtllm
+          test_type: unit
+          platform_arch: amd64
+
+  unit-trtllm-arm64:
+    name: Unit Tests (trtllm.arm64)
+    runs-on: cpu-arm-r8g-4xlarge
+    needs: build-trtllm-arm64
+    if: needs.build-trtllm-arm64.result == 'success'
+    steps:
+      - name: Run Unit Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-trtllm-arm64
+          pytest_marks: "trtllm and unit and nightly"
+          framework: trtllm
+          test_type: unit
+          platform_arch: arm64
+
+  unit-sglang-amd64:
+    name: Unit Tests (sglang.amd64)
+    runs-on: gpu-l40-amd64
+    needs: build-sglang-amd64
+    if: needs.build-sglang-amd64.result == 'success'
+    steps:
+      - name: Run Unit Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-sglang-amd64
+          pytest_marks: "sglang and unit and nightly"
+          framework: sglang
+          test_type: unit
+          platform_arch: amd64
+
+  unit-sglang-arm64:
+    name: Unit Tests (sglang.arm64)
+    runs-on: cpu-arm-r8g-4xlarge
+    needs: build-sglang-arm64
+    if: needs.build-sglang-arm64.result == 'success'
+    steps:
+      - name: Run Unit Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-sglang-arm64
+          pytest_marks: "sglang and unit and nightly"
+          framework: sglang
+          test_type: unit
+          platform_arch: arm64
+
+  ############################## INTEGRATION TEST JOBS ##############################
+
+  integration-vllm-amd64:
+    name: Integration Tests (vllm.amd64)
+    runs-on: gpu-l40-amd64
+    needs: build-vllm-amd64
+    if: needs.build-vllm-amd64.result == 'success'
     steps:
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "${{ matrix.framework }} and integration and nightly"
-          framework: ${{ matrix.framework }}
+          image_tag: nightly-vllm-amd64
+          pytest_marks: "vllm and integration and nightly"
+          framework: vllm
           test_type: integration
-          platform_arch: ${{ matrix.arch }}
+          platform_arch: amd64
 
-  # --- E2E Tests: Single GPU (gpu_1) ---
-  e2e_tests_single_gpu:
-    name: E2E Tests (Single GPU) (${{ matrix.framework }} | ${{ matrix.arch }})
+  integration-trtllm-amd64:
+    name: Integration Tests (trtllm.amd64)
     runs-on: gpu-l40-amd64
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - framework: vllm
-            arch: amd64
-          - framework: trtllm
-            arch: amd64
-          - framework: sglang
-            arch: amd64
+    needs: build-trtllm-amd64
+    if: needs.build-trtllm-amd64.result == 'success'
+    steps:
+      - name: Run Integration Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-trtllm-amd64
+          pytest_marks: "trtllm and integration and nightly"
+          framework: trtllm
+          test_type: integration
+          platform_arch: amd64
+
+  integration-sglang-amd64:
+    name: Integration Tests (sglang.amd64)
+    runs-on: gpu-l40-amd64
+    needs: build-sglang-amd64
+    if: needs.build-sglang-amd64.result == 'success'
+    steps:
+      - name: Run Integration Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-sglang-amd64
+          pytest_marks: "sglang and integration and nightly"
+          framework: sglang
+          test_type: integration
+          platform_arch: amd64
+
+  ############################## E2E SINGLE GPU TEST JOBS ##############################
+
+  e2e-single-vllm-amd64:
+    name: E2E Tests Single GPU (vllm.amd64)
+    runs-on: gpu-l40-amd64
+    needs: build-vllm-amd64
+    if: needs.build-vllm-amd64.result == 'success'
     steps:
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "nightly and ${{ matrix.framework }} and e2e and gpu_1"
-          framework: ${{ matrix.framework }}
+          image_tag: nightly-vllm-amd64
+          pytest_marks: "nightly and vllm and e2e and gpu_1"
+          framework: vllm
           test_type: e2e
-          platform_arch: ${{ matrix.arch }}
+          platform_arch: amd64
 
-  # --- E2E Tests: Multi-GPU (gpu_2) ---
-  # NOTE: No dedicated multi-GPU runner available; these are run on gpu-l40-amd64 for now.
-  e2e_tests_multi_gpu:
-    name: E2E Tests (Multi-GPU) (${{ matrix.framework }} | ${{ matrix.arch }})
+  e2e-single-trtllm-amd64:
+    name: E2E Tests Single GPU (trtllm.amd64)
     runs-on: gpu-l40-amd64
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - framework: vllm
-            arch: amd64
-          - framework: trtllm
-            arch: amd64
-          - framework: sglang
-            arch: amd64
+    needs: build-trtllm-amd64
+    if: needs.build-trtllm-amd64.result == 'success'
     steps:
-      - name: Run E2E Tests (gpu_2) # (Simulated multi-GPU on gpu-l40-amd64)
+      - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "nightly and ${{ matrix.framework }} and e2e and gpu_2"
-          framework: ${{ matrix.framework }}
+          image_tag: nightly-trtllm-amd64
+          pytest_marks: "nightly and trtllm and e2e and gpu_1"
+          framework: trtllm
           test_type: e2e
-          platform_arch: ${{ matrix.arch }}
+          platform_arch: amd64
 
-  # --- Component Tests Stage ---
-  component_tests:
-    name: Component Tests (${{ matrix.framework }} | ${{ matrix.arch }} | ${{ matrix.component }})
-    runs-on: ${{ matrix.runner }}
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - framework: vllm
-            arch: amd64
-            runner: gpu-l40-amd64
-            components: [router, planner, kvbm]
-          - framework: vllm
-            arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            components: [router, planner, kvbm]
-          - framework: trtllm
-            arch: amd64
-            runner: gpu-l40-amd64
-            components: [router, planner, kvbm]
-          - framework: trtllm
-            arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            components: [router, planner, kvbm]
-          - framework: sglang
-            arch: amd64
-            runner: gpu-l40-amd64
-            components: [router, planner, kvbm]
-          - framework: sglang
-            arch: arm64
-            runner: cpu-arm-r8g-4xlarge
-            components: [router, planner, kvbm]
+  e2e-single-sglang-amd64:
+    name: E2E Tests Single GPU (sglang.amd64)
+    runs-on: gpu-l40-amd64
+    needs: build-sglang-amd64
+    if: needs.build-sglang-amd64.result == 'success'
     steps:
-      - name: Run Component Tests (${{ matrix.component }})
+      - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "nightly and ${{ matrix.component }}"
-          framework: ${{ matrix.framework }}
-          test_type: component
-          platform_arch: ${{ matrix.arch }}
+          image_tag: nightly-sglang-amd64
+          pytest_marks: "nightly and sglang and e2e and gpu_1"
+          framework: sglang
+          test_type: e2e
+          platform_arch: amd64
 
-  # --- Results Summary Job ---
-  results_summary:
+  ############################## E2E MULTI GPU TEST JOBS ##############################
+
+  e2e-multi-vllm-amd64:
+    name: E2E Tests Multi-GPU (vllm.amd64)
+    runs-on: gpu-l40-amd64
+    needs: build-vllm-amd64
+    if: needs.build-vllm-amd64.result == 'success'
+    steps:
+      - name: Run E2E Tests (gpu_2)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-vllm-amd64
+          pytest_marks: "nightly and vllm and e2e and gpu_2"
+          framework: vllm
+          test_type: e2e
+          platform_arch: amd64
+
+  e2e-multi-trtllm-amd64:
+    name: E2E Tests Multi-GPU (trtllm.amd64)
+    runs-on: gpu-l40-amd64
+    needs: build-trtllm-amd64
+    if: needs.build-trtllm-amd64.result == 'success'
+    steps:
+      - name: Run E2E Tests (gpu_2)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-trtllm-amd64
+          pytest_marks: "nightly and trtllm and e2e and gpu_2"
+          framework: trtllm
+          test_type: e2e
+          platform_arch: amd64
+
+  e2e-multi-sglang-amd64:
+    name: E2E Tests Multi-GPU (sglang.amd64)
+    runs-on: gpu-l40-amd64
+    needs: build-sglang-amd64
+    if: needs.build-sglang-amd64.result == 'success'
+    steps:
+      - name: Run E2E Tests (gpu_2)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-sglang-amd64
+          pytest_marks: "nightly and sglang and e2e and gpu_2"
+          framework: sglang
+          test_type: e2e
+          platform_arch: amd64
+
+  ############################## COMPONENT TEST JOBS ##############################
+
+  component-vllm-amd64-router:
+    name: Component Tests (vllm.amd64.router)
+    runs-on: gpu-l40-amd64
+    needs: build-vllm-amd64
+    if: needs.build-vllm-amd64.result == 'success'
+    steps:
+      - name: Run Component Tests (router)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-vllm-amd64
+          pytest_marks: "nightly and router"
+          framework: vllm
+          test_type: component
+          platform_arch: amd64
+
+  component-vllm-amd64-planner:
+    name: Component Tests (vllm.amd64.planner)
+    runs-on: gpu-l40-amd64
+    needs: build-vllm-amd64
+    if: needs.build-vllm-amd64.result == 'success'
+    steps:
+      - name: Run Component Tests (planner)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-vllm-amd64
+          pytest_marks: "nightly and planner"
+          framework: vllm
+          test_type: component
+          platform_arch: amd64
+
+  component-vllm-amd64-kvbm:
+    name: Component Tests (vllm.amd64.kvbm)
+    runs-on: gpu-l40-amd64
+    needs: build-vllm-amd64
+    if: needs.build-vllm-amd64.result == 'success'
+    steps:
+      - name: Run Component Tests (kvbm)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-vllm-amd64
+          pytest_marks: "nightly and kvbm"
+          framework: vllm
+          test_type: component
+          platform_arch: amd64
+
+  component-vllm-arm64-router:
+    name: Component Tests (vllm.arm64.router)
+    runs-on: cpu-arm-r8g-4xlarge
+    needs: build-vllm-arm64
+    if: needs.build-vllm-arm64.result == 'success'
+    steps:
+      - name: Run Component Tests (router)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-vllm-arm64
+          pytest_marks: "nightly and router"
+          framework: vllm
+          test_type: component
+          platform_arch: arm64
+
+  component-vllm-arm64-planner:
+    name: Component Tests (vllm.arm64.planner)
+    runs-on: cpu-arm-r8g-4xlarge
+    needs: build-vllm-arm64
+    if: needs.build-vllm-arm64.result == 'success'
+    steps:
+      - name: Run Component Tests (planner)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-vllm-arm64
+          pytest_marks: "nightly and planner"
+          framework: vllm
+          test_type: component
+          platform_arch: arm64
+
+  component-vllm-arm64-kvbm:
+    name: Component Tests (vllm.arm64.kvbm)
+    runs-on: cpu-arm-r8g-4xlarge
+    needs: build-vllm-arm64
+    if: needs.build-vllm-arm64.result == 'success'
+    steps:
+      - name: Run Component Tests (kvbm)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-vllm-arm64
+          pytest_marks: "nightly and kvbm"
+          framework: vllm
+          test_type: component
+          platform_arch: arm64
+
+  component-trtllm-amd64-router:
+    name: Component Tests (trtllm.amd64.router)
+    runs-on: gpu-l40-amd64
+    needs: build-trtllm-amd64
+    if: needs.build-trtllm-amd64.result == 'success'
+    steps:
+      - name: Run Component Tests (router)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-trtllm-amd64
+          pytest_marks: "nightly and router"
+          framework: trtllm
+          test_type: component
+          platform_arch: amd64
+
+  component-trtllm-amd64-planner:
+    name: Component Tests (trtllm.amd64.planner)
+    runs-on: gpu-l40-amd64
+    needs: build-trtllm-amd64
+    if: needs.build-trtllm-amd64.result == 'success'
+    steps:
+      - name: Run Component Tests (planner)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-trtllm-amd64
+          pytest_marks: "nightly and planner"
+          framework: trtllm
+          test_type: component
+          platform_arch: amd64
+
+  component-trtllm-amd64-kvbm:
+    name: Component Tests (trtllm.amd64.kvbm)
+    runs-on: gpu-l40-amd64
+    needs: build-trtllm-amd64
+    if: needs.build-trtllm-amd64.result == 'success'
+    steps:
+      - name: Run Component Tests (kvbm)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-trtllm-amd64
+          pytest_marks: "nightly and kvbm"
+          framework: trtllm
+          test_type: component
+          platform_arch: amd64
+
+  component-trtllm-arm64-router:
+    name: Component Tests (trtllm.arm64.router)
+    runs-on: cpu-arm-r8g-4xlarge
+    needs: build-trtllm-arm64
+    if: needs.build-trtllm-arm64.result == 'success'
+    steps:
+      - name: Run Component Tests (router)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-trtllm-arm64
+          pytest_marks: "nightly and router"
+          framework: trtllm
+          test_type: component
+          platform_arch: arm64
+
+  component-trtllm-arm64-planner:
+    name: Component Tests (trtllm.arm64.planner)
+    runs-on: cpu-arm-r8g-4xlarge
+    needs: build-trtllm-arm64
+    if: needs.build-trtllm-arm64.result == 'success'
+    steps:
+      - name: Run Component Tests (planner)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-trtllm-arm64
+          pytest_marks: "nightly and planner"
+          framework: trtllm
+          test_type: component
+          platform_arch: arm64
+
+  component-trtllm-arm64-kvbm:
+    name: Component Tests (trtllm.arm64.kvbm)
+    runs-on: cpu-arm-r8g-4xlarge
+    needs: build-trtllm-arm64
+    if: needs.build-trtllm-arm64.result == 'success'
+    steps:
+      - name: Run Component Tests (kvbm)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-trtllm-arm64
+          pytest_marks: "nightly and kvbm"
+          framework: trtllm
+          test_type: component
+          platform_arch: arm64
+
+  component-sglang-amd64-router:
+    name: Component Tests (sglang.amd64.router)
+    runs-on: gpu-l40-amd64
+    needs: build-sglang-amd64
+    if: needs.build-sglang-amd64.result == 'success'
+    steps:
+      - name: Run Component Tests (router)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-sglang-amd64
+          pytest_marks: "nightly and router"
+          framework: sglang
+          test_type: component
+          platform_arch: amd64
+
+  component-sglang-amd64-planner:
+    name: Component Tests (sglang.amd64.planner)
+    runs-on: gpu-l40-amd64
+    needs: build-sglang-amd64
+    if: needs.build-sglang-amd64.result == 'success'
+    steps:
+      - name: Run Component Tests (planner)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-sglang-amd64
+          pytest_marks: "nightly and planner"
+          framework: sglang
+          test_type: component
+          platform_arch: amd64
+
+  component-sglang-amd64-kvbm:
+    name: Component Tests (sglang.amd64.kvbm)
+    runs-on: gpu-l40-amd64
+    needs: build-sglang-amd64
+    if: needs.build-sglang-amd64.result == 'success'
+    steps:
+      - name: Run Component Tests (kvbm)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-sglang-amd64
+          pytest_marks: "nightly and kvbm"
+          framework: sglang
+          test_type: component
+          platform_arch: amd64
+
+  component-sglang-arm64-router:
+    name: Component Tests (sglang.arm64.router)
+    runs-on: cpu-arm-r8g-4xlarge
+    needs: build-sglang-arm64
+    if: needs.build-sglang-arm64.result == 'success'
+    steps:
+      - name: Run Component Tests (router)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-sglang-arm64
+          pytest_marks: "nightly and router"
+          framework: sglang
+          test_type: component
+          platform_arch: arm64
+
+  component-sglang-arm64-planner:
+    name: Component Tests (sglang.arm64.planner)
+    runs-on: cpu-arm-r8g-4xlarge
+    needs: build-sglang-arm64
+    if: needs.build-sglang-arm64.result == 'success'
+    steps:
+      - name: Run Component Tests (planner)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-sglang-arm64
+          pytest_marks: "nightly and planner"
+          framework: sglang
+          test_type: component
+          platform_arch: arm64
+
+  component-sglang-arm64-kvbm:
+    name: Component Tests (sglang.arm64.kvbm)
+    runs-on: cpu-arm-r8g-4xlarge
+    needs: build-sglang-arm64
+    if: needs.build-sglang-arm64.result == 'success'
+    steps:
+      - name: Run Component Tests (kvbm)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-sglang-arm64
+          pytest_marks: "nightly and kvbm"
+          framework: sglang
+          test_type: component
+          platform_arch: arm64
+
+  ############################## RESULTS SUMMARY ##############################
+
+  results-summary:
     name: Results Summary
     runs-on: ubuntu-latest
     if: always()
     needs:
-      - build
-      - unit_tests
-      - integration_tests
-      - e2e_tests_single_gpu
-      - e2e_tests_multi_gpu
-      - component_tests
+      - build-vllm-amd64
+      - build-vllm-arm64
+      - build-trtllm-amd64
+      - build-trtllm-arm64
+      - build-sglang-amd64
+      - build-sglang-arm64
+      - unit-vllm-amd64
+      - unit-vllm-arm64
+      - unit-trtllm-amd64
+      - unit-trtllm-arm64
+      - unit-sglang-amd64
+      - unit-sglang-arm64
+      - integration-vllm-amd64
+      - integration-trtllm-amd64
+      - integration-sglang-amd64
+      - e2e-single-vllm-amd64
+      - e2e-single-trtllm-amd64
+      - e2e-single-sglang-amd64
+      - e2e-multi-vllm-amd64
+      - e2e-multi-trtllm-amd64
+      - e2e-multi-sglang-amd64
+      - component-vllm-amd64-router
+      - component-vllm-amd64-planner
+      - component-vllm-amd64-kvbm
+      - component-vllm-arm64-router
+      - component-vllm-arm64-planner
+      - component-vllm-arm64-kvbm
+      - component-trtllm-amd64-router
+      - component-trtllm-amd64-planner
+      - component-trtllm-amd64-kvbm
+      - component-trtllm-arm64-router
+      - component-trtllm-arm64-planner
+      - component-trtllm-arm64-kvbm
+      - component-sglang-amd64-router
+      - component-sglang-amd64-planner
+      - component-sglang-amd64-kvbm
+      - component-sglang-arm64-router
+      - component-sglang-arm64-planner
+      - component-sglang-arm64-kvbm
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
       - name: Gather job metadata
         id: gather
         run: |
@@ -260,30 +818,13 @@ jobs:
           echo "| Stage            | Status   | Runner                | Duration (min) | Artifacts                  |" >> results.md
           echo "|------------------|----------|-----------------------|----------------|----------------------------|" >> results.md
 
-          # Helper function
-          job_summary() {
-            local label="$1"; local job="$2"; local runner="$3"; local path="$4"
-            # Strip quotes and [ ] from runners
-            runner=$(echo "$runner" | tr -d '[]')
-            # Extract status and duration
-            status=$(jq -r ".jobs.$job.conclusion" workflow.json)
-            duration=$(jq -r ".jobs.$job.durationMs" workflow.json)
-            minutes="N/A"
-            if [ "$duration" != "null" ]; then minutes=$(awk "BEGIN{print $duration/60000}"); fi
-            artifacts="[See Actions]($path)"
-            echo "| $label | $status | $runner | $minutes | $artifacts |" >> results.md
-          }
-
-          # Download workflow summary JSON using GitHub API
           gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs -q ".jobs[] | {id, name, runner_name, conclusion, started_at, completed_at}" > jobs.jsonl
-          gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }} > workflow.json
 
           while read job_entry; do
             job_id=$(echo "$job_entry" | jq -r '.id')
             name=$(echo "$job_entry" | jq -r '.name')
             runner=$(echo "$job_entry" | jq -r '.runner_name')
             status=$(echo "$job_entry" | jq -r '.conclusion')
-            # Compute duration
             started=$(echo "$job_entry" | jq -r '.started_at')
             completed=$(echo "$job_entry" | jq -r '.completed_at')
             minutes="N/A"
@@ -301,10 +842,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Display workflow summary
-        run: |
-          cat results.md
-        shell: bash
+        run: cat results.md
       - name: Upload results summary as job summary
-        run: |
-          cat results.md >> $GITHUB_STEP_SUMMARY
-        shell: bash
+        run: cat results.md >> $GITHUB_STEP_SUMMARY
