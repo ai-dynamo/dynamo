@@ -167,7 +167,7 @@ def logger(request):
     logger.removeHandler(handler)
 
 
-@pytest.hookimpl(trylast=True)
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
@@ -179,19 +179,19 @@ def pytest_collection_modifyitems(config, items):
     # Collect models via explicit pytest mark from final filtered items only
     models_to_download = set()
     for item in items:
-        # Only collect from items that are not skipped
-        if any(
-            getattr(m, "name", "") == "skip" for m in getattr(item, "own_markers", [])
-        ):
-            continue
-
-        # Auto-apply nightly marker if test has any of the trigger markers
+        # Auto-apply nightly marker FIRST before skip check
         item_marker_names = {m.name for m in item.own_markers}
         if (
             item_marker_names & auto_nightly_markers
             and "nightly" not in item_marker_names
         ):
             item.add_marker(pytest.mark.nightly)
+
+        # Only collect from items that are not skipped
+        if any(
+            getattr(m, "name", "") == "skip" for m in getattr(item, "own_markers", [])
+        ):
+            continue
 
         # Collect models for pre-download
         model_mark = item.get_closest_marker("model")

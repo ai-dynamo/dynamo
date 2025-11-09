@@ -23,7 +23,7 @@ def pytest_ignore_collect(collection_path, config):
     return None
 
 
-@pytest.hookimpl(trylast=True)
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     """
     Auto-apply nightly marker to tests with certain markers.
@@ -31,11 +31,7 @@ def pytest_collection_modifyitems(config, items):
     auto_nightly_markers = {"pre_merge", "post_merge"}
 
     for item in items:
-        if any(
-            getattr(m, "name", "") == "skip" for m in getattr(item, "own_markers", [])
-        ):
-            continue
-
+        # Auto-apply nightly marker FIRST before skip check
         item_marker_names = {m.name for m in item.own_markers}
         if (
             item_marker_names & auto_nightly_markers
