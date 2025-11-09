@@ -12,13 +12,15 @@ from tests.utils.payloads import (
 )
 
 # Common default text prompt used across tests
-TEXT_PROMPT = "Tell me a short joke about AI."
+DEFAULT_TEXT_PROMPT = "Tell me a short joke about AI."
+DEFAULT_EXPECTED_RESPONSE_ANY = ("AI", "joke", "short", "robot")
+_UNSET: Any = object()
 
 
 def chat_payload_default(
     repeat_count: int = 2,
     expected_response_all: Optional[List[str]] = None,
-    expected_response_any: Optional[List[str]] = None,
+    expected_response_any: Optional[List[str]] = _UNSET,
     expected_log: Optional[List[str]] = None,
     max_tokens: int = 300,
     temperature: float = 0,
@@ -29,7 +31,7 @@ def chat_payload_default(
             "messages": [
                 {
                     "role": "user",
-                    "content": TEXT_PROMPT,
+                    "content": DEFAULT_TEXT_PROMPT,
                 }
             ],
             "max_tokens": max_tokens,
@@ -39,14 +41,18 @@ def chat_payload_default(
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response_all=expected_response_all or [],
-        expected_response_any=expected_response_any or ["AI", "joke", "short", "robot"],
+        expected_response_any=_resolve_expected_response_any(
+            expected_response_all,
+            expected_response_any,
+            DEFAULT_EXPECTED_RESPONSE_ANY,
+        ),
     )
 
 
 def completion_payload_default(
     repeat_count: int = 2,
     expected_response_all: Optional[List[str]] = None,
-    expected_response_any: Optional[List[str]] = None,
+    expected_response_any: Optional[List[str]] = _UNSET,
     expected_log: Optional[List[str]] = None,
     max_tokens: int = 300,
     temperature: float = 0,
@@ -54,7 +60,7 @@ def completion_payload_default(
 ) -> CompletionPayload:
     return CompletionPayload(
         body={
-            "prompt": TEXT_PROMPT,
+            "prompt": DEFAULT_TEXT_PROMPT,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": stream,
@@ -62,8 +68,22 @@ def completion_payload_default(
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response_all=expected_response_all or [],
-        expected_response_any=expected_response_any or ["AI", "joke", "short", "robot"],
+        expected_response_any=_resolve_expected_response_any(
+            expected_response_all,
+            expected_response_any,
+            DEFAULT_EXPECTED_RESPONSE_ANY,
+        ),
     )
+
+
+def _resolve_expected_response_any(
+    expected_response_all: Optional[List[str]],
+    expected_response_any: Optional[List[str]],
+    default_any: List[str],
+) -> List[str]:
+    if expected_response_any is _UNSET:
+        return [] if expected_response_all is not None else list(default_any)
+    return expected_response_any or []
 
 
 def metric_payload_default(
