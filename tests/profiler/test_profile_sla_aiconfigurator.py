@@ -51,7 +51,7 @@ class TestProfileSlaAiconfigurator:
                 self.aic_system = "h200_sxm"
                 self.aic_hf_id = "Qwen/Qwen3-32B"
                 self.aic_backend = ""
-                self.aic_backend_version = "0.20.0"
+                self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
 
@@ -95,6 +95,7 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.parametrize(
         "backend, aic_backend_version",
         [
+            ("trtllm", None),
             ("trtllm", "0.20.0"),
             ("trtllm", "1.0.0rc3"),
         ],

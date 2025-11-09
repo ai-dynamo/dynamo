@@ -82,7 +82,7 @@ def create_profiler_parser() -> argparse.Namespace:
             decode_interpolation_granularity: Int (how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length, default: 6)
             use_ai_configurator: Boolean (use ai-configurator to estimate benchmarking results instead of running actual deployment, default: False)
             aic_system: String (target system for use with aiconfigurator, default: None)
-            aic_hf_id: String (aiconfigurator name of the target model, default: None)
+            aic_hf_id: String (aiconfigurator huggingface id of the target model, default: None)
             aic_backend: String (aiconfigurator backend of the target model, if not provided, will use args.backend, default: "")
             aic_backend_version: String (specify backend version when using aiconfigurator to estimate perf, default: None)
             dry_run: Boolean (dry run the profile job, default: False)

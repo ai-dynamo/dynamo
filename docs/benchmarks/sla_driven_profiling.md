@@ -299,8 +299,8 @@ profilingConfig:
     sweep:
       use_ai_configurator: true
       aic_system: h200_sxm              # GPU system: h100_sxm, h200_sxm, b200_sxm, gb200_sxm, a100_sxm
-      aic_hf_id: Qwen/Qwen3-32B         # AIC model identifier (see supported list)
-      aic_backend_version: "0.20.0"     # TensorRT-LLM version: 0.20.0, 1.0.0rc3, 1.0.0rc6
+      aic_hf_id: Qwen/Qwen3-32B         # Huggingface model id
+      aic_backend_version: "0.20.0"     # TensorRT-LLM version: 0.20.0, 1.0.0rc3
 ```
 
 **Supported configurations:** See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#supported-features)
