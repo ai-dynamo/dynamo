@@ -102,3 +102,13 @@ Validation for configuration consistency
   {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Validation for discoverBackend configuration
+*/}}
+{{- define "dynamo-operator.validateDiscoverBackend" -}}
+{{- $discoverBackend := .Values.discoverBackend -}}
+{{- if and (ne $discoverBackend "") (ne $discoverBackend "kubernetes") -}}
+  {{- fail (printf "VALIDATION ERROR: discoverBackend must be either an empty string (defaults to ETCD) or 'kubernetes'. Got: '%s'" $discoverBackend) -}}
+{{- end -}}
+{{- end -}}

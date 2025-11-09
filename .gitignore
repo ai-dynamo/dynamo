@@ -109,3 +109,4 @@ profiling_results*
 
 # Direnv
 .envrc
+rebuild.sh

@@ -92,13 +92,59 @@ impl DistributedRuntime {
 
         let nats_client_for_metrics = nats_client.clone();
 
-        // Initialize discovery backed by KV store
-        let discovery_client = {
-            use crate::discovery::KVStoreDiscovery;
-            Arc::new(KVStoreDiscovery::new(
-                store.clone(),
-                runtime.primary_token(),
-            )) as Arc<dyn Discovery>
+        // Initialize discovery client based on backend configuration
+        let discovery_backend = std::env::var("DYN_DISCOVERY_BACKEND")
+            .unwrap_or_else(|_| "kv_store".to_string());
+        
+        let (discovery_client, discovery_metadata) = match discovery_backend.as_str() {
+            "kubernetes" => {
+                tracing::info!("Initializing Kubernetes discovery backend");
+                
+                // Create shared metadata store
+                let metadata = Arc::new(tokio::sync::RwLock::new(
+                    crate::discovery::DiscoveryMetadata::new()
+                ));
+                
+                // Create Kubernetes discovery client
+                match crate::discovery::KubeDiscoveryClient::new(
+                    metadata.clone(),
+                    runtime.primary_token(),
+                ).await {
+                    Ok(client) => {
+                        tracing::info!("Kubernetes discovery client initialized successfully");
+                        (
+                            Arc::new(client) as Arc<dyn Discovery>,
+                            Some(metadata),
+                        )
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to initialize Kubernetes discovery client: {}. Falling back to KV store.",
+                            e
+                        );
+                        // Fallback to KV store
+                        use crate::discovery::KVStoreDiscovery;
+                        (
+                            Arc::new(KVStoreDiscovery::new(
+                                store.clone(),
+                                runtime.primary_token(),
+                            )) as Arc<dyn Discovery>,
+                            None,
+                        )
+                    }
+                }
+            }
+            _ => {
+                tracing::info!("Initializing KV store discovery backend");
+                use crate::discovery::KVStoreDiscovery;
+                (
+                    Arc::new(KVStoreDiscovery::new(
+                        store.clone(),
+                        runtime.primary_token(),
+                    )) as Arc<dyn Discovery>,
+                    None,
+                )
+            }
         };
 
         let distributed_runtime = Self {
@@ -109,6 +155,7 @@ impl DistributedRuntime {
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
+            discovery_metadata,
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -152,6 +199,7 @@ impl DistributedRuntime {
                 port,
                 cancel_token,
                 Arc::new(distributed_runtime.clone()),
+                distributed_runtime.discovery_metadata.clone(),
             )
             .await
             {
@@ -230,7 +278,7 @@ impl DistributedRuntime {
     }
 
     pub fn connection_id(&self) -> u64 {
-        self.store.connection_id()
+        self.discovery_client.instance_id()
     }
 
     pub fn shutdown(&self) {

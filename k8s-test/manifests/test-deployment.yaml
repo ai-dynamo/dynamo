@@ -1,0 +1,65 @@
+---
+# Test deployment for Dynamo discovery integration testing
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamo-test-worker
+  labels:
+    app: dynamo-test
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dynamo-test
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: dynamo-test
+        component: worker
+        dynamo.nvidia.com/namespace: "test-namespace"
+        dynamo.nvidia.com/component: "test-component"
+    spec:
+      containers:
+      - name: worker
+        image: nginx:alpine  # Simple container for testing
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 2
+          periodSeconds: 5
+---
+# Service to create EndpointSlices
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamo-test-service
+  labels:
+    app: dynamo-test
+    dynamo.nvidia.com/namespace: "test-namespace"
+    dynamo.nvidia.com/component: "test-component"
+spec:
+  selector:
+    app: dynamo-test
+    component: worker
+  ports:
+  - port: 8080
+    targetPort: 80
+    protocol: TCP
+    name: http
+  type: ClusterIP
+

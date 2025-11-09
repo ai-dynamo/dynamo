@@ -99,6 +99,10 @@ pub struct DistributedRuntime {
     // Service discovery interface
     discovery_client: Arc<dyn discovery::Discovery>,
 
+    // Discovery metadata (only used for Kubernetes backend)
+    // Shared with system status server to expose via /metadata endpoint
+    discovery_metadata: Option<Arc<tokio::sync::RwLock<discovery::DiscoveryMetadata>>>,
+
     // local registry for components
     // the registry allows us to use share runtime resources across instances of the same component object.
     // take for example two instances of a client to the same remote component. The registry allows us to use

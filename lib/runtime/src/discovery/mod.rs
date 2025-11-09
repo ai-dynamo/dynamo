@@ -15,6 +15,9 @@ pub use mock::{MockDiscovery, SharedMockRegistry};
 mod kv_store;
 pub use kv_store::KVStoreDiscovery;
 
+mod kube;
+pub use kube::{KubeDiscoveryClient, DiscoveryMetadata, hash_pod_name};
+
 pub mod utils;
 pub use utils::watch_and_extract_field;
 

@@ -135,11 +135,14 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 
 		// Propagate metrics annotation from parent deployment if present
 		if parentDynamoGraphDeployment.Annotations != nil {
+			if deployment.Spec.Annotations == nil {
+				deployment.Spec.Annotations = make(map[string]string)
+			}
 			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationEnableMetrics]; exists {
-				if deployment.Spec.Annotations == nil {
-					deployment.Spec.Annotations = make(map[string]string)
-				}
 				deployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics] = val
+			}
+			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend]; exists {
+				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend] = val
 			}
 		}
 
@@ -392,24 +395,39 @@ func getCliqueStartupDependencies(
 	return nil
 }
 
-func GenerateComponentService(ctx context.Context, componentName, componentNamespace string) (*corev1.Service, error) {
+// TODO: validation for all resource creation (or maybe just Service) that it's DNS-1035 compliant
+// component.ServiceName is empty
+func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec, componentName string) (*corev1.Service, error) {
+	componentName = GetDynamoComponentName(dynamoDeployment, componentName)
+	// TODO: need to consolidate notion of ComponentType and SubComponentType (can have P and D where both are ComponentType worker)
+
+	var servicePort corev1.ServicePort
+	if component.ComponentType == commonconsts.ComponentTypeFrontend {
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.DynamoServicePortName,
+			Port:       commonconsts.DynamoServicePort,
+			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	} else {
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.DynamoSystemPortName,
+			Port:       commonconsts.DynamoSystemPort,
+			TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	}
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      componentName,
-			Namespace: componentNamespace,
+			Namespace: dynamoDeployment.Namespace,
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
-				commonconsts.KubeLabelDynamoSelector: componentName,
+				commonconsts.KubeLabelDynamoComponentType: component.ComponentType,
+				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace, // TODO: nilness check
 			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       commonconsts.DynamoServicePortName,
-					Port:       commonconsts.DynamoServicePort,
-					TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
+			Ports: []corev1.ServicePort{servicePort},
 		},
 	}
 	return service, nil
@@ -631,7 +649,9 @@ func MultinodeDeployerFactory(multinodeDeploymentType commonconsts.MultinodeDepl
 
 // isWorkerComponent checks if a component is a worker that needs backend framework detection
 func isWorkerComponent(componentType string) bool {
-	return componentType == commonconsts.ComponentTypeWorker
+	return componentType == commonconsts.ComponentTypeWorker ||
+		componentType == commonconsts.ComponentTypePrefill ||
+		componentType == commonconsts.ComponentTypeDecode
 }
 
 // addStandardEnvVars adds the standard environment variables that are common to both Grove and Controller
@@ -685,7 +705,7 @@ func GenerateBasePodSpec(
 	serviceName string,
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
-	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes)
+	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controllerConfig.DiscoverBackend)
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
@@ -833,6 +853,10 @@ func GenerateBasePodSpec(
 			return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 		}
 	}
+
+	// TODO: just for workers and frontend if k8s service discovery is enabled
+	podSpec.ServiceAccountName = fmt.Sprintf("%s-k8s-service-discovery", componentContext.ParentGraphDeploymentName)
+
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
@@ -852,14 +876,22 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32) ComponentContext {
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoverBackend string) ComponentContext {
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
+		ComponentType:                  component.ComponentType,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
 	}
 	if component.DynamoNamespace != nil {
 		componentContext.DynamoNamespace = *component.DynamoNamespace
+	}
+	// This is the discover backend set by the helm installation/operator
+	componentContext.DiscoverBackend = discoverBackend
+
+	// If the user has set a discover backend in the annotations, use that instead
+	if component.Annotations != nil && component.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend] != "" {
+		componentContext.DiscoverBackend = component.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend]
 	}
 	return componentContext
 }
@@ -915,6 +947,11 @@ func GenerateGrovePodCliqueSet(
 		}
 	}
 
+	var discoverBackend string
+	if dynamoDeployment.Annotations != nil && dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend] != "" {
+		discoverBackend = dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend]
+	}
+
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
 		dynamoNamespace := getDynamoNamespace(dynamoDeployment, component)
@@ -923,6 +960,13 @@ func GenerateGrovePodCliqueSet(
 		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
 		if err != nil {
 			return nil, fmt.Errorf("failed to determine backend framework for service %s: %w", serviceName, err)
+		}
+
+		if discoverBackend != "" {
+			if component.Annotations == nil {
+				component.Annotations = make(map[string]string)
+			}
+			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend] = discoverBackend
 		}
 
 		numberOfNodes := component.GetNumberOfNodes()

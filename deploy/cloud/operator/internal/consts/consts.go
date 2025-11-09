@@ -31,6 +31,7 @@ const (
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
+	KubeAnnotationDynamoDiscoverBackend           = "nvidia.com/dynamo-discover-backend"
 
 	KubeLabelDynamoGraphDeploymentName  = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"
@@ -47,12 +48,17 @@ const (
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
 	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
+	DynamoNamespaceEnvVar        = "DYN_NAMESPACE"
+	DynamoComponentEnvVar        = "DYN_COMPONENT"
+	DynamoDiscoverBackendEnvVar  = "DYN_DISCOVER_BACKEND"
 
 	GlobalDynamoNamespace = "dynamo"
 
 	ComponentTypePlanner      = "planner"
 	ComponentTypeFrontend     = "frontend"
 	ComponentTypeWorker       = "worker"
+	ComponentTypePrefill      = "prefill"
+	ComponentTypeDecode       = "decode"
 	ComponentTypeDefault      = "default"
 	PlannerServiceAccountName = "planner-serviceaccount"
 
