@@ -263,6 +263,7 @@ jobs:
     needs: build-vllm-amd64
     if: needs.build-vllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -278,6 +279,7 @@ jobs:
     needs: build-vllm-arm64
     if: needs.build-vllm-arm64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -293,6 +295,7 @@ jobs:
     needs: build-trtllm-amd64
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -308,6 +311,7 @@ jobs:
     needs: build-trtllm-arm64
     if: needs.build-trtllm-arm64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -323,6 +327,7 @@ jobs:
     needs: build-sglang-amd64
     if: needs.build-sglang-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -338,6 +343,7 @@ jobs:
     needs: build-sglang-arm64
     if: needs.build-sglang-arm64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -355,6 +361,7 @@ jobs:
     needs: build-vllm-amd64
     if: needs.build-vllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
@@ -370,6 +377,7 @@ jobs:
     needs: build-trtllm-amd64
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
@@ -385,6 +393,7 @@ jobs:
     needs: build-sglang-amd64
     if: needs.build-sglang-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
@@ -402,6 +411,7 @@ jobs:
     needs: build-vllm-amd64
     if: needs.build-vllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
@@ -417,6 +427,7 @@ jobs:
     needs: build-trtllm-amd64
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
@@ -432,6 +443,7 @@ jobs:
     needs: build-sglang-amd64
     if: needs.build-sglang-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
@@ -449,6 +461,7 @@ jobs:
     needs: build-vllm-amd64
     if: needs.build-vllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
@@ -464,6 +477,7 @@ jobs:
     needs: build-trtllm-amd64
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
@@ -479,6 +493,7 @@ jobs:
     needs: build-sglang-amd64
     if: needs.build-sglang-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
@@ -496,6 +511,7 @@ jobs:
     needs: build-vllm-amd64
     if: needs.build-vllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -511,6 +527,7 @@ jobs:
     needs: build-vllm-amd64
     if: needs.build-vllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -526,6 +543,7 @@ jobs:
     needs: build-vllm-amd64
     if: needs.build-vllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -541,6 +559,7 @@ jobs:
     needs: build-vllm-arm64
     if: needs.build-vllm-arm64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -556,6 +575,7 @@ jobs:
     needs: build-vllm-arm64
     if: needs.build-vllm-arm64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -571,6 +591,7 @@ jobs:
     needs: build-vllm-arm64
     if: needs.build-vllm-arm64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -586,6 +607,7 @@ jobs:
     needs: build-trtllm-amd64
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -601,6 +623,7 @@ jobs:
     needs: build-trtllm-amd64
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -616,6 +639,7 @@ jobs:
     needs: build-trtllm-amd64
     if: needs.build-trtllm-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -631,6 +655,7 @@ jobs:
     needs: build-trtllm-arm64
     if: needs.build-trtllm-arm64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -646,6 +671,7 @@ jobs:
     needs: build-trtllm-arm64
     if: needs.build-trtllm-arm64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -661,6 +687,7 @@ jobs:
     needs: build-trtllm-arm64
     if: needs.build-trtllm-arm64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -676,6 +703,7 @@ jobs:
     needs: build-sglang-amd64
     if: needs.build-sglang-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -691,6 +719,7 @@ jobs:
     needs: build-sglang-amd64
     if: needs.build-sglang-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -706,6 +735,7 @@ jobs:
     needs: build-sglang-amd64
     if: needs.build-sglang-amd64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -721,6 +751,7 @@ jobs:
     needs: build-sglang-arm64
     if: needs.build-sglang-arm64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -736,6 +767,7 @@ jobs:
     needs: build-sglang-arm64
     if: needs.build-sglang-arm64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -751,6 +783,7 @@ jobs:
     needs: build-sglang-arm64
     if: needs.build-sglang-arm64.result == 'success'
     steps:
+      - uses: actions/checkout@v4
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
