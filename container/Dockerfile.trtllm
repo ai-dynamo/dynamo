@@ -57,6 +57,9 @@ ARG PYTHON_VERSION=3.12
 WORKDIR /workspace
 
 ARG ARCH_ALT
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
 # Install Python, build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
@@ -82,10 +85,15 @@ COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 # Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
-
+COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+ENV PATH=/usr/local/ucx/bin:$PATH
 ENV DYNAMO_HOME=/workspace
 
 ENV LD_LIBRARY_PATH=\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
 $LD_LIBRARY_PATH
 
