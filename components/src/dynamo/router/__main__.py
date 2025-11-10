@@ -124,20 +124,20 @@ class StandaloneRouterHandler:
             yield llm_engine_output
 
     async def best_worker_id(self, token_ids, router_config_override=None):
-        """
-        Get the best worker ID for a given set of tokens without actually routing.
+        """Get the best worker for given tokens without routing.
 
-        This method returns the worker ID that would be selected based on KV cache
-        overlap, but does NOT actually route the request or update router states.
-        It's useful for debugging, monitoring, or implementing custom routing logic.
+        Returns (worker_id, dp_rank, overlap_blocks) based on KV cache overlap.
+        Does NOT update router states - useful for preview/debugging.
         """
         if self.kv_push_router is None:
-            logger.error("KvPushRouter not initialized - cannot get best worker")
             raise RuntimeError("Router not initialized")
 
-        result = await self.kv_push_router.best_worker_id(
-            token_ids, router_config_override
-        )
+        # Use new API with dp_rank support, fallback to old API for compatibility
+        if hasattr(self.kv_push_router, "best_worker"):
+            result = await self.kv_push_router.best_worker(token_ids, router_config_override)
+        else:
+            wid, overlap = await self.kv_push_router.best_worker_id(token_ids, router_config_override)
+            result = (wid, None, overlap)
 
         yield result
 
