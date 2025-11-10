@@ -336,8 +336,8 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
         message = (
             "KV events doesn't work when LoRA is enabled due to upstream vLLM bug. "
             "Please see https://github.com/vllm-project/vllm/pull/27728."
-            "For now, either disable lora or dont use explicit kv envents config "
-            "(dont set both --kv-events-config and --enable-lora in vllm command line args )."
+            "For now, either disable lora or dont use explicit kv envents config."
+            "Dont set both --kv-events-config and --enable-lora in vllm command line args."
         )
         logger.error(message)
         raise ValueError(message)
