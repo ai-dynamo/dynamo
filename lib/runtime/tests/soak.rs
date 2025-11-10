@@ -18,7 +18,7 @@ mod integration {
     pub const DEFAULT_NAMESPACE: &str = "dynamo";
 
     use dynamo_runtime::{
-        DistributedRuntime, ErrorContext, Result, Runtime, Worker, logging,
+        DistributedRuntime, Runtime, Worker, logging,
         pipeline::{
             AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
             SingleIn, async_trait, network::Ingress,
@@ -26,6 +26,8 @@ mod integration {
         protocols::annotated::Annotated,
         stream,
     };
+
+    use anyhow::{Context, Result};
     use futures::StreamExt;
     use std::{
         sync::Arc,

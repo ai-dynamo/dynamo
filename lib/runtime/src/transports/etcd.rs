@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{CancellationToken, ErrorContext, Result, Runtime, error};
+use crate::runtime::Runtime;
+use anyhow::{Context, Result};
 
 use async_nats::jetstream::kv;
 use derive_builder::Builder;
@@ -19,6 +20,7 @@ use etcd_client::{
 };
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
 use tokio::time::{Duration, interval};
+use tokio_util::sync::CancellationToken;
 
 mod connector;
 mod lease;
@@ -139,7 +141,7 @@ impl Client {
             for resp in result.op_responses() {
                 tracing::warn!(response = ?resp, "kv_create etcd op response");
             }
-            Err(error!("Unable to create key. Check etcd server status"))
+            anyhow::bail!("Unable to create key. Check etcd server status")
         }
     }
 
@@ -180,17 +182,15 @@ impl Client {
                 Some(response) => match response {
                     TxnOpResponse::Txn(response) => match response.succeeded() {
                         true => Ok(()),
-                        false => Err(error!(
+                        false => anyhow::bail!(
                             "Unable to create or validate key. Check etcd server status"
-                        )),
+                        ),
                     },
-                    _ => Err(error!(
-                        "Unable to validate key operation. Check etcd server status"
-                    )),
+                    _ => {
+                        anyhow::bail!("Unable to validate key operation. Check etcd server status")
+                    }
                 },
-                None => Err(error!(
-                    "Unable to create or validate key. Check etcd server status"
-                )),
+                None => anyhow::bail!("Unable to create or validate key. Check etcd server status"),
             }
         }
     }
@@ -372,7 +372,7 @@ impl Client {
         // Get the start revision
         let mut start_revision = get_response
             .header()
-            .ok_or(error!("missing header; unable to get revision"))?
+            .ok_or(anyhow::anyhow!("missing header; unable to get revision"))?
             .revision();
         tracing::trace!("{prefix}: start_revision: {start_revision}");
         start_revision += 1;
