@@ -6,14 +6,14 @@ use crate::{CancellationToken, Result};
 use futures::StreamExt;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{
-    runtime::{reflector, watcher, watcher::Config, WatchStreamExt},
     Api, Client as KubeClient,
+    runtime::{WatchStreamExt, reflector, watcher, watcher::Config},
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::utils::{extract_endpoint_info, hash_pod_name, PodInfo};
+use super::utils::{PodInfo, extract_endpoint_info, hash_pod_name};
 
 const SNAPSHOT_POLL_INTERVAL_MS: u64 = 500;
 const MAX_CONCURRENT_FETCHES: usize = 20;
@@ -78,7 +78,7 @@ impl DiscoveryDaemon {
             .default_backoff()
             .touched_objects()
             .for_each(|res| {
-                futures::future::ready(match res {
+                match res {
                     Ok(obj) => {
                         tracing::debug!(
                             slice_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
@@ -88,7 +88,8 @@ impl DiscoveryDaemon {
                     Err(e) => {
                         tracing::warn!("Daemon reflector error: {}", e);
                     }
-                })
+                }
+                futures::future::ready(())
             });
 
         tokio::spawn(reflector_stream);
@@ -191,26 +192,25 @@ impl DiscoveryDaemon {
         );
 
         // Concurrent fetch: Fetch metadata for all endpoints in parallel
-        let fetch_futures =
-            all_endpoints
-                .into_iter()
-                .map(|(instance_id, pod_name, pod_ip)| {
-                    let daemon = self.clone();
-                    async move {
-                        match daemon.fetch_metadata(&pod_name, &pod_ip).await {
-                            Ok(metadata) => Some((instance_id, metadata)),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to fetch metadata for pod {} (instance_id={:x}): {}",
-                                    pod_name,
-                                    instance_id,
-                                    e
-                                );
-                                None
-                            }
+        let fetch_futures = all_endpoints
+            .into_iter()
+            .map(|(instance_id, pod_name, pod_ip)| {
+                let daemon = self.clone();
+                async move {
+                    match daemon.fetch_metadata(&pod_name, &pod_ip).await {
+                        Ok(metadata) => Some((instance_id, metadata)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to fetch metadata for pod {} (instance_id={:x}): {}",
+                                pod_name,
+                                instance_id,
+                                e
+                            );
+                            None
                         }
                     }
-                });
+                }
+            });
 
         // Execute fetches concurrently with bounded parallelism
         let results: Vec<_> = futures::stream::iter(fetch_futures)
@@ -239,11 +239,7 @@ impl DiscoveryDaemon {
     }
 
     /// Fetch metadata for a single pod (with caching)
-    async fn fetch_metadata(
-        &self,
-        pod_name: &str,
-        pod_ip: &str,
-    ) -> Result<Arc<DiscoveryMetadata>> {
+    async fn fetch_metadata(&self, pod_name: &str, pod_ip: &str) -> Result<Arc<DiscoveryMetadata>> {
         let instance_id = hash_pod_name(pod_name);
 
         // Check cache
@@ -331,4 +327,3 @@ impl Clone for DiscoveryDaemon {
         }
     }
 }
-

@@ -86,13 +86,13 @@ impl DiscoveryMetadata {
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
             | DiscoveryQuery::Endpoint { .. } => self.get_all_endpoints(),
-            
+
             DiscoveryQuery::AllModels
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
             | DiscoveryQuery::EndpointModels { .. } => self.get_all_model_cards(),
         };
-        
+
         filter_instances(all_instances, query)
     }
 }
@@ -110,75 +110,83 @@ fn filter_instances(
 ) -> Vec<DiscoveryInstance> {
     match query {
         DiscoveryQuery::AllEndpoints | DiscoveryQuery::AllModels => instances,
-        
-        DiscoveryQuery::NamespacedEndpoints { namespace } => {
-            instances.into_iter()
-                .filter(|inst| match inst {
-                    DiscoveryInstance::Endpoint(i) => &i.namespace == namespace,
-                    _ => false,
-                })
-                .collect()
-        }
-        
-        DiscoveryQuery::ComponentEndpoints { namespace, component } => {
-            instances.into_iter()
-                .filter(|inst| match inst {
-                    DiscoveryInstance::Endpoint(i) => {
-                        &i.namespace == namespace && &i.component == component
-                    }
-                    _ => false,
-                })
-                .collect()
-        }
-        
-        DiscoveryQuery::Endpoint { namespace, component, endpoint } => {
-            instances.into_iter()
-                .filter(|inst| match inst {
-                    DiscoveryInstance::Endpoint(i) => {
-                        &i.namespace == namespace 
-                            && &i.component == component 
-                            && &i.endpoint == endpoint
-                    }
-                    _ => false,
-                })
-                .collect()
-        }
-        
-        DiscoveryQuery::NamespacedModels { namespace } => {
-            instances.into_iter()
-                .filter(|inst| match inst {
-                    DiscoveryInstance::Model { namespace: ns, .. } => ns == namespace,
-                    _ => false,
-                })
-                .collect()
-        }
-        
-        DiscoveryQuery::ComponentModels { namespace, component } => {
-            instances.into_iter()
-                .filter(|inst| match inst {
-                    DiscoveryInstance::Model { 
-                        namespace: ns, 
-                        component: comp, 
-                        .. 
-                    } => ns == namespace && comp == component,
-                    _ => false,
-                })
-                .collect()
-        }
-        
-        DiscoveryQuery::EndpointModels { namespace, component, endpoint } => {
-            instances.into_iter()
-                .filter(|inst| match inst {
-                    DiscoveryInstance::Model { 
-                        namespace: ns, 
-                        component: comp, 
-                        endpoint: ep,
-                        .. 
-                    } => ns == namespace && comp == component && ep == endpoint,
-                    _ => false,
-                })
-                .collect()
-        }
+
+        DiscoveryQuery::NamespacedEndpoints { namespace } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::Endpoint(i) => &i.namespace == namespace,
+                _ => false,
+            })
+            .collect(),
+
+        DiscoveryQuery::ComponentEndpoints {
+            namespace,
+            component,
+        } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::Endpoint(i) => {
+                    &i.namespace == namespace && &i.component == component
+                }
+                _ => false,
+            })
+            .collect(),
+
+        DiscoveryQuery::Endpoint {
+            namespace,
+            component,
+            endpoint,
+        } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::Endpoint(i) => {
+                    &i.namespace == namespace
+                        && &i.component == component
+                        && &i.endpoint == endpoint
+                }
+                _ => false,
+            })
+            .collect(),
+
+        DiscoveryQuery::NamespacedModels { namespace } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::Model { namespace: ns, .. } => ns == namespace,
+                _ => false,
+            })
+            .collect(),
+
+        DiscoveryQuery::ComponentModels {
+            namespace,
+            component,
+        } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::Model {
+                    namespace: ns,
+                    component: comp,
+                    ..
+                } => ns == namespace && comp == component,
+                _ => false,
+            })
+            .collect(),
+
+        DiscoveryQuery::EndpointModels {
+            namespace,
+            component,
+            endpoint,
+        } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::Model {
+                    namespace: ns,
+                    component: comp,
+                    endpoint: ep,
+                    ..
+                } => ns == namespace && comp == component && ep == endpoint,
+                _ => false,
+            })
+            .collect(),
     }
 }
 
@@ -219,7 +227,7 @@ mod tests {
     #[test]
     fn test_metadata_serde() {
         let mut metadata = DiscoveryMetadata::new();
-        
+
         // Add an endpoint
         let instance = DiscoveryInstance::Endpoint(Instance {
             namespace: "test".to_string(),
@@ -228,15 +236,15 @@ mod tests {
             instance_id: 123,
             transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
         });
-        
+
         metadata.register_endpoint(instance).unwrap();
-        
+
         // Serialize
         let json = serde_json::to_string(&metadata).unwrap();
-        
+
         // Deserialize
         let deserialized: DiscoveryMetadata = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.endpoints.len(), 1);
         assert_eq!(deserialized.model_cards.len(), 0);
     }
@@ -244,9 +252,9 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_registration() {
         use tokio::sync::RwLock;
-        
+
         let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
-        
+
         // Spawn multiple tasks registering concurrently
         let handles: Vec<_> = (0..10)
             .map(|i| {
@@ -264,12 +272,12 @@ mod tests {
                 })
             })
             .collect();
-        
+
         // Wait for all to complete
         for handle in handles {
             handle.await.unwrap();
         }
-        
+
         // Verify all registrations succeeded
         let meta = metadata.read().await;
         assert_eq!(meta.endpoints.len(), 10);
@@ -278,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn test_metadata_accessors() {
         let mut metadata = DiscoveryMetadata::new();
-        
+
         // Register endpoints
         for i in 0..3 {
             let instance = DiscoveryInstance::Endpoint(Instance {
@@ -290,7 +298,7 @@ mod tests {
             });
             metadata.register_endpoint(instance).unwrap();
         }
-        
+
         // Register model cards
         for i in 0..2 {
             let instance = DiscoveryInstance::Model {
@@ -302,10 +310,9 @@ mod tests {
             };
             metadata.register_model_card(instance).unwrap();
         }
-        
+
         assert_eq!(metadata.get_all_endpoints().len(), 3);
         assert_eq!(metadata.get_all_model_cards().len(), 2);
         assert_eq!(metadata.get_all().len(), 5);
     }
 }
-

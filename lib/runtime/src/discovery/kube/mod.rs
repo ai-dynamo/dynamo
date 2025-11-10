@@ -10,8 +10,8 @@ use daemon::DiscoveryDaemon;
 use utils::PodInfo;
 
 use crate::discovery::{
-    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
-    DiscoveryMetadata, MetadataSnapshot,
+    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryMetadata, DiscoveryQuery, DiscoverySpec,
+    DiscoveryStream, MetadataSnapshot,
 };
 use crate::{CancellationToken, Result};
 use async_trait::async_trait;
@@ -53,8 +53,7 @@ impl KubeDiscoveryClient {
             .map_err(|e| crate::error!("Failed to create Kubernetes client: {}", e))?;
 
         // Create watch channel with initial empty snapshot
-        let (watch_tx, watch_rx) =
-            tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
+        let (watch_tx, watch_rx) = tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
 
         // Create and spawn daemon
         let daemon = DiscoveryDaemon::new(kube_client, pod_info, cancel_token)?;
@@ -72,23 +71,6 @@ impl KubeDiscoveryClient {
             metadata,
             metadata_watch: watch_rx,
         })
-    }
-
-    /// Wait for first snapshot or return current one
-    async fn wait_for_snapshot(&self) -> Result<Arc<MetadataSnapshot>> {
-        let mut rx = self.metadata_watch.clone();
-        let snapshot = rx.borrow_and_update().clone();
-
-        // If still on initial empty snapshot, wait for first real update
-        if snapshot.sequence == 0 {
-            tracing::debug!("Waiting for daemon to fetch first snapshot...");
-            rx.changed()
-                .await
-                .map_err(|_| crate::error!("Daemon channel closed before first snapshot"))?;
-            Ok(rx.borrow_and_update().clone())
-        } else {
-            Ok(snapshot)
-        }
     }
 }
 
@@ -144,8 +126,8 @@ impl Discovery for KubeDiscoveryClient {
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
         tracing::debug!("KubeDiscoveryClient::list called with query={:?}", query);
 
-        // Wait for daemon to fetch at least once
-        let snapshot = self.wait_for_snapshot().await?;
+        // Get current snapshot (may be empty if daemon hasn't fetched yet)
+        let snapshot = self.metadata_watch.borrow().clone();
 
         tracing::debug!(
             "List using snapshot seq={} with {} instances",
@@ -250,8 +232,7 @@ impl Discovery for KubeDiscoveryClient {
                                         instance_id = format!("{:x}", instance.instance_id()),
                                         "Emitting Added event"
                                     );
-                                    if event_tx.send(Ok(DiscoveryEvent::Added(instance))).is_err()
-                                    {
+                                    if event_tx.send(Ok(DiscoveryEvent::Added(instance))).is_err() {
                                         tracing::debug!(
                                             stream_id = %stream_id,
                                             "Watch receiver dropped"
@@ -297,4 +278,3 @@ impl Discovery for KubeDiscoveryClient {
         Ok(Box::pin(stream))
     }
 }
-

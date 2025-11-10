@@ -93,29 +93,28 @@ impl DistributedRuntime {
         let nats_client_for_metrics = nats_client.clone();
 
         // Initialize discovery client based on backend configuration
-        let discovery_backend = std::env::var("DYN_DISCOVERY_BACKEND")
-            .unwrap_or_else(|_| "kv_store".to_string());
-        
+        let discovery_backend =
+            std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "kv_store".to_string());
+
         let (discovery_client, discovery_metadata) = match discovery_backend.as_str() {
             "kubernetes" => {
                 tracing::info!("Initializing Kubernetes discovery backend");
-                
+
                 // Create shared metadata store
                 let metadata = Arc::new(tokio::sync::RwLock::new(
-                    crate::discovery::DiscoveryMetadata::new()
+                    crate::discovery::DiscoveryMetadata::new(),
                 ));
-                
+
                 // Create Kubernetes discovery client
                 match crate::discovery::KubeDiscoveryClient::new(
                     metadata.clone(),
                     runtime.primary_token(),
-                ).await {
+                )
+                .await
+                {
                     Ok(client) => {
                         tracing::info!("Kubernetes discovery client initialized successfully");
-                        (
-                            Arc::new(client) as Arc<dyn Discovery>,
-                            Some(metadata),
-                        )
+                        (Arc::new(client) as Arc<dyn Discovery>, Some(metadata))
                     }
                     Err(e) => {
                         tracing::warn!(

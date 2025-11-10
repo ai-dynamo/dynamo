@@ -247,7 +247,7 @@ async fn metadata_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 
     // Read the metadata
     let metadata_guard = metadata.read().await;
-    
+
     // Serialize to JSON
     match serde_json::to_string(&*metadata_guard) {
         Ok(json) => {
