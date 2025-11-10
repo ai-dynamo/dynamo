@@ -9,7 +9,9 @@ use anyhow::Result;
 use dynamo_async_openai::types::ChatCompletionRequestUserMessageContentPart;
 
 use super::common::EncodedMediaData;
-use super::decoders::{DecodedMediaData, Decoder, MediaDecoder};
+use super::decoders::{Decoder, MediaDecoder};
+use super::rdma::{RdmaMediaDataDescriptor, get_nixl_agent};
+use dynamo_memory::nixl::NixlAgent;
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -39,7 +41,7 @@ pub struct MediaLoader {
     media_decoder: MediaDecoder,
     http_client: reqwest::Client,
     media_fetcher: MediaFetcher,
-    // TODO: NIXL agent
+    nixl_agent: NixlAgent,
 }
 
 impl MediaLoader {
@@ -53,10 +55,13 @@ impl MediaLoader {
 
         let http_client = http_client_builder.build()?;
 
+        let nixl_agent = get_nixl_agent()?;
+
         Ok(Self {
             media_decoder,
             http_client,
             media_fetcher,
+            nixl_agent,
         })
     }
 
@@ -90,9 +95,8 @@ impl MediaLoader {
         &self,
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
         // TODO: request-level options
-    ) -> Result<DecodedMediaData> {
-        // fetch the media
-        // TODO: decode and NIXL-register
+    ) -> Result<RdmaMediaDataDescriptor> {
+        // fetch the media, decode and NIXL-register
         let decoded = match oai_content_part {
             ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
                 let url = &image_part.image_url.url;
@@ -112,13 +116,14 @@ impl MediaLoader {
             _ => anyhow::bail!("Unsupported media type"),
         };
 
-        Ok(decoded)
+        let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
+        Ok(rdma_descriptor)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::decoders::DataType;
+    use super::super::rdma::DataType;
     use super::*;
     use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
@@ -157,17 +162,33 @@ mod tests {
             result.err()
         );
 
-        let data = result.unwrap();
-        assert_eq!(data.dtype, DataType::UINT8);
+        let descriptor = result.unwrap();
+        assert_eq!(descriptor.tensor_info.dtype, DataType::UINT8);
 
         // Verify image dimensions: 1,999px × 1,125px (width × height)
         // Shape format is [height, width, channels]
-        assert_eq!(data.shape.len(), 3);
-        assert_eq!(data.shape[0], 1125, "Height should be 1125");
-        assert_eq!(data.shape[1], 1999, "Width should be 1999");
-        assert_eq!(data.shape[2], 4, "RGBA channels should be 4");
+        assert_eq!(descriptor.tensor_info.shape.len(), 3);
+        assert_eq!(
+            descriptor.tensor_info.shape[0], 1125,
+            "Height should be 1125"
+        );
+        assert_eq!(
+            descriptor.tensor_info.shape[1], 1999,
+            "Width should be 1999"
+        );
+        assert_eq!(
+            descriptor.tensor_info.shape[2], 4,
+            "RGBA channels should be 4"
+        );
 
-        mock.assert_async().await;
+        assert!(
+            descriptor.source_storage.is_some(),
+            "Source storage should be present"
+        );
+        assert!(
+            descriptor.source_storage.unwrap().is_registered(),
+            "Source storage should be registered with NIXL"
+        );
     }
 
     #[test]
