@@ -182,6 +182,20 @@ class LLMServerManager:
             )
             self.server_stdout_file.flush()
 
+        # Try to download the model.
+        model = os.environ.get(
+            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+        )
+        print("Attempting model download...")
+        try:
+            subprocess.run(
+                f"pip install hf_transfer && HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model}",
+                check=True,
+                shell=True,
+            )
+        except subprocess.CalledProcessError:
+            print("Model download failed. Is this a locally stored model?")
+
         # Launch
         self.process = subprocess.Popen(
             self.server_cmd,
@@ -334,7 +348,7 @@ def llm_server(request, runtime_services):
         server_type=server_type,
     )
 
-    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "300"))
+    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
     if not server_manager.start_server(timeout=start_timeout):
         pytest.fail(
             f"Failed to start {server_type} server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"

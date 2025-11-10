@@ -429,7 +429,7 @@ def llm_server(request, runtime_services):
         server_type=server_type,
     )
 
-    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "300"))
+    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
     if not server_manager.start_server(timeout=start_timeout):
         pytest.fail(
             f"Failed to start {server_type} server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
