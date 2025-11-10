@@ -28,7 +28,7 @@ use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 #[cfg(feature = "media-nixl")]
-use crate::preprocessor::media::{MediaDecoder, MediaLoader, MediaFetcher};
+use crate::preprocessor::media::{MediaDecoder, MediaFetcher, MediaLoader};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder,
@@ -145,8 +145,13 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+
         #[cfg(feature = "media-nixl")]
-        let media_loader = Some(MediaLoader::new(MediaDecoder::default(), MediaFetcher::default())?);
+        let media_loader = match mdc.media_decoder {
+            Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
+            None => None,
+        };
+
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
@@ -284,7 +289,8 @@ impl OpenAIPreprocessor {
         let message_count = messages.len().unwrap_or(0);
         let mut media_map: MultimodalDataMap = HashMap::new();
         #[cfg(feature = "media-nixl")]
-        let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> = Vec::new();
+        let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
+            Vec::new();
 
         for idx in 0..message_count {
             let msg = messages

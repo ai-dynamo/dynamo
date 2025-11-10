@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "media-nixl")]
 use {
+    base64::{Engine as _, engine::general_purpose},
     dynamo_memory::SystemStorage,
     dynamo_memory::nixl::{self, NixlAgent, NixlDescriptor, RegisteredView},
-    base64::{Engine as _, engine::general_purpose},
     std::sync::Arc,
 };
 
