@@ -8,17 +8,14 @@ use anyhow::Result;
 
 use dynamo_async_openai::types::ChatCompletionRequestUserMessageContentPart;
 
-use super::decoders::{MediaDecoder};
+use super::decoders::MediaDecoder;
 use super::rdma::RdmaMediaDataDescriptor;
 
 #[cfg(feature = "media-nixl")]
 use {
-    super::rdma::get_nixl_agent,
+    super::common::EncodedMediaData, super::decoders::Decoder, super::rdma::get_nixl_agent,
     dynamo_memory::nixl::NixlAgent,
-    super::common::EncodedMediaData,
-    super::decoders::Decoder
 };
-
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -55,8 +52,9 @@ pub struct MediaLoader {
 }
 
 impl MediaLoader {
-    pub fn new(media_decoder: MediaDecoder, media_fetcher: MediaFetcher) -> Result<Self> {
-        let mut http_client_builder =
+    pub fn new(media_decoder: MediaDecoder, media_fetcher: Option<MediaFetcher>) -> Result<Self> {
+        let media_fetcher = media_fetcher.unwrap_or_default();
+        let mut http_client_builder: reqwest::ClientBuilder =
             reqwest::Client::builder().user_agent(&media_fetcher.user_agent);
 
         if let Some(timeout) = media_fetcher.timeout {
@@ -109,7 +107,9 @@ impl MediaLoader {
         // TODO: request-level options
     ) -> Result<RdmaMediaDataDescriptor> {
         #[cfg(not(feature = "media-nixl"))]
-        anyhow::bail!("NIXL is not supported, cannot decode and register media data {oai_content_part:?}");
+        anyhow::bail!(
+            "NIXL is not supported, cannot decode and register media data {oai_content_part:?}"
+        );
 
         #[cfg(feature = "media-nixl")]
         {
@@ -133,11 +133,9 @@ impl MediaLoader {
                 _ => anyhow::bail!("Unsupported media type"),
             };
 
-
             let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
             Ok(rdma_descriptor)
         }
-
     }
 }
 
@@ -225,7 +223,7 @@ mod tests_non_nixl {
             allow_direct_ip: false,
             ..Default::default()
         };
-        let loader = MediaLoader::new(MediaDecoder::default(), fetcher).unwrap();
+        let loader = MediaLoader::new(MediaDecoder::default(), Some(fetcher)).unwrap();
 
         let url = url::Url::parse("http://192.168.1.1/image.jpg").unwrap();
         let result = loader.check_if_url_allowed(&url);
@@ -245,7 +243,7 @@ mod tests_non_nixl {
             allow_direct_port: false,
             ..Default::default()
         };
-        let loader = MediaLoader::new(MediaDecoder::default(), fetcher).unwrap();
+        let loader = MediaLoader::new(MediaDecoder::default(), Some(fetcher)).unwrap();
 
         let url = url::Url::parse("http://example.com:8080/image.jpg").unwrap();
         let result = loader.check_if_url_allowed(&url);
@@ -269,7 +267,7 @@ mod tests_non_nixl {
             allowed_media_domains: Some(allowed_domains),
             ..Default::default()
         };
-        let loader = MediaLoader::new(MediaDecoder::default(), fetcher).unwrap();
+        let loader = MediaLoader::new(MediaDecoder::default(), Some(fetcher)).unwrap();
 
         // Allowed domain should pass
         let url = url::Url::parse("https://trusted.com/image.jpg").unwrap();

@@ -3,6 +3,39 @@
 
 This component performs media download, base64 decoding, media decoding and NIXL registration. Today, this is used in the OpenAI preprocessor, to transform multimodal inputs (image_url, video_url, audio_url) into fully decoded data (pixel values, ...) accessible to the backends via NIXL.
 
+## Usage
+
+Media decoding is enabled when registering the MDC:
+
+Set HTTP download options:
+
+```python
+from dynamo.llm import MediaFetcher
+fetcher = MediaFetcher()
+fetcher.user_agent("dynamo")
+fetcher.timeout_ms(15000)
+fetcher.allow_direct_ip(True)
+fetcher.allow_direct_port(False)
+fetcher.allowed_media_domains(["google.com"])
+```
+
+Set media decoding options:
+
+```python
+from dynamo.llm import MediaDecoder
+decoder = MediaDecoder()
+decoder.image_decoder({"max_image_width": 4096, "max_image_height": 4096, "max_alloc": 16*1024*1024})
+```
+
+And register the LLM as usual, adding the media configuration:
+
+```python
+register_llm(
+  ...,
+  media_decoder=decoder,
+  media_fetcher=fetcher,
+)
+```
 
 
 ## TODOs
@@ -25,5 +58,6 @@ This component performs media download, base64 decoding, media decoding and NIXL
 - [ ] Memory spilling to lower storage tiers
 - [ ] Early-free memory on client notifications
 
-### Observability
+### Misc
 - [ ] Observability on performance, memory usage and input distributions
+- [ ] Per-request decoding options
