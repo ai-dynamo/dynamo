@@ -1,22 +1,25 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+use std::{collections::HashMap, time::Duration};
+
+use anyhow::Result;
+use arc_swap::ArcSwap;
+use futures::StreamExt;
+use tokio::net::unix::pipe::Receiver;
+
 use crate::{
+    component::{Endpoint, Instance},
+    pipeline::async_trait,
     pipeline::{
         AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
         SingleIn,
     },
     storage::key_value_store::{KeyValueStoreManager, WatchEvent},
+    traits::DistributedRuntimeProvider,
+    transports::etcd::Client as EtcdClient,
 };
-use arc_swap::ArcSwap;
-use futures::StreamExt;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::net::unix::pipe::Receiver;
-
-use crate::{pipeline::async_trait, transports::etcd::Client as EtcdClient};
-
-use super::*;
 
 /// Each state will be have a nonce associated with it
 /// The state will be emitted in a watch channel, so we can observe the
@@ -318,7 +321,7 @@ impl Client {
 
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
 
-        let secondary = endpoint.component.drt.runtime.secondary().clone();
+        let secondary = endpoint.component.drt.runtime().secondary().clone();
 
         secondary.spawn(async move {
             tracing::debug!("endpoint_watcher: Starting for discovery query: {:?}", discovery_query);
