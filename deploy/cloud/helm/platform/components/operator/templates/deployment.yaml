@@ -16,7 +16,6 @@
 {{/* Validate installation to prevent conflicts */}}
 {{- include "dynamo-operator.validateClusterWideInstallation" . -}}
 {{- include "dynamo-operator.validateConfiguration" . -}}
-{{- include "dynamo-operator.validateDiscoverBackend" . -}}
 
 ---
 apiVersion: apps/v1
@@ -128,9 +127,6 @@ spec:
         {{- if not .Values.namespaceRestriction.enabled }}
           - --dgdr-profiling-cluster-role-name={{ include "dynamo-operator.fullname" . }}-dgdr-profiling
           - --planner-cluster-role-name={{ include "dynamo-operator.fullname" . }}-planner
-        {{- end }}
-        {{- if .Values.discoverBackend }}
-          - --discover-backend={{ .Values.discoverBackend }}
         {{- end }}
         {{- if .Values.namespaceRestriction.enabled }}
         {{- if .Values.namespaceRestriction.lease }}

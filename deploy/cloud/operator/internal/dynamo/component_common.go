@@ -27,7 +27,7 @@ func ComponentDefaultsFactory(componentType string) ComponentDefaults {
 	switch componentType {
 	case commonconsts.ComponentTypeFrontend:
 		return NewFrontendDefaults()
-	case commonconsts.ComponentTypeWorker, commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode:
+	case commonconsts.ComponentTypeWorker:
 		return NewWorkerDefaults()
 	case commonconsts.ComponentTypePlanner:
 		return NewPlannerDefaults()
@@ -42,10 +42,8 @@ type BaseComponentDefaults struct{}
 type ComponentContext struct {
 	numberOfNodes                  int32
 	DynamoNamespace                string
-	ComponentType                  string
 	ParentGraphDeploymentName      string
 	ParentGraphDeploymentNamespace string
-	DiscoverBackend                string
 }
 
 func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
@@ -73,12 +71,8 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 	}
 	container.Env = []corev1.EnvVar{
 		{
-			Name:  commonconsts.DynamoNamespaceEnvVar,
+			Name:  "DYN_NAMESPACE",
 			Value: context.DynamoNamespace,
-		},
-		{
-			Name:  commonconsts.DynamoComponentEnvVar,
-			Value: context.ComponentType,
 		},
 		{
 			Name:  "DYN_PARENT_DGD_K8S_NAME",
@@ -88,29 +82,6 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 			Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 			Value: context.ParentGraphDeploymentNamespace,
 		},
-		{
-			Name: "POD_NAME",
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: "metadata.name",
-				},
-			},
-		},
-		{
-			Name: "POD_NAMESPACE",
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: "metadata.namespace",
-				},
-			},
-		},
-	}
-
-	if context.DiscoverBackend != "" {
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  commonconsts.DynamoDiscoverBackendEnvVar,
-			Value: context.DiscoverBackend,
-		})
 	}
 
 	return container

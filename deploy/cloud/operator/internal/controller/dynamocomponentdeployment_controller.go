@@ -65,7 +65,14 @@ const (
 	KubeAnnotationEnableStealingTrafficDebugMode         = "nvidia.com/enable-stealing-traffic-debug-mode"
 	KubeAnnotationEnableDebugMode                        = "nvidia.com/enable-debug-mode"
 	KubeAnnotationEnableDebugPodReceiveProductionTraffic = "nvidia.com/enable-debug-pod-receive-production-traffic"
+	DeploymentTargetTypeProduction                       = "production"
 	DeploymentTargetTypeDebug                            = "debug"
+	HeaderNameDebug                                      = "X-Nvidia-Debug"
+	KubernetesDeploymentStrategy                         = "kubernetes"
+
+	DeploymentTypeStandard       = "standard"
+	DeploymentTypeMultinodeGrove = "multinode-grove"
+	ComponentTypePlanner         = "Planner"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
@@ -1249,73 +1256,40 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		},
 	}
 
-	// Creating service per component
-	// Would only want to do this when the service discovery backend is k8s - else only create service for frontend
-	if !opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled {
+	if !opt.dynamoComponentDeployment.IsFrontendComponent() || (!opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled) {
 		// if it's not the main component or if it's not a generic service and not contains stealing traffic debug mode enabled, we don't need to create the service
 		return kubeService, true, nil
 	}
 
-	// For Grove selector
-	// nvidia.com/selector: sglang-disagg-multinode-frontend
+	labels := r.getKubeLabels(opt.dynamoComponentDeployment)
 
-	// For single node non-Grove
-	// nvidia.com/dynamo-component: Frontend                                                                                                                                                                                                        │
-	// nvidia.com/dynamo-component-type: frontend
-	// nvidia.com/dynamo-graph-deployment-name: vllm-disagg
-	// nvidia.com/dynamo-namespace: tm-vllm-disagg
-	// nvidia.com/metrics-enabled: "true"
-	// nvidia.com/selector: vllm-disagg-frontend
+	selector := make(map[string]string)
 
-	// labels := r.getKubeLabels(opt.dynamoComponentDeployment)
-
-	// selector := make(map[string]string)
-
-	// for k, v := range labels {
-	// 	selector[k] = v
-	// }
-
-	// // If using LeaderWorkerSet, modify selector to only target leaders
-	// if opt.dynamoComponentDeployment.IsMultinode() {
-	// 	selector["role"] = "leader" // doesn't seem like Grove has this label
-	// }
-
-	// if opt.isStealingTrafficDebugModeEnabled {
-	// 	selector[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
-	// }
-
-	selector := map[string]string{
-		// Selector labels to match pods (using nvidia.com/dynamo-* labels)
-		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,
-		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace, // TODO: nilness check
-	}
-	labels := map[string]string{
-		// Discovery labels that propagate to EndpointSlices (kube.rs expects these)
-		commonconsts.KubeLabelDynamoDiscovery:          commonconsts.KubeLabelValueEnabled,
-		commonconsts.KubeLabelDynamoDiscoveryNamespace: *opt.dynamoComponentDeployment.Spec.DynamoNamespace, // TODO: nilness check
-		commonconsts.KubeLabelDynamoDiscoveryComponent: opt.dynamoComponentDeployment.Spec.ComponentType,
+	for k, v := range labels {
+		selector[k] = v
 	}
 
-	var servicePort corev1.ServicePort
-	if opt.dynamoComponentDeployment.Spec.ComponentType == consts.ComponentTypeFrontend {
-		servicePort = corev1.ServicePort{
-			Name:       commonconsts.DynamoServicePortName,
-			Port:       commonconsts.DynamoServicePort,
-			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
-			Protocol:   corev1.ProtocolTCP,
-		}
-	} else { // only in case of a worker - what about other components??
-		servicePort = corev1.ServicePort{
-			Name:       commonconsts.DynamoSystemPortName,
-			Port:       commonconsts.DynamoSystemPort,
-			TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
-			Protocol:   corev1.ProtocolTCP,
-		}
+	// If using LeaderWorkerSet, modify selector to only target leaders
+	if opt.dynamoComponentDeployment.IsMultinode() {
+		selector["role"] = "leader"
 	}
+
+	if opt.isStealingTrafficDebugModeEnabled {
+		selector[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
+	}
+
+	targetPort := intstr.FromString(commonconsts.DynamoContainerPortName)
 
 	spec := corev1.ServiceSpec{
 		Selector: selector,
-		Ports:    []corev1.ServicePort{servicePort},
+		Ports: []corev1.ServicePort{
+			{
+				Name:       commonconsts.DynamoServicePortName,
+				Port:       commonconsts.DynamoServicePort,
+				TargetPort: targetPort,
+				Protocol:   corev1.ProtocolTCP,
+			},
+		},
 	}
 
 	annotations := r.getKubeAnnotations(opt.dynamoComponentDeployment)

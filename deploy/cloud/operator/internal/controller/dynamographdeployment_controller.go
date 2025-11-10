@@ -25,13 +25,11 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller/serviceaccount"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	v1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -312,46 +310,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
-
-	// TODO: this should be based on if k8s service discovery is enabled
-	// service account, role and role binding for k8s service discovery
-	serviceAccount := serviceaccount.GetKubernetesDiscoveryServiceAccount(fmt.Sprintf("%s-k8s-service-discovery", dynamoDeployment.Name), dynamoDeployment.Namespace)
-	_, syncedServiceAccount, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
-		return serviceAccount.ServiceAccount, false, nil
-	})
-	if err != nil {
-		logger.Error(err, "failed to sync the service account")
-		return "", "", "", fmt.Errorf("failed to sync the service account: %w", err)
-	}
-	serviceAccountAsResource := commonController.WrapResource(syncedServiceAccount,
-		func() (bool, string) {
-			return true, ""
-		})
-
-	// role and role binding for k8s service discovery
-	_, syncedRole, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*v1.Role, bool, error) {
-		return serviceAccount.Role, false, nil
-	})
-	if err != nil {
-		logger.Error(err, "failed to sync the service account")
-		return "", "", "", fmt.Errorf("failed to sync the service account: %w", err)
-	}
-	roleAsResource := commonController.WrapResource(syncedRole,
-		func() (bool, string) {
-			return true, ""
-		})
-	_, syncedRoleBinding, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*v1.RoleBinding, bool, error) {
-		return serviceAccount.RoleBinding, false, nil
-	})
-	if err != nil {
-		logger.Error(err, "failed to sync the role binding")
-		return "", "", "", fmt.Errorf("failed to sync the role binding: %w", err)
-	}
-	roleBindingAsResource := commonController.WrapResource(syncedRoleBinding,
-		func() (bool, string) {
-			return true, ""
-		})
-
 	// generate the dynamoComponentsDeployments from the config
 	groveGangSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever)
 	if err != nil {
@@ -383,31 +341,27 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		return "", "", "", fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
-	resources := []Resource{groveGangSetAsResource, serviceAccountAsResource, roleAsResource, roleBindingAsResource}
+	resources := []Resource{groveGangSetAsResource}
 	for componentName, component := range dynamoDeployment.Spec.Services {
-		// Creating service per component
-		// Would only want to do this when the service discovery backend is k8s - else only create service for frontend
-		// dynamocomponentdeployment_controller.go:1240
-
-		mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamoDeployment, component, componentName)
-		if err != nil {
-			logger.Error(err, "failed to generate the main component service")
-			return "", "", "", fmt.Errorf("failed to generate the main component service: %w", err)
-		}
-		_, syncedMainComponentService, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
-			return mainComponentService, false, nil
-		})
-		if err != nil {
-			logger.Error(err, "failed to sync the main component service")
-			return "", "", "", fmt.Errorf("failed to sync the main component service: %w", err)
-		}
-		mainComponentServiceAsResource := commonController.WrapResource(syncedMainComponentService,
-			func() (bool, string) {
-				return true, ""
-			})
-		resources = append(resources, mainComponentServiceAsResource)
-
 		if component.ComponentType == consts.ComponentTypeFrontend {
+			// generate the main component service
+			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace)
+			if err != nil {
+				logger.Error(err, "failed to generate the main component service")
+				return "", "", "", fmt.Errorf("failed to generate the main component service: %w", err)
+			}
+			_, syncedMainComponentService, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+				return mainComponentService, false, nil
+			})
+			if err != nil {
+				logger.Error(err, "failed to sync the main component service")
+				return "", "", "", fmt.Errorf("failed to sync the main component service: %w", err)
+			}
+			mainComponentServiceAsResource := commonController.WrapResource(syncedMainComponentService,
+				func() (bool, string) {
+					return true, ""
+				})
+			resources = append(resources, mainComponentServiceAsResource)
 			// generate the main component ingress
 			ingressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
 			if component.Ingress != nil {
