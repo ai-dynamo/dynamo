@@ -25,6 +25,7 @@ DECODE_MAX_CONCURRENCY = 2000
 # set a prefill maximum number of tokens to 32768 to avoid chunked prefill but not too large to cause activation tensor too large
 PREFILL_MAX_NUM_TOKENS = 32768
 
+
 class EngineType(str, Enum):
     PREFILL = "prefill"
     DECODE = "decode"

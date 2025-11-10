@@ -6,8 +6,7 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from benchmarks.profiler.utils.defaults import EngineType
-from benchmarks.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS
+from benchmarks.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS, EngineType
 from benchmarks.profiler.utils.model_info import ModelInfo
 
 logger = logging.getLogger(__name__)
