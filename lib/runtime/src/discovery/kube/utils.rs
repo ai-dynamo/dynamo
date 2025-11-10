@@ -13,14 +13,6 @@ pub fn hash_pod_name(pod_name: &str) -> u64 {
     hasher.finish()
 }
 
-/// Parse port number from pod name (format: pod-name-<port>)
-/// Returns Some(port) if successfully parsed, None otherwise
-pub(super) fn parse_port_from_pod_name(pod_name: &str) -> Option<u16> {
-    pod_name.rsplit('-')
-        .next()
-        .and_then(|last| last.parse::<u16>().ok())
-}
-
 /// Extract endpoint information from an EndpointSlice
 /// Returns (instance_id, pod_name, pod_ip) tuples for ready endpoints
 pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String, String)> {
@@ -108,45 +100,6 @@ mod tests {
         let hash1 = hash_pod_name("pod-1");
         let hash2 = hash_pod_name("pod-2");
         assert_ne!(hash1, hash2, "Different pods should have different hashes");
-    }
-
-    #[test]
-    fn test_parse_port_from_pod_name() {
-        // Valid port numbers
-        assert_eq!(
-            parse_port_from_pod_name("dynamo-test-worker-8080"),
-            Some(8080)
-        );
-        assert_eq!(
-            parse_port_from_pod_name("my-service-9000"),
-            Some(9000)
-        );
-        assert_eq!(
-            parse_port_from_pod_name("test-3000"),
-            Some(3000)
-        );
-        assert_eq!(
-            parse_port_from_pod_name("a-b-c-80"),
-            Some(80)
-        );
-        
-        // Invalid - no port number at end
-        assert_eq!(
-            parse_port_from_pod_name("dynamo-test-worker"),
-            None
-        );
-        assert_eq!(
-            parse_port_from_pod_name("8080-worker"),
-            None
-        );
-        assert_eq!(
-            parse_port_from_pod_name("worker-abc"),
-            None
-        );
-        assert_eq!(
-            parse_port_from_pod_name(""),
-            None
-        );
     }
 }
 

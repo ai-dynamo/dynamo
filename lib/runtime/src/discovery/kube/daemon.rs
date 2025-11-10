@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::utils::{extract_endpoint_info, hash_pod_name, parse_port_from_pod_name, PodInfo};
+use super::utils::{extract_endpoint_info, hash_pod_name, PodInfo};
 
 const SNAPSHOT_POLL_INTERVAL_MS: u64 = 500;
 const MAX_CONCURRENT_FETCHES: usize = 20;
@@ -303,24 +303,8 @@ impl DiscoveryDaemon {
         Ok(metadata)
     }
 
-    /// Resolve target host (supports local testing)
-    fn resolve_target_host(&self, pod_name: &str, pod_ip: &str) -> String {
-        // Local test mode: parse port from pod name and use localhost
-        if std::env::var("DYN_LOCAL_KUBE_TEST").is_ok() {
-            if let Some(port) = parse_port_from_pod_name(pod_name) {
-                tracing::trace!(
-                    "Local test mode: using localhost:{} for pod {}",
-                    port,
-                    pod_name
-                );
-                return format!("localhost:{}", port);
-            }
-            tracing::warn!(
-                "Local test mode enabled but couldn't parse port from pod name: {}",
-                pod_name
-            );
-        }
-
+    /// Resolve target host for fetching metadata
+    fn resolve_target_host(&self, _pod_name: &str, pod_ip: &str) -> String {
         format!("{}:{}", pod_ip, self.pod_info.system_port)
     }
 
