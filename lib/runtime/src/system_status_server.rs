@@ -81,13 +81,13 @@ pub async fn spawn_system_status_server(
     let server_state = Arc::new(SystemStatusState::new(drt)?);
     let health_path = server_state
         .drt()
-        .system_health
+        .system_health()
         .lock()
         .health_path()
         .to_string();
     let live_path = server_state
         .drt()
-        .system_health
+        .system_health()
         .lock()
         .live_path()
         .to_string();
@@ -158,9 +158,11 @@ pub async fn spawn_system_status_server(
 #[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Get basic health status
-    let system_health = state.drt().system_health.lock();
-    let (healthy, endpoints) = system_health.get_health_status();
-    let uptime = Some(system_health.uptime());
+    let system_health = state.drt().system_health();
+    let system_health_lock = system_health.lock();
+    let (healthy, endpoints) = system_health_lock.get_health_status();
+    let uptime = Some(system_health_lock.uptime());
+    drop(system_health_lock);
 
     let healthy_string = if healthy { "ready" } else { "notready" };
     let status_code = if healthy {
@@ -184,7 +186,7 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 #[tracing::instrument(skip_all, level = "trace")]
 async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
-    state.drt().system_health.lock().update_uptime_gauge();
+    state.drt().system_health().lock().update_uptime_gauge();
 
     // Get all metrics from DistributedRuntime
     // Note: In the new hierarchy-based architecture, metrics are automatically registered
@@ -260,13 +262,13 @@ mod integration_tests {
             let drt = create_test_drt_async().await;
 
             // Get uptime from SystemHealth
-            let uptime = drt.system_health.lock().uptime();
+            let uptime = drt.system_health().lock().uptime();
             // Uptime should exist (even if close to zero)
             assert!(uptime.as_nanos() > 0 || uptime.is_zero());
 
             // Sleep briefly and check uptime increases
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let uptime_after = drt.system_health.lock().uptime();
+            let uptime_after = drt.system_health().lock().uptime();
             assert!(uptime_after > uptime);
         })
         .await;
@@ -317,19 +319,19 @@ mod integration_tests {
             let drt = create_test_drt_async().await;
 
             // Get initial uptime
-            let initial_uptime = drt.system_health.lock().uptime();
+            let initial_uptime = drt.system_health().lock().uptime();
 
             // Update the gauge with initial value
-            drt.system_health.lock().update_uptime_gauge();
+            drt.system_health().lock().update_uptime_gauge();
 
             // Sleep for 100ms
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
             // Get uptime after sleep
-            let uptime_after_sleep = drt.system_health.lock().uptime();
+            let uptime_after_sleep = drt.system_health().lock().uptime();
 
             // Update the gauge again
-            drt.system_health.lock().update_uptime_gauge();
+            drt.system_health().lock().update_uptime_gauge();
 
             // Verify uptime increased by at least 100ms
             let elapsed = uptime_after_sleep - initial_uptime;
@@ -582,8 +584,8 @@ mod integration_tests {
                 struct TestHandler;
 
                 #[async_trait]
-                impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for TestHandler {
-                    async fn generate(&self, input: SingleIn<String>) -> crate::Result<ManyOut<Annotated<String>>> {
+                impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, anyhow::Error> for TestHandler {
+                    async fn generate(&self, input: SingleIn<String>) -> anyhow::Result<ManyOut<Annotated<String>>> {
                         let (data, ctx) = input.into_parts();
                         let response = Annotated::from_data(format!("You responded: {}", data));
                         Ok(crate::pipeline::ResponseStream::new(
@@ -733,8 +735,9 @@ mod integration_tests {
 
                 // Register the endpoint and its health check payload
                 {
-                    let system_health = drt.system_health.lock();
-                    system_health.register_health_check_target(
+                    let system_health = drt.system_health();
+                    let system_health_lock = system_health.lock();
+                    system_health_lock.register_health_check_target(
                         endpoint,
                         crate::component::Instance {
                             component: "test_component".to_string(),
@@ -760,7 +763,7 @@ mod integration_tests {
                 );
 
                 // Set endpoint to healthy state
-                drt.system_health
+                drt.system_health()
                     .lock()
                     .set_endpoint_health_status(endpoint, HealthStatus::Ready);
 
@@ -777,7 +780,7 @@ mod integration_tests {
 
                 // Verify the endpoint status in SystemHealth directly
                 let endpoint_status = drt
-                    .system_health
+                    .system_health()
                     .lock()
                     .get_endpoint_health_status(endpoint);
                 assert_eq!(

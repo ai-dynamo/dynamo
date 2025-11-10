@@ -2,26 +2,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
 
 use anyhow::Context as _;
-use tokio::sync::{Notify, mpsc::Receiver};
+use futures::StreamExt;
 
 use dynamo_runtime::{
     DistributedRuntime,
+    discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoveryStream},
     pipeline::{
         ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
         network::egress::push_router::PushRouter,
     },
     protocols::{EndpointId, annotated::Annotated},
-    storage::key_value_store::WatchEvent,
 };
 
 use crate::{
     backend::Backend,
     entrypoint,
     kv_router::{KvRouterConfig, PrefillRouter},
-    model_card::{self, ModelDeploymentCard},
+    model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
     protocols::{
@@ -99,17 +100,51 @@ impl ModelWatcher {
     }
 
     /// Common watch logic with optional namespace filtering
-    pub async fn watch(&self, mut events_rx: Receiver<WatchEvent>, target_namespace: Option<&str>) {
+    pub async fn watch(
+        &self,
+        mut discovery_stream: DiscoveryStream,
+        target_namespace: Option<&str>,
+    ) {
         let global_namespace = target_namespace.is_none_or(is_global_namespace);
 
-        while let Some(event) = events_rx.recv().await {
+        while let Some(result) = discovery_stream.next().await {
+            let event = match result {
+                Ok(event) => event,
+                Err(err) => {
+                    tracing::error!(%err, "Error in discovery stream");
+                    continue;
+                }
+            };
+
             match event {
-                WatchEvent::Put(kv) => {
-                    let key = kv.key_str();
-                    let endpoint_id = match key_extract(key) {
-                        Ok((eid, _)) => eid,
-                        Err(err) => {
-                            tracing::error!(%key, %err, "Failed extracting EndpointId from key. Ignoring instance.");
+                DiscoveryEvent::Added(instance) => {
+                    // Extract EndpointId, instance_id, and card from the discovery instance
+                    let (endpoint_id, instance_id, mut card) = match &instance {
+                        DiscoveryInstance::Model {
+                            namespace,
+                            component,
+                            endpoint,
+                            instance_id,
+                            ..
+                        } => {
+                            let eid = EndpointId {
+                                namespace: namespace.clone(),
+                                component: component.clone(),
+                                name: endpoint.clone(),
+                            };
+
+                            match instance.deserialize_model::<ModelDeploymentCard>() {
+                                Ok(card) => (eid, *instance_id, card),
+                                Err(err) => {
+                                    tracing::error!(%err, instance_id, "Failed to deserialize model card");
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => {
+                            tracing::error!(
+                                "Unexpected discovery instance type (expected ModelCard)"
+                            );
                             continue;
                         }
                     };
@@ -126,21 +161,6 @@ impl ModelWatcher {
                         );
                         continue;
                     }
-
-                    let mut card = match serde_json::from_slice::<ModelDeploymentCard>(kv.value()) {
-                        Ok(card) => card,
-                        Err(err) => {
-                            match kv.value_str() {
-                                Ok(value) => {
-                                    tracing::error!(%err, value, "Invalid JSON in model card")
-                                }
-                                Err(value_str_err) => {
-                                    tracing::error!(original_error = %err, %value_str_err, "Invalid UTF-8 string in model card, expected JSON")
-                                }
-                            }
-                            continue;
-                        }
-                    };
 
                     // If we already have a worker for this model, and the ModelDeploymentCard
                     // cards don't match, alert, and don't add the new instance
@@ -164,7 +184,10 @@ impl ModelWatcher {
                         continue;
                     }
 
-                    match self.handle_put(key, &endpoint_id, &mut card).await {
+                    // Use instance_id as the HashMap key (simpler and sufficient since keys are opaque)
+                    let key = format!("{:x}", instance_id);
+
+                    match self.handle_put(&key, &endpoint_id, &mut card).await {
                         Ok(()) => {
                             tracing::info!(
                                 model_name = card.name(),
@@ -183,10 +206,12 @@ impl ModelWatcher {
                         }
                     }
                 }
-                WatchEvent::Delete(key) => {
-                    let deleted_key = key.as_ref();
+                DiscoveryEvent::Removed(instance_id) => {
+                    // Use instance_id hex as the HashMap key (matches what we saved with)
+                    let key = format!("{:x}", instance_id);
+
                     match self
-                        .handle_delete(deleted_key, target_namespace, global_namespace)
+                        .handle_delete(&key, target_namespace, global_namespace)
                         .await
                     {
                         Ok(Some(model_name)) => {
@@ -559,35 +584,39 @@ impl ModelWatcher {
 
     /// All the registered ModelDeploymentCard with the EndpointId they are attached to, one per instance
     async fn all_cards(&self) -> anyhow::Result<Vec<(EndpointId, ModelDeploymentCard)>> {
-        let store = self.drt.store();
-        let Some(card_bucket) = store.get_bucket(model_card::ROOT_PATH).await? else {
-            // no cards
-            return Ok(vec![]);
-        };
-        let entries = card_bucket.entries().await?;
+        let discovery = self.drt.discovery();
+        let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
-        let mut results = Vec::with_capacity(entries.len());
-        for (key, card_bytes) in entries {
-            let r = match serde_json::from_slice::<ModelDeploymentCard>(&card_bytes) {
+        let mut results = Vec::with_capacity(instances.len());
+        for instance in instances {
+            match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
-                    let maybe_endpoint_id =
-                        key_extract(&key).map(|(endpoint_id, _instance_id)| endpoint_id);
-                    let endpoint_id = match maybe_endpoint_id {
-                        Ok(eid) => eid,
-                        Err(err) => {
-                            tracing::error!(%err, "Skipping invalid key, not string or not EndpointId");
+                    // Extract EndpointId from the instance
+                    let endpoint_id = match &instance {
+                        dynamo_runtime::discovery::DiscoveryInstance::Model {
+                            namespace,
+                            component,
+                            endpoint,
+                            ..
+                        } => EndpointId {
+                            namespace: namespace.clone(),
+                            component: component.clone(),
+                            name: endpoint.clone(),
+                        },
+                        _ => {
+                            tracing::error!(
+                                "Unexpected discovery instance type (expected ModelCard)"
+                            );
                             continue;
                         }
                     };
-                    (endpoint_id, card)
+                    results.push((endpoint_id, card));
                 }
                 Err(err) => {
-                    let value = String::from_utf8_lossy(&card_bytes);
-                    tracing::error!(%err, %value, "Invalid JSON in model card");
+                    tracing::error!(%err, "Failed to deserialize model card");
                     continue;
                 }
-            };
-            results.push(r);
+            }
         }
         Ok(results)
     }
@@ -609,43 +638,5 @@ impl ModelWatcher {
             matches_name && matches_namespace
         });
         Ok(all.into_iter().map(|(_eid, card)| card).collect())
-    }
-}
-
-/// The ModelDeploymentCard is published in store with a key like "v1/mdc/dynamo/backend/generate/694d9981145a61ad".
-/// Extract the EndpointId and instance_id from that.
-fn key_extract(s: &str) -> anyhow::Result<(EndpointId, String)> {
-    if !s.starts_with(model_card::ROOT_PATH) {
-        anyhow::bail!("Invalid format: expected model card ROOT_PATH segment in {s}");
-    }
-    let parts: Vec<&str> = s.split('/').collect();
-
-    // Need at least prefix model_card::ROOT_PATH (2 parts) + namespace, component, name (3 parts)
-    if parts.len() <= 5 {
-        anyhow::bail!("Invalid format: not enough path segments in {s}");
-    }
-
-    let endpoint_id = EndpointId {
-        namespace: parts[2].to_string(),
-        component: parts[3].to_string(),
-        name: parts[4].to_string(),
-    };
-    Ok((endpoint_id, parts[parts.len() - 1].to_string()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_key_extract() {
-        let input = format!(
-            "{}/dynamo/backend/generate/694d9981145a61ad",
-            model_card::ROOT_PATH
-        );
-        let (endpoint_id, _) = key_extract(&input).unwrap();
-        assert_eq!(endpoint_id.namespace, "dynamo");
-        assert_eq!(endpoint_id.component, "backend");
-        assert_eq!(endpoint_id.name, "generate");
     }
 }

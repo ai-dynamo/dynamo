@@ -353,3 +353,28 @@ class SGLangConfigModifier:
         except Exception as e:
             logger.warning(f"Failed to parse KV cache size from log file. Error: {e}")
         return 0
+
+    @classmethod
+    def set_prefill_config(
+        cls, config: dict, max_batch_size: int, max_num_tokens: int
+    ) -> dict:
+        """
+        Configure prefill-related limits for aggregated prefill runs.
+        - Batch size is applied as server concurrency.
+        - Max tokens is applied as a total token cap to avoid chunked prefill.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="sglang", sub_component_type=SubComponentType.DECODE
+        )
+        args = validate_and_get_worker_args(worker_service, backend="sglang")
+        args = break_arguments(args)
+
+        # Set max concurrency to control effective batch size
+        args = set_argument_value(args, "--max-running-requests", str(max_batch_size))
+
+        # Cap total tokens processed in a batch to avoid chunked prefill
+        args = set_argument_value(args, "--chunked-prefill-size", str(max_num_tokens))
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()
