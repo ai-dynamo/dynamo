@@ -325,13 +325,24 @@ jobs:
           DYNAMO_DIR: ${{ env.DYNAMO_DIR }}
         run: |
           set -euo pipefail
-          # Use the pushed EPP image from the previous step
+          NS=${NAMESPACE}
           echo "Using EPP_IMAGE=${EPP_IMAGE}"
           export EPP_IMAGE
 
-          # Deploy Helm chart in the Dynamo repo pointing to the EPP image
           cd "${DYNAMO_DIR}/deploy/inference-gateway"
-          helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n ${NAMESPACE} -f ./vllm_agg_qwen.yaml --set-string extension.image=${EPP_IMAGE}
+
+          echo "Checking for existing ClusterRole pod-read before Helm install..."
+          kubectl get clusterrole pod-read -o yaml || echo "ClusterRole pod-read does not exist"
+
+          echo "Deleting stale ClusterRole/ClusterRoleBinding pod-read (if any) to avoid Helm ownership conflicts..."
+          kubectl delete clusterrole pod-read --ignore-not-found
+          kubectl delete clusterrolebinding pod-read --ignore-not-found || true
+
+          echo "Installing/Upgrading GAIE Helm chart (dynamo-gaie) into namespace ${NS}..."
+          helm upgrade --install dynamo-gaie ./helm/dynamo-gaie \
+            -n "${NS}" \
+            -f ./vllm_agg_qwen.yaml \
+            --set-string extension.image="${EPP_IMAGE}"
 
       - name: Verify qwen-epp deployment readiness
         shell: bash
@@ -421,14 +432,27 @@ jobs:
           set -euo pipefail
           NS="${NAMESPACE:-}"
           if [[ -n "${NS}" ]]; then
+            echo "=== Namespaced resources in ${NS} ==="
             kubectl get all -n ${NS} || true
+
+            echo "=== Uninstalling Helm releases in ${NS} ==="
             helm uninstall dynamo-platform -n ${NS} || true
+            helm uninstall dynamo-gaie -n ${NS} || true
+
+            echo "=== Deleting Dynamo graph resources in ${NS} ==="
             kubectl delete dynamographdeployments --all -n ${NS} || true
             kubectl delete deployment qwen-epp -n ${NS} || true
+
+            echo "=== Deleting namespace ${NS} ==="
             kubectl delete namespace ${NS} || true
           else
             echo "NAMESPACE is unset; skipping namespace-scoped cleanup." >&2
           fi
+
+          echo "=== Cleaning up cluster-scoped GAIE RBAC (pod-read) ==="
+          # These are cluster-scoped, so no -n
+          kubectl delete clusterrole pod-read --ignore-not-found
+          kubectl delete clusterrolebinding pod-read --ignore-not-found || true
 
       - name: Remove kubeconfig file
         if: always()
