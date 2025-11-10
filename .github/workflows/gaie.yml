@@ -333,7 +333,7 @@ jobs:
 
           echo "Waiting for frontend pods to be Ready and decodeworker pods to be Running..."
           ATTEMPTS=60
-          SLEEP=10
+          SLEEP=20
           OK=0
 
           for i in $(seq 1 ${ATTEMPTS}); do
@@ -354,17 +354,31 @@ jobs:
             kubectl get pods -n ${KUBE_NS} -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" -o wide || true
 
             # Fail fast on obvious bad states (for ANY pod)
-            if echo "${POD_JSON}" | jq -e \
-              '.items[] | select(.status.containerStatuses != null) | .status.containerStatuses[] | select(.state.waiting.reason=="CrashLoopBackOff" or .state.waiting.reason=="ImagePullBackOff" or .state.waiting.reason=="ErrImagePull")' >/dev/null; then
+            if echo "${POD_JSON}" | jq -e '
+              .items[]?
+              | select(type=="object" and .status.containerStatuses != null)
+              | .status.containerStatuses[]
+              | select(.state.waiting.reason=="CrashLoopBackOff"
+                       or .state.waiting.reason=="ImagePullBackOff"
+                       or .state.waiting.reason=="ErrImagePull")
+            ' >/dev/null; then
               echo "Detected CrashLoopBackOff/ImagePullBackOff/ErrImagePull in vLLM pods" >&2
               kubectl describe pods -n ${KUBE_NS} -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" || true
               exit 1
             fi
 
             # Frontend pods: name contains "-frontend-"
-            FRONT_COUNT=$(echo "${POD_JSON}" | jq '[.items[] | select(.metadata.name | contains("-frontend-"))] | length')
+            FRONT_COUNT=$(echo "${POD_JSON}" | jq '
+              [.items[]?
+               | select(type=="object" and (.metadata.name // "") | contains("-frontend-"))
+              ] | length
+            ')
             # Decodeworker pods: name contains "vllmdecodeworker"
-            DECODE_COUNT=$(echo "${POD_JSON}" | jq '[.items[] | select(.metadata.name | contains("vllmdecodeworker"))] | length')
+            DECODE_COUNT=$(echo "${POD_JSON}" | jq '
+              [.items[]?
+               | select(type=="object" and (.metadata.name // "") | contains("vllmdecodeworker"))
+              ] | length
+            ')
 
             echo "Frontend pods count: ${FRONT_COUNT}"
             echo "Decodeworker pods count: ${DECODE_COUNT}"
@@ -376,17 +390,25 @@ jobs:
             fi
 
             # Check: all frontend pods Ready == True
-            FRONT_NOT_READY=$(echo "${POD_JSON}" | jq \
-              '[.items[]
-                | select(.metadata.name | contains("-frontend-"))
+            FRONT_NOT_READY=$(echo "${POD_JSON}" | jq '
+              [.items[]?
+                | select(type=="object" and (.metadata.name // "") | contains("-frontend-"))
                 | {conds: (.status.conditions // [])}
-                | select([.conds[]? | select(.type=="Ready") | .status] | first != "True")
-               ] | length')
+                | select(
+                    ([.conds[]? | select(.type=="Ready") | .status]
+                      | first // "False") != "True"
+                  )
+              ] | length
+            ')
+
             # Check: all decodeworker pods have phase == Running
-            DECODE_NOT_RUNNING=$(echo "${POD_JSON}" | jq \
-              '[.items[]
-                | select(.metadata.name | contains("vllmdecodeworker") and .status.phase != "Running")
-               ] | length')
+            DECODE_NOT_RUNNING=$(echo "${POD_JSON}" | jq '
+              [.items[]?
+                | select(type=="object"
+                         and (.metadata.name // "") | contains("vllmdecodeworker")
+                         and (.status.phase // "") != "Running")
+              ] | length
+            ')
 
             echo "Frontend not ready count: ${FRONT_NOT_READY}"
             echo "Decodeworker not running count: ${DECODE_NOT_RUNNING}"
