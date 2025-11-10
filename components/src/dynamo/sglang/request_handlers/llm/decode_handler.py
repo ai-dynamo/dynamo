@@ -114,11 +114,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         logging.debug(f"New Request ID: {context.id()}")
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
-        
+
         # Extract data_parallel_rank (explicit None check to preserve dp_rank=0)
         data_parallel_rank = (
             request.get("data_parallel_rank")
-            if "data_parallel_rank" in request and request["data_parallel_rank"] is not None
+            if "data_parallel_rank" in request
+            and request["data_parallel_rank"] is not None
             else request.get("dp_rank")
         )
 
@@ -135,17 +136,25 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 result_data = result.data()
                 if len(result_data) == 3:
                     worker_id, prefill_dp_rank, overlap = result_data
-                    if not hasattr(self, '_dp_routing_active_logged'):
-                        logging.info(f"DP-aware routing active: dp_rank={prefill_dp_rank}")
+                    if not hasattr(self, "_dp_routing_active_logged"):
+                        logging.info(
+                            f"DP-aware routing active: dp_rank={prefill_dp_rank}"
+                        )
                         self._dp_routing_active_logged = True
-                    logging.debug(f"Router selected: worker={worker_id}, dp_rank={prefill_dp_rank}, overlap={overlap}")
+                    logging.debug(
+                        f"Router selected: worker={worker_id}, dp_rank={prefill_dp_rank}, overlap={overlap}"
+                    )
                 else:
                     # Backward compatibility: (worker_id, overlap)
                     worker_id, overlap = result_data
                     prefill_dp_rank = None
-                    logging.debug(f"Router selected: worker={worker_id}, overlap={overlap}")
-                    if not hasattr(self, '_dp_routing_unavailable_warned'):
-                        logging.warning("Router not returning dp_rank - DP-aware routing unavailable")
+                    logging.debug(
+                        f"Router selected: worker={worker_id}, overlap={overlap}"
+                    )
+                    if not hasattr(self, "_dp_routing_unavailable_warned"):
+                        logging.warning(
+                            "Router not returning dp_rank - DP-aware routing unavailable"
+                        )
                         self._dp_routing_unavailable_warned = True
 
                 # Build prefill request
@@ -153,14 +162,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request=request,
                     sampling_params=sampling_params,
                 ).model_dump()
-                
+
                 # Inject dp_rank after serialization (Pydantic drops unknown fields)
                 if prefill_dp_rank is not None:
-                    prefill_request_dict["dp_rank"] = prefill_dp_rank  # For Dynamo routing
+                    prefill_request_dict[
+                        "dp_rank"
+                    ] = prefill_dp_rank  # For Dynamo routing
                     if isinstance(prefill_request_dict.get("request"), dict):
                         prefill_request_dict["request"]["dp_rank"] = prefill_dp_rank
-                        prefill_request_dict["request"]["data_parallel_rank"] = prefill_dp_rank
-                
+                        prefill_request_dict["request"][
+                            "data_parallel_rank"
+                        ] = prefill_dp_rank
+
                 prefill_stream = await self.prefill_client.direct(
                     prefill_request_dict,
                     worker_id,
@@ -191,19 +204,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "bootstrap_port": bootstrap_info["bootstrap_port"],
                 "bootstrap_room": bootstrap_info["bootstrap_room"],
             }
-            
+
             # Use router-selected dp_rank (fallback to request-level if not provided)
-            if 'prefill_dp_rank' in locals() and prefill_dp_rank is not None:
+            if "prefill_dp_rank" in locals() and prefill_dp_rank is not None:
                 effective_dp_rank = prefill_dp_rank
             elif data_parallel_rank is not None:
                 effective_dp_rank = data_parallel_rank
             else:
                 effective_dp_rank = None
-            
+
             if effective_dp_rank is not None:
                 generate_kwargs["data_parallel_rank"] = effective_dp_rank
                 logging.debug(f"Using dp_rank={effective_dp_rank} for decode")
-            
+
             decode = await self.engine.async_generate(**generate_kwargs)
 
             if self.skip_tokenizer_init:
@@ -219,11 +232,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "sampling_params": sampling_params,
                 "stream": True,
             }
-            
+
             if data_parallel_rank is not None:
                 generate_kwargs["data_parallel_rank"] = data_parallel_rank
                 logging.debug(f"Using dp_rank={data_parallel_rank} for aggregated mode")
-            
+
             agg = await self.engine.async_generate(**generate_kwargs)
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):

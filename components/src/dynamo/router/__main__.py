@@ -134,9 +134,13 @@ class StandaloneRouterHandler:
 
         # Use new API with dp_rank support, fallback to old API for compatibility
         if hasattr(self.kv_push_router, "best_worker"):
-            result = await self.kv_push_router.best_worker(token_ids, router_config_override)
+            result = await self.kv_push_router.best_worker(
+                token_ids, router_config_override
+            )
         else:
-            wid, overlap = await self.kv_push_router.best_worker_id(token_ids, router_config_override)
+            wid, overlap = await self.kv_push_router.best_worker_id(
+                token_ids, router_config_override
+            )
             result = (wid, None, overlap)
 
         yield result

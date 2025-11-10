@@ -80,20 +80,26 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 f"Expected disaggregated format with 'request' and 'sampling_params', "
                 f"got keys: {list(request.keys())}"
             )
-        
+
         inner_request = request["request"]
         sampling_params_dict = request["sampling_params"]
-        
+
         # Extract data_parallel_rank (explicit None check to preserve dp_rank=0)
-        if "data_parallel_rank" in request and request["data_parallel_rank"] is not None:
+        if (
+            "data_parallel_rank" in request
+            and request["data_parallel_rank"] is not None
+        ):
             data_parallel_rank = request["data_parallel_rank"]
-        elif "data_parallel_rank" in inner_request and inner_request["data_parallel_rank"] is not None:
+        elif (
+            "data_parallel_rank" in inner_request
+            and inner_request["data_parallel_rank"] is not None
+        ):
             data_parallel_rank = inner_request["data_parallel_rank"]
         elif "dp_rank" in inner_request and inner_request["dp_rank"] is not None:
             data_parallel_rank = inner_request["dp_rank"]
         else:
             data_parallel_rank = None
-        
+
         input_param = self._get_input_param(inner_request)
 
         # Build engine kwargs
@@ -105,11 +111,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             "bootstrap_port": self.bootstrap_port,
             "bootstrap_room": bootstrap_room,
         }
-        
+
         if data_parallel_rank is not None:
             generate_kwargs["data_parallel_rank"] = data_parallel_rank
             logging.debug(f"Using dp_rank={data_parallel_rank} for prefill")
-        
+
         results = await self.engine.async_generate(**generate_kwargs)
 
         task = asyncio.create_task(self._consume_results(results, context))
