@@ -64,6 +64,11 @@ sglang = [
     "sglang[all]==0.5.3.post2",
 ]
 
+[project.entry-points.pytest11]
+vllm_tests = "dynamo.vllm.tests.conftest"
+trtllm_tests = "dynamo.trtllm.tests.conftest"
+sglang_tests = "dynamo.sglang.tests.conftest"
+
 [dependency-groups]
 docs = [
     # Core Sphinx
