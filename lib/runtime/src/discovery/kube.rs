@@ -13,9 +13,30 @@ use super::{Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, Discov
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{
     Api, Client as KubeClient,
-    api::ListParams,
     runtime::{watcher, watcher::Config, reflector, WatchStreamExt},
 };
+use tokio::task::JoinHandle;
+
+/// Snapshot of all discovered instances and their metadata
+#[derive(Clone, Debug)]
+struct MetadataSnapshot {
+    /// Map of instance_id -> metadata
+    instances: HashMap<u64, Arc<DiscoveryMetadata>>,
+    /// Sequence number for debugging
+    sequence: u64,
+    /// Timestamp for observability
+    timestamp: std::time::Instant,
+}
+
+impl MetadataSnapshot {
+    fn empty() -> Self {
+        Self {
+            instances: HashMap::new(),
+            sequence: 0,
+            timestamp: std::time::Instant::now(),
+        }
+    }
+}
 
 /// Hash a pod name to get a consistent instance ID
 pub fn hash_pod_name(pod_name: &str) -> u64 {
@@ -162,6 +183,10 @@ pub struct KubeDiscoveryClient {
     kube_client: KubeClient,
     /// Mock mode for testing (skips HTTP calls and returns mock metadata)
     mock_metadata: bool,
+    /// Watch channel receiver for daemon broadcasts
+    metadata_watch: tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>,
+    /// Daemon task handle for graceful shutdown
+    daemon_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
 impl KubeDiscoveryClient {
@@ -193,16 +218,38 @@ impl KubeDiscoveryClient {
             .await
             .map_err(|e| crate::error!("Failed to create Kubernetes client: {}", e))?;
         
-        Ok(Self {
+        // Create watch channel with initial empty snapshot
+        let (watch_tx, watch_rx) = tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
+        
+        let client = Self {
             instance_id,
             metadata,
             http_client,
             metadata_cache: Arc::new(RwLock::new(HashMap::new())),
             pod_info,
-            cancel_token,
+            cancel_token: cancel_token.clone(),
             kube_client,
             mock_metadata: false,
-        })
+            metadata_watch: watch_rx,
+            // why can't this simply be an option
+            daemon_handle: Arc::new(RwLock::new(None)),
+        };
+        
+        // Spawn daemon task
+        let daemon_handle = tokio::spawn({
+            let client = client.clone();
+            async move {
+                if let Err(e) = client.run_metadata_daemon(watch_tx).await {
+                    tracing::error!("Metadata daemon failed: {}", e);
+                }
+            }
+        });
+        
+        *client.daemon_handle.write().await = Some(daemon_handle);
+        
+        tracing::info!("Metadata daemon started");
+        
+        Ok(client)
     }
 
     /// Create a new client for testing (doesn't require environment variables)
@@ -232,16 +279,36 @@ impl KubeDiscoveryClient {
             system_port: 8080,
         };
         
-        Ok(Self {
+        // Create watch channel with initial empty snapshot
+        let (watch_tx, watch_rx) = tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
+        
+        let client = Self {
             instance_id,
             metadata,
             http_client,
             metadata_cache: Arc::new(RwLock::new(HashMap::new())),
             pod_info,
-            cancel_token,
+            cancel_token: cancel_token.clone(),
             kube_client,
             mock_metadata,
-        })
+            metadata_watch: watch_rx,
+            daemon_handle: Arc::new(RwLock::new(None)),
+        };
+        
+        // Spawn daemon task
+        let daemon_handle = tokio::spawn({
+            let client = client.clone();
+            async move {
+                if let Err(e) = client.run_metadata_daemon(watch_tx).await {
+                    tracing::error!("Metadata daemon failed: {}", e);
+                }
+            }
+        });
+
+        // what is this for?
+        *client.daemon_handle.write().await = Some(daemon_handle);
+        
+        Ok(client)
     }
 
     /// Generate mock metadata for testing
@@ -285,7 +352,7 @@ impl KubeDiscoveryClient {
         // Local test mode: parse port from pod name and use localhost
         let target_host = if std::env::var("DYN_LOCAL_KUBE_TEST").is_ok() {
             if let Some(port) = Self::parse_port_from_pod_name(pod_name) {
-                tracing::info!(
+                tracing::trace!(
                     "Local test mode: using localhost:{} for pod {}",
                     port,
                     pod_name
@@ -306,7 +373,7 @@ impl KubeDiscoveryClient {
         {
             let cache = self.metadata_cache.read().await;
             if let Some(cached) = cache.get(&instance_id) {
-                tracing::debug!(
+                tracing::trace!(
                     "Cache hit for pod_name={}, instance_id={:x}",
                     pod_name,
                     instance_id
@@ -316,7 +383,7 @@ impl KubeDiscoveryClient {
         }
         
         // Cache miss: fetch from remote pod
-        tracing::debug!(
+        tracing::info!(
             "Cache miss for pod_name={}, instance_id={:x}, fetching from {}",
             pod_name,
             instance_id,
@@ -390,100 +457,214 @@ impl KubeDiscoveryClient {
         Ok(metadata)
     }
 
+    /// Run the metadata daemon that maintains global discovery state
+    async fn run_metadata_daemon(
+        &self,
+        watch_tx: tokio::sync::watch::Sender<Arc<MetadataSnapshot>>,
+    ) -> Result<()> {
+        use futures::StreamExt;
+        
+        tracing::info!("Metadata daemon starting");
+        
+        // Create reflector for ALL EndpointSlices in our namespace
+        let endpoint_slices: Api<EndpointSlice> = Api::namespaced(
+            self.kube_client.clone(),
+            &self.pod_info.pod_namespace,
+        );
+        
+        let (reader, writer) = reflector::store();
+        
+        // Apply label selector to only watch discovery-enabled EndpointSlices
+        let watch_config = Config::default()
+            .labels("dynamo.nvidia.com/discovery=enabled");
+        
+        tracing::info!("Daemon watching EndpointSlices with label: dynamo.nvidia.com/discovery=enabled");
+        
+        // Spawn reflector task (runs independently)
+        let reflector_stream = reflector(writer, watcher(endpoint_slices, watch_config))
+            .default_backoff()
+            .touched_objects()
+            .for_each(|res| {
+                futures::future::ready(match res {
+                    Ok(obj) => {
+                        tracing::debug!(
+                            slice_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
+                            "Daemon reflector updated EndpointSlice"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Daemon reflector error: {}", e);
+                    }
+                })
+            });
+        
+        tokio::spawn(reflector_stream);
+        
+        // Polling loop
+        let mut sequence = 0u64;
+        let mut prev_instance_ids: HashSet<u64> = HashSet::new();
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    match self.fetch_snapshot(&reader, sequence).await {
+                        Ok(snapshot) => {
+                            // Compare instance IDs to detect changes
+                            // Assumption: metadata is immutable once set, so we only need to compare keys
+                            let current_instance_ids: HashSet<u64> = 
+                                snapshot.instances.keys().copied().collect();
+                            
+                            let instances_changed = current_instance_ids != prev_instance_ids;
+                            
+                            if instances_changed {
+                                // Compute what was added and removed
+                                let added: Vec<u64> = current_instance_ids
+                                    .difference(&prev_instance_ids)
+                                    .copied()
+                                    .collect();
+                                
+                                let removed: Vec<u64> = prev_instance_ids
+                                    .difference(&current_instance_ids)
+                                    .copied()
+                                    .collect();
+                                
+                                tracing::info!(
+                                    "Daemon snapshot (seq={}): instances changed, total={}, added=[{}], removed=[{}]",
+                                    sequence,
+                                    current_instance_ids.len(),
+                                    added.iter().map(|id| format!("{:x}", id)).collect::<Vec<_>>().join(", "),
+                                    removed.iter().map(|id| format!("{:x}", id)).collect::<Vec<_>>().join(", ")
+                                );
+                                
+                                // Prune cache for removed instances
+                                if !removed.is_empty() {
+                                    self.prune_cache_entries(&removed).await;
+                                }
+                                
+                                // Broadcast the snapshot (only when changed)
+                                if watch_tx.send(Arc::new(snapshot)).is_err() {
+                                    tracing::debug!("No watch subscribers, daemon stopping");
+                                    break;
+                                }
+                                
+                                prev_instance_ids = current_instance_ids;
+                            } else {
+                                tracing::trace!(
+                                    "Daemon snapshot (seq={}): no changes, {} instances",
+                                    sequence,
+                                    current_instance_ids.len()
+                                );
+                            }
+                            
+                            sequence += 1;
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to fetch snapshot: {}", e);
+                            // Continue on errors - don't crash daemon
+                        }
+                    }
+                }
+                _ = self.cancel_token.cancelled() => {
+                    tracing::info!("Metadata daemon received cancellation");
+                    break;
+                }
+            }
+        }
+        
+        tracing::info!("Metadata daemon stopped");
+        Ok(())
+    }
+
+    /// Fetch a complete snapshot of all instances and their metadata
+    async fn fetch_snapshot(
+        &self,
+        reader: &reflector::Store<EndpointSlice>,
+        sequence: u64,
+    ) -> Result<MetadataSnapshot> {
+        use futures::StreamExt;
+        
+        let start = std::time::Instant::now();
+        
+        // Extract ALL ready endpoints (instance_id, pod_name, pod_ip) directly from reflector
+        // No need to clone EndpointSlices - just iterate and extract
+        let all_endpoints: Vec<(u64, String, String)> = reader
+            .state()
+            .iter()
+            .flat_map(|arc_slice| Self::extract_endpoint_info(arc_slice.as_ref()))
+            .collect();
+        
+        tracing::trace!(
+            "Daemon found {} ready endpoints to fetch",
+            all_endpoints.len()
+        );
+        
+        // Concurrent fetch: Fetch metadata for all endpoints in parallel
+        let fetch_futures = all_endpoints.into_iter().map(|(instance_id, pod_name, pod_ip)| {
+            let client = self.clone();
+            async move {
+                match client.get_metadata(&pod_name, &pod_ip).await {
+                    Ok(metadata) => Some((instance_id, metadata)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to fetch metadata for pod {} (instance_id={:x}): {}",
+                            pod_name,
+                            instance_id,
+                            e
+                        );
+                        None
+                    }
+                }
+            }
+        });
+        
+        // Execute fetches concurrently with bounded parallelism
+        let results: Vec<_> = futures::stream::iter(fetch_futures)
+            .buffer_unordered(20)
+            .collect()
+            .await;
+        
+        // Build the snapshot
+        let mut instances = HashMap::new();
+        for result in results {
+            if let Some((instance_id, metadata)) = result {
+                instances.insert(instance_id, metadata);
+            }
+        }
+        
+        let elapsed = start.elapsed();
+        
+        tracing::trace!(
+            "Daemon snapshot complete (seq={}): {} instances in {:?}",
+            sequence,
+            instances.len(),
+            elapsed
+        );
+        
+        Ok(MetadataSnapshot {
+            instances,
+            sequence,
+            timestamp: std::time::Instant::now(),
+        })
+    }
+
+    /// Prune cache entries for removed instances
+    async fn prune_cache_entries(&self, removed: &[u64]) {
+        let mut cache = self.metadata_cache.write().await;
+        for instance_id in removed {
+            if cache.remove(instance_id).is_some() {
+                tracing::debug!("Pruned cache for removed instance_id={:x}", instance_id);
+            }
+        }
+    }
+
     /// Invalidate cache entry for a given instance
     async fn invalidate_cache(&self, instance_id: u64) {
         let mut cache = self.metadata_cache.write().await;
         if cache.remove(&instance_id).is_some() {
             tracing::debug!("Invalidated cache for instance_id={:x}", instance_id);
         }
-    }
-
-    /// Build label selector for Kubernetes EndpointSlices from DiscoveryQuery
-    fn build_label_selector(key: &DiscoveryQuery) -> String {
-        match key {
-            DiscoveryQuery::AllEndpoints => String::new(),
-            DiscoveryQuery::NamespacedEndpoints { namespace } => {
-                format!("dynamo.nvidia.com/namespace={}", namespace)
-            }
-            DiscoveryQuery::ComponentEndpoints { namespace, component } => {
-                format!("dynamo.nvidia.com/namespace={},dynamo.nvidia.com/component={}", namespace, component)
-            }
-            DiscoveryQuery::Endpoint { namespace, component, .. } => {
-                format!("dynamo.nvidia.com/namespace={},dynamo.nvidia.com/component={}", namespace, component)
-            }
-            DiscoveryQuery::AllModels => String::new(),
-            DiscoveryQuery::NamespacedModels { namespace } => {
-                format!("dynamo.nvidia.com/namespace={}", namespace)
-            }
-            DiscoveryQuery::ComponentModels { namespace, component } => {
-                format!("dynamo.nvidia.com/namespace={},dynamo.nvidia.com/component={}", namespace, component)
-            }
-            DiscoveryQuery::EndpointModels { namespace, component, .. } => {
-                format!("dynamo.nvidia.com/namespace={},dynamo.nvidia.com/component={}", namespace, component)
-            }
-        }
-    }
-
-    /// Extract ready endpoints from an EndpointSlice
-    /// Returns (pod_name, pod_ip) pairs
-    fn extract_ready_endpoints(slice: &EndpointSlice) -> Vec<(String, String)> {
-        let mut result = Vec::new();
-        
-        let endpoints = &slice.endpoints;
-        
-        for endpoint in endpoints {
-            // Check if endpoint is ready
-            let is_ready = endpoint.conditions.as_ref()
-                .and_then(|c| c.ready)
-                .unwrap_or(false);
-            
-            if !is_ready {
-                continue;
-            }
-            
-            // Get pod name from targetRef
-            let pod_name = match endpoint.target_ref.as_ref() {
-                Some(target_ref) => target_ref.name.as_deref().unwrap_or(""),
-                None => continue,
-            };
-            
-            if pod_name.is_empty() {
-                continue;
-            }
-            
-            // Get IP addresses
-            for ip in &endpoint.addresses {
-                result.push((pod_name.to_string(), ip.clone()));
-            }
-        }
-        
-        result
-    }
-
-    /// Extract instance IDs from an EndpointSlice (only ready endpoints)
-    fn extract_instance_ids(slice: &EndpointSlice) -> HashSet<u64> {
-        let mut ids = HashSet::new();
-        
-        let endpoints = &slice.endpoints;
-        
-        for endpoint in endpoints {
-            // Only count ready endpoints
-            let is_ready = endpoint.conditions.as_ref()
-                .and_then(|c| c.ready)
-                .unwrap_or(false);
-            
-            if !is_ready {
-                continue;
-            }
-            
-            if let Some(target_ref) = &endpoint.target_ref {
-                if let Some(pod_name) = &target_ref.name {
-                    ids.insert(hash_pod_name(pod_name));
-                }
-            }
-        }
-        
-        ids
     }
 
     /// Extract endpoint information from an EndpointSlice
@@ -660,76 +841,35 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn list(&self, key: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
-        use futures::StreamExt;
-
         tracing::debug!("KubeDiscoveryClient::list called with key={:?}", key);
         
-        // Build label selector
-        let label_selector = Self::build_label_selector(&key);
-        tracing::debug!("Using label selector: {}", label_selector);
-        
-        // Query EndpointSlices in our namespace only
-        let endpoint_slices: Api<EndpointSlice> = Api::namespaced(
-            self.kube_client.clone(),
-            &self.pod_info.pod_namespace,
-        );
-        let mut list_params = ListParams::default();
-        if !label_selector.is_empty() {
-            list_params = list_params.labels(&label_selector);
-        }
+        // Wait for daemon to fetch at least once (skip initial empty snapshot)
+        let snapshot = {
+            let mut rx = self.metadata_watch.clone();
+            let snapshot = rx.borrow_and_update().clone();
+            
+            // If we got the initial empty snapshot, wait for first real update
+            if snapshot.sequence == 0 {
+                tracing::debug!("Waiting for daemon to fetch first snapshot...");
+                rx.changed().await
+                    .map_err(|_| crate::error!("Daemon channel closed before first snapshot"))?;
+                rx.borrow_and_update().clone()
+            } else {
+                snapshot
+            }
+        };
         
         tracing::debug!(
-            "Listing EndpointSlices in namespace: {}",
-            self.pod_info.pod_namespace
+            "List using snapshot seq={} with {} instances",
+            snapshot.sequence,
+            snapshot.instances.len()
         );
         
-        let slices = endpoint_slices
-            .list(&list_params)
-            .await
-            .map_err(|e| crate::error!("Failed to list EndpointSlices: {}", e))?;
-        
-        tracing::debug!("Found {} EndpointSlices", slices.items.len());
-        
-        // Extract ready endpoints
-        let ready_endpoints: Vec<(String, String)> = slices
-            .items
-            .iter()
-            .flat_map(Self::extract_ready_endpoints)
-            .collect();
-        
-        tracing::debug!("Found {} ready endpoints", ready_endpoints.len());
-        
-        // Fetch metadata concurrently with rate limiting
-        let metadata_futures = ready_endpoints.into_iter().map(|(pod_name, pod_ip)| {
-            let client = self.clone();
-            async move {
-                match client.get_metadata(&pod_name, &pod_ip).await {
-                    Ok(metadata) => Some((hash_pod_name(&pod_name), metadata)),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to fetch metadata from pod {} ({}): {}",
-                            pod_name,
-                            pod_ip,
-                            e
-                        );
-                        None
-                    }
-                }
-            }
-        });
-        
-        let results: Vec<_> = futures::stream::iter(metadata_futures)
-            .buffer_unordered(20)
-            .collect()
-            .await;
-        
-        // Filter and collect instances
+        // Filter snapshot by query
         let mut instances = Vec::new();
-        for result in results {
-            if let Some((instance_id, metadata)) = result {
-                let filtered = Self::filter_metadata(&metadata, &key, instance_id);
-                instances.extend(filtered);
-            }
+        for (&instance_id, metadata) in &snapshot.instances {
+            let filtered = Self::filter_metadata(metadata, &key, instance_id);
+            instances.extend(filtered);
         }
         
         tracing::info!(
@@ -742,216 +882,123 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn list_and_watch(&self, key: DiscoveryQuery, _cancel_token: Option<CancellationToken>) -> Result<DiscoveryStream> {
-        use futures::{StreamExt, future};
         use tokio::sync::mpsc;
 
         tracing::info!(
-            "KubeDiscoveryClient::list_and_watch started for key={:?} in namespace={}",
-            key,
-            self.pod_info.pod_namespace
+            "KubeDiscoveryClient::list_and_watch started for key={:?}",
+            key
         );
         
-        // Build label selector
-        let label_selector = Self::build_label_selector(&key);
+        // Clone the watch receiver
+        let mut watch_rx = self.metadata_watch.clone();
         
-        // Create EndpointSlice API and watcher (scoped to our namespace)
-        let endpoint_slices: Api<EndpointSlice> = Api::namespaced(
-            self.kube_client.clone(),
-            &self.pod_info.pod_namespace,
-        );
-        let mut watch_config = Config::default();
-        if !label_selector.is_empty() {
-            watch_config = watch_config.labels(&label_selector);
-        }
-        
-        tracing::debug!(
-            "Watching EndpointSlices in namespace: {} with label selector: {:?}",
-            self.pod_info.pod_namespace,
-            label_selector
-        );
-        
-        // Create reflector to maintain complete current state
-        let (reader, writer) = reflector::store();
+        // Create output stream
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
         
         // Generate unique stream identifier for tracing
         let stream_id = uuid::Uuid::new_v4();
         
-        // Set up reflector stream that polls forever to keep store updated
-        let reflector_stream = reflector(writer, watcher(endpoint_slices, watch_config))
-            .default_backoff()
-            .touched_objects()
-            .for_each(move |res| {
-                future::ready(match res {
-                    Ok(obj) => {
-                        tracing::debug!(
-                            stream_id = %stream_id,
-                            slice_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
-                            "Reflector updated"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            stream_id = %stream_id,
-                            error = %e,
-                            "Reflector error"
-                        );
-                    }
-                })
-            });
-        
-        // Spawn background task to poll reflector forever
-        tokio::spawn(reflector_stream);
-        
-        // Track known instances for diffing
-        let known_instances = Arc::new(RwLock::new(HashSet::<u64>::new()));
-        let client = self.clone();
-        let key_clone = key.clone();
-        
-        // Create channel for emitting discovery events
-        let (tx, rx) = mpsc::unbounded_channel();
-        
-        // Spawn task that watches the reflector store and emits events
+        // Spawn task to process snapshots
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+            let mut known_instances = HashSet::<u64>::new();
             
             tracing::debug!(
                 stream_id = %stream_id,
-                "Store monitor started for key={:?}",
-                key_clone
+                "Watch started for key={:?}",
+                key
             );
             
             loop {
-                interval.tick().await;
-                
-                // Get complete current state from reflector
-                let all_slices: Vec<EndpointSlice> = reader.state()
-                    .iter()
-                    .map(|arc_slice| arc_slice.as_ref().clone())
-                    .collect();
-                
-                // Debug: print all slices
-                // let slice_names: Vec<String> = all_slices.iter()
-                //     .map(|s| s.metadata.name.as_deref().unwrap_or("unnamed").to_string())
-                //     .collect();
-                // tracing::debug!(
-                //     stream_id = %stream_id,
-                //     slice_count = all_slices.len(),
-                //     slices = ?slice_names,
-                //     "Store monitor tick - all slices"
-                // );
-                
-                // Extract ALL current instances from ALL slices
-                let current_instances: HashSet<u64> = all_slices.iter()
-                    .flat_map(Self::extract_instance_ids)
-                    .collect();
-                
-                // Build endpoint info map for fetching
-                let mut endpoint_info_map = HashMap::new();
-                for slice in &all_slices {
-                    let endpoint_infos = Self::extract_endpoint_info(slice);
-                    for (instance_id, pod_name, pod_ip) in endpoint_infos {
-                        endpoint_info_map.entry(instance_id)
-                            .or_insert((pod_name, pod_ip));
-                    }
-                }
-                
-                // Diff against previous state
-                let prev_instances = known_instances.read().await.clone();
-                let added: Vec<_> = current_instances.difference(&prev_instances).copied().collect();
-                let removed: Vec<_> = prev_instances.difference(&current_instances).copied().collect();
-                
-                if !added.is_empty() || !removed.is_empty() {
-                    tracing::debug!(
-                        stream_id = %stream_id,
-                        added = added.len(),
-                        removed = removed.len(),
-                        total = current_instances.len(),
-                        "State diff computed"
-                    );
-                }
-                
-                // Update known_instances before fetching
-                *known_instances.write().await = current_instances.clone();
-                
-                // Fetch metadata for new instances concurrently
-                let fetch_futures: Vec<_> = added.iter().filter_map(|&instance_id| {
-                    endpoint_info_map.get(&instance_id).map(|(pod_name, pod_ip)| {
-                        let client = client.clone();
-                        let pod_name = pod_name.clone();
-                        let pod_ip = pod_ip.clone();
-                        let key_clone = key_clone.clone();
-                        let known_instances = known_instances.clone();
+                // Wait for next snapshot
+                match watch_rx.changed().await {
+                    Ok(()) => {
+                        // Get latest snapshot
+                        let snapshot = watch_rx.borrow_and_update().clone();
                         
-                        async move {
-                            match client.get_metadata(&pod_name, &pod_ip).await {
-                                Ok(metadata) => {
-                                    // Fetch-after-delete guard: check if still in known set
-                                    if known_instances.read().await.contains(&instance_id) {
-                                        let instances = Self::filter_metadata(&metadata, &key_clone, instance_id);
-                                        Some((instance_id, instances))
-                                    } else {
-                                        tracing::debug!(
-                                            stream_id = %stream_id,
-                                            instance_id = format!("{:x}", instance_id),
-                                            "Instance removed before fetch completed, skipping"
-                                        );
-                                        None
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        stream_id = %stream_id,
-                                        pod_name = %pod_name,
-                                        error = %e,
-                                        "Failed to fetch metadata"
-                                    );
+                        // Filter snapshot by query
+                        let current_instances: HashSet<u64> = snapshot
+                            .instances
+                            .iter()
+                            .filter_map(|(&instance_id, metadata)| {
+                                let filtered = Self::filter_metadata(metadata, &key, instance_id);
+                                if !filtered.is_empty() {
+                                    Some(instance_id)
+                                } else {
                                     None
+                                }
+                            })
+                            .collect();
+                        
+                        // Compute diff
+                        let added: Vec<u64> = current_instances
+                            .difference(&known_instances)
+                            .copied()
+                            .collect();
+                        
+                        let removed: Vec<u64> = known_instances
+                            .difference(&current_instances)
+                            .copied()
+                            .collect();
+                        
+                        // Only log if there are changes
+                        if !added.is_empty() || !removed.is_empty() {
+                            tracing::debug!(
+                                stream_id = %stream_id,
+                                seq = snapshot.sequence,
+                                added = added.len(),
+                                removed = removed.len(),
+                                total = current_instances.len(),
+                                "Watch detected changes"
+                            );
+                        }
+                        
+                        // Emit Added events
+                        for instance_id in added {
+                            if let Some(metadata) = snapshot.instances.get(&instance_id) {
+                                let instances = Self::filter_metadata(metadata, &key, instance_id);
+                                for instance in instances {
+                                    tracing::info!(
+                                        stream_id = %stream_id,
+                                        instance_id = format!("{:x}", instance.instance_id()),
+                                        "Emitting Added event"
+                                    );
+                                    if event_tx.send(Ok(DiscoveryEvent::Added(instance))).is_err() {
+                                        tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
+                                        return;
+                                    }
                                 }
                             }
                         }
-                    })
-                }).collect();
-                
-                // Fetch concurrently and emit Added events
-                let results: Vec<_> = futures::stream::iter(fetch_futures)
-                    .buffer_unordered(20)
-                    .collect()
-                    .await;
-                
-                for result in results {
-                    if let Some((_instance_id, instances)) = result {
-                        for instance in instances {
+                        
+                        // Emit Removed events
+                        for instance_id in removed {
                             tracing::info!(
                                 stream_id = %stream_id,
-                                instance_id = format!("{:x}", instance.instance_id()),
-                                "Emitting Added event"
+                                instance_id = format!("{:x}", instance_id),
+                                "Emitting Removed event"
                             );
-                            if tx.send(Ok(DiscoveryEvent::Added(instance))).is_err() {
-                                tracing::debug!(stream_id = %stream_id, "Receiver dropped, stopping monitor");
+                            if event_tx.send(Ok(DiscoveryEvent::Removed(instance_id))).is_err() {
+                                tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
                                 return;
                             }
                         }
+                        
+                        // Update known set
+                        known_instances = current_instances;
                     }
-                }
-                
-                // Emit Removed events
-                for instance_id in removed {
-                    tracing::info!(
-                        stream_id = %stream_id,
-                        instance_id = format!("{:x}", instance_id),
-                        "Emitting Removed event"
-                    );
-                    client.invalidate_cache(instance_id).await;
-                    if tx.send(Ok(DiscoveryEvent::Removed(instance_id))).is_err() {
-                        tracing::debug!(stream_id = %stream_id, "Receiver dropped, stopping monitor");
-                        return;
+                    Err(_) => {
+                        tracing::info!(
+                            stream_id = %stream_id,
+                            "Watch channel closed (daemon stopped)"
+                        );
+                        break;
                     }
                 }
             }
         });
         
         // Convert receiver to stream
-        let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+        let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx);
         Ok(Box::pin(stream))
     }
 }
