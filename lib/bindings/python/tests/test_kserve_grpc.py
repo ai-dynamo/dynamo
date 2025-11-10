@@ -90,6 +90,7 @@ def tensor_service(runtime):
 async def test_model_config_uses_runtime_config(tensor_service):
     """Ensure tensor runtime_config is returned via the ModelConfig endpoint."""
     import tritonclient.grpc as grpcclient
+
     model_name = "tensor-config-model"
     tensor_config = {
         "name": model_name,
