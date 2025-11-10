@@ -25,6 +25,7 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -48,6 +49,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
+	rbacv1 "k8s.io/api/rbac/v1"
 )
 
 type State string
@@ -200,6 +202,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return "", "", "", fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
 	}
 
+	// Reconcile the SA, Role and RoleBinding if k8s discovery is enabled
+	err = r.reconcileK8sDiscoveryResources(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile K8s discovery resources")
+		return "", "", "", fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
+	}
+
 	// Orchestrator selection via single boolean annotation: nvidia.com/enable-grove
 	// Unset or not "false": Grove if available; else component mode
 	// "false": component mode (multinode -> LWS; single-node -> standard)
@@ -310,6 +319,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
+
 	// generate the dynamoComponentsDeployments from the config
 	groveGangSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever)
 	if err != nil {
@@ -355,9 +365,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 
 	resources := []Resource{groveGangSetAsResource}
 	for componentName, component := range dynamoDeployment.Spec.Services {
-		if component.ComponentType == consts.ComponentTypeFrontend {
-			// generate the main component service
-			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace)
+
+		// if k8s discovery is enabled, create a service for each component
+		// else, only create for the frontend component
+		if r.Config.IsK8sDiscoveryEnabled(dynamoDeployment.Annotations) || component.ComponentType == consts.ComponentTypeFrontend {
+			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamoDeployment, component, componentName)
 			if err != nil {
 				logger.Error(err, "failed to generate the main component service")
 				return "", "", "", fmt.Errorf("failed to generate the main component service: %w", err)
@@ -374,6 +386,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 					return true, ""
 				})
 			resources = append(resources, mainComponentServiceAsResource)
+		}
+
+		if component.ComponentType == consts.ComponentTypeFrontend {
 			// generate the main component ingress
 			ingressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
 			if component.Ingress != nil {
@@ -499,6 +514,47 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVC(ctx context.Context, dyna
 	}
 
 	return pvc, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileK8sDiscoveryResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	logger := log.FromContext(ctx)
+
+	if !r.Config.IsK8sDiscoveryEnabled(dynamoDeployment.Annotations) {
+		logger.Info("K8s discovery is not enabled")
+		return nil
+	} else {
+		logger.Info("K8s discovery is enabled")
+	}
+
+	serviceAccount := discovery.GetK8sDiscoveryServiceAccount(dynamoDeployment.Name, dynamoDeployment.Namespace)
+	_, _, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
+		return serviceAccount, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the k8s discovery service account")
+		return fmt.Errorf("failed to sync the k8s discovery service account: %w", err)
+	}
+
+	role := discovery.GetK8sDiscoveryRole(dynamoDeployment.Name, dynamoDeployment.Namespace)
+	_, _, err = commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*rbacv1.Role, bool, error) {
+		return role, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the k8s discovery role")
+		return fmt.Errorf("failed to sync the k8s discovery role: %w", err)
+	}
+
+	roleBinding := discovery.GetK8sDiscoveryRoleBinding(dynamoDeployment.Name, dynamoDeployment.Namespace)
+	_, _, err = commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*rbacv1.RoleBinding, bool, error) {
+		return roleBinding, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the k8s discovery role binding")
+		return fmt.Errorf("failed to sync the k8s discovery role binding: %w", err)
+	}
+
+	return nil
+
 }
 
 // reconcilePVCs reconciles all top-level PVCs defined in the DynamoGraphDeployment spec
