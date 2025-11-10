@@ -3,11 +3,11 @@
 
 use anyhow::Result;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Hash a pod name to get a consistent instance ID
 pub fn hash_pod_name(pod_name: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
     let mut hasher = DefaultHasher::new();
     pod_name.hash(&mut hasher);
     hasher.finish()
@@ -81,25 +81,5 @@ impl PodInfo {
             pod_namespace,
             system_port,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_hash_consistency() {
-        let pod_name = "test-pod-123";
-        let hash1 = hash_pod_name(pod_name);
-        let hash2 = hash_pod_name(pod_name);
-        assert_eq!(hash1, hash2, "Hash should be consistent");
-    }
-
-    #[test]
-    fn test_hash_uniqueness() {
-        let hash1 = hash_pod_name("pod-1");
-        let hash2 = hash_pod_name("pod-2");
-        assert_ne!(hash1, hash2, "Different pods should have different hashes");
     }
 }

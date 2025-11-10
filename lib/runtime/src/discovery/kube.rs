@@ -151,7 +151,7 @@ impl Discovery for KubeDiscoveryClient {
     async fn list_and_watch(
         &self,
         query: DiscoveryQuery,
-        _cancel_token: Option<CancellationToken>,
+        cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream> {
         use tokio::sync::mpsc;
 
@@ -180,8 +180,23 @@ impl Discovery for KubeDiscoveryClient {
             );
 
             loop {
-                // Wait for next snapshot
-                match watch_rx.changed().await {
+                // Wait for next snapshot or cancellation
+                let watch_result = if let Some(ref token) = cancel_token {
+                    tokio::select! {
+                        result = watch_rx.changed() => result,
+                        _ = token.cancelled() => {
+                            tracing::info!(
+                                stream_id = %stream_id,
+                                "Watch cancelled via cancel token"
+                            );
+                            break;
+                        }
+                    }
+                } else {
+                    watch_rx.changed().await
+                };
+
+                match watch_result {
                     Ok(()) => {
                         // Get latest snapshot
                         let snapshot = watch_rx.borrow_and_update().clone();
