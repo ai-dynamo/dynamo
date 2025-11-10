@@ -58,7 +58,7 @@ jobs:
       actions: read
 
     env:
-      S3_BUCKET: s3://brightspot-assets-prod/developer/docs
+      S3_BUCKET: ${{ secrets.DOCS_AWS_S3_BUCKET }}
       DOCS_DIR: dynamo-docs
 
     steps:
