@@ -39,7 +39,7 @@ import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
@@ -102,11 +102,13 @@ async def get_engine_runtime_config(
         return runtime_config
 
 
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
-    # Set up signal handler for graceful shutdown
-    loop = asyncio.get_running_loop()
+async def worker():
+    config = cmd_line_args()
 
+    loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, config.store_kv, False)
+
+    # Set up signal handler for graceful shutdown
     def signal_handler():
         # Schedule the shutdown coroutine instead of calling it directly
         asyncio.create_task(graceful_shutdown(runtime))
@@ -116,7 +118,6 @@ async def worker(runtime: DistributedRuntime):
 
     logging.info("Signal handlers set up for graceful shutdown")
 
-    config = cmd_line_args()
     await init(runtime, config)
 
 

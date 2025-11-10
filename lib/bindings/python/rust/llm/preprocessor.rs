@@ -3,9 +3,11 @@
 
 use super::*;
 use crate::llm::model_card::ModelDeploymentCard;
+use std::time::Duration;
 
 use llm_rs::{
     preprocessor::OpenAIPreprocessor,
+    preprocessor::media::{MediaDecoder as RsMediaDecoder, MediaFetcher as RsMediaFetcher},
     protocols::common::llm_backend::{BackendOutput, PreprocessedRequest},
     types::{
         Annotated,
@@ -72,5 +74,64 @@ impl OAIChatPreprocessor {
             builder.start().await.map_err(to_pyerr)?;
             Ok(())
         })
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct MediaDecoder {
+    pub(crate) inner: RsMediaDecoder,
+}
+
+#[pymethods]
+impl MediaDecoder {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: RsMediaDecoder::default(),
+        }
+    }
+
+    fn image_decoder(&mut self, image_decoder: &Bound<'_, PyDict>) -> PyResult<()> {
+        let image_decoder = pythonize::depythonize(image_decoder).map_err(|err| {
+            PyErr::new::<PyException, _>(format!("Failed to parse image_decoder: {}", err))
+        })?;
+        self.inner.image_decoder = image_decoder;
+        Ok(())
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct MediaFetcher {
+    pub(crate) inner: RsMediaFetcher,
+}
+
+#[pymethods]
+impl MediaFetcher {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: RsMediaFetcher::default(),
+        }
+    }
+    fn user_agent(&mut self, user_agent: String) {
+        self.inner.user_agent = user_agent;
+    }
+
+    fn allow_direct_ip(&mut self, allow: bool) {
+        self.inner.allow_direct_ip = allow;
+    }
+
+    fn allow_direct_port(&mut self, allow: bool) {
+        self.inner.allow_direct_port = allow;
+    }
+
+    fn allowed_media_domains(&mut self, domains: Vec<String>) {
+        self.inner.allowed_media_domains = Some(domains.into_iter().collect());
+    }
+
+    fn timeout_ms(&mut self, timeout_ms: u64) {
+        self.inner.timeout = Some(Duration::from_millis(timeout_ms));
     }
 }

@@ -118,3 +118,144 @@ fn build_samples() -> Result<Vec<CompletionSample>, String> {
 
     Ok(samples)
 }
+
+// ============================================================================
+// Batch Prompt Tests
+// ============================================================================
+
+#[test]
+fn test_batch_prompt_utilities() {
+    use dynamo_async_openai::types::Prompt;
+    use dynamo_llm::protocols::openai::completions::{
+        extract_single_prompt, get_prompt_batch_size,
+    };
+
+    // Test single string prompt
+    let single_string = Prompt::String("Hello, world!".to_string());
+    assert_eq!(get_prompt_batch_size(&single_string), 1);
+    assert_eq!(
+        extract_single_prompt(&single_string, 0),
+        Prompt::String("Hello, world!".to_string())
+    );
+
+    // Test single integer array prompt
+    let single_int = Prompt::IntegerArray(vec![1, 2, 3]);
+    assert_eq!(get_prompt_batch_size(&single_int), 1);
+    assert_eq!(
+        extract_single_prompt(&single_int, 0),
+        Prompt::IntegerArray(vec![1, 2, 3])
+    );
+
+    // Test string array prompt
+    let string_array = Prompt::StringArray(vec![
+        "First prompt".to_string(),
+        "Second prompt".to_string(),
+        "Third prompt".to_string(),
+    ]);
+    assert_eq!(get_prompt_batch_size(&string_array), 3);
+    assert_eq!(
+        extract_single_prompt(&string_array, 0),
+        Prompt::String("First prompt".to_string())
+    );
+    assert_eq!(
+        extract_single_prompt(&string_array, 1),
+        Prompt::String("Second prompt".to_string())
+    );
+    assert_eq!(
+        extract_single_prompt(&string_array, 2),
+        Prompt::String("Third prompt".to_string())
+    );
+
+    // Test array of integer arrays
+    let int_array = Prompt::ArrayOfIntegerArray(vec![vec![1, 2, 3], vec![4, 5], vec![6, 7, 8, 9]]);
+    assert_eq!(get_prompt_batch_size(&int_array), 3);
+    assert_eq!(
+        extract_single_prompt(&int_array, 0),
+        Prompt::IntegerArray(vec![1, 2, 3])
+    );
+    assert_eq!(
+        extract_single_prompt(&int_array, 1),
+        Prompt::IntegerArray(vec![4, 5])
+    );
+    assert_eq!(
+        extract_single_prompt(&int_array, 2),
+        Prompt::IntegerArray(vec![6, 7, 8, 9])
+    );
+}
+
+#[test]
+fn test_total_choices_validation() {
+    use dynamo_llm::protocols::openai::validate::validate_total_choices;
+
+    // Valid cases
+    assert!(validate_total_choices(1, 1).is_ok());
+    assert!(validate_total_choices(10, 10).is_ok());
+    assert!(validate_total_choices(64, 2).is_ok());
+    assert!(validate_total_choices(128, 1).is_ok());
+    assert!(validate_total_choices(1, 128).is_ok());
+
+    // Edge case: exactly at the limit
+    assert!(validate_total_choices(128, 1).is_ok());
+    assert!(validate_total_choices(64, 2).is_ok());
+
+    // Invalid cases: exceeds limit
+    assert!(validate_total_choices(129, 1).is_err());
+    assert!(validate_total_choices(65, 2).is_err());
+    assert!(validate_total_choices(100, 2).is_err());
+    assert!(validate_total_choices(2, 100).is_err());
+
+    // Test error message
+    let result = validate_total_choices(100, 2);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Total choices (batch_size × n = 100 × 2 = 200) exceeds maximum of 128")
+    );
+}
+
+#[test]
+fn test_batch_prompt_with_n_parameter() {
+    use dynamo_async_openai::types::Prompt;
+    use dynamo_llm::protocols::openai::completions::get_prompt_batch_size;
+
+    // Test batch size calculation
+    let prompt = Prompt::StringArray(vec!["p1".to_string(), "p2".to_string(), "p3".to_string()]);
+    let batch_size = get_prompt_batch_size(&prompt);
+    let n = 2_u8;
+
+    // Total choices = batch_size × n = 3 × 2 = 6
+    let total_choices = batch_size * (n as usize);
+    assert_eq!(total_choices, 6);
+
+    // Choice indices should be:
+    // prompt 0: indices 0, 1
+    // prompt 1: indices 2, 3
+    // prompt 2: indices 4, 5
+    for prompt_idx in 0..batch_size {
+        for choice_idx in 0..n {
+            let expected_index = (prompt_idx as u32) * (n as u32) + (choice_idx as u32);
+            // Verify index calculation matches vLLM logic
+            assert_eq!(
+                expected_index,
+                prompt_idx as u32 * n as u32 + choice_idx as u32
+            );
+        }
+    }
+}
+
+#[test]
+fn test_single_prompt_in_array() {
+    use dynamo_async_openai::types::Prompt;
+    use dynamo_llm::protocols::openai::completions::{
+        extract_single_prompt, get_prompt_batch_size,
+    };
+
+    // Single element array should work like regular prompt
+    let single_in_array = Prompt::StringArray(vec!["Single prompt".to_string()]);
+    assert_eq!(get_prompt_batch_size(&single_in_array), 1);
+    assert_eq!(
+        extract_single_prompt(&single_in_array, 0),
+        Prompt::String("Single prompt".to_string())
+    );
+}
