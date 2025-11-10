@@ -341,6 +341,18 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		return "", "", "", fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
+	// Reconcile headless services for model endpoint discovery
+	if err := dynamo.ReconcileModelServicesForComponents(
+		ctx,
+		r,
+		dynamoDeployment,
+		dynamoDeployment.Spec.Services,
+		dynamoDeployment.Namespace,
+	); err != nil {
+		logger.Error(err, "failed to reconcile model services")
+		return "", "", "", fmt.Errorf("failed to reconcile model services: %w", err)
+	}
+
 	resources := []Resource{groveGangSetAsResource}
 	for componentName, component := range dynamoDeployment.Spec.Services {
 		if component.ComponentType == consts.ComponentTypeFrontend {

@@ -30,6 +30,8 @@ metadata:
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.controllerManager.replicas }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       control-plane: controller-manager
@@ -76,12 +78,13 @@ spec:
         {{- range .Values.controllerManager.manager.args }}
           - {{ . }}
         {{- end }}
-        {{- if .Values.namespaceRestriction.enabled }}
-          - --restrictedNamespace={{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
-          - --leader-elect=false
-        {{- else }}
           - --leader-elect
           - --leader-election-id={{ default "dynamo.nvidia.com" .Values.controllerManager.leaderElection.id }}
+        {{- if .Values.namespaceRestriction.enabled }}
+          {{- $restrictedNs := default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
+          - --restrictedNamespace={{ $restrictedNs }}
+          - --leader-election-namespace={{ $restrictedNs }}
+        {{- else }}
           - --leader-election-namespace={{ default "kube-system" .Values.controllerManager.leaderElection.namespace }}
         {{- end }}
         {{- if .Values.natsAddr }}
@@ -165,4 +168,4 @@ spec:
       securityContext:
         runAsNonRoot: true
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-controller-manager
-      terminationGracePeriodSeconds: 10
+      terminationGracePeriodSeconds: 30
