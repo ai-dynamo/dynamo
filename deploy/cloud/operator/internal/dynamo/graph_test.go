@@ -4757,7 +4757,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				},
 			},
 			controllerConfig: controller_common.Config{
-				DiscoverBackend: "etcd",
+				DiscoveryBackend: "etcd",
 			},
 			wantEnvVar: "test",
 		},
@@ -4767,7 +4767,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				Annotations: map[string]string{},
 			},
 			controllerConfig: controller_common.Config{
-				DiscoverBackend: "etcd",
+				DiscoveryBackend: "etcd",
 			},
 			wantEnvVar: "etcd",
 		},
@@ -4779,7 +4779,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				},
 			},
 			controllerConfig: controller_common.Config{
-				DiscoverBackend: "",
+				DiscoveryBackend: "",
 			},
 		},
 		{

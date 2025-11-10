@@ -1309,6 +1309,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace, // TODO: nilness check
 	}
 	labels := selector
+	labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
 
 	var servicePort corev1.ServicePort
 	if opt.dynamoComponentDeployment.Spec.ComponentType == consts.ComponentTypeFrontend {

@@ -31,7 +31,7 @@ const (
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
-	KubeAnnotationDynamoDiscoverBackend           = "nvidia.com/dynamo-discover-backend"
+	KubeAnnotationDynamoDiscoverBackend           = "nvidia.com/dynamo-discovery-backend"
 
 	KubeLabelDynamoGraphDeploymentName  = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"
@@ -42,6 +42,7 @@ const (
 	KubeLabelDynamoBaseModel            = "nvidia.com/dynamo-base-model"
 	KubeLabelDynamoBaseModelHash        = "nvidia.com/dynamo-base-model-hash"
 	KubeAnnotationDynamoBaseModel       = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoDiscoveryBackend     = "nvidia.com/dynamo-discovery-backend"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
