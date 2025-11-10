@@ -68,7 +68,8 @@ impl DiscoveryDaemon {
         let (reader, writer) = reflector::store();
 
         // Apply label selector to only watch discovery-enabled EndpointSlices
-        let watch_config = Config::default().labels("nvidia.com/dynamo-discovery-backend=kubernetes");
+        let watch_config =
+            Config::default().labels("nvidia.com/dynamo-discovery-backend=kubernetes");
 
         tracing::info!(
             "Daemon watching EndpointSlices with label: nvidia.com/dynamo-discovery-backend=kubernetes"
