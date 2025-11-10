@@ -54,7 +54,7 @@ const (
 	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar        = "DYN_NAMESPACE"
 	DynamoComponentEnvVar        = "DYN_COMPONENT"
-	DynamoDiscoverBackendEnvVar  = "DYN_DISCOVERY_BACKEND"
+	DynamoDiscoveryBackendEnvVar = "DYN_DISCOVERY_BACKEND"
 
 	GlobalDynamoNamespace = "dynamo"
 

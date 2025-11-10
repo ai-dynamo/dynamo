@@ -4806,10 +4806,10 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				return
 			}
 			if tt.wantEnvVar != "" {
-				assert.Contains(t, podSpec.Containers[0].Env, corev1.EnvVar{Name: commonconsts.DynamoDiscoverBackendEnvVar, Value: tt.wantEnvVar})
+				assert.Contains(t, podSpec.Containers[0].Env, corev1.EnvVar{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: tt.wantEnvVar})
 			} else {
 				for _, env := range podSpec.Containers[0].Env {
-					if env.Name == commonconsts.DynamoDiscoverBackendEnvVar {
+					if env.Name == commonconsts.DynamoDiscoveryBackendEnvVar {
 						t.Errorf("GenerateBasePodSpec() Discover backend env var should not be set, got %s", env.Value)
 					}
 				}

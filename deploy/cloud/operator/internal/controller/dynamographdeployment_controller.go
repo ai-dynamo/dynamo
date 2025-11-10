@@ -365,27 +365,28 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 
 	resources := []Resource{groveGangSetAsResource}
 	for componentName, component := range dynamoDeployment.Spec.Services {
-		// Creating service per component
-		// Would only want to do this when the service discovery backend is k8s - else only create service for frontend
-		// dynamocomponentdeployment_controller.go:1240
 
-		mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamoDeployment, component, componentName)
-		if err != nil {
-			logger.Error(err, "failed to generate the main component service")
-			return "", "", "", fmt.Errorf("failed to generate the main component service: %w", err)
-		}
-		_, syncedMainComponentService, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
-			return mainComponentService, false, nil
-		})
-		if err != nil {
-			logger.Error(err, "failed to sync the main component service")
-			return "", "", "", fmt.Errorf("failed to sync the main component service: %w", err)
-		}
-		mainComponentServiceAsResource := commonController.WrapResource(syncedMainComponentService,
-			func() (bool, string) {
-				return true, ""
+		// if k8s discovery is enabled, create a service for each component
+		// else, only create for the frontend component
+		if r.Config.IsK8sDiscoveryEnabled(dynamoDeployment.Annotations) || component.ComponentType == consts.ComponentTypeFrontend {
+			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamoDeployment, component, componentName)
+			if err != nil {
+				logger.Error(err, "failed to generate the main component service")
+				return "", "", "", fmt.Errorf("failed to generate the main component service: %w", err)
+			}
+			_, syncedMainComponentService, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+				return mainComponentService, false, nil
 			})
-		resources = append(resources, mainComponentServiceAsResource)
+			if err != nil {
+				logger.Error(err, "failed to sync the main component service")
+				return "", "", "", fmt.Errorf("failed to sync the main component service: %w", err)
+			}
+			mainComponentServiceAsResource := commonController.WrapResource(syncedMainComponentService,
+				func() (bool, string) {
+					return true, ""
+				})
+			resources = append(resources, mainComponentServiceAsResource)
+		}
 
 		if component.ComponentType == consts.ComponentTypeFrontend {
 			// generate the main component ingress
@@ -525,7 +526,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileK8sDiscoveryResources(ctx con
 		logger.Info("K8s discovery is enabled")
 	}
 
-	serviceAccount := discovery.GetK8sDiscoveryServiceAccount(dynamoDeployment)
+	serviceAccount := discovery.GetK8sDiscoveryServiceAccount(dynamoDeployment.Name, dynamoDeployment.Namespace)
 	_, _, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
 		return serviceAccount, false, nil
 	})
@@ -534,7 +535,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileK8sDiscoveryResources(ctx con
 		return fmt.Errorf("failed to sync the k8s discovery service account: %w", err)
 	}
 
-	role := discovery.GetK8sDiscoveryRole(dynamoDeployment)
+	role := discovery.GetK8sDiscoveryRole(dynamoDeployment.Name, dynamoDeployment.Namespace)
 	_, _, err = commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*rbacv1.Role, bool, error) {
 		return role, false, nil
 	})
@@ -543,7 +544,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileK8sDiscoveryResources(ctx con
 		return fmt.Errorf("failed to sync the k8s discovery role: %w", err)
 	}
 
-	roleBinding := discovery.GetK8sDiscoveryRoleBinding(dynamoDeployment)
+	roleBinding := discovery.GetK8sDiscoveryRoleBinding(dynamoDeployment.Name, dynamoDeployment.Namespace)
 	_, _, err = commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*rbacv1.RoleBinding, bool, error) {
 		return roleBinding, false, nil
 	})

@@ -1280,6 +1280,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 
 	labels := r.getKubeLabels(opt.dynamoComponentDeployment)
 
+	// ensures that component type label is set
 	if _, exists := labels[commonconsts.KubeLabelDynamoComponentType]; !exists {
 		labels[commonconsts.KubeLabelDynamoComponentType] = opt.dynamoComponentDeployment.Spec.ComponentType
 	}
@@ -1287,6 +1288,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	if opt.dynamoComponentDeployment.Spec.DynamoNamespace == nil {
 		return nil, false, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", opt.dynamoComponentDeployment.Name)
 	}
+	// ensures that namespace label is set
 	if _, exists := labels[commonconsts.KubeLabelDynamoNamespace]; !exists {
 		labels[commonconsts.KubeLabelDynamoNamespace] = *opt.dynamoComponentDeployment.Spec.DynamoNamespace
 	}
@@ -1302,7 +1304,9 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	if opt.isStealingTrafficDebugModeEnabled {
 		selector[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
 	}
-	labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+	if isK8sDiscovery {
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+	}
 
 	var servicePort corev1.ServicePort
 	if opt.dynamoComponentDeployment.Spec.ComponentType == consts.ComponentTypeFrontend {

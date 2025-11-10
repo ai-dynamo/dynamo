@@ -45,7 +45,7 @@ type ComponentContext struct {
 	ComponentType                  string
 	ParentGraphDeploymentName      string
 	ParentGraphDeploymentNamespace string
-	DiscoverBackend                string
+	DiscoveryBackend               string
 }
 
 func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
@@ -106,10 +106,10 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 		},
 	}
 
-	if context.DiscoverBackend != "" {
+	if context.DiscoveryBackend != "" {
 		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  commonconsts.DynamoDiscoverBackendEnvVar,
-			Value: context.DiscoverBackend,
+			Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
+			Value: context.DiscoveryBackend,
 		})
 	}
 

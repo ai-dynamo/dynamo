@@ -160,11 +160,14 @@ func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName
 // For DGD, pass in the meta annotations
 // For DCD, pass in the spec annotations
 func (c Config) IsK8sDiscoveryEnabled(annotations map[string]string) bool {
-	dgdDiscoveryBackend := annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]
-	if dgdDiscoveryBackend == "kubernetes" || (dgdDiscoveryBackend == "" && c.DiscoveryBackend == "kubernetes") {
-		return true
+	return c.GetDiscoveryBackend(annotations) == "kubernetes"
+}
+
+func (c Config) GetDiscoveryBackend(annotations map[string]string) string {
+	if dgdDiscoveryBackend, exists := annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
+		return dgdDiscoveryBackend
 	}
-	return false
+	return c.DiscoveryBackend
 }
 
 func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {

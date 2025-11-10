@@ -38,6 +38,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/discovery"
 	"github.com/imdario/mergo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
@@ -395,11 +396,11 @@ func getCliqueStartupDependencies(
 	return nil
 }
 
-// TODO: validation for all resource creation (or maybe just Service) that it's DNS-1035 compliant
-// component.ServiceName is empty
 func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec, componentName string) (*corev1.Service, error) {
+	if component.DynamoNamespace == nil {
+		return nil, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", componentName)
+	}
 	componentName = GetDynamoComponentName(dynamoDeployment, componentName)
-	// TODO: need to consolidate notion of ComponentType and SubComponentType (can have P and D where both are ComponentType worker)
 
 	var servicePort corev1.ServicePort
 	if component.ComponentType == commonconsts.ComponentTypeFrontend {
@@ -425,7 +426,7 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
 				commonconsts.KubeLabelDynamoComponentType: component.ComponentType,
-				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace, // TODO: nilness check
+				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace,
 			},
 			Ports: []corev1.ServicePort{servicePort},
 		},
@@ -705,7 +706,7 @@ func GenerateBasePodSpec(
 	serviceName string,
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
-	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controllerConfig.DiscoveryBackend)
+	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controllerConfig.GetDiscoveryBackend(component.Annotations))
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
@@ -854,8 +855,9 @@ func GenerateBasePodSpec(
 		}
 	}
 
-	// TODO: just for workers and frontend if k8s service discovery is enabled
-	podSpec.ServiceAccountName = fmt.Sprintf("%s-k8s-service-discovery", componentContext.ParentGraphDeploymentName)
+	if controllerConfig.IsK8sDiscoveryEnabled(component.Annotations) {
+		podSpec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(parentGraphDeploymentName)
+	}
 
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
@@ -876,22 +878,16 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoverBackend string) ComponentContext {
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend string) ComponentContext {
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
 		ComponentType:                  component.ComponentType,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
+		DiscoveryBackend:               discoveryBackend,
 	}
 	if component.DynamoNamespace != nil {
 		componentContext.DynamoNamespace = *component.DynamoNamespace
-	}
-	// This is the discover backend set by the helm installation/operator
-	componentContext.DiscoverBackend = discoverBackend
-
-	// If the user has set a discover backend in the annotations, use that instead
-	if component.Annotations != nil && component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] != "" {
-		componentContext.DiscoverBackend = component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]
 	}
 	return componentContext
 }
@@ -947,10 +943,7 @@ func GenerateGrovePodCliqueSet(
 		}
 	}
 
-	var discoverBackend string
-	if dynamoDeployment.Annotations != nil && dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] != "" {
-		discoverBackend = dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]
-	}
+	discoveryBackend := controllerConfig.GetDiscoveryBackend(dynamoDeployment.Annotations)
 
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
@@ -962,11 +955,11 @@ func GenerateGrovePodCliqueSet(
 			return nil, fmt.Errorf("failed to determine backend framework for service %s: %w", serviceName, err)
 		}
 
-		if discoverBackend != "" {
+		if discoveryBackend != "" {
 			if component.Annotations == nil {
 				component.Annotations = make(map[string]string)
 			}
-			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = discoverBackend
+			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = discoveryBackend
 		}
 
 		numberOfNodes := component.GetNumberOfNodes()

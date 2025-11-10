@@ -8,7 +8,6 @@ package discovery
 import (
 	"fmt"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,15 +19,12 @@ const (
 	apiGroupCore       = ""
 )
 
-func IsK8sDiscoveryEnabled()
-
-func GetK8sDiscoveryServiceAccountName(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) string {
-	return fmt.Sprintf("%s-k8s-service-discovery", dynamoDeployment.Name)
+func GetK8sDiscoveryServiceAccountName(dgdName string) string {
+	return fmt.Sprintf("%s-k8s-service-discovery", dgdName)
 }
 
-func GetK8sDiscoveryServiceAccount(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) *corev1.ServiceAccount {
-	name := GetK8sDiscoveryServiceAccountName(dynamoDeployment)
-	namespace := dynamoDeployment.Namespace
+func GetK8sDiscoveryServiceAccount(dgdName string, namespace string) *corev1.ServiceAccount {
+	name := GetK8sDiscoveryServiceAccountName(dgdName)
 	return &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -42,9 +38,8 @@ func GetK8sDiscoveryServiceAccount(dynamoDeployment *nvidiacomv1alpha1.DynamoGra
 	}
 }
 
-func GetK8sDiscoveryRole(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) *rbacv1.Role {
-	name := GetK8sDiscoveryServiceAccountName(dynamoDeployment)
-	namespace := dynamoDeployment.Namespace
+func GetK8sDiscoveryRole(dgdName string, namespace string) *rbacv1.Role {
+	name := GetK8sDiscoveryServiceAccountName(dgdName)
 	roleName := name + "-role"
 	return &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
@@ -71,9 +66,8 @@ func GetK8sDiscoveryRole(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployme
 	}
 }
 
-func GetK8sDiscoveryRoleBinding(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) *rbacv1.RoleBinding {
-	name := GetK8sDiscoveryServiceAccountName(dynamoDeployment)
-	namespace := dynamoDeployment.Namespace
+func GetK8sDiscoveryRoleBinding(dgdName, namespace string) *rbacv1.RoleBinding {
+	name := GetK8sDiscoveryServiceAccountName(dgdName)
 	roleName := name + "-role"
 	bindingName := name + "-binding"
 	return &rbacv1.RoleBinding{
