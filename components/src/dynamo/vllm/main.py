@@ -339,7 +339,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     ) = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
-        runtime, component, engine_client, default_sampling_params
+        runtime,
+        component,
+        engine_client,
+        default_sampling_params,
+        generate_endpoint=generate_endpoint,
+        config=config,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -427,6 +432,8 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
+    load_lora_endpoint = component.endpoint("load_lora")
+    list_loras_endpoint = component.endpoint("list_loras")
 
     factory = StatLoggerFactory(
         component,
@@ -450,6 +457,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         component,
         engine_client,
         default_sampling_params,
+        generate_endpoint=generate_endpoint,
+        config=config,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -511,6 +520,14 @@ async def init(runtime: DistributedRuntime, config: Config):
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
+                metrics_labels=[("model", config.served_model_name or config.model)],
+            ),
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora,
+                metrics_labels=[("model", config.served_model_name or config.model)],
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras,
                 metrics_labels=[("model", config.served_model_name or config.model)],
             ),
         )
