@@ -68,6 +68,9 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
         block_ids: Vec<BlockId>,
     ) -> anyhow::Result<bool>;
 
+    #[allow(dead_code)]
+    fn update_connector_output(&mut self) -> anyhow::Result<()>;
+
     fn has_slot(&self, request_id: String) -> bool;
 
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
@@ -471,17 +474,42 @@ impl Leader for KvConnectorLeader {
         }
 
         for unscheduled_req in inflight_requests.iter() {
+            tracing::debug!("evaluating state of unscheduled request: {unscheduled_req}");
             let shared_slot = self.slot_manager().get_slot(unscheduled_req)?;
             let mut slot_guard = shared_slot
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
 
-            let slot = slot_guard
-                .as_any_mut()
-                .downcast_mut::<VllmConnectorSlot>()
-                .ok_or_else(|| anyhow::anyhow!("Expected VllmConnectorSlot, got different type"))?;
+            let state = slot_guard.state();
+            if state == SlotState::Finishing {
+                // re-evaluate the slot state, try to mark it as finished
+                tracing::debug!(
+                    "slot {} was marked as finishing; checking if it can be marked as finished",
+                    unscheduled_req
+                );
+                slot_guard.mark_as_finished(self.iteration_counter)?;
 
-            slot.mark_as_skipped()?;
+                if let SlotState::Finished = slot_guard.state() {
+                    // slot was marked as finished, so we can remove it
+                    tracing::debug!("slot was marked as finished, so we can remove it");
+                    self.slot_manager().remove_slot(unscheduled_req)?;
+                    self.inflight_requests.remove(unscheduled_req);
+                } else {
+                    tracing::debug!("slot was not marked as finished, so we cannot remove it");
+                }
+            } else {
+                // this deals with possible eviction scenarios or being in "paused" state
+                // we will want to more clearly evaluate how/why this can happens have an improved
+                // state management system in v2.
+                let slot = slot_guard
+                    .as_any_mut()
+                    .downcast_mut::<VllmConnectorSlot>()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Expected VllmConnectorSlot, got different type")
+                    })?;
+
+                slot.mark_as_skipped()?;
+            }
         }
 
         tracing::debug!("metadata: {md:#?}");
@@ -517,9 +545,6 @@ impl Leader for KvConnectorLeader {
         // or Finished if all operations are complete)
         slot.mark_as_finished(self.iteration_counter)?;
 
-        // remove the request from the inflight requests
-        self.inflight_requests.remove(&request_id);
-
         // if the slot has finished, we can return false to vllm, indicating all gpu blocks are free to be reused
         // otherwise, we return true, which means there are still outstanding operations on gpu blocks which
         // must be awaited before the gpu blocks can be reused. if we return true, then it is the worker side
@@ -527,15 +552,35 @@ impl Leader for KvConnectorLeader {
         if let SlotState::Finished = slot.state() {
             // All operations complete - safe to remove slot and tell vLLM blocks are free
             self.slot_manager().remove_slot(&request_id)?;
+            self.inflight_requests.remove(&request_id);
             Ok(false)
         } else {
             debug_assert!(matches!(slot.state(), SlotState::Finishing));
-            // Still has pending operations - keep slot alive for worker to process
+            // The slot still has pending operations - keep slot alive for worker to process
             // Don't remove slot here. Worker needs it to process the finish event.
             // Worker will remove it after verifying all operations are complete.
             // The lock on the slot prevents new operations from being created in offload_blocks()
+            //
+            // We still need to clean this up leader side, but in v0.10, we don't have a strong
+            // signal on when the worker is finished. However, with the new methods in v0.11,
+            // update_connector_output, we can get a strong signal on when the worker is finished.
             Ok(true)
         }
+    }
+
+    // v0.11 of vllm adds this method; we have not yet implemented, nor do we have the signature of this
+    // function correctly defined yet.
+    //
+    // initially, like all new methods on the connector, the policy on when this is called is not well
+    // defined, so we will need to first evaluate how and when teh scheudler calls this function.
+    //
+    // in theory, this methods is the correct place to re-evaluate the ::Finishing -> ::Finished transition,
+    // for requests that could not be immediately marked as finished due to pending operations.
+    //
+    // once we have a clear picture, we should be able to migrate the logic in the `unscheduled_req` request
+    // loop to this method for slots in the ::Finishing state.
+    fn update_connector_output(&mut self) -> anyhow::Result<()> {
+        Ok(())
     }
 
     fn has_slot(&self, request_id: String) -> bool {
