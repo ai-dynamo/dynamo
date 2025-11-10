@@ -9,6 +9,9 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
+mod metadata;
+pub use metadata::{DiscoveryMetadata, MetadataSnapshot};
+
 mod mock;
 pub use mock::{MockDiscovery, SharedMockRegistry};
 
@@ -16,7 +19,7 @@ mod kv_store;
 pub use kv_store::KVStoreDiscovery;
 
 mod kube;
-pub use kube::{KubeDiscoveryClient, DiscoveryMetadata, hash_pod_name};
+pub use kube::{KubeDiscoveryClient, hash_pod_name};
 
 pub mod utils;
 pub use utils::watch_and_extract_field;
