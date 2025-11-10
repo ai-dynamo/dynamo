@@ -168,14 +168,16 @@ mod tests {
         );
 
         let result = loader.fetch_and_decode_media_part(&content_part).await;
+
         let descriptor = match result {
             Ok(descriptor) => descriptor,
             Err(e) if e.to_string().contains("NIXL agent is not available") => {
-                eprintln!("Skipping test: NIXL agent not available");
+                println!("test test_fetch_and_decode ... ignored (NIXL agent not available)");
                 return;
             }
             Err(e) => panic!("Failed to fetch and decode image: {}", e),
         };
+        mock.assert_async().await;
         assert_eq!(descriptor.tensor_info.dtype, DataType::UINT8);
 
         // Verify image dimensions: 1,999px × 1,125px (width × height)
