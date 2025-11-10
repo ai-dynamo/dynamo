@@ -238,7 +238,7 @@ def get_prefill_ttft(
             return max_ttft / float(attn_dp_num_req_ratio)
         except (KeyError, TypeError, ValueError):
             logger.warning(
-                "Failed to extract avg TTFT from AIPerf result for DEP prefill"
+                "Failed to extract max TTFT from AIPerf result for DEP prefill"
             )
             return None
 

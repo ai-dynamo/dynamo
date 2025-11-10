@@ -764,7 +764,7 @@ impl OpenAIPreprocessor {
         let jail = JailedStream::builder()
             .tool_call_parser(tool_call_parser)
             .build();
-        jail.apply(stream)
+        jail.apply_with_finish_reason(stream)
     }
 
     // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility

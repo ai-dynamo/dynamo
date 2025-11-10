@@ -52,6 +52,11 @@ impl KeyValueStore for NATSStore {
     fn connection_id(&self) -> u64 {
         self.client.client().server_info().client_id
     }
+
+    fn shutdown(&self) {
+        // TODO: Track and delete any owned keys
+        // The TTL should ensure NATS does it, but best we do it immediately
+    }
 }
 
 impl NATSStore {
@@ -160,12 +165,14 @@ impl KeyValueBucket for NATSBucket {
                 >| async move {
                     match maybe_entry {
                         Ok(entry) => {
-                            let item = KeyValue::new(entry.key, entry.value);
                             Some(match entry.operation {
-                                Operation::Put => WatchEvent::Put(item),
-                                Operation::Delete => WatchEvent::Delete(item),
+                                Operation::Put => {
+                                    let item = KeyValue::new(entry.key, entry.value);
+                                    WatchEvent::Put(item)
+                                }
+                                Operation::Delete => WatchEvent::Delete(Key::from_raw(entry.key)),
                                 // TODO: What is Purge? Not urgent, NATS impl not used
-                                Operation::Purge => WatchEvent::Delete(item),
+                                Operation::Purge => WatchEvent::Delete(Key::from_raw(entry.key)),
                             })
                         }
                         Err(e) => {

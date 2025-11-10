@@ -75,7 +75,7 @@ pub use client::{Client, InstanceSource};
 /// An instance is namespace+component+endpoint+lease_id and must be unique.
 pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
     NatsTcp(String),
@@ -278,21 +278,24 @@ impl Component {
     }
 
     pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
-        let client = self.drt.store();
-        let Some(bucket) = client.get_bucket(&self.instance_root()).await? else {
-            return Ok(vec![]);
+        let discovery = self.drt.discovery();
+
+        let discovery_query = crate::discovery::DiscoveryQuery::ComponentEndpoints {
+            namespace: self.namespace.name(),
+            component: self.name.clone(),
         };
-        let entries = bucket.entries().await?;
-        let mut instances = Vec::with_capacity(entries.len());
-        for (name, bytes) in entries.into_iter() {
-            let val = match serde_json::from_slice::<Instance>(&bytes) {
-                Ok(val) => val,
-                Err(err) => {
-                    anyhow::bail!("Error converting storage response to Instance: {err}. {name}",);
-                }
-            };
-            instances.push(val);
-        }
+
+        let discovery_instances = discovery.list(discovery_query).await?;
+
+        // Extract Instance from DiscoveryInstance::Endpoint wrapper
+        let mut instances: Vec<Instance> = discovery_instances
+            .into_iter()
+            .filter_map(|di| match di {
+                crate::discovery::DiscoveryInstance::Endpoint(instance) => Some(instance),
+                _ => None, // Ignore all other variants (ModelCard, etc.)
+            })
+            .collect();
+
         instances.sort();
         Ok(instances)
     }

@@ -446,7 +446,7 @@ counter.inc();
 - **Automatic registration**: Metrics created via endpoint's `metrics().create_*()` factory methods are automatically registered with the system
 - Automatic labeling with namespace, component, and endpoint information
 - Consistent metric naming with `dynamo_` prefix
-- Built-in HTTP metrics endpoint when enabled with `DYN_SYSTEM_ENABLED=true`
+- Built-in HTTP metrics endpoint when `DYN_SYSTEM_PORT` is set to a positive value
 - Hierarchical metric organization
 
 ### Advanced Features

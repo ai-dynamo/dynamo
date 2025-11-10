@@ -11,7 +11,7 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.llm import ModelInput, ModelType
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
 from dynamo.sglang.health_check import (
@@ -33,9 +33,12 @@ from dynamo.sglang.request_handlers import (
 configure_dynamo_logging()
 
 
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
+async def worker():
+    config = await parse_args(sys.argv[1:])
+    dump_config(config.dynamo_args.dump_config_to, config)
+
     loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, config.dynamo_args.store_kv, False)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -44,9 +47,6 @@ async def worker(runtime: DistributedRuntime):
         loop.add_signal_handler(sig, signal_handler)
 
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
-
-    config = await parse_args(sys.argv[1:])
-    dump_config(config.dynamo_args.dump_config_to, config)
 
     if config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config)
