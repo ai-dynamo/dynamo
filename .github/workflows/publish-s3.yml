@@ -91,11 +91,11 @@ jobs:
               status: 'success',
               per_page: 1
             });
-            
+
             if (runs.data.workflow_runs.length === 0) {
               throw new Error('No successful generate-docs workflow runs found');
             }
-            
+
             const runId = runs.data.workflow_runs[0].id;
             console.log(`Found generate-docs run: ${runId}`);
             core.setOutput('run_id', runId);
@@ -231,8 +231,9 @@ jobs:
 
       - name: Publish dev (main branch)
         # Publish main branch to 'dev' directory for development docs
+        # Also publish for manual triggers on test branch (for testing)
         # Skip if commit message contains '/skip-dev' anywhere
-        if: ${{ github.event.workflow_run.head_branch == 'main' && !contains(github.event.workflow_run.head_commit.message, '/skip-dev') }}
+        if: ${{ (github.event.workflow_run.head_branch == 'main' && !contains(github.event.workflow_run.head_commit.message, '/skip-dev')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/nealv/docs_build') }}
         working-directory: ${{ env.DOCS_DIR }}
         id: publish_dev
         env:
