@@ -51,7 +51,7 @@ ARG PIP_DEFAULT_INDEX
 ARG UBUNTU_MIRROR
 ARG GITHUB_ARTIFACTORY=github.com
 ARG SGL_KERNEL_VERSION=0.3.16.post5
-ARG SGL_VERSION=0.5.5
+ARG SGL_VERSION=0.5.4.post3
 ARG USE_LATEST_SGLANG=0
 ARG GDRCOPY_VERSION=2.5.1
 ARG NVSHMEM_VERSION=3.4.5
@@ -280,7 +280,6 @@ RUN --mount=type=cache,target=/root/.cache/pip  python3 -m pip install --upgrade
 
 # Download NVSHMEM source files
 # We use Tom's DeepEP fork for GB200 for now; the 1fd57b0276311d035d16176bb0076426166e52f3 commit is https://github.com/fzyzcjy/DeepEP/tree/gb200_blog_part_2
-
 RUN set -eux; \
     if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
       wget -q https://${GITHUB_ARTIFACTORY}/NVIDIA/nvshmem/releases/download/v${NVSHMEM_VERSION}-0/nvshmem_src_cuda-all-all-${NVSHMEM_VERSION}.tar.gz; \
