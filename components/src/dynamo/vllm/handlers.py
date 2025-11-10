@@ -15,7 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from dynamo.llm import ZmqKvEventPublisher
+from dynamo.llm import ModelInput, ModelType, ZmqKvEventPublisher, register_llm
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
@@ -184,8 +184,6 @@ class BaseWorkerHandler(ABC):
                     f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"
                 )
                 try:
-                    from dynamo.llm import ModelInput, ModelType, publish_lora_model
-
                     logger.info(f"Publishing LoRA '{lora_name}' ModelDeploymentCard")
 
                     # Mark this as a LoRA in user_data
@@ -196,14 +194,15 @@ class BaseWorkerHandler(ABC):
                     }
 
                     # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
-                    await publish_lora_model(
-                        base_model_path=self.config.model,
-                        lora_name=lora_name,
-                        endpoint=self.generate_endpoint,
-                        model_type=ModelType.Chat | ModelType.Completions,
+                    await register_llm(
                         model_input=ModelInput.Tokens,
+                        model_type=ModelType.Chat | ModelType.Completions,
+                        endpoint=self.generate_endpoint,
+                        model_path=self.config.model,
                         kv_cache_block_size=self.config.engine_args.block_size,
                         user_data=user_data,
+                        lora_name=lora_name,
+                        base_model_path=self.config.model,
                     )
                     logger.info(
                         f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"

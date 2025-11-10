@@ -187,6 +187,11 @@ impl OpenAIPreprocessor {
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
+        // Always pass the requested model name to the backend
+        // The backend will check if it's a loaded LoRA and route accordingly
+        let model_name = request.model();
+        builder.lora_name(Some(model_name.clone()));
+
         Ok((builder.build()?, annotations))
     }
 
