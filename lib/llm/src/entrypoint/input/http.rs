@@ -102,13 +102,14 @@ pub async fn run(
             let component = distributed_runtime
                 .namespace(&endpoint_id.namespace)?
                 .component(&endpoint_id.component)?;
-            let client = component.endpoint(&endpoint_id.name).client().await?;
+            let endpoint = component.endpoint(&endpoint_id.name);
+            let client = endpoint.client().await?;
 
             let kv_chooser = if router_mode == RouterMode::KV {
                 Some(
                     manager
                         .kv_chooser_for(
-                            &component,
+                            &endpoint,
                             card.kv_cache_block_size,
                             Some(local_model.router_config().kv_router_config),
                         )

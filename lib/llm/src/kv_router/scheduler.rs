@@ -3,7 +3,7 @@
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
-use dynamo_runtime::component::{Component, Instance};
+use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::EventPublisher;
 use rand::Rng;
@@ -96,27 +96,26 @@ impl KvScheduler {
     pub async fn start(
         component: Component,
         block_size: u32,
-        instances_rx: watch::Receiver<Vec<Instance>>,
+        instance_ids_rx: watch::Receiver<Vec<u64>>,
         runtime_configs_rx: watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_uuid: String,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
-        let instances: Vec<Instance> = instances_rx.borrow().clone();
+        let instance_ids: Vec<u64> = instance_ids_rx.borrow().clone();
         let runtime_configs: HashMap<WorkerId, ModelRuntimeConfig> =
             runtime_configs_rx.borrow().clone();
 
         // Create shared workers_with_configs wrapped in Arc<RwLock>
         let workers_with_configs: Arc<RwLock<HashMap<WorkerId, Option<ModelRuntimeConfig>>>> = {
             let mut initial_map = HashMap::new();
-            for instance in &instances {
-                let worker_id = instance.instance_id;
-                let config = runtime_configs.get(&worker_id).cloned();
+            for worker_id in &instance_ids {
+                let config = runtime_configs.get(worker_id).cloned();
                 if config.is_some() {
                     tracing::info!("Runtime config found for worker_id: {}", worker_id);
                 }
-                initial_map.insert(worker_id, config);
+                initial_map.insert(*worker_id, config);
             }
             Arc::new(RwLock::new(initial_map))
         };
@@ -132,7 +131,7 @@ impl KvScheduler {
         // Spawn background task to monitor and update workers_with_configs
         let workers_monitor = workers_with_configs.clone();
         let slots_monitor = slots.clone();
-        let mut instances_monitor_rx = instances_rx.clone();
+        let mut instance_ids_monitor_rx = instance_ids_rx.clone();
         let mut configs_monitor_rx = runtime_configs_rx.clone();
         let monitor_cancel_token = component.drt().primary_token();
         tokio::spawn(async move {
@@ -144,9 +143,9 @@ impl KvScheduler {
                         tracing::trace!("workers monitoring task shutting down");
                         break;
                     }
-                    result = instances_monitor_rx.changed() => {
+                    result = instance_ids_monitor_rx.changed() => {
                         if result.is_err() {
-                            tracing::warn!("endpoint watch sender shutdown in monitor");
+                            tracing::warn!("instance IDs watch sender shutdown in monitor");
                             break;
                         }
                     }
@@ -159,18 +158,17 @@ impl KvScheduler {
                 }
 
                 // Get the latest values from both channels
-                let new_instances = instances_monitor_rx.borrow_and_update().clone();
+                let new_instance_ids = instance_ids_monitor_rx.borrow_and_update().clone();
                 let new_configs = configs_monitor_rx.borrow_and_update().clone();
 
                 // Build the new workers_with_configs map
                 let mut new_workers_with_configs = HashMap::new();
-                for instance in &new_instances {
-                    let worker_id = instance.instance_id;
-                    let config = new_configs.get(&worker_id).cloned();
+                for worker_id in &new_instance_ids {
+                    let config = new_configs.get(worker_id).cloned();
                     if config.is_some() {
                         tracing::info!("Runtime config found for worker_id: {}", worker_id);
                     }
-                    new_workers_with_configs.insert(worker_id, config);
+                    new_workers_with_configs.insert(*worker_id, config);
                 }
 
                 // Update workers when instances change
