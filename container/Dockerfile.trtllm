@@ -329,11 +329,17 @@ COPY --chown=dynamo: recipes/ /workspace/recipes/
 # Copy attribution files with correct ownership
 COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 
-# Setup launch banner (running as dynamo, automatically owned by dynamo)
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
-    sed '/^#\s/d' /workspace/launch_message.txt > /home/dynamo/.launch_screen && \
-    echo "cat ~/.launch_screen" >> /home/dynamo/.bashrc && \
-    echo "source $VIRTUAL_ENV/bin/activate" >> /home/dynamo/.bashrc
+# Setup launch banner in common directory accessible to all users
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
+
+# Setup environment for all users
+USER root
+RUN chmod 755 /opt/dynamo/.launch_screen && \
+    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+USER dynamo
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
@@ -384,12 +390,7 @@ RUN apt-get update -y && \
     # Rust build dependencies
     clang \
     libclang-dev \
-    protobuf-compiler \
-    # sudo for dev stage
-    sudo && \
-    # Add sudo privileges to dynamo user
-    echo "dynamo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dynamo && \
-    chmod 0440 /etc/sudoers.d/dynamo && \
+    protobuf-compiler && \
     rm -rf /var/lib/apt/lists/*
 
 # Set workspace directory variable
@@ -401,17 +402,14 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/usr/local/cargo/bin:$PATH
 
-# Switch back to dynamo for development operations
-USER dynamo
-
-COPY --chown=dynamo: --from=dynamo_base /usr/local/rustup /usr/local/rustup
-COPY --chown=dynamo: --from=dynamo_base /usr/local/cargo /usr/local/cargo
+COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 
 # Install maturin, for maturin develop
 RUN uv pip install maturin[patchelf]
 
 # Editable install of dynamo
-COPY --chown=dynamo: pyproject.toml README.md hatch_build.py /workspace/
+COPY pyproject.toml README.md hatch_build.py /workspace/
 RUN uv pip install --no-deps -e .
 
 CMD []

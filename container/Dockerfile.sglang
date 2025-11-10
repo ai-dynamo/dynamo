@@ -382,9 +382,17 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 COPY --chown=dynamo: container/launch_message.txt /workspace/launch_message.txt
 
-# Setup launch banner for dynamo user
-RUN sed '/^#\s/d' /workspace/launch_message.txt > ${HOME}/.launch_screen && \
-    echo "cat ${HOME}/.launch_screen" >> ${HOME}/.bashrc
+# Setup launch banner in common directory accessible to all users
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
+
+# Setup environment for all users
+USER root
+RUN chmod 755 /opt/dynamo/.launch_screen && \
+    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+USER dynamo
 
 # Copy tests, benchmarks, deploy and components for CI with correct ownership
 COPY --chown=dynamo: tests /workspace/tests
@@ -468,9 +476,6 @@ RUN apt-get update -y && \
     sudo \
     # NVIDIA tools dependencies
     gnupg && \
-    # Add sudo privileges to dynamo user
-    echo "dynamo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dynamo && \
-    chmod 0440 /etc/sudoers.d/dynamo && \
     echo "deb https://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64 /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
     apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub && \
     apt-get update -y && \
@@ -486,10 +491,8 @@ RUN curl --retry 3 --retry-delay 2 -LSso /usr/local/bin/clang-format https://git
     && cp -r clangd_18.1.3/lib/* /usr/local/lib/ \
     && rm -rf clangd_18.1.3 clangd.zip
 
-USER dynamo
-
 # Editable install of dynamo
-COPY --chown=dynamo: pyproject.toml README.md hatch_build.py /workspace/
+COPY pyproject.toml README.md hatch_build.py /workspace/
 RUN python3 -m pip install --no-deps -e .
 
 # Install Python development packages

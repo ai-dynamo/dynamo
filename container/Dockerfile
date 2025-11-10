@@ -408,11 +408,17 @@ RUN uv pip install \
     && cd /workspace/benchmarks \
     && UV_GIT_LFS=1 uv pip install --no-cache .
 
-# Setup launch banner
+# Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
-    sed '/^#\s/d' /opt/dynamo/launch_message.txt > ${HOME}/.launch_screen && \
-    echo "cat ${HOME}/.launch_screen" >> ${HOME}/.bashrc && \
-    echo "source $VIRTUAL_ENV/bin/activate" >> ${HOME}/.bashrc
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
+
+# Setup environment for all users
+USER root
+RUN chmod 755 /opt/dynamo/.launch_screen && \
+    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+USER dynamo
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
