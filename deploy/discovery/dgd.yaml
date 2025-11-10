@@ -6,8 +6,8 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: dynamo
-  annotations:
-    nvidia.com/dynamo-discover-backend: kubernetes
+  labels:
+    nvidia.com/dynamo-discovery-backend: kubernetes
 spec:
   envs:
   - name: DYN_LOG
