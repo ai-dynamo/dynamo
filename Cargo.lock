@@ -2434,7 +2434,6 @@ dependencies = [
  "regex",
  "reqwest 0.12.23",
  "rstest 0.23.0",
- "schemars 1.0.4",
  "serde",
  "serde_json",
  "socket2 0.5.10",
@@ -4423,7 +4422,6 @@ checksum = "d13f06d5326a915becaffabdfab75051b8cdc260c2a5c06c0e90226ede89a692"
 dependencies = [
  "base64 0.22.1",
  "chrono",
- "schemars 1.0.4",
  "serde",
  "serde_json",
 ]
