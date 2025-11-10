@@ -63,8 +63,7 @@ To see the actual metrics available in your TensorRT-LLM version:
 ### 1. Launch TensorRT-LLM with Metrics Enabled
 
 ```bash
-# Set environment variables
-export DYN_SYSTEM_ENABLED=true
+# Set system metrics port (automatically enables metrics server)
 export DYN_SYSTEM_PORT=8081
 
 # Start TensorRT-LLM worker with metrics enabled

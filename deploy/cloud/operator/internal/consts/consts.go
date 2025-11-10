@@ -48,6 +48,8 @@ const (
 
 	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
 
+	GlobalDynamoNamespace = "dynamo"
+
 	ComponentTypePlanner      = "planner"
 	ComponentTypeFrontend     = "frontend"
 	ComponentTypeWorker       = "worker"

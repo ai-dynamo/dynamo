@@ -60,9 +60,14 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
+
+        # Set KV event port and NIXL side channel port only for prefill worker
+        # to avoid conflicts with decode worker
+        if is_prefill:
+            env["DYN_VLLM_KV_EVENT_PORT"] = "20082"
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "5601"
 
         # Set log directory based on worker type
         worker_type = "prefill_worker" if is_prefill else "worker"
