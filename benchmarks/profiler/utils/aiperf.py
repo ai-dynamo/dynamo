@@ -211,7 +211,7 @@ def get_prefill_ttft(
 ) -> Optional[float]:
     """
     Run prefill benchmark and extract TTFT (ms). Returns None on failure.
-    If attention_dp_size > 1 (DEP), send n * attn_dp_num_req_ratio concurrent requests (single burst),
+    If attention_dp_size > 1 (DEP), send attn_dp_size * attn_dp_num_req_ratio concurrent requests (single burst),
     then compute TTFT as (max TTFT across burst) / attn_dp_num_req_ratio.
     attn_dp_num_req_ratio defaults to 4 rounds to account for the error margin caused
     by the first batch being launched too early without enough requests.

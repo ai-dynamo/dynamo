@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from benchmarks.profiler.utils.defaults import EngineType
+from benchmarks.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS
 from benchmarks.profiler.utils.model_info import ModelInfo
 
 logger = logging.getLogger(__name__)
@@ -222,11 +223,10 @@ def apply_parallel_mapping_to_config(
 
     # for prefill,set batch size to attention_dp_size
     # (this assume prompt is long enough to saturate the GPU, which is usually valid in disagg)
-    # set max num tokens to 32768 to avoid chunked prefill
     if phase == EngineType.PREFILL:
         cfg = config_modifier.set_prefill_config(
             cfg,
             max_batch_size=mapping.get_attn_dp_size(),
-            max_num_tokens=32768,
+            max_num_tokens=PREFILL_MAX_NUM_TOKENS,
         )
     return cfg
