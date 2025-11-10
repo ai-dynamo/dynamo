@@ -3,21 +3,13 @@
 """General utilities for checkpoint/restore operations."""
 
 import os
+import subprocess
 import time
-import logging
+from typing import Optional
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
 
-# Try to import cuda-python
-try:
-    from cuda import cuda
-    cuda_available = True
-except Exception:  # pragma: no cover
-    logger.warning("cuda-python package not found. CUDA checkpointing will not be available. "
-                   "Install with: pip install cuda-python")
-    cuda = None
-    cuda_available = False
-
+logger = init_logger(__name__)
 
 # General checkpoint utilities
 
@@ -162,142 +154,6 @@ def get_tty_info(pid: int) -> tuple[str, str]:
 
 # CUDA checkpoint utilities
 
-def get_cuda_error_details(err) -> tuple[str, str]:
-    """Get detailed error information from a CUDA error code.
-    
-    Returns:
-        Tuple of (error_name, error_description)
-    """
-    # Get error name
-    _, name_ptr = cuda.cuGetErrorName(err)
-    error_name = name_ptr.decode() if isinstance(name_ptr, bytes) else str(name_ptr)
-    
-    # Get error description
-    try:
-        _, desc_ptr = cuda.cuGetErrorString(err)
-        error_desc = desc_ptr.decode() if isinstance(desc_ptr, bytes) else str(desc_ptr)
-    except Exception:
-        error_desc = "No description available"
-    
-    return error_name, error_desc
-
-
-def get_process_gpu_devices(pid: int) -> list[int]:
-    """Get list of GPU device indices that a process has open file descriptors to.
-    
-    Args:
-        pid: Process ID to check
-        
-    Returns:
-        List of GPU device indices (e.g., [0, 1, 3])
-    """
-    fd_dir = f"/proc/{pid}/fd"
-    devices = set()
-    
-    if not os.path.exists(fd_dir):
-        return []
-    
-    try:
-        for fd in os.listdir(fd_dir):
-            try:
-                link = os.readlink(os.path.join(fd_dir, fd))
-                # Check for /dev/nvidia0, /dev/nvidia1, etc.
-                if link.startswith("/dev/nvidia") and link[12:].isdigit():
-                    device_idx = int(link[12:])
-                    devices.add(device_idx)
-            except Exception:
-                continue
-    except Exception:
-        pass
-    
-    return sorted(list(devices))
-
-
-def log_gpu_memory_for_devices(devices: list[int], context: str = "") -> None:
-    """Log memory usage for specific GPU devices.
-    
-    Args:
-        devices: List of GPU device indices to log
-        context: Context string to include in log messages
-    """
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            return
-        
-        for device_idx in devices:
-            if device_idx < torch.cuda.device_count():
-                try:
-                    allocated = torch.cuda.memory_allocated(device_idx) / 1024**3
-                    reserved = torch.cuda.memory_reserved(device_idx) / 1024**3
-                    free_bytes, total_bytes = torch.cuda.mem_get_info(device_idx)
-                    free = free_bytes / 1024**3
-                    total = total_bytes / 1024**3
-                    props = torch.cuda.get_device_properties(device_idx)
-                    
-                    logger.info(
-                        "[CUDA CHECKPOINT%s] GPU %d (%s): "
-                        "Allocated=%.2fGB, Reserved=%.2fGB, Free=%.2fGB, Total=%.2fGB",
-                        f" {context}" if context else "",
-                        device_idx,
-                        props.name,
-                        allocated,
-                        reserved,
-                        free,
-                        total
-                    )
-                except Exception as e:
-                    logger.warning("Could not get memory info for GPU %d: %s", device_idx, e)
-    except ImportError:
-        pass
-
-
-def checkpoint_cuda_process(pid: int) -> None:
-    """Lock and checkpoint a CUDA process using the CUDA checkpoint API."""
-    if not cuda_available:
-        raise RuntimeError("cuda-python package not available")
-
-    # Get which GPU devices this process is using
-    gpu_devices = get_process_gpu_devices(pid)
-    if gpu_devices:
-        logger.info("PID %d is using GPU device(s): %s", pid, gpu_devices)
-        log_gpu_memory_for_devices(gpu_devices, f"PID_{pid}_BEFORE")
-    else:
-        logger.warning("PID %d: Could not determine which GPU devices are in use", pid)
-
-    logger.info("Locking CUDA process (PID: %d)...", pid)
-
-    # Lock the CUDA process
-    err, = cuda.cuCheckpointProcessLock(pid, None)
-    if err != cuda.CUresult.CUDA_SUCCESS:
-        error_name, error_desc = get_cuda_error_details(err)
-        if gpu_devices:
-            log_gpu_memory_for_devices(gpu_devices, f"PID_{pid}_LOCK_FAILED")
-        raise RuntimeError(
-            f"Failed to lock CUDA process (PID {pid}, GPUs {gpu_devices}): "
-            f"{error_name} - {error_desc}"
-        )
-    logger.info("CUDA process locked (PID: %d)", pid)
-
-    # Checkpoint the CUDA process
-    logger.info("Checkpointing CUDA process (PID: %d)...", pid)
-    err, = cuda.cuCheckpointProcessCheckpoint(pid, None)
-    if err != cuda.CUresult.CUDA_SUCCESS:
-        error_name, error_desc = get_cuda_error_details(err)
-        if gpu_devices:
-            log_gpu_memory_for_devices(gpu_devices, f"PID_{pid}_CHECKPOINT_FAILED")
-        raise RuntimeError(
-            f"Failed to checkpoint CUDA process (PID {pid}, GPUs {gpu_devices}): "
-            f"{error_name} - {error_desc}"
-        )
-    
-    logger.info("CUDA process checkpointed (PID: %d)", pid)
-    
-    # Log memory after successful checkpoint
-    if gpu_devices:
-        log_gpu_memory_for_devices(gpu_devices, f"PID_{pid}_AFTER")
-
-
 def process_has_nvidia_fd(pid: int) -> bool:
     """Check if a process has any NVIDIA device file descriptors open.
 
@@ -323,27 +179,33 @@ def process_has_nvidia_fd(pid: int) -> bool:
     return False
 
 
-def find_gpu_worker_pids(root_pid: int) -> list[int]:
-    """Find all GPU worker processes in the process tree.
+def validate_cuda_process_tree(root_pid: int) -> tuple[list[int], list[int]]:
+    """Validate that all processes with NVIDIA fds are leaf processes.
 
-    Returns PIDs of leaf processes that use GPU (workers).
+    Args:
+        root_pid: Root process ID of the tree to validate
+
+    Returns:
+        Tuple of (valid_cuda_pids, invalid_cuda_pids) where:
+        - valid_cuda_pids: List of PIDs that have nvidia fds and are leaves
+        - invalid_cuda_pids: List of PIDs that have nvidia fds but are NOT leaves
+
+    Raises:
+        RuntimeError: If any non-leaf process has NVIDIA file descriptors
     """
     all_pids = collect_process_tree_pids(root_pid)
 
-    # Find leaf processes (no children)
-    leaf_pids = []
+    valid_cuda_pids = []
+    invalid_cuda_pids = []
+
     for pid in all_pids:
-        if process_is_leaf(pid):
-            leaf_pids.append(pid)
-
-    # Filter for GPU-using processes
-    gpu_pids = []
-    for pid in leaf_pids:
         if process_has_nvidia_fd(pid):
-            gpu_pids.append(pid)
+            if process_is_leaf(pid):
+                valid_cuda_pids.append(pid)
+            else:
+                invalid_cuda_pids.append(pid)
 
-    return gpu_pids
-
+    return valid_cuda_pids, invalid_cuda_pids
 
 
 def get_processes_with_nvidia_fds(pids: list[int]) -> list[int]:
@@ -404,28 +266,18 @@ def format_cuda_checkpoint_results(succeeded: list[int],
     msg_parts = []
 
     if succeeded:
-        msg_parts.append(f"CUDA checkpoint succeeded for {len(succeeded)} PID(s):")
-        for pid in succeeded:
-            devices = get_process_gpu_devices(pid)
-            if devices:
-                msg_parts.append(f"  PID {pid} (GPUs: {devices})")
-            else:
-                msg_parts.append(f"  PID {pid}")
+        msg_parts.append(f"CUDA checkpoint succeeded for {len(succeeded)} PIDs: {succeeded}")
 
     if failed:
-        msg_parts.append(f"CUDA checkpoint failed for {len(failed)} PID(s):")
+        msg_parts.append(f"CUDA checkpoint failed for {len(failed)} PIDs:")
         for pid, error in failed:
-            devices = get_process_gpu_devices(pid)
-            if devices:
-                msg_parts.append(f"  PID {pid} (GPUs: {devices}): {error}")
-            else:
-                msg_parts.append(f"  PID {pid}: {error}")
+            msg_parts.append(f"  PID {pid}: {error}")
 
     return "\n".join(msg_parts)
 
 
 def checkpoint_cuda_processes_from_pids(cuda_pids: list[int]) -> tuple[list[int], list[tuple[int, str]]]:
-    """Checkpoint CUDA processes from a list of PIDs.
+    """Checkpoint CUDA processes from a list of PIDs using cuda-checkpoint CLI.
 
     This function attempts to checkpoint each CUDA process and returns
     success/failure results.
@@ -441,22 +293,331 @@ def checkpoint_cuda_processes_from_pids(cuda_pids: list[int]) -> tuple[list[int]
     if not cuda_pids:
         return [], []
 
-    if not cuda_available:
-        raise RuntimeError(
-            "cuda-python is not installed; install 'cuda-python' to "
-            "enable CUDA API checkpointing")
+    import subprocess
 
-    succeeded: list[int] = []
-    failed: list[tuple[int, str]] = []
+    # Two-phase approach for multi-process: lock all, then checkpoint all.
+    # This approximates a cohort-style checkpoint across ranks and avoids
+    # capturing inconsistent cross-process CUDA/NCCL/IPC state.
 
+    locked: list[int] = []
+    lock_failed: list[tuple[int, str]] = []
+
+    # Phase 1: Lock all CUDA processes
     for pid in cuda_pids:
         try:
-            checkpoint_cuda_process(pid)
+            result = subprocess.run(
+                ["cuda-checkpoint", "--action", "lock", "--pid", str(pid)],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to lock CUDA process: {result.stderr}")
+            locked.append(pid)
+        except Exception as e:
+            error_msg = str(e)
+            lock_failed.append((pid, error_msg))
+            logger.debug("cuda-checkpoint lock failed for PID %d: %s", pid, error_msg)
+
+    # Phase 2: Checkpoint all locked processes
+    succeeded: list[int] = []
+    failed: list[tuple[int, str]] = list(lock_failed)
+
+    for pid in locked:
+        try:
+            result = subprocess.run(
+                ["cuda-checkpoint", "--action", "checkpoint", "--pid", str(pid)],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to checkpoint CUDA process: {result.stderr}")
             succeeded.append(pid)
         except Exception as e:
             error_msg = str(e)
             failed.append((pid, error_msg))
-            logger.debug("cuCheckpoint failed for PID %d: %s", pid, error_msg)
+            logger.debug("cuda-checkpoint checkpoint failed for PID %d: %s", pid, error_msg)
 
     return succeeded, failed
 
+
+def format_cuda_restore_results(succeeded: list[int],
+                                failed: list[tuple[int, str]]) -> str:
+    """Format CUDA restore/unlock results for logging.
+
+    Args:
+        succeeded: List of PIDs that were successfully restored/unlocked
+        failed: List of (pid, error_message) tuples for failures
+
+    Returns:
+        Formatted string summarizing the results
+    """
+    msg_parts = []
+
+    if succeeded:
+        msg_parts.append(f"CUDA restore/unlock succeeded for {len(succeeded)} PIDs: {succeeded}")
+
+    if failed:
+        msg_parts.append(f"CUDA restore/unlock failed for {len(failed)} PIDs:")
+        for pid, error in failed:
+            msg_parts.append(f"  PID {pid}: {error}")
+
+    return "\n".join(msg_parts)
+
+
+def restore_cuda_processes_from_pids(cuda_pids: list[int], device_map: Optional[str] = None) -> tuple[list[int], list[tuple[int, str]]]:
+    """Restore and unlock CUDA processes from a list of PIDs using cuda-checkpoint CLI.
+
+    Args:
+        cuda_pids: List of PIDs to restore and unlock
+        device_map: Optional device map string for GPU migration
+
+    Returns:
+        Tuple of (succeeded, failed) where:
+        - succeeded: List of PIDs that were successfully restored and unlocked
+        - failed: List of (pid, error_message) tuples for failed operations
+    """
+    if not cuda_pids:
+        return [], []
+
+    import subprocess
+
+    # Two-phase approach for multi-process restore: restore all, then unlock all.
+    # This mirrors how we checkpoint (lock all, then checkpoint all) and helps
+    # avoid per-rank inconsistencies during restore/unlock.
+
+    restored: list[int] = []
+    restore_failed: list[tuple[int, str]] = []
+
+    # Phase 1: Restore all CUDA processes
+    for pid in cuda_pids:
+        try:
+            cmd = ["cuda-checkpoint", "--action", "restore", "--pid", str(pid)]
+            if device_map:
+                cmd.extend(["--device-map", device_map])
+            logger.info("Running cuda-checkpoint restore with device map: %s", ' '.join(cmd))
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to restore CUDA process: {result.stderr}")
+            restored.append(pid)
+        except Exception as e:
+            error_msg = str(e)
+            restore_failed.append((pid, error_msg))
+            logger.debug("cuda-checkpoint restore failed for PID %d: %s", pid, error_msg)
+
+    # Phase 2: Unlock all successfully restored processes
+    succeeded: list[int] = []
+    failed: list[tuple[int, str]] = list(restore_failed)
+
+    for pid in restored:
+        try:
+            result = subprocess.run(
+                ["cuda-checkpoint", "--action", "unlock", "--pid", str(pid)],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to unlock CUDA process: {result.stderr}")
+            succeeded.append(pid)
+        except Exception as e:
+            error_msg = str(e)
+            failed.append((pid, error_msg))
+            logger.debug("cuda-checkpoint unlock failed for PID %d: %s", pid, error_msg)
+
+    return succeeded, failed
+
+
+# CRIU helper utilities
+
+def ensure_dummy_criu_libdir(base_dir: str, dir_name: str = "noop-criu-libdir") -> str:
+    """Ensure a dummy libdir exists to prevent CRIU from loading plugins.
+
+    Returns the path to a directory that can be passed via --libdir to CRIU
+    to avoid discovering system-wide plugins such as the CUDA plugin.
+    """
+    path = os.path.join(base_dir, dir_name)
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception as e:
+        logger.warning("Failed to create dummy CRIU libdir %s: %s", path, e)
+    return path
+
+
+def snapshot_dev_shm_files_for_tree(root_pid: int) -> list[dict]:
+    """Snapshot open /dev/shm files across a process tree.
+
+    Returns a list of dict entries with keys: name, size, mode.
+    For files opened multiple times with different sizes, the largest size
+    is kept.
+    """
+    dev_shm_files: dict[str, dict] = {}
+    try:
+        tree_pids = collect_process_tree_pids(root_pid)
+        for pid in tree_pids:
+            fd_dir = f"/proc/{pid}/fd"
+            if not os.path.isdir(fd_dir):
+                continue
+            for fd in os.listdir(fd_dir):
+                fd_path = os.path.join(fd_dir, fd)
+                try:
+                    link = os.readlink(fd_path)
+                except Exception:
+                    continue
+                # Normalize deleted marker appended by the kernel
+                if link.endswith(" (deleted)"):
+                    link = link[:-10]
+                if not link.startswith("/dev/shm/"):
+                    continue
+                name = os.path.basename(link)
+                # Stat via fd path to obtain mode/size of the opened file
+                try:
+                    st = os.stat(fd_path)
+                    size = int(getattr(st, "st_size", 0))
+                    mode = int(getattr(st, "st_mode", 0))
+                except Exception:
+                    size = 0
+                    mode = 0o600
+                entry = dev_shm_files.get(name)
+                if entry is None or size > entry.get("size", 0):
+                    dev_shm_files[name] = {"name": name, "size": size, "mode": mode}
+        if dev_shm_files:
+            logger.info("Captured %d /dev/shm files for restore: %s",
+                        len(dev_shm_files), [f["name"] for f in dev_shm_files.values()])
+    except Exception as e:
+        logger.warning("Failed to snapshot /dev/shm files: %s", e)
+    return list(dev_shm_files.values())
+
+
+def precreate_dev_shm_files(files: list[dict]) -> None:
+    """Pre-create /dev/shm files described by snapshot entries.
+
+    Each entry should contain keys: name, size, mode.
+    """
+    try:
+        if files:
+            if not os.path.isdir("/dev/shm"):
+                os.makedirs("/dev/shm", exist_ok=True)
+            for shm in files:
+                name = shm.get("name")
+                if not name:
+                    continue
+                path = os.path.join("/dev/shm", name)
+                # Skip if already exists
+                if os.path.exists(path):
+                    continue
+                mode = int(shm.get("mode", 0o600)) & 0o777
+                size = int(shm.get("size", 0))
+                try:
+                    fd = os.open(path, os.O_CREAT | os.O_RDWR, mode)
+                    if size > 0:
+                        try:
+                            os.ftruncate(fd, size)
+                        except Exception:
+                            pass
+                    os.close(fd)
+                except Exception as e:
+                    logger.warning("Failed to pre-create /dev/shm/%s: %s", name, e)
+    except Exception as e:
+        logger.warning("Error while preparing /dev/shm files: %s", e)
+
+
+# GPU UUID helper functions
+
+# Try to import NVML (prefer nvidia-ml-py over deprecated pynvml)
+nvml_available = False
+nvml = None
+try:
+    import nvidia_ml_py as nvml
+    nvml_available = True
+except ImportError:
+    try:
+        import pynvml as nvml
+        nvml_available = True
+    except ImportError:
+        logger.debug("Neither nvidia-ml-py nor pynvml available for GPU process detection")
+
+
+def get_gpu_uuids() -> list[str]:
+    """Get all GPU UUIDs from the system.
+    
+    Uses NVML to query all visible GPU UUIDs in cuda-checkpoint format.
+    This is required because cuda-checkpoint needs ALL GPUs to be specified
+    in the device map, not just the ones actually used by the process.
+    
+    Returns:
+        List of all GPU UUIDs in cuda-checkpoint format (with 'GPU-' prefix)
+    """
+    if not nvml_available or nvml is None:
+        logger.warning("NVML not available, cannot get GPU UUIDs")
+        return []
+        
+    try:
+        # Initialize NVML
+        nvml.nvmlInit()
+        
+        device_count = nvml.nvmlDeviceGetCount()
+        gpu_uuids = []
+        
+        for i in range(device_count):
+            try:
+                handle = nvml.nvmlDeviceGetHandleByIndex(i)
+                uuid_str = nvml.nvmlDeviceGetUUID(handle)
+                
+                # Ensure UUID has the 'GPU-' prefix required by cuda-checkpoint
+                if uuid_str and not uuid_str.startswith("GPU-"):
+                    uuid_str = f"GPU-{uuid_str}"
+                    
+                gpu_uuids.append(uuid_str)
+            except Exception as e:
+                logger.warning("Error getting UUID for device %d: %s", i, e)
+                continue
+        
+        nvml.nvmlShutdown()
+        
+        logger.info("Found %d GPU(s): %s", len(gpu_uuids), gpu_uuids)
+        return gpu_uuids
+        
+    except Exception as e:
+        logger.error("Error using NVML for GPU detection: %s", e)
+        try:
+            nvml.nvmlShutdown()
+        except:
+            pass
+        return []
+
+
+def create_gpu_device_map(old_uuids: list[str],
+                         new_uuids: list[str]) -> Optional[str]:
+    """Create GPU device map string for cuda-checkpoint restore.
+
+    This function maps old GPU UUIDs to new GPU UUIDs for migration.
+    The mapping preserves the device index order.
+
+    Args:
+        old_uuids: List of GPU UUIDs from checkpoint time (in cuda-checkpoint format)
+        new_uuids: List of current GPU UUIDs (in cuda-checkpoint format)
+
+    Returns:
+        Device map string in format "oldUuid1=newUuid1,oldUuid2=newUuid2,..."
+        suitable for cuda-checkpoint --device-map option, or None if mapping
+        cannot be created.
+    """
+    if len(old_uuids) != len(new_uuids):
+        logger.error("GPU count mismatch: checkpoint had %d GPUs, current has %d",
+                    len(old_uuids), len(new_uuids))
+        return None
+
+    if not old_uuids:
+        logger.warning("No GPUs to migrate")
+        return None
+
+    # Build device map string
+    pairs = []
+    for i, (old_uuid, new_uuid) in enumerate(zip(old_uuids, new_uuids)):
+        pairs.append(f"{old_uuid}={new_uuid}")
+
+        if old_uuid != new_uuid:
+            logger.info("GPU migration: device %d %s -> %s",
+                       i, old_uuid, new_uuid)
+
+    return ",".join(pairs)

@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import errno
+import fcntl
 import multiprocessing
 import os
 import pty
@@ -13,7 +14,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Mapping
 from typing import Any, Optional, Union
-import logging
+
 import cloudpickle
 import msgspec
 import zmq
@@ -21,8 +22,10 @@ import zmq.asyncio
 
 from vllm.config import LiteVllmConfig, ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.protocol import EngineClient
 from vllm.inputs import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
@@ -35,11 +38,18 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import RequestOutputCollector
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory
-
 from .utils import (
-    find_gpu_worker_pids,
-    collect_process_tree_pids,
+    validate_cuda_process_tree, get_processes_with_nvidia_fds,
+    assert_no_nvidia_fds_in_tree, format_cuda_checkpoint_results,
+    checkpoint_cuda_processes_from_pids,
+    format_cuda_restore_results,
+    restore_cuda_processes_from_pids,
+    ensure_dummy_criu_libdir,
+    snapshot_dev_shm_files_for_tree,
+    precreate_dev_shm_files,
+    read_comm, read_cmdline, collect_process_tree_pids,
     verify_processes_exited, get_tty_info,
+    get_gpu_uuids, create_gpu_device_map,
 )
 from .metadata import CheckpointMetadata
 from .zmq_async_llm_server import (
@@ -47,7 +57,7 @@ from .zmq_async_llm_server import (
     run_async_llm_server,
 )
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 def _create_engine_config_in_subprocess(queue: multiprocessing.Queue, engine_args_pickle: bytes) -> None:
@@ -140,7 +150,7 @@ def create_engine_config_isolated(engine_args: AsyncEngineArgs) -> VllmConfig:
         raise e
 
 
-class CheckpointableAsyncLLM(AsyncLLM):
+class CheckpointableAsyncLLM(EngineClient):
     """
     A wrapper around AsyncLLM that runs it in a subprocess and
     communicates via ZMQ. Supports CRIU checkpoint/restore functionality.
@@ -188,11 +198,6 @@ class CheckpointableAsyncLLM(AsyncLLM):
             self.socket_url = f"tcp://127.0.0.1:{self.port}"
 
         self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        # Processor and io_processor are managed by the subprocess AsyncLLM
-        # Set to None as we proxy through ZMQ RPC
-        self.processor = None  # type: ignore
-        self.io_processor = None
         self.process: Optional[multiprocessing.Process] = None
         self.ctx = zmq.asyncio.Context()
         self.socket: Optional[zmq.asyncio.Socket] = None
@@ -200,7 +205,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
         self._is_running = False
         self._subprocess_started = False
         # For CRIU TTY forwarding
-        self._pty_main_fd: Optional[int] = None
+        self._pty_master_fd: Optional[int] = None
         self._pty_forwarder_thread: Optional[threading.Thread] = None
 
         # Serialize configuration for subprocess
@@ -211,7 +216,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
             'usage_context': usage_context,
             'log_requests': log_requests,
             'start_engine_loop': start_engine_loop,
-            'stat_loggers': None,  # Set to None - stat_loggers contain unpicklable Component objects
+            'stat_loggers': stat_loggers,
             'client_addresses': client_addresses,
             'client_count': client_count,
             'client_index': client_index,
@@ -234,28 +239,28 @@ class CheckpointableAsyncLLM(AsyncLLM):
         # Note: daemon=False is required because AsyncLLM may need to spawn
         # its own child processes (e.g., DPCoordinator for data parallel)
         # Create a private PTY for the child so it can become a session leader
-        # with a controlling TTY. We pass the parent's PID and the worker fd
+        # with a controlling TTY. We pass the parent's PID and the slave fd
         # number so the child can open it via /proc and call TIOCSCTTY.
-        pty_main_fd, pty_worker_fd = pty.openpty()
-        os.set_inheritable(pty_worker_fd, True)
+        pty_master_fd, pty_slave_fd = pty.openpty()
+        os.set_inheritable(pty_slave_fd, True)
         self.process = ctx.Process(
             target=run_async_llm_server,
             args=(self.socket_url, self.vllm_config_pickle,
                   self.executor_class_pickle, self.kwargs_pickle,
-                  os.getpid(), pty_worker_fd),
+                  os.getpid(), pty_slave_fd),
             daemon=False
         )
         self.process.start()
         self._is_running = True
         self._subprocess_started = True
 
-        # Close the worker fd in parent process (child has it)
-        os.close(pty_worker_fd)
+        # Close the slave fd in parent process (child has it)
+        os.close(pty_slave_fd)
 
-        # Forward child's PTY main to our stdout so logs are visible
+        # Forward child's PTY master to our stdout so logs are visible
         # Do this BEFORE connecting so we can see any startup errors
         try:
-            self._start_pty_forwarder(pty_main_fd)
+            self._start_pty_forwarder(pty_master_fd)
         except Exception as e:
             logger.warning("Failed to start startup PTY forwarder: %s", e)
 
@@ -282,8 +287,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
             logger.debug("Sent READY_CHECK to subprocess")
 
             # Wait for ready signal
-            # Must match or exceed the server's max_wait_time (900s in zmq_async_llm_server.py)
-            timeout = 900  # 15 minutes for initial connection and engine initialization
+            timeout = 120  # 2 minutes for initial connection
             # With REQ socket, we just wait for the response
             if sync_socket.poll(timeout=timeout * 1000):  # Convert to milliseconds
                 msg = sync_socket.recv()
@@ -410,7 +414,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
         # Parse response format: TYPE|PAYLOAD
         delimiter_idx = raw_response.find(b'|')
         if delimiter_idx == -1:
-            raise RuntimeError("Invalid response format")
+            raise RuntimeError(f"Invalid response format")
         response_type = raw_response[:delimiter_idx]
         if response_type != b"RPC_RESPONSE":
             raise RuntimeError(f"Unexpected response type: {response_type}")
@@ -449,7 +453,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
         raw_response = await self.socket.recv()
         delimiter_idx = raw_response.find(b'|')
         if delimiter_idx == -1:
-            raise RuntimeError("Invalid response format")
+            raise RuntimeError(f"Invalid response format")
         response_type = raw_response[:delimiter_idx]
         if response_type != b"RPC_RESPONSE":
             raise RuntimeError(f"Unexpected response type: {response_type}")
@@ -472,7 +476,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
             raw_response = await self.socket.recv()
             delimiter_idx = raw_response.find(b'|')
             if delimiter_idx == -1:
-                raise RuntimeError("Invalid response format")
+                raise RuntimeError(f"Invalid response format")
             response_type = raw_response[:delimiter_idx]
             if response_type != b"RPC_RESPONSE":
                 raise RuntimeError(f"Unexpected response type: {response_type}")
@@ -505,7 +509,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
         raw_response = await self.socket.recv()
         delimiter_idx = raw_response.find(b'|')
         if delimiter_idx == -1:
-            raise RuntimeError("Invalid response format")
+            raise RuntimeError(f"Invalid response format")
         response_type = raw_response[:delimiter_idx]
         if response_type != b"PROPERTY_RESPONSE":
             raise RuntimeError(f"Unexpected response type: {response_type}")
@@ -678,16 +682,12 @@ class CheckpointableAsyncLLM(AsyncLLM):
         return not self.is_running
 
     @property
-    def errored(self) -> bool:
-        # Synchronous property - cannot make async RPC call
-        # Return False as default; actual error handling is via exceptions
-        return False
+    async def errored(self) -> bool:
+        return await self._get_property("errored")
 
     @property
-    def dead_error(self) -> BaseException:
-        # Synchronous property - cannot make async RPC call
-        # Return a default exception; actual error handling is via exceptions
-        return RuntimeError("Engine error - check logs for details")
+    async def dead_error(self):
+        return await self._get_property("dead_error")
 
     # CRIU-specific methods
     async def criu_checkpoint(
@@ -720,16 +720,70 @@ class CheckpointableAsyncLLM(AsyncLLM):
         root_pid = self.process.pid
 
         # Validate that only leaf processes have CUDA contexts
-        logger.info("Getting CUDA process tree...")
-        cuda_pids = find_gpu_worker_pids(root_pid)
+        logger.info("Validating CUDA process tree...")
+        valid_cuda_pids, invalid_cuda_pids = validate_cuda_process_tree(root_pid)
 
+        if invalid_cuda_pids:
+            # Collect detailed info about invalid processes
+            invalid_info = []
+            for pid in invalid_cuda_pids:
+                try:
+                    cmdline = read_cmdline(pid)
+                    comm = read_comm(pid)
+                    invalid_info.append(f"PID {pid} ({comm}): {cmdline}")
+                except Exception:
+                    invalid_info.append(f"PID {pid}")
+
+            raise RuntimeError(
+                f"Cannot checkpoint: found {len(invalid_cuda_pids)} non-leaf "
+                f"process(es) with CUDA contexts (mapped /dev/nvidia* FDs). "
+                f"Only leaf processes are allowed to have CUDA contexts.\n"
+                f"Invalid processes:\n" + "\n".join(invalid_info)
+            )
+
+        logger.info("Found %d leaf processes with CUDA contexts: %s",
+                    len(valid_cuda_pids), valid_cuda_pids)
+
+        # Capture ALL GPU UUIDs in the system BEFORE CUDA checkpoint
+        # cuda-checkpoint requires ALL GPUs to be specified in device map, not just used ones
+        gpu_uuids = get_gpu_uuids()  # Get all GPU UUIDs in the system
+        logger.info("Captured %d GPU UUIDs from system at checkpoint time", len(gpu_uuids))
 
         # Sleep the model (level 1) to free GPU memory before checkpointing
         logger.info("Putting model to sleep (level 1) before checkpoint...")
         await self.sleep(level=1)
         logger.info("Model sleep completed")
 
-        
+        # Attempt CUDA checkpoint on ALL processes with /dev/nvidia* FDs
+        if valid_cuda_pids:
+            logger.info("CUDA checkpoint: attempting cuda-checkpoint on PIDs with nvidia FDs: %s",
+                        valid_cuda_pids)
+            succeeded, failed = checkpoint_cuda_processes_from_pids(valid_cuda_pids)
+
+            # Format and log results
+            results_summary = format_cuda_checkpoint_results(succeeded, failed)
+            logger.info(results_summary)
+
+            if failed:
+                logger.warning("Some CUDA checkpoints failed. This may prevent successful checkpoint.")
+
+            # Verify that CUDA checkpoint actually worked
+            # After checkpoint, NO processes should have /dev/nvidia* FDs
+            remaining_nvidia_pids = get_processes_with_nvidia_fds(succeeded)
+            if remaining_nvidia_pids:
+                raise RuntimeError(
+                    f"CUDA checkpoint failed: {len(remaining_nvidia_pids)} process(es) "
+                    f"still have /dev/nvidia* FDs after checkpoint. PIDs: {remaining_nvidia_pids}. "
+                    f"This indicates the CUDA checkpoint did not work properly."
+                )
+
+        else:
+            logger.info("No processes with CUDA contexts found")
+
+        # Assert that all NVIDIA FDs are closed in the entire process tree
+        # This is critical - if any process still has NVIDIA FDs, CRIU will fail
+        assert_no_nvidia_fds_in_tree(root_pid)
+        logger.info("All /dev/nvidia* FDs closed; proceeding to CRIU dump")
 
         # Create checkpoint metadata
         metadata = CheckpointMetadata()
@@ -742,7 +796,19 @@ class CheckpointableAsyncLLM(AsyncLLM):
         # Save process tree info
         metadata.tree_pid = root_pid
         metadata.zmq_port = self.port
-        metadata.cuda_pids = cuda_pids
+        metadata.cuda_pids = valid_cuda_pids if valid_cuda_pids else []
+
+        # Save GPU UUIDs for potential cross-GPU restore
+        # (captured earlier before CUDA checkpoint)
+        metadata.gpu_uuids = gpu_uuids
+
+        # Snapshot of open /dev/shm files across the process tree so we can
+        # pre-create them before CRIU restore. Some libraries (e.g., NCCL/Gloo
+        # or other IPC backends) use POSIX shm segments under /dev/shm, which
+        # CRIU expects to exist when restoring usual regular file descriptors.
+        # If these are absent at restore time, CRIU may fail with messages like
+        # "Can't open file dev/shm/<name>". We record their names/sizes here.
+        metadata.dev_shm_files = snapshot_dev_shm_files_for_tree(root_pid)
 
         # Take a snapshot of the process tree (for post-dump verification)
         pre_dump_tree = collect_process_tree_pids(root_pid)
@@ -756,13 +822,19 @@ class CheckpointableAsyncLLM(AsyncLLM):
             "-v4",
             "--ext-unix-sk",
             "--tcp-established",
-            "--external", "mnt[shm]:/dev/shm",
+            "--external", "mnt[/dev/shm]:shm",
             "--link-remap",
+            "--ghost-limit", "512M",
             "--manage-cgroups=ignore",
-            "--tree", str(root_pid),
-            "--ghost-limit", "50M",
-            "--timeout", "1800",
+            "--tree", str(root_pid)
         ]
+
+        # Force CRIU to skip CUDA plugin discovery by using an empty libdir
+        try:
+            dump_libdir = ensure_dummy_criu_libdir(checkpoint_dir)
+            cmd.extend(["--libdir", dump_libdir])
+        except Exception as e:
+            logger.warning("Failed to configure dummy --libdir for CRIU dump: %s", e)
 
         if metadata.tty_external:
             cmd.extend(["--external", metadata.tty_external])
@@ -790,7 +862,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
 
         # Verify that all processes in the pre-dump tree are gone.
         # This helps catch stray children that might linger due to plugins.
-        verify_processes_exited(pre_dump_tree)
+        lingering_pids = verify_processes_exited(pre_dump_tree)
 
         # The process is now frozen, mark it as not running
         self._is_running = False
@@ -865,6 +937,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
                     )
                 else:
                     logger.error("%s", msg)
+                raise RuntimeError(msg)
 
         # Build CRIU restore command
         cmd = [
@@ -879,30 +952,40 @@ class CheckpointableAsyncLLM(AsyncLLM):
             "--external", "mnt[shm]:/dev/shm",
             "--link-remap",
             "--manage-cgroups=ignore",
-            "--ghost-limit", "50M",
         ]
+
+        # Force CRIU to skip CUDA plugin discovery by using an empty libdir
+        try:
+            libdir = ensure_dummy_criu_libdir(self.checkpoint_dir)
+            cmd.extend(["--libdir", libdir])
+        except Exception as e:
+            logger.warning("Failed to configure dummy --libdir for CRIU: %s", e)
 
         # Provide a valid TTY to CRIU using a Python-created pty, so we can
         # mirror logs back to this terminal and support non-TTY parents.
-        # We pass the pty worker fd to CRIU and map it to the saved TTY id.
+        # We pass the pty slave fd to CRIU and map it to the saved TTY id.
         pass_fds = ()
-        pty_main_fd = None
-        pty_worker_fd = None
+        pty_master_fd = None
+        pty_slave_fd = None
         if metadata.tty_external:
             try:
-                pty_main_fd, pty_worker_fd = pty.openpty()
-                os.set_inheritable(pty_worker_fd, True)
-                # Map the saved tty id to the pty worker fd in CRIU
+                pty_master_fd, pty_slave_fd = pty.openpty()
+                os.set_inheritable(pty_slave_fd, True)
+                # Map the saved tty id to the pty slave fd in CRIU
                 cmd.extend([
-                    "--inherit-fd", f"fd[{pty_worker_fd}]:{metadata.tty_external}",
+                    "--inherit-fd", f"fd[{pty_slave_fd}]:{metadata.tty_external}",
                 ])
-                pass_fds = (pty_worker_fd,)
+                pass_fds = (pty_slave_fd,)
             except Exception as e:
                 logger.warning("Failed to create PTY for CRIU restore: %s", e)
 
         logger.info("Running CRIU restore: %s", ' '.join(cmd))
 
         # Run CRIU restore
+        # Pre-create any /dev/shm files that were open at checkpoint time, so
+        # CRIU can reopen them as regular files on the tmpfs mount.
+        precreate_dev_shm_files(getattr(metadata, "dev_shm_files", []) or [])
+
         if pass_fds:
             result = subprocess.run(cmd, capture_output=True, text=True,
                                     pass_fds=pass_fds)
@@ -912,6 +995,40 @@ class CheckpointableAsyncLLM(AsyncLLM):
             raise RuntimeError(f"CRIU restore failed: {result.stderr}")
 
         logger.info("Successfully restored AsyncLLM from checkpoint")
+
+        # Restore and unlock CUDA contexts via CUDA API, since CRIU CUDA plugin is disabled
+        cuda_pids = getattr(metadata, "cuda_pids", []) or []
+        if cuda_pids:
+            # Check if we need GPU migration
+            old_gpu_uuids = getattr(metadata, "gpu_uuids", [])
+            new_gpu_uuids = list(reversed(get_gpu_uuids()))  # Get all GPUs in the current system
+            
+            # cuda-checkpoint requires ALL GPUs to be mapped, so both lists must have same length
+            device_map = None
+            if old_gpu_uuids and new_gpu_uuids:
+                if old_gpu_uuids != new_gpu_uuids:
+                    logger.info("GPU configuration changed - attempting migration")
+                    logger.info("Old GPUs: %s", old_gpu_uuids)
+                    logger.info("New GPUs: %s", new_gpu_uuids)
+                    device_map = create_gpu_device_map(old_gpu_uuids, new_gpu_uuids)
+                    if device_map is None:
+                        logger.error("Failed to create GPU device map")
+                else:
+                    logger.info("GPU configuration unchanged - standard restore")
+
+            logger.info(
+                "CUDA restore/unlock: attempting cuda-checkpoint restore/unlock on PIDs: %s",
+                cuda_pids,
+            )
+
+            succeeded, failed = restore_cuda_processes_from_pids(cuda_pids, device_map)
+
+            results_summary = format_cuda_restore_results(succeeded, failed)
+            logger.info(results_summary)
+            if failed:
+                logger.warning(
+                    "Some CUDA restore/unlock operations failed; subsequent GPU operations may fail."
+                )
 
         # Re-establish connection to the restored process
         self._is_running = True
@@ -934,7 +1051,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
 
         # REQ socket will wait for the response
         # Use a generous timeout for post-restore initialization
-        if await self.socket.poll(timeout=500000):  # 5 second timeout
+        if await self.socket.poll(timeout=5000):  # 5 second timeout
             ack = await self.socket.recv()
             if ack == b"RECONNECT_ACK":
                 logger.info("Reconnection acknowledged by server")
@@ -949,23 +1066,23 @@ class CheckpointableAsyncLLM(AsyncLLM):
         logger.info("Model wake up completed")
 
         # Start forwarding the restored process output to our stdout
-        if pty_main_fd is not None:
+        if pty_master_fd is not None:
             try:
-                self._start_pty_forwarder(pty_main_fd)
+                self._start_pty_forwarder(pty_master_fd)
             except Exception as e:
                 logger.warning("Failed to start PTY forwarder: %s", e)
-        # Close the worker fd in this process; CRIU/restored proc holds it now
-        if pty_worker_fd is not None:
+        # Close the slave fd in this process; CRIU/restored proc holds it now
+        if pty_slave_fd is not None:
             with contextlib.suppress(Exception):
-                os.close(pty_worker_fd)
+                os.close(pty_slave_fd)
 
     def shutdown(self):
         """Shutdown the subprocess and clean up resources."""
-        # Close PTY main if present
-        if getattr(self, "_pty_main_fd", None) is not None:
+        # Close PTY master if present
+        if getattr(self, "_pty_master_fd", None) is not None:
             with contextlib.suppress(Exception):
-                os.close(self._pty_main_fd)  # type: ignore[arg-type]
-            self._pty_main_fd = None
+                os.close(self._pty_master_fd)  # type: ignore[arg-type]
+            self._pty_master_fd = None
 
         # Try to send shutdown signal if we have a socket connection
         # This works both for normal operation and after CRIU restore
@@ -1034,14 +1151,14 @@ class CheckpointableAsyncLLM(AsyncLLM):
 
 
     # ----- Internal helpers for CRIU PTY forwarding -----
-    def _start_pty_forwarder(self, main_fd: int) -> None:
-        """Forward data from PTY main fd to this process' stdout.
+    def _start_pty_forwarder(self, master_fd: int) -> None:
+        """Forward data from PTY master fd to this process' stdout.
 
         This mirrors the restored process' stdout/stderr back
         into the controlling terminal running CheckpointableAsyncLLM.
         """
-        self._pty_main_fd = main_fd
-        logger.debug("Starting PTY forwarder for fd %d", main_fd)
+        self._pty_master_fd = master_fd
+        logger.debug("Starting PTY forwarder for fd %d", master_fd)
 
         def _forward_loop(fd: int):
             try:
@@ -1068,11 +1185,11 @@ class CheckpointableAsyncLLM(AsyncLLM):
             finally:
                 with contextlib.suppress(Exception):
                     os.close(fd)
-                if getattr(self, "_pty_main_fd", None) == fd:
-                    self._pty_main_fd = None
+                if getattr(self, "_pty_master_fd", None) == fd:
+                    self._pty_master_fd = None
 
         t = threading.Thread(target=_forward_loop,
-                             args=(main_fd,),
+                             args=(master_fd,),
                              name="criu-pty-forwarder",
                              daemon=True)
         t.start()
@@ -1093,20 +1210,6 @@ class CheckpointableAsyncLLM(AsyncLLM):
         auto_start: bool = True,
     ) -> "CheckpointableAsyncLLM":
         """Create CheckpointableAsyncLLM from VllmConfig."""
-        # Validate required settings for checkpointing
-        if not vllm_config.model_config.enable_sleep_mode:
-            raise ValueError(
-                "enable_sleep_mode must be True in vllm_config for checkpointing. "
-                "Sleep mode is required to omit KV cache from the checkpoint image."
-            )
-        
-        if hasattr(vllm_config.parallel_config, 'disable_custom_all_reduce'):
-            if not vllm_config.parallel_config.disable_custom_all_reduce:
-                raise ValueError(
-                    "disable_custom_all_reduce must be True in vllm_config for checkpointing. "
-                    "Custom all-reduce uses CUDA IPC which is not compatible with CRIU."
-                )
-        
         return cls(
             vllm_config=vllm_config,
             executor_class=Executor.get_class(vllm_config),
@@ -1143,15 +1246,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
         Returns:
             CheckpointableAsyncLLM instance
         """
-        # Force enable sleep mode and disable custom all reduce for checkpointing
-        if not engine_args.enable_sleep_mode:
-            logger.warning("enable_sleep_mode was False, forcing to True for checkpointing")
-            engine_args.enable_sleep_mode = True
-        
-        if not engine_args.disable_custom_all_reduce:
-            logger.warning("disable_custom_all_reduce was False, forcing to True for checkpointing")
-            engine_args.disable_custom_all_reduce = True
-        
+        assert engine_args.enable_sleep_mode, "Sleep mode must be enabled for omitting KV cache from image."
         vllm_config = create_engine_config_isolated(engine_args)
 
         return cls(

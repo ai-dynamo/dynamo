@@ -8,7 +8,6 @@ import os
 import sys
 import time
 import traceback
-import logging
 from collections.abc import AsyncGenerator
 from typing import Any, Optional
 
@@ -18,10 +17,12 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.executor.abstract import Executor
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
+
 
 # RPC message types
 class RPCMessageType(msgspec.Struct):
@@ -305,20 +306,20 @@ def run_async_llm_server(socket_url: str, vllm_config_pickle: bytes,
                         executor_class_pickle: bytes,
                         kwargs_pickle: bytes,
                         parent_pid_for_tty: Optional[int] = None,
-                        parent_tty_worker_fd: Optional[int] = None):
+                        parent_tty_slave_fd: Optional[int] = None):
     """Entry point for the subprocess running AsyncLLM."""
     # Set up a private PTY for logs without making it a controlling TTY.
     # We intentionally avoid TIOCSCTTY so no session in the checkpointed
     # subtree owns a controlling TTY (simplifies CRIU restore).
-    if parent_pid_for_tty is not None and parent_tty_worker_fd is not None:
+    if parent_pid_for_tty is not None and parent_tty_slave_fd is not None:
         try:
             # Become a new session leader with no controlling TTY
             with contextlib.suppress(Exception):
                 os.setsid()
 
-            # Open the PTY worker passed by the parent without acquiring
+            # Open the PTY slave passed by the parent without acquiring
             # a controlling TTY.
-            fd_path = f"/proc/{parent_pid_for_tty}/fd/{parent_tty_worker_fd}"
+            fd_path = f"/proc/{parent_pid_for_tty}/fd/{parent_tty_slave_fd}"
             tty_fd = os.open(fd_path, os.O_RDWR | os.O_NOCTTY)
 
             # Mirror logs to this PTY (stdout/stderr; stdin optional)
@@ -365,4 +366,3 @@ def run_async_llm_server(socket_url: str, vllm_config_pickle: bytes,
         print(f"AsyncLLM server failed: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)
-
