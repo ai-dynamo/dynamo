@@ -192,10 +192,10 @@ class EncodeHelper:
         request: Dict[str, Any],
         multimodal_processor,
         connector: nixl_connect.Connector,
-        tokenizer = None,
-        model_dir = None,
-        model_type = None,
-        engine = None,
+        tokenizer=None,
+        model_dir=None,
+        model_type=None,
+        engine=None,
     ):
         """
         Process embedding request by loading embeddings and creating NIXL readable operation.
@@ -211,7 +211,9 @@ class EncodeHelper:
         # Load embeddings first to get the actual shape
         messages = request.get("messages", [])
         (
-            text_prompt, image_urls, embedding_paths
+            text_prompt,
+            image_urls,
+            embedding_paths,
         ) = multimodal_processor.extract_prompt_and_media(messages)
         if embedding_paths:
             loaded_data = multimodal_processor.load_tensor_from_path_or_url(
@@ -245,7 +247,9 @@ class EncodeHelper:
                     "nixl_readable_metadata": op_metadata.model_dump(),
                     "embeddings_shape": list(encodings.shape),
                     "embeddings_dtype": str(encodings.dtype),
-                    "auxiliary_data": EncodeHelper.serialize_tensor_dict(auxiliary_data),
+                    "auxiliary_data": EncodeHelper.serialize_tensor_dict(
+                        auxiliary_data
+                    ),
                 }
                 yield response
 
@@ -256,7 +260,9 @@ class EncodeHelper:
                 await readable_op.wait_for_completion()
                 logging.debug("EncodeHelper completed readable operation.")
         else:
-            logging.info("========== ENCODE WORKER: Full EPD - Using MultimodalEncoder ==========")
+            logging.info(
+                "========== ENCODE WORKER: Full EPD - Using MultimodalEncoder =========="
+            )
             inputs = default_multimodal_input_loader(
                 tokenizer=tokenizer,
                 model_dir=model_dir,
@@ -275,14 +281,23 @@ class EncodeHelper:
 
             ep_disaggregated_params = encoder_outputs[0].disaggregated_params
             if ep_disaggregated_params is None:
-                logging.error("ENCODE WORKER: encoder_outputs[0].disaggregated_params is None")
+                logging.error(
+                    "ENCODE WORKER: encoder_outputs[0].disaggregated_params is None"
+                )
                 yield {"ep_disaggregated_params": None}
                 return
 
-           if hasattr(ep_disaggregated_params, 'multimodal_embedding_handles') and ep_disaggregated_params.multimodal_embedding_handles:
-                logging.info(f"ENCODE WORKER: Generated {len(ep_disaggregated_params.multimodal_embedding_handles)} embedding handle(s)")
+            if (
+                hasattr(ep_disaggregated_params, "multimodal_embedding_handles")
+                and ep_disaggregated_params.multimodal_embedding_handles
+            ):
+                logging.info(
+                    f"ENCODE WORKER: Generated {len(ep_disaggregated_params.multimodal_embedding_handles)} embedding handle(s)"
+                )
             else:
-                logging.warning("ENCODE WORKER: ep_disaggregated_params has no multimodal_embedding_handles")
+                logging.warning(
+                    "ENCODE WORKER: ep_disaggregated_params has no multimodal_embedding_handles"
+                )
             # Prepare for Network Transfer
             encoded_params = DisaggregatedParamsCodec.encode(ep_disaggregated_params)
             params_dict = asdict(encoded_params)
@@ -296,18 +311,24 @@ class EncodeHelper:
                 if isinstance(first_input, dict):
                     processed_prompt = first_input.get("prompt")
                 else:
-                    processed_prompt = getattr(first_input, 'prompt', None)
+                    processed_prompt = getattr(first_input, "prompt", None)
 
                 # Tokenize the processed prompt for prefill worker
                 if processed_prompt and tokenizer is not None:
-                    prompt_token_ids = tokenizer.encode(processed_prompt, add_special_tokens=False)
-                    logging.info(f"ENCODE WORKER: Tokenized processed_prompt (length={len(prompt_token_ids)})")
+                    prompt_token_ids = tokenizer.encode(
+                        processed_prompt, add_special_tokens=False
+                    )
+                    logging.info(
+                        f"ENCODE WORKER: Tokenized processed_prompt (length={len(prompt_token_ids)})"
+                    )
 
-            logging.info(f"ENCODE WORKER: Extracted processed_prompt: {processed_prompt}")
+            logging.info(
+                f"ENCODE WORKER: Extracted processed_prompt: {processed_prompt}"
+            )
 
             yield {
                 "ep_disaggregated_params": params_dict,
                 "processed_prompt": processed_prompt,  # Prompt with <image> tokens
-                "prompt_token_ids": prompt_token_ids  # Token IDs for consistency
+                "prompt_token_ids": prompt_token_ids,  # Token IDs for consistency
             }
             return

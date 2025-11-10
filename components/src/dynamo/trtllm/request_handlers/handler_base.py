@@ -44,6 +44,7 @@ from dynamo.trtllm.utils.disagg_utils import (
 
 configure_dynamo_logging()
 
+
 @dataclass
 class RequestHandlerConfig:
     """
@@ -399,8 +400,10 @@ class HandlerBase:
 
                         # Pass the original max_tokens to decode worker
                         if "_original_max_tokens" in request:
-                            out["_original_max_tokens"] = request["_original_max_tokens"]
-                   
+                            out["_original_max_tokens"] = request[
+                                "_original_max_tokens"
+                            ]
+
                     if res.finished and not out.get("finish_reason"):
                         out["finish_reason"] = "unknown"
                         logging.warning(

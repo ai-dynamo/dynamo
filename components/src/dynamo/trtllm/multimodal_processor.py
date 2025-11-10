@@ -177,13 +177,20 @@ class MultimodalRequestProcessor:
 
         processed_prompt_from_encoder = request.get("_epd_processed_prompt")
 
-        if processed_prompt_from_encoder is not None or ep_disaggregated_params is not None:
-            logging.info("MM PROCESSOR: Full EPD flow - skipping default_multimodal_input_loader")
+        if (
+            processed_prompt_from_encoder is not None
+            or ep_disaggregated_params is not None
+        ):
+            logging.info(
+                "MM PROCESSOR: Full EPD flow - skipping default_multimodal_input_loader"
+            )
             text_prompt = processed_prompt_from_encoder
             result = {"prompt": text_prompt}
             if "_epd_prompt_token_ids" in request and request["_epd_prompt_token_ids"]:
                 result["prompt_token_ids"] = request["_epd_prompt_token_ids"]
-                logging.info(f"MM PROCESSOR: Including prompt_token_ids from encoder (length={len(request['_epd_prompt_token_ids'])})")
+                logging.info(
+                    f"MM PROCESSOR: Including prompt_token_ids from encoder (length={len(request['_epd_prompt_token_ids'])})"
+                )
             else:
                 logging.warning("MM PROCESSOR: No prompt_token_ids from encoder")
 

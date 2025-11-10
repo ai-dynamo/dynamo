@@ -8,6 +8,7 @@ from typing import AsyncGenerator, Optional, Union
 from tensorrt_llm import LLM, MultimodalEncoder
 
 from dynamo.trtllm.constants import DisaggregationMode
+
 logging.basicConfig(level=logging.DEBUG)
 
 
@@ -23,7 +24,9 @@ class TensorRTLLMEngine:
             if self._disaggregation_mode == DisaggregationMode.ENCODE:
                 # Initialize the multimodal encoder for full EPD
                 max_batch_size = self.engine_args.pop("max_batch_size", 1)
-                logging.info(f"Initializing multimodal encoder with max_batch_size: {max_batch_size}")
+                logging.info(
+                    f"Initializing multimodal encoder with max_batch_size: {max_batch_size}"
+                )
                 self._llm = MultimodalEncoder(
                     model=model,
                     max_batch_size=max_batch_size,
@@ -52,7 +55,9 @@ class TensorRTLLMEngine:
 
 
 @asynccontextmanager
-async def get_llm_engine(engine_args, disaggregation_mode) -> AsyncGenerator[TensorRTLLMEngine, None]:
+async def get_llm_engine(
+    engine_args, disaggregation_mode
+) -> AsyncGenerator[TensorRTLLMEngine, None]:
     engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
     try:
         await engine.initialize()

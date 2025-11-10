@@ -43,8 +43,10 @@ class DisaggregatedParamsCodec:
             draft_tokens=disaggregated_params.draft_tokens,
             # E-P Disaggregated Params (for full EPD flow)
             # Use getattr with None default for backward compatibility with text-only requests
-            multimodal_embedding_handles=getattr(disaggregated_params, 'multimodal_embedding_handles', None),
-            multimodal_hashes=getattr(disaggregated_params, 'multimodal_hashes', None),            
+            multimodal_embedding_handles=getattr(
+                disaggregated_params, "multimodal_embedding_handles", None
+            ),
+            multimodal_hashes=getattr(disaggregated_params, "multimodal_hashes", None),
         )
 
     @staticmethod
@@ -60,8 +62,8 @@ class DisaggregatedParamsCodec:
             else None
         )
 
-        mm_handles = getattr(disaggregated_params, 'multimodal_embedding_handles', None)
-        mm_hashes = getattr(disaggregated_params, 'multimodal_hashes', None)
+        mm_handles = getattr(disaggregated_params, "multimodal_embedding_handles", None)
+        mm_hashes = getattr(disaggregated_params, "multimodal_hashes", None)
 
         return DisaggregatedParams(
             request_type=disaggregated_params.request_type,

@@ -33,7 +33,7 @@ from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
 from torch.cuda import device_count
-from transformers import AutoConfig
+from transformers import AutoConfig, GenerationConfig
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
@@ -239,9 +239,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Populate default sampling params from the model
     tokenizer = tokenizer_factory(arg_map["model"])
 
-    model_config = AutoConfig.from_pretrained(
-        arg_map["model"], trust_remote_code=True
-    )
+    model_config = AutoConfig.from_pretrained(arg_map["model"], trust_remote_code=True)
     generation_config = GenerationConfig.from_pretrained(
         arg_map["model"], trust_remote_code=True
     )

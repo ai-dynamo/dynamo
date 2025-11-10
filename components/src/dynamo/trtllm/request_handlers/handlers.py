@@ -62,7 +62,7 @@ class EncodeHandler(HandlerBase):
         if self.multimodal_processor:
             self.model_dir = self.multimodal_processor.model_dir
             self.model_type = self.multimodal_processor.model_type
-            self.tokenizer = self.multimodal_processor.tokenizer        
+            self.tokenizer = self.multimodal_processor.tokenizer
 
     async def generate(self, request: dict, context: Context):
         logging.debug(f"New Request ID: {context.id()}")
@@ -134,7 +134,7 @@ class PrefillHandler(HandlerBase):
         ep_disaggregated_params = None
 
         if self.multimodal_processor:
-           (
+            (
                 _,
                 image_urls,
                 embedding_paths,
@@ -196,7 +196,7 @@ class DecodeHandler(HandlerBase):
     """
 
     def __init__(self, config: RequestHandlerConfig):
-        super().__init__(config)request["disaggregated_params"] = response_data["disaggregated_params"]
+        super().__init__(config)
 
     async def generate(self, request: dict, context: Context):
         """

@@ -9,4 +9,3 @@ class DisaggregationMode(Enum):
     PREFILL = "prefill"
     DECODE = "decode"
     ENCODE = "encode"
-
