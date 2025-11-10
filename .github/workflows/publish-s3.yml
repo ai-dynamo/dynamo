@@ -77,15 +77,39 @@ jobs:
             exit 1
           }
 
+      - name: Find latest generate-docs run (for manual trigger)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        id: find_run
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'generate-docs.yml',
+              branch: context.ref.replace('refs/heads/', ''),
+              status: 'success',
+              per_page: 1
+            });
+            
+            if (runs.data.workflow_runs.length === 0) {
+              throw new Error('No successful generate-docs workflow runs found');
+            }
+            
+            const runId = runs.data.workflow_runs[0].id;
+            console.log(`Found generate-docs run: ${runId}`);
+            core.setOutput('run_id', runId);
+            return runId;
+
       - name: Download documentation artifacts
         uses: actions/download-artifact@v4
         with:
-          # When triggered by workflow_run, this automatically downloads from that run
-          # For manual dispatch, downloads from the latest workflow run on the current branch
+          # When triggered by workflow_run, download from that run
+          # When manually triggered, download from the run we just found
           pattern: dynamo-docs-*
           path: ${{ env.DOCS_DIR }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ github.event.workflow_run.id || steps.find_run.outputs.run_id }}
 
       - name: Validate documentation artifacts
         run: |
