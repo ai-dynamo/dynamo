@@ -84,21 +84,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         inner_request = request["request"]
         sampling_params_dict = request["sampling_params"]
 
-        # Extract data_parallel_rank (explicit None check to preserve dp_rank=0)
-        if (
-            "data_parallel_rank" in request
-            and request["data_parallel_rank"] is not None
-        ):
-            data_parallel_rank = request["data_parallel_rank"]
-        elif (
-            "data_parallel_rank" in inner_request
+        # Extract data_parallel_rank from inner request (explicit None check to preserve dp_rank=0)
+        data_parallel_rank = (
+            inner_request.get("data_parallel_rank")
+            if "data_parallel_rank" in inner_request
             and inner_request["data_parallel_rank"] is not None
-        ):
-            data_parallel_rank = inner_request["data_parallel_rank"]
-        elif "dp_rank" in inner_request and inner_request["dp_rank"] is not None:
-            data_parallel_rank = inner_request["dp_rank"]
-        else:
-            data_parallel_rank = None
+            else None
+        )
 
         input_param = self._get_input_param(inner_request)
 
@@ -114,7 +106,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         if data_parallel_rank is not None:
             generate_kwargs["data_parallel_rank"] = data_parallel_rank
-            logging.debug(f"Using dp_rank={data_parallel_rank} for prefill")
+            logging.info(f"Prefill using dp_rank={data_parallel_rank}")
 
         results = await self.engine.async_generate(**generate_kwargs)
 

@@ -145,15 +145,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         f"Router selected: worker={worker_id}, dp_rank={prefill_dp_rank}, overlap={overlap}"
                     )
                 else:
-                    # Backward compatibility: (worker_id, overlap)
+                    # Fallback for older router versions (2-tuple response)
                     worker_id, overlap = result_data
                     prefill_dp_rank = None
-                    logging.debug(
-                        f"Router selected: worker={worker_id}, overlap={overlap}"
-                    )
                     if not hasattr(self, "_dp_routing_unavailable_warned"):
                         logging.warning(
-                            "Router not returning dp_rank - DP-aware routing unavailable"
+                            "Router returned 2-tuple, DP routing unavailable (update router)"
                         )
                         self._dp_routing_unavailable_warned = True
 
@@ -163,16 +160,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     sampling_params=sampling_params,
                 ).model_dump()
 
-                # Inject dp_rank after serialization (Pydantic drops unknown fields)
-                if prefill_dp_rank is not None:
-                    prefill_request_dict[
-                        "dp_rank"
-                    ] = prefill_dp_rank  # For Dynamo routing
-                    if isinstance(prefill_request_dict.get("request"), dict):
-                        prefill_request_dict["request"]["dp_rank"] = prefill_dp_rank
-                        prefill_request_dict["request"][
-                            "data_parallel_rank"
-                        ] = prefill_dp_rank
+                # Inject dp_rank into inner request after serialization (Pydantic drops unknown fields)
+                if prefill_dp_rank is not None and isinstance(
+                    prefill_request_dict.get("request"), dict
+                ):
+                    # SGLang engine reads data_parallel_rank from inner request
+                    prefill_request_dict["request"][
+                        "data_parallel_rank"
+                    ] = prefill_dp_rank
+                    logging.info(f"Routing to prefill dp_rank={prefill_dp_rank}")
 
                 prefill_stream = await self.prefill_client.direct(
                     prefill_request_dict,
