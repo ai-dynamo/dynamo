@@ -112,7 +112,7 @@ impl Client {
 
     /// Get a clone of the underlying [`etcd_client::Client`] instance.
     /// This returns a clone since the client is behind an RwLock.
-    pub fn etcd_client(&self) -> etcd_client::Client {
+    fn etcd_client(&self) -> etcd_client::Client {
         self.connector.get_client()
     }
 
