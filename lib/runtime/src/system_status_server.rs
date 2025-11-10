@@ -228,8 +228,7 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     (StatusCode::OK, response)
 }
 
-/// Metadata handler for Kubernetes discovery backend
-/// Returns the discovery metadata registered by this pod
+/// Metadata handler
 #[tracing::instrument(skip_all, level = "trace")]
 async fn metadata_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Check if discovery metadata is available
@@ -239,7 +238,7 @@ async fn metadata_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
             tracing::debug!("Metadata endpoint called but no discovery metadata available");
             return (
                 StatusCode::NOT_FOUND,
-                "Discovery metadata not available (not using Kubernetes backend)".to_string(),
+                "Discovery metadata not available".to_string(),
             )
                 .into_response();
         }

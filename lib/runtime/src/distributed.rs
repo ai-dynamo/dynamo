@@ -99,39 +99,18 @@ impl DistributedRuntime {
         let (discovery_client, discovery_metadata) = match discovery_backend.as_str() {
             "kubernetes" => {
                 tracing::info!("Initializing Kubernetes discovery backend");
-
-                // Create shared metadata store
                 let metadata = Arc::new(tokio::sync::RwLock::new(
                     crate::discovery::DiscoveryMetadata::new(),
                 ));
-
-                // Create Kubernetes discovery client
-                match crate::discovery::KubeDiscoveryClient::new(
+                let client = crate::discovery::KubeDiscoveryClient::new(
                     metadata.clone(),
                     runtime.primary_token(),
                 )
                 .await
-                {
-                    Ok(client) => {
-                        tracing::info!("Kubernetes discovery client initialized successfully");
-                        (Arc::new(client) as Arc<dyn Discovery>, Some(metadata))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to initialize Kubernetes discovery client: {}. Falling back to KV store.",
-                            e
-                        );
-                        // Fallback to KV store
-                        use crate::discovery::KVStoreDiscovery;
-                        (
-                            Arc::new(KVStoreDiscovery::new(
-                                store.clone(),
-                                runtime.primary_token(),
-                            )) as Arc<dyn Discovery>,
-                            None,
-                        )
-                    }
-                }
+                .inspect_err(
+                    |err| tracing::error!(%err, "Failed to initialize Kubernetes discovery client"),
+                )?;
+                (Arc::new(client) as Arc<dyn Discovery>, Some(metadata))
             }
             _ => {
                 tracing::info!("Initializing KV store discovery backend");
