@@ -40,8 +40,15 @@ const (
 	KubeLabelDynamoComponentType        = "nvidia.com/dynamo-component-type"
 	KubeLabelDynamoSubComponentType     = "nvidia.com/dynamo-sub-component-type"
 
-	KubeLabelValueFalse = "false"
-	KubeLabelValueTrue  = "true"
+	// Labels for Kubernetes service discovery (used on Services to propagate to EndpointSlices)
+	// These use the dynamo.nvidia.com domain and match what kube.rs expects
+	KubeLabelDynamoDiscovery          = "dynamo.nvidia.com/discovery"
+	KubeLabelDynamoDiscoveryNamespace = "dynamo.nvidia.com/namespace"
+	KubeLabelDynamoDiscoveryComponent = "dynamo.nvidia.com/component"
+
+	KubeLabelValueFalse   = "false"
+	KubeLabelValueTrue    = "true"
+	KubeLabelValueEnabled = "enabled"
 
 	KubeLabelDynamoComponentPod = "nvidia.com/dynamo-component-pod"
 
@@ -50,7 +57,7 @@ const (
 	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar        = "DYN_NAMESPACE"
 	DynamoComponentEnvVar        = "DYN_COMPONENT"
-	DynamoDiscoverBackendEnvVar  = "DYN_DISCOVER_BACKEND"
+	DynamoDiscoverBackendEnvVar  = "DYN_DISCOVERY_BACKEND"
 
 	GlobalDynamoNamespace = "dynamo"
 

@@ -1285,10 +1285,16 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	// }
 
 	selector := map[string]string{
+		// Selector labels to match pods (using nvidia.com/dynamo-* labels)
 		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,
 		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace, // TODO: nilness check
 	}
-	labels := selector
+	labels := map[string]string{
+		// Discovery labels that propagate to EndpointSlices (kube.rs expects these)
+		commonconsts.KubeLabelDynamoDiscovery:          commonconsts.KubeLabelValueEnabled,
+		commonconsts.KubeLabelDynamoDiscoveryNamespace: *opt.dynamoComponentDeployment.Spec.DynamoNamespace, // TODO: nilness check
+		commonconsts.KubeLabelDynamoDiscoveryComponent: opt.dynamoComponentDeployment.Spec.ComponentType,
+	}
 
 	var servicePort corev1.ServicePort
 	if opt.dynamoComponentDeployment.Spec.ComponentType == consts.ComponentTypeFrontend {

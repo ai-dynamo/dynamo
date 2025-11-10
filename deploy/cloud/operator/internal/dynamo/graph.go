@@ -421,9 +421,16 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      componentName,
 			Namespace: dynamoDeployment.Namespace,
+			Labels: map[string]string{
+				// Discovery labels that propagate to EndpointSlices (kube.rs expects these)
+				commonconsts.KubeLabelDynamoDiscovery:          commonconsts.KubeLabelValueEnabled,
+				commonconsts.KubeLabelDynamoDiscoveryNamespace: *component.DynamoNamespace, // TODO: nilness check
+				commonconsts.KubeLabelDynamoDiscoveryComponent: component.ComponentType,
+			},
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
+				// Selector labels to match pods (using nvidia.com/dynamo-* labels)
 				commonconsts.KubeLabelDynamoComponentType: component.ComponentType,
 				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace, // TODO: nilness check
 			},
