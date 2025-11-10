@@ -14,9 +14,9 @@
 # limitations under the License.
 #
 # Dynamo docs publish workflow
-# - Automatically runs after successful generate-docs workflow on main
-# - Pushes to main: publish to S3 under 'dev' (development docs)
-# - Version tags: publish to S3 under 'archive/vX.Y[.Z][suffix]' AND update 'latest' to match the release
+# - Automatically runs after successful generate-docs workflow completes
+# - Main branch: publish to S3 under 'dev' (development docs)
+# - Tagged commits: publish to S3 under 'archive/vX.Y[.Z][suffix]' AND update 'latest' to match the release
 # - Akamai: always flushes cache for the target path after publish
 # - Repo variable required: DOCS_PUBLISH_S3_TARGET_PATH (prefix under s3://brightspot-assets-prod/developer/docs)
 # - Secrets required: AWS credentials (role or keys), AKAMAI_* EdgeGrid creds
@@ -33,15 +33,11 @@ on:
       - completed
     branches:
       - main
-  push:
-    branches:
       - nealv/docs_build  # TEMPORARY: for testing only
-    tags:
-      - '*'
   workflow_dispatch:
     inputs:
-      run_id:
-        description: 'Optional: Specific generate-docs run ID to use for artifacts'
+      version:
+        description: 'Optional: Version to publish (e.g., 1.2.3). If not provided, publishes as dev.'
         required: false
         type: string
 
@@ -82,74 +78,27 @@ jobs:
           }
 
       - name: Download documentation artifacts
-        id: download
-        uses: actions/github-script@v7
+        uses: actions/download-artifact@v4
         with:
-          script: |
-            const fs = require('fs');
+          # When triggered by workflow_run, this automatically downloads from that run
+          # For manual dispatch, downloads from the latest workflow run on the current branch
+          pattern: dynamo-docs-*
+          path: ${{ env.DOCS_DIR }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
 
-            // Determine which run to get artifacts from
-            let runId = context.payload.workflow_run?.id ||
-                       context.payload.inputs?.run_id;
-
-            if (context.eventName === 'workflow_run') {
-              // Triggered by generate-docs workflow completion
-              runId = context.payload.workflow_run.id;
-              console.log(`Using artifacts from triggering workflow run: ${runId}`);
-            } else if (context.eventName === 'workflow_dispatch' && context.payload.inputs?.run_id) {
-              // Manual trigger with specific run ID
-              runId = context.payload.inputs.run_id;
-              console.log(`Using artifacts from specified run: ${runId}`);
-            } else {
-              // For tag pushes or manual trigger without run_id, find the latest successful generate-docs run
-              const runs = await github.rest.actions.listWorkflowRuns({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id: 'generate-docs.yml',
-                branch: 'main',
-                status: 'success',
-                per_page: 1
-              });
-
-              if (runs.data.workflow_runs.length === 0) {
-                throw new Error('No successful generate-docs workflow runs found');
-              }
-              runId = runs.data.workflow_runs[0].id;
-            }
-
-            console.log(`Using artifacts from run: ${runId}`);
-
-            // Get and download the docs artifact
-            const { data: artifacts } = await github.rest.actions.listWorkflowRunArtifacts({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              run_id: runId
-            });
-
-            const artifact = artifacts.artifacts.find(a => a.name.startsWith('dynamo-docs-'));
-            if (!artifact) {
-              throw new Error(`No documentation artifact found in run ${runId}`);
-            }
-
-            console.log(`Found artifact: ${artifact.name} (${artifact.size_in_bytes} bytes)`);
-
-            const { data } = await github.rest.actions.downloadArtifact({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              artifact_id: artifact.id,
-              archive_format: 'zip'
-            });
-
-            fs.writeFileSync('/tmp/artifact.zip', Buffer.from(data));
-            core.setOutput('artifact_name', artifact.name);
-            core.setOutput('run_id', runId);
-            return `Downloaded ${artifact.name}`;
-
-      - name: Extract documentation artifacts
+      - name: Validate documentation artifacts
         run: |
-          echo "::notice::Extracting documentation from artifact: ${{ steps.download.outputs.artifact_name }}"
-          mkdir -p ${{ env.DOCS_DIR }}
-          unzip -q /tmp/artifact.zip -d ${{ env.DOCS_DIR }}
+          # The artifact is downloaded into a subdirectory, move contents up one level
+          ARTIFACT_DIR=$(find "${{ env.DOCS_DIR }}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          if [[ -z "${ARTIFACT_DIR}" ]]; then
+            echo "::error::No artifact directory found"
+            exit 1
+          fi
+
+          echo "::notice::Moving contents from ${ARTIFACT_DIR} to ${{ env.DOCS_DIR }}"
+          mv "${ARTIFACT_DIR}"/* "${{ env.DOCS_DIR }}/"
+          rmdir "${ARTIFACT_DIR}"
 
           # Validate extraction
           if [[ ! -d "${{ env.DOCS_DIR }}" ]] || [[ -z "$(ls -A ${{ env.DOCS_DIR }})" ]]; then
@@ -178,18 +127,31 @@ jobs:
             exit 1
           fi
 
-          # Parse version from tag if present
+          # Determine version from various sources
           VERSION=""
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            TAG="${{ github.ref_name }}"
-            # Extract semantic version from tags like v1.2.3 or project-v1.2.3.post0
-            if [[ "${TAG}" =~ v([0-9]+(\.[0-9]+){1,2}([._-](post|rc|dev)[0-9]+)?) ]]; then
-              VERSION="${BASH_REMATCH[1]}"
-            fi
+
+          # Option 1: Manual dispatch with version input
+          if [[ -n "${{ inputs.version || '' }}" ]]; then
+            VERSION="${{ inputs.version }}"
+            echo "Using version from manual input: ${VERSION}"
+          # Option 2: Triggered by workflow_run - check if it was from a tag
+          elif [[ "${{ github.event.workflow_run.head_branch || '' }}" =~ ^v([0-9]+(\.[0-9]+){1,2}([._-](post|rc|dev)[0-9]+)?)$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+            echo "Detected version from workflow_run tag: ${VERSION}"
+          # Option 3: Check commit message for version tag (e.g., for main branch releases)
+          elif [[ "${{ github.event.workflow_run.head_commit.message || '' }}" =~ version:\ *v?([0-9]+(\.[0-9]+){1,2}([._-](post|rc|dev)[0-9]+)?) ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+            echo "Detected version from commit message: ${VERSION}"
           fi
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "artifacts_path=${ARTIFACTS_PATH}" >> "$GITHUB_OUTPUT"
+
+          if [[ -n "${VERSION}" ]]; then
+            echo "::notice::Publishing version: ${VERSION}"
+          else
+            echo "::notice::Publishing as dev (no version detected)"
+          fi
 
       - name: Normalize S3 path
         id: paths
@@ -214,7 +176,7 @@ jobs:
           S3_ROOT: ${{ steps.paths.outputs.s3_root }}
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
           VERSION: ${{ steps.vars.outputs.version }}
-          COMMIT_MSG: ${{ github.event.head_commit.message || '' }}
+          COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -246,7 +208,7 @@ jobs:
       - name: Publish dev (main branch)
         # Publish main branch to 'dev' directory for development docs
         # Skip if commit message contains '/skip-dev' anywhere
-        if: ${{ startsWith(github.ref, 'refs/heads/main') && !contains(github.event.head_commit.message, '/skip-dev') }}
+        if: ${{ github.event.workflow_run.head_branch == 'main' && !contains(github.event.workflow_run.head_commit.message, '/skip-dev') }}
         working-directory: ${{ env.DOCS_DIR }}
         id: publish_dev
         env:
@@ -376,8 +338,7 @@ jobs:
         env:
           VERSION: ${{ steps.vars.outputs.version }}
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
-          ARTIFACT_NAME: ${{ steps.download.outputs.artifact_name }}
-          RUN_ID: ${{ steps.download.outputs.run_id }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id || 'N/A' }}
           PUBLISHED_VERSION: ${{ steps.publish_version.outputs.published || 'false' }}
           PUBLISHED_LATEST: ${{ steps.publish_version.outputs.published_latest || 'false' }}
           PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
@@ -386,8 +347,11 @@ jobs:
           echo "## 📚 Documentation Publishing Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Source" >> $GITHUB_STEP_SUMMARY
-          echo "- **Artifact:** \`${ARTIFACT_NAME}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **From Run:** [#${RUN_ID}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${RUN_ID})" >> $GITHUB_STEP_SUMMARY
+          if [[ "${WORKFLOW_RUN_ID}" != "N/A" ]]; then
+            echo "- **From Workflow Run:** [#${WORKFLOW_RUN_ID}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${WORKFLOW_RUN_ID})" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Trigger:** Manual dispatch" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Published To" >> $GITHUB_STEP_SUMMARY
           if [[ "${PUBLISHED_VERSION}" == "true" ]]; then
