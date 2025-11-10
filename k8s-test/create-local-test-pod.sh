@@ -83,7 +83,7 @@ spec:
       httpGet:
         path: /
         port: 80
-      initialDelaySeconds: 2
+      initialDelaySeconds: 30
       periodSeconds: 5
 ---
 apiVersion: v1
@@ -95,6 +95,7 @@ metadata:
     app: dynamo-local-test
     dynamo.nvidia.com/namespace: "$DYNAMO_NAMESPACE"
     dynamo.nvidia.com/component: "$DYNAMO_COMPONENT"
+    dynamo.nvidia.com/discovery: "enabled"
 spec:
   selector:
     app: dynamo-local-test
