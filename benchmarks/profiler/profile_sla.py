@@ -20,6 +20,7 @@ import os
 
 import numpy as np
 import yaml
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
 from benchmarks.profiler.utils.aiperf import benchmark_decode, benchmark_prefill
 from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
@@ -50,7 +51,6 @@ from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -77,12 +77,9 @@ async def run_profile(args):
             logger.info(
                 "MoE (Mixture of Experts) model profiling, sweeping TEP size for prefill and DEP size for decode"
             )
-            assert args.backend in [
-                "sglang"
-            ], "MoE model support is only available for SGLang"
-            assert (
-                not args.use_ai_configurator
-            ), "MoE model is not supported in ai-configurator"
+            assert args.backend in ["sglang"], (
+                "MoE model support is only available for SGLang"
+            )
         else:
             logger.info(
                 "Standard dense model profiling, sweeping TP size for both prefill and decode"
@@ -149,10 +146,18 @@ async def run_profile(args):
                 raise ValueError(
                     "Must provide --aic-system when using --use-ai-configurator."
                 )
+
+            # Fallback to args.model if aic_hf_id is not provided
             if not args.aic_hf_id:
-                raise ValueError(
-                    "Must provide --aic-hf-id when using --use-ai-configurator."
-                )
+                if args.model:
+                    logger.info(
+                        f"--aic-hf-id not provided, using --model ({args.model}) as HuggingFace ID for AI configurator"
+                    )
+                    args.aic_hf_id = args.model
+                else:
+                    raise ValueError(
+                        "Must provide --aic-hf-id or --model when using --use-ai-configurator."
+                    )
 
             logger.info("Will use aiconfigurator to estimate perf.")
             ai_configurator_perf_estimator = AIConfiguratorPerfEstimator(

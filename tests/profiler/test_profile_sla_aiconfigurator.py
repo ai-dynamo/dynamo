@@ -59,11 +59,10 @@ class TestProfileSlaAiconfigurator:
 
     @pytest.mark.pre_merge
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "missing_arg", ["aic_system", "aic_hf_id", "aic_backend_version"]
-    )
+    @pytest.mark.parametrize("missing_arg", ["aic_system", "aic_hf_id"])
     async def test_aiconfigurator_missing_args(self, trtllm_args, missing_arg):
         # Check that validation error happens when a required arg is missing.
+        # Note: aic_backend_version is optional - when None, auto-detects latest version
         setattr(trtllm_args, missing_arg, None)
         with pytest.raises(ValueError):
             await run_profile(trtllm_args)
