@@ -20,7 +20,6 @@ import os
 
 import numpy as np
 import yaml
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
 from benchmarks.profiler.utils.aiperf import benchmark_decode, benchmark_prefill
 from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
@@ -51,6 +50,7 @@ from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -77,9 +77,9 @@ async def run_profile(args):
             logger.info(
                 "MoE (Mixture of Experts) model profiling, sweeping TEP size for prefill and DEP size for decode"
             )
-            assert args.backend in ["sglang"], (
-                "MoE model support is only available for SGLang"
-            )
+            assert args.backend in [
+                "sglang"
+            ], "MoE model support is only available for SGLang"
         else:
             logger.info(
                 "Standard dense model profiling, sweeping TP size for both prefill and decode"
