@@ -38,7 +38,7 @@ set -e
 warmup_isl=$chosen_isl
 warmup_osl=$chosen_osl
 warmup_req_rate=250
-warmup_concurrency_list=(1 4 8 32 64 128 256 1024 4096)
+warmup_concurrency_list=(1 4 8 32 64 128 256 512 1024 4096)
 
 for warmup_concurrency in "${warmup_concurrency_list[@]}"
 do
