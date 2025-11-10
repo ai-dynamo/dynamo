@@ -432,7 +432,7 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    fn new(event_loop: PyObject, store_kv: String, is_static: bool) -> PyResult<Self> {
+    fn new(event_loop: PyObject, store_kv: String) -> PyResult<Self> {
         let selected_kv_store: KeyValueStoreSelect = store_kv.parse().map_err(to_pyerr)?;
 
         // Try to get existing runtime first, create new Worker only if needed
@@ -463,22 +463,14 @@ impl DistributedRuntime {
             });
         }
 
-        let inner =
-            if is_static {
-                runtime.secondary().block_on(
-                    rs::DistributedRuntime::from_settings_without_discovery(runtime),
-                )
-            } else {
-                let config = DistributedConfig {
-                    store_backend: selected_kv_store,
-                    is_static: false,
-                    nats_config: dynamo_runtime::transports::nats::ClientOptions::default(),
-                };
-                runtime
-                    .secondary()
-                    .block_on(rs::DistributedRuntime::new(runtime, config))
-            };
-        let inner = inner.map_err(to_pyerr)?;
+        let runtime_config = DistributedConfig {
+            store_backend: selected_kv_store,
+            nats_config: dynamo_runtime::transports::nats::ClientOptions::default(),
+        };
+        let inner = runtime
+            .secondary()
+            .block_on(rs::DistributedRuntime::new(runtime, runtime_config))
+            .map_err(to_pyerr)?;
 
         Ok(DistributedRuntime { inner, event_loop })
     }
@@ -867,11 +859,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        if self.router.client.is_static() {
-            self.r#static(py, request, annotated, context)
-        } else {
-            self.random(py, request, annotated, context)
-        }
+        self.random(py, request, annotated, context)
     }
 
     /// Send a request to the next endpoint in a round-robin fashion.
@@ -981,45 +969,6 @@ impl Client {
                     .direct(request_ctx, instance_id)
                     .await
                     .map_err(to_pyerr)?,
-            };
-
-            tokio::spawn(process_stream(stream, tx));
-
-            Ok(AsyncResponseStream {
-                rx: Arc::new(Mutex::new(rx)),
-                annotated,
-            })
-        })
-    }
-
-    /// Directly send a request to a pre-defined static worker
-    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
-    fn r#static<'p>(
-        &self,
-        py: Python<'p>,
-        request: PyObject,
-        annotated: Option<bool>,
-        context: Option<context::Context>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
-        let request_ctx = create_request_context(request, &context);
-        let annotated = annotated.unwrap_or(false);
-
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let client = self.router.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = match context {
-                Some(context) => {
-                    // Always instrument with appropriate span (none if no trace context)
-                    let span = get_span_for_context(&context, "static");
-                    client
-                        .r#static(request_ctx)
-                        .instrument(span)
-                        .await
-                        .map_err(to_pyerr)?
-                }
-                _ => client.r#static(request_ctx).await.map_err(to_pyerr)?,
             };
 
             tokio::spawn(process_stream(stream, tx));

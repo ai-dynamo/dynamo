@@ -75,7 +75,7 @@ async def worker():
     config = parse_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv, False)
+    runtime = DistributedRuntime(loop, config.store_kv)
 
     await configure_ports(config)
     overwrite_args(config)

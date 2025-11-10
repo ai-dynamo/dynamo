@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::component::Component;
+use crate::component::{Component, Instance};
 use crate::pipeline::PipelineError;
 use crate::storage::key_value_store::{
     EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, KeyValueStoreSelect,
@@ -9,7 +9,7 @@ use crate::storage::key_value_store::{
 };
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
-    component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
+    component::{self, ComponentBuilder, Endpoint, Namespace},
     discovery::Discovery,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
@@ -24,6 +24,7 @@ use crate::runtime::Runtime;
 
 use async_once_cell::OnceCell;
 use std::sync::{Arc, OnceLock, Weak};
+use tokio::sync::watch::Receiver;
 
 use anyhow::Result;
 use derive_getters::Dissolve;
@@ -31,6 +32,8 @@ use figment::error;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+type InstanceMap = HashMap<Endpoint, Weak<Receiver<Vec<Instance>>>>;
 
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
 /// communication protocols and transports.
@@ -60,11 +63,7 @@ pub struct DistributedRuntime {
     // paths in etcd to a minimum.
     component_registry: component::Registry,
 
-    // Will only have static components that are not discoverable via etcd, they must be know at
-    // startup. Will not start etcd.
-    is_static: bool,
-
-    instance_sources: Arc<tokio::sync::Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
+    instance_sources: Arc<tokio::sync::Mutex<InstanceMap>>,
 
     // Health Status
     system_health: Arc<parking_lot::Mutex<SystemHealth>>,
@@ -95,12 +94,12 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let (selected_kv_store, nats_config, is_static) = config.dissolve();
+        let (selected_kv_store, nats_config) = config.dissolve();
 
         let runtime_clone = runtime.clone();
 
-        let (etcd_client, store) = match (is_static, selected_kv_store) {
-            (false, KeyValueStoreSelect::Etcd(etcd_config)) => {
+        let (etcd_client, store) = match selected_kv_store {
+            KeyValueStoreSelect::Etcd(etcd_config) => {
                 let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
                     // The returned error doesn't show because of a dropped runtime error, so
                     // log it first.
@@ -108,10 +107,8 @@ impl DistributedRuntime {
                 let store = KeyValueStoreManager::etcd(etcd_client.clone());
                 (Some(etcd_client), store)
             }
-            (false, KeyValueStoreSelect::File(root)) => (None, KeyValueStoreManager::file(root)),
-            (true, _) | (false, KeyValueStoreSelect::Memory) => {
-                (None, KeyValueStoreManager::memory())
-            }
+            KeyValueStoreSelect::File(root) => (None, KeyValueStoreManager::file(root)),
+            KeyValueStoreSelect::Memory => (None, KeyValueStoreManager::memory()),
         };
 
         let nats_client = Some(nats_config.clone().connect().await?);
@@ -181,7 +178,6 @@ impl DistributedRuntime {
             discovery_client,
             discovery_metadata,
             component_registry: component::Registry::new(),
-            is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
@@ -283,13 +279,7 @@ impl DistributedRuntime {
     }
 
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings(false);
-        Self::new(runtime, config).await
-    }
-
-    // Call this if you are using static workers that do not need etcd-based discovery.
-    pub async fn from_settings_without_discovery(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings(true);
+        let config = DistributedConfig::from_settings();
         Self::new(runtime, config).await
     }
 
@@ -323,7 +313,7 @@ impl DistributedRuntime {
 
     /// Create a [`Namespace`]
     pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
-        Namespace::new(self.clone(), name.into(), self.is_static)
+        Namespace::new(self.clone(), name.into())
     }
 
     /// Returns the discovery interface for service registration and discovery
@@ -380,7 +370,7 @@ impl DistributedRuntime {
         self.runtime.graceful_shutdown_tracker()
     }
 
-    pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
+    pub fn instance_sources(&self) -> Arc<Mutex<InstanceMap>> {
         self.instance_sources.clone()
     }
 }
@@ -389,15 +379,13 @@ impl DistributedRuntime {
 pub struct DistributedConfig {
     pub store_backend: KeyValueStoreSelect,
     pub nats_config: nats::ClientOptions,
-    pub is_static: bool,
 }
 
 impl DistributedConfig {
-    pub fn from_settings(is_static: bool) -> DistributedConfig {
+    pub fn from_settings() -> DistributedConfig {
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::default()),
             nats_config: nats::ClientOptions::default(),
-            is_static,
         }
     }
 
@@ -409,24 +397,26 @@ impl DistributedConfig {
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::new(etcd_config)),
             nats_config: nats::ClientOptions::default(),
-            is_static: false,
         }
     }
 }
 
 pub mod distributed_test_utils {
     //! Common test helper functions for DistributedRuntime tests
-    // TODO: Use in-memory DistributedRuntime for tests instead of full runtime when available.
 
     /// Helper function to create a DRT instance for integration-only tests.
     /// Uses from_current to leverage existing tokio runtime
-    /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings_without_discovery
+    /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings
     #[cfg(feature = "integration")]
-    pub async fn create_test_drt_async() -> crate::DistributedRuntime {
+    pub async fn create_test_drt_async() -> super::DistributedRuntime {
+        use crate::{storage::key_value_store::KeyValueStoreSelect, transports::nats};
+
         let rt = crate::Runtime::from_current().unwrap();
-        crate::DistributedRuntime::from_settings_without_discovery(rt)
-            .await
-            .unwrap()
+        let config = super::DistributedConfig {
+            store_backend: KeyValueStoreSelect::Memory,
+            nats_config: nats::ClientOptions::default(),
+        };
+        super::DistributedRuntime::new(rt, config).await.unwrap()
     }
 }
 
