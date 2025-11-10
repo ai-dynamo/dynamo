@@ -1076,3 +1076,82 @@ jobs:
         run: cat results.md
       - name: Upload results summary as job summary
         run: cat results.md >> $GITHUB_STEP_SUMMARY
+      - name: Upload results as artifact for Slack
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-results-summary
+          path: results.md
+          retention-days: 7
+
+  notify-slack:
+    name: Notify Slack
+    runs-on: gpu-l40-amd64
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !github.event.repository.fork
+    needs: results-summary
+    steps:
+      - name: Download results summary
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-results-summary
+          path: .
+        continue-on-error: true
+
+      - name: Send Slack notification
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set +x  # Prevent printing secrets.
+
+          # Ensure results.md exists
+          if [ ! -f results.md ]; then
+            echo "Results file not found, creating fallback message"
+            echo "Nightly CI Run: ${RUN_URL}" > results.md
+          fi
+
+          # Truncate large messages (Slack has ~40KB limit)
+          MAX_SIZE=30000
+          FILE_SIZE=$(wc -c < results.md)
+          if [ "$FILE_SIZE" -gt "$MAX_SIZE" ]; then
+            echo "Results file too large ($FILE_SIZE bytes), truncating..."
+            head -c 29000 results.md > results_truncated.md
+            printf "\n\n...(Results truncated. Full details: %s)" "$RUN_URL" >> results_truncated.md
+            mv results_truncated.md results.md
+          fi
+
+          # Safely encode message to JSON using jq
+          # Read file content and create proper JSON payload
+          PAYLOAD=$(jq -n --rawfile content results.md '{text: $content}')
+
+          # Send to Slack with retry logic
+          send_slack() {
+            local retries=3
+            local delay=5
+
+            for attempt in $(seq 1 $retries); do
+              echo "Sending Slack notification (attempt $attempt/$retries)..."
+
+              http_code=$(curl -s -w "%{http_code}" -o /tmp/slack_response.txt \
+                   -X POST \
+                   -H "Content-Type: application/json" \
+                   -d "$PAYLOAD" \
+                   "$SLACK_WEBHOOK_URL")
+
+              if [ "$http_code" = "200" ]; then
+                echo "Slack notification sent successfully"
+                return 0
+              else
+                echo "HTTP $http_code returned. Response: $(cat /tmp/slack_response.txt 2>/dev/null || echo 'N/A')"
+                if [ $attempt -lt $retries ]; then
+                  echo "Retrying in ${delay}s..."
+                  sleep $delay
+                fi
+              fi
+            done
+
+            echo "Warning: Slack notification failed after $retries attempts (non-blocking)"
+            return 0
+          }
+
+          send_slack || true
