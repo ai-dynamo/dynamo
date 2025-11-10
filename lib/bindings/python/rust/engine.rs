@@ -1,26 +1,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::context::{Context, callable_accepts_kwarg};
-use dynamo_runtime::logging::get_distributed_tracing_context;
+use std::sync::Arc;
+
+use anyhow::{Error, Result};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::{PyAny, PyErr};
 use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
-use std::sync::Arc;
+pub use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_util::sync::CancellationToken;
 
+use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
-    CancellationToken, Error, Result,
-    pipeline::{
-        AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn,
-        async_trait,
-    },
+    pipeline::{AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn},
     protocols::annotated::Annotated,
 };
-pub use serde::{Deserialize, Serialize};
+
+use super::context::{Context, callable_accepts_kwarg};
 
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -87,7 +87,7 @@ impl PythonAsyncEngine {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error> for PythonAsyncEngine
 where
     Req: Data + Serialize,
@@ -141,7 +141,7 @@ enum ResponseProcessingError {
     OffloadError(String),
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error>
     for PythonServerStreamingEngine
 where

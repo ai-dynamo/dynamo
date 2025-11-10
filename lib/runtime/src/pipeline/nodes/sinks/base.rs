@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::Error;
+use anyhow::Error;
 
 impl<Resp: PipelineIO> Default for SinkEdge<Resp> {
     fn default() -> Self {

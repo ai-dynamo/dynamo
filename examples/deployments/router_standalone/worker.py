@@ -20,7 +20,13 @@ import uuid
 from typing import AsyncGenerator, Optional
 
 import zmq
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    ObservabilityConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.inputs.data import TokensPrompt
 from vllm.outputs import RequestOutput
@@ -50,7 +56,7 @@ class MetricsPublisher(StatLoggerBase):
         # Send metrics over ZMQ
         metrics_data = {
             "num_waiting_reqs": scheduler_stats.num_waiting_reqs,
-            "gpu_cache_usage": scheduler_stats.gpu_cache_usage,
+            "kv_cache_usage": scheduler_stats.kv_cache_usage,
         }
 
         self.socket.send_json(metrics_data)
@@ -108,11 +114,14 @@ class VllmWorkers:
                 scheduler_cls="vllm.v1.core.sched.scheduler.Scheduler"
             )
 
+            observability_config = ObservabilityConfig()
+
             vllm_config = VllmConfig(
                 model_config=model_config,
                 cache_config=cache_config,
                 kv_events_config=kv_events_config,
                 scheduler_config=scheduler_config,
+                observability_config=observability_config,
             )
 
             self.llms.append(

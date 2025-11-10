@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use anyhow::{Error, Result, anyhow as error};
 use pyo3::prelude::*;
 
 use crate::{CancellationToken, engine::*, to_pyerr};
@@ -10,7 +11,6 @@ use crate::{CancellationToken, engine::*, to_pyerr};
 pub use dynamo_llm::endpoint_type::EndpointType;
 pub use dynamo_llm::http::service::{error as http_error, service_v2};
 pub use dynamo_runtime::{
-    Error, Result, error,
     pipeline::{AsyncEngine, Data, ManyOut, SingleIn, async_trait},
     protocols::annotated::Annotated,
 };

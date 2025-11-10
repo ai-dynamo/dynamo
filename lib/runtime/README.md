@@ -1,1 +1,1 @@
-../../docs/runtime/README.md
+../../docs/development/runtime-guide.md

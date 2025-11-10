@@ -35,6 +35,7 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
+from vllm.inputs.data import TokensPrompt
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from worker import VllmWorkers
 
@@ -78,9 +79,11 @@ class ServiceAPI:
                 or self.http_client is None
             ):
                 return ErrorResponse(
-                    message="Service not ready",
-                    type="service_unavailable",
-                    code=503,
+                    error={
+                        "message": "Service not ready",
+                        "type": "service_unavailable",
+                        "code": 503,
+                    },
                 )
 
             try:
@@ -95,9 +98,11 @@ class ServiceAPI:
                     max_tokens_value = request.max_tokens
                 else:
                     return ErrorResponse(
-                        message="Either max_tokens or max_completion_tokens must be specified",
-                        type="invalid_request_error",
-                        code=400,
+                        error={
+                            "message": "Either max_tokens or max_completion_tokens must be specified",
+                            "type": "invalid_request_error",
+                            "code": 400,
+                        },
                     )
 
                 # Use vLLM's preprocessing to convert chat to prompt
@@ -119,9 +124,9 @@ class ServiceAPI:
 
                 # Convert request to sampling parameters with our determined max_tokens
                 sampling_params = request.to_sampling_params(
-                    default_max_tokens=max_tokens_value,
+                    max_tokens=max_tokens_value,
                     logits_processor_pattern=None,
-                    default_sampling_params=None,
+                    default_sampling_params={},
                 )
 
                 # Get best worker using HTTP request to router
@@ -129,9 +134,11 @@ class ServiceAPI:
                 num_tokens = len(tokens)
                 if num_tokens == 0:
                     return ErrorResponse(
-                        message="Input prompt is empty",
-                        type="invalid_request_error",
-                        code=400,
+                        error={
+                            "message": "Input prompt is empty",
+                            "type": "invalid_request_error",
+                            "code": 400,
+                        }
                     )
 
                 # It is much preferred to communicate block hashes to the router instead of
@@ -161,9 +168,11 @@ class ServiceAPI:
                 except (httpx.RequestError, httpx.HTTPStatusError) as e:
                     logger.error(f"Router request failed: {e}")
                     return ErrorResponse(
-                        message="Router service unavailable",
-                        type="service_unavailable",
-                        code=503,
+                        error={
+                            "message": "Router service unavailable",
+                            "type": "service_unavailable",
+                            "code": 503,
+                        }
                     )
 
                 logger.info(f"Selected worker {best_worker_id} for request")
@@ -172,9 +181,13 @@ class ServiceAPI:
                 request_id = f"chatcmpl-{uuid.uuid4()}"
                 request_metadata = RequestResponseMetadata(request_id=request_id)
 
+                # Convert engine_prompt dict to TokensPrompt object
+                tokens_prompt = TokensPrompt(prompt_token_ids=tokens)
+                logger.info(f"Created TokensPrompt with {len(tokens)} tokens")
+
                 # Get the generator from the selected worker with sampling params
                 result_generator = self.workers.direct(
-                    engine_prompt, best_worker_id, sampling_params
+                    tokens_prompt, best_worker_id, sampling_params
                 )
                 assert request.stream
 
@@ -188,6 +201,7 @@ class ServiceAPI:
                         conversation,
                         self.tokenizer,
                         request_metadata,
+                        enable_force_include_usage=False,
                     ),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
@@ -195,7 +209,9 @@ class ServiceAPI:
 
             except Exception as e:
                 logger.error(f"Error processing request: {e}")
-                return ErrorResponse(message=str(e), type="internal_error", code=500)
+                return ErrorResponse(
+                    error={"message": str(e), "type": "internal_error", "code": 500}
+                )
 
     async def initialize_services(self):
         """Initialize workers, HTTP client, and OpenAI serving components"""

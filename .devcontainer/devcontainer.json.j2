@@ -29,7 +29,7 @@
                 // Disable automatic copying of .gitconfig to avoid errors
                 "dev.containers.copyGitConfig": false,
                 "terminal.integrated.defaultProfile.linux": "bash",
-                "terminal.integrated.cwd": "/home/ubuntu/dynamo",
+                "terminal.integrated.cwd": "/workspace",
 
                 "python.defaultInterpreterPath": "/opt/dynamo/venv/bin/python",
                 "python.linting.enabled": true,
@@ -38,7 +38,7 @@
                 "rust-analyzer.checkOnSave.command": "clippy",
                 "rust-analyzer.checkOnSave.enable": true,
                 "rust-analyzer.cargo.buildScripts.enable": true,
-                "rust-analyzer.cargo.targetDir": "/home/ubuntu/dynamo/.build/target",
+                "rust-analyzer.cargo.targetDir": "/workspace/target",
                 "rust-analyzer.procMacro.enable": true,
                 "rust-analyzer.completion.autoimport.enable": true,
 
@@ -56,16 +56,10 @@
             }
         }
     },
-    "workspaceFolder": "/home/ubuntu/dynamo",
-    "workspaceMount": "source=${localWorkspaceFolder},target=/home/ubuntu/dynamo,type=bind,consistency=cached",
+    "workspaceFolder": "/workspace",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
     "userEnvProbe": "interactiveShell",
-    "postCreateCommand": "/bin/bash /home/ubuntu/dynamo/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
-    "containerEnv": {
-        "DYNAMO_HOME": "/home/ubuntu/dynamo",
-        "CARGO_HOME": "/home/ubuntu/dynamo/.build/.cargo",
-        "RUSTUP_HOME": "/home/ubuntu/dynamo/.build/.rustup",
-        "CARGO_TARGET_DIR": "/home/ubuntu/dynamo/.build/target"
-    },
+    "postCreateCommand": "/bin/bash /workspace/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
     "remoteEnv": {
         // Optional convenience tokens passed from host. SSH agent is forwarded via your IDE setting, not here by default.
         "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",

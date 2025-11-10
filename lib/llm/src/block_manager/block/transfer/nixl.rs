@@ -4,7 +4,7 @@
 use super::*;
 
 use anyhow::Result;
-use nixl_sys::{MemoryRegion, NixlDescriptor, XferDescList};
+use nixl_sys::{MemoryRegion, NixlDescriptor, XferDescList, XferStatus};
 use std::future::Future;
 
 fn append_xfer_request<Source, Destination>(
@@ -109,14 +109,12 @@ where
         .storage_type()
         .nixl_mem_type();
 
-    let mut src_dl = XferDescList::new(src_mem_type, false)?;
-    let mut dst_dl = XferDescList::new(dst_mem_type, false)?;
+    let mut src_dl = XferDescList::new(src_mem_type)?;
+    let mut dst_dl = XferDescList::new(dst_mem_type)?;
 
     for (src, dst) in src.iter().zip(dst.iter_mut()) {
         append_xfer_request(src, dst, &mut src_dl, &mut dst_dl)?;
     }
-
-    debug_assert!(!src_dl.has_overlaps()? && !dst_dl.has_overlaps()?);
 
     let xfer_req = nixl_agent.create_xfer_req(
         transfer_type.as_xfer_op(),
@@ -137,8 +135,10 @@ where
 
             loop {
                 match nixl_agent.get_xfer_status(&xfer_req) {
-                    Ok(false) => break, // Transfer is complete.
-                    Ok(true) => tokio::time::sleep(std::time::Duration::from_millis(5)).await, // Transfer is still in progress.
+                    Ok(XferStatus::Success) => break, // Transfer is complete.
+                    Ok(XferStatus::InProgress) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await
+                    } // Transfer is still in progress.
                     Err(e) => {
                         tracing::error!("Error getting transfer status: {}", e);
                         break;

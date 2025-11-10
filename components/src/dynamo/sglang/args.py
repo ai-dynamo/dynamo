@@ -16,6 +16,7 @@ from sglang.srt.server_args import ServerArgs
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import register_encoder
+from dynamo.llm import fetch_llm
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang import __version__
 
@@ -92,6 +93,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": None,
         "help": "Dump debug config to the specified file path. If not specified, the config will be dumped to stdout at INFO level.",
     },
+    "store-kv": {
+        "flags": ["--store-kv"],
+        "type": str,
+        "default": os.environ.get("DYN_STORE_KV", "etcd"),
+        "help": "Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    },
 }
 
 
@@ -101,6 +108,7 @@ class DynamoArgs:
     component: str
     endpoint: str
     migration_limit: int
+    store_kv: str
 
     # tool and reasoning parser options
     tool_call_parser: Optional[str] = None
@@ -203,8 +211,9 @@ def _set_parser(
         return dynamo_str
 
 
-def parse_args(args: list[str]) -> Config:
+async def parse_args(args: list[str]) -> Config:
     """Parse CLI arguments and return combined configuration.
+    Download the model if necessary.
 
     Args:
         args: Command-line argument strings.
@@ -316,12 +325,18 @@ def parse_args(args: list[str]) -> Config:
         expanded_template_path = os.path.expandvars(
             os.path.expanduser(parsed_args.custom_jinja_template)
         )
+        # Validate custom Jinja template file exists
+        if not os.path.isfile(expanded_template_path):
+            raise FileNotFoundError(
+                f"Custom Jinja template file not found: {expanded_template_path}"
+            )
 
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
         component=parsed_component_name,
         endpoint=parsed_endpoint_name,
         migration_limit=parsed_args.migration_limit,
+        store_kv=parsed_args.store_kv,
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
         custom_jinja_template=expanded_template_path,
@@ -333,6 +348,14 @@ def parse_args(args: list[str]) -> Config:
         dump_config_to=parsed_args.dump_config_to,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
+
+    # TODO: sglang downloads the model in `from_cli_args`, so we need to do it here.
+    # That's unfortunate because `parse_args` isn't the right place for this. Fix.
+    model_path = parsed_args.model_path
+    if not parsed_args.served_model_name:
+        parsed_args.served_model_name = model_path
+    if not os.path.exists(model_path):
+        parsed_args.model_path = await fetch_llm(model_path)
 
     server_args = ServerArgs.from_cli_args(parsed_args)
 

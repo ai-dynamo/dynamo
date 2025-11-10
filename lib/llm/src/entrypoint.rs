@@ -59,6 +59,7 @@ pub enum EngineConfig {
         engine: ExecutionContext,
         model: Box<LocalModel>,
         is_static: bool,
+        is_prefill: bool,
     },
 }
 

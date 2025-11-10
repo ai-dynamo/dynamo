@@ -76,6 +76,8 @@ use std::{
 
 use cudarc::driver::{CudaContext, sys};
 
+use crate::block_manager::numa_allocator;
+
 /// Trait for [Storage] types that can be accessed by CUDA
 pub trait CudaAccessible: Storage {}
 
@@ -176,10 +178,27 @@ impl PinnedStorage {
         unsafe {
             ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
-            let ptr = cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
-                .map_err(StorageError::Cuda)?;
+            // Try NUMA-aware allocation if enabled, otherwise use direct allocation
+            let ptr = if numa_allocator::is_numa_enabled() {
+                let device_id = ctx.cu_device() as u32;
+                match numa_allocator::worker_pool::NumaWorkerPool::global()
+                    .allocate_pinned_for_gpu(size, device_id)
+                {
+                    Ok(ptr) => ptr,
+                    Err(e) => {
+                        tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
+                        cudarc::driver::result::malloc_host(
+                            size,
+                            sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+                        )
+                        .map_err(StorageError::Cuda)? as *mut u8
+                    }
+                }
+            } else {
+                cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
+                    .map_err(StorageError::Cuda)? as *mut u8
+            };
 
-            let ptr = ptr as *mut u8;
             assert!(!ptr.is_null(), "Failed to allocate pinned memory");
             assert!(ptr.is_aligned(), "Pinned memory is not aligned");
             assert!(size < isize::MAX as usize);

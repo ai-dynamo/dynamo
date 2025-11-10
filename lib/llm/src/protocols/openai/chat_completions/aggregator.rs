@@ -157,7 +157,7 @@ impl DeltaAggregator {
                                 });
                         // Append content if available.
                         if let Some(content) = &choice.delta.content {
-                            state_choice.text.push_str(content.trim_end());
+                            state_choice.text.push_str(content);
                         }
 
                         if let Some(reasoning_content) = &choice.delta.reasoning_content {
@@ -543,6 +543,53 @@ mod tests {
             choice.logprobs.as_ref().unwrap().content.as_ref().unwrap()[1].logprob,
             -0.2
         );
+    }
+
+    #[tokio::test]
+    async fn test_preserves_intermediate_whitespace_chunks() {
+        // This validates behavior before/after removing trim_end():
+        // If a whitespace-only chunk (" ") arrives between tokens, it must be preserved.
+        // With trim_end(), that chunk was dropped, yielding "Helloworld" instead of "Hello world".
+
+        let annotated_delta1 = create_test_delta(
+            0,
+            "Hello",
+            Some(dynamo_async_openai::types::Role::User),
+            None,
+            None,
+            None,
+        );
+        // A whitespace-only chunk
+        let annotated_delta2 = create_test_delta(0, " ", None, None, None, None);
+        let annotated_delta3 = create_test_delta(
+            0,
+            "world",
+            None,
+            Some(dynamo_async_openai::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![
+            annotated_delta1,
+            annotated_delta2,
+            annotated_delta3,
+        ]));
+
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        assert_eq!(choice.index, 0);
+        assert_eq!(choice.message.content.as_deref(), Some("Hello world"));
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::Stop)
+        );
+        assert_eq!(choice.message.role, dynamo_async_openai::types::Role::User);
     }
 
     #[allow(deprecated)]

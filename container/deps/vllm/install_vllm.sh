@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-VLLM_REF="v0.10.2"
+VLLM_REF="v0.11.0"
 
 # Basic Configurations
 ARCH=$(uname -m)
@@ -29,7 +29,7 @@ CUDA_VERSION="12.8" # For DEEPGEMM
 # These flags are applicable when installing vLLM from source code
 EDITABLE=true
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
-FLASHINF_REF="v0.3.0"
+FLASHINF_REF="v0.3.1"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -131,16 +131,14 @@ git clone $VLLM_GIT_URL vllm
 cd vllm
 git checkout $VLLM_REF
 
-# TODO remove in future vLLM release, re-instate ignore torch script
-# https://github.com/vllm-project/vllm/pull/24729
-GIT_COMMITTER_NAME="Container Build" GIT_COMMITTER_EMAIL="container@buildkitsandbox.local" git cherry-pick 740f064
-
+# TODO leave this here in case we need to do cherry-picks in future
+# GIT_COMMITTER_NAME="Container Build" GIT_COMMITTER_EMAIL="container@buildkitsandbox.local" git cherry-pick 740f064
 
 echo "\n=== Installing vLLM & FlashInfer ==="
 
-if [[ $VLLM_REF =~ ^v ]] && [ "$ARCH" = "amd64" ]; then
-    # VLLM_REF starts with 'v' and amd64 - use pip install with version tag
-    echo "Installing vLLM $VLLM_REF from PyPI..."
+if [[ $VLLM_REF =~ ^v ]] && { [ "$ARCH" = "amd64" ] || { [ "$ARCH" = "arm64" ] && [ "$TORCH_BACKEND" = "cu129" ]; }; }; then
+    # VLLM_REF starts with 'v' and either amd64, or arm64 with cu129 backend - use PyPI install
+    echo "Installing vLLM $VLLM_REF from PyPI... (ARCH=$ARCH, TORCH_BACKEND=$TORCH_BACKEND)"
 
     uv pip install vllm[flashinfer]==$VLLM_REF --torch-backend=$TORCH_BACKEND
 

@@ -72,6 +72,14 @@ pub struct CommonExt {
     #[builder(default, setter(strip_option))]
     #[allow(unused)] // Not used
     pub guided_whitespace_pattern: Option<String>,
+
+    /// Whether to skip special tokens in the decoded output.
+    /// When true, special tokens (like EOS, BOS, PAD) are removed from the output text.
+    /// When false, special tokens are included in the output text.
+    /// Defaults to false if not specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub skip_special_tokens: Option<bool>,
 }
 
 impl CommonExt {
@@ -99,35 +107,9 @@ pub trait CommonExtProvider {
     fn get_min_p(&self) -> Option<f32>;
     fn get_repetition_penalty(&self) -> Option<f32>;
     fn get_include_stop_str_in_output(&self) -> Option<bool>;
-}
 
-/// Helper function to emit deprecation warnings for nvext parameters
-pub fn emit_nvext_deprecation_warning(
-    field_name: &str,
-    nvext_has_value: bool,
-    common_has_value: bool,
-) {
-    if nvext_has_value && !common_has_value {
-        tracing::warn!(
-            "DEPRECATION WARNING: 'nvext.{field_name}' is deprecated and will be removed in a future release. Use '{field_name}' at the top level or in 'extra_body' instead."
-        );
-    } else if nvext_has_value && common_has_value {
-        tracing::warn!(
-            "DEPRECATION WARNING: 'nvext.{field_name}' is deprecated and will be removed in a future release. Top-level '{field_name}' takes precedence. Use '{field_name}' at the top level or in 'extra_body' instead."
-        );
-    }
-}
-
-/// Helper function to choose between common and nvext values with deprecation warnings
-pub fn choose_with_deprecation<T: Clone>(
-    field: &'static str,
-    common: Option<&T>,
-    nv: Option<&T>,
-) -> Option<T> {
-    if nv.is_some() {
-        emit_nvext_deprecation_warning(field, true, common.is_some());
-    }
-    common.cloned().or_else(|| nv.cloned())
+    /// Output Options
+    fn get_skip_special_tokens(&self) -> Option<bool>;
 }
 
 #[cfg(test)]
@@ -149,6 +131,7 @@ mod tests {
         assert_eq!(common_ext.guided_choice, None);
         assert_eq!(common_ext.guided_decoding_backend, None);
         assert_eq!(common_ext.include_stop_str_in_output, None);
+        assert_eq!(common_ext.skip_special_tokens, None);
     }
 
     #[test]
@@ -164,6 +147,7 @@ mod tests {
             .guided_grammar("grammar".to_string())
             .guided_choice(vec!["choice1".to_string(), "choice2".to_string()])
             .guided_decoding_backend("backend".to_string())
+            .skip_special_tokens(false)
             .build()
             .unwrap();
 
@@ -186,6 +170,7 @@ mod tests {
             common_ext.guided_decoding_backend,
             Some("backend".to_string())
         );
+        assert_eq!(common_ext.skip_special_tokens, Some(false));
     }
 
     #[test]
@@ -219,6 +204,7 @@ mod tests {
             guided_choice: None,
             guided_decoding_backend: None,
             guided_whitespace_pattern: None,
+            skip_special_tokens: None,
         };
         assert!(common_ext.validate().is_ok());
     }
@@ -250,21 +236,50 @@ mod tests {
     }
 
     #[test]
-    fn test_choose_with_deprecation() {
-        // Common takes precedence
-        let result = choose_with_deprecation(
-            "test_field",
-            Some(&"common_value".to_string()),
-            Some(&"nvext_value".to_string()),
-        );
-        assert_eq!(result, Some("common_value".to_string()));
+    fn test_skip_special_tokens_field() {
+        // Test that skip_special_tokens can be set and retrieved
+        let common_ext = CommonExt::builder()
+            .skip_special_tokens(true)
+            .build()
+            .unwrap();
 
-        // Fallback to nvext
-        let result = choose_with_deprecation("test_field", None, Some(&"nvext_value".to_string()));
-        assert_eq!(result, Some("nvext_value".to_string()));
+        assert_eq!(common_ext.skip_special_tokens, Some(true));
 
-        // Both None
-        let result: Option<String> = choose_with_deprecation("test_field", None, None);
-        assert_eq!(result, None);
+        let common_ext = CommonExt::builder()
+            .skip_special_tokens(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(common_ext.skip_special_tokens, Some(false));
+    }
+
+    #[test]
+    fn test_skip_special_tokens_serialization() {
+        // Test that skip_special_tokens can be serialized and deserialized
+        let common_ext = CommonExt::builder()
+            .skip_special_tokens(true)
+            .build()
+            .unwrap();
+
+        let json = serde_json::to_string(&common_ext).unwrap();
+        let deserialized: CommonExt = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.skip_special_tokens, Some(true));
+
+        // Test with false value
+        let common_ext = CommonExt::builder()
+            .skip_special_tokens(false)
+            .build()
+            .unwrap();
+
+        let json = serde_json::to_string(&common_ext).unwrap();
+        let deserialized: CommonExt = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.skip_special_tokens, Some(false));
+
+        // Test that None is not serialized (skip_serializing_if = "Option::is_none")
+        let common_ext = CommonExt::builder().build().unwrap();
+        let json = serde_json::to_string(&common_ext).unwrap();
+        assert!(!json.contains("skip_special_tokens"));
     }
 }

@@ -14,6 +14,7 @@ repository.workspace = true
 dynamo-runtime = { workspace = true }
 
 # third-party
+anyhow = { workspace = true }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }

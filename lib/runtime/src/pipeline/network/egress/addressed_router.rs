@@ -1,14 +1,29 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use async_nats::client::Client;
-use async_nats::{HeaderMap, HeaderValue};
-use tracing as log;
+use std::sync::Arc;
 
-use super::*;
+use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use crate::logging::DistributedTraceContext;
 use crate::logging::get_distributed_tracing_context;
-use crate::{Result, protocols::maybe_error::MaybeError};
+use crate::logging::inject_otel_context_into_nats_headers;
+use crate::pipeline::network::ConnectionInfo;
+use crate::pipeline::network::NetworkStreamWrapper;
+use crate::pipeline::network::PendingConnections;
+use crate::pipeline::network::ResponseService;
+use crate::pipeline::network::STREAM_ERR_MSG;
+use crate::pipeline::network::StreamOptions;
+use crate::pipeline::network::TwoPartCodec;
+use crate::pipeline::network::codec::TwoPartMessage;
+use crate::pipeline::network::tcp;
+use crate::pipeline::{ManyOut, PipelineError, ResponseStream, SingleIn};
+use crate::protocols::maybe_error::MaybeError;
+
+use anyhow::{Error, Result};
+use async_nats::client::Client;
+use async_nats::{HeaderMap, HeaderValue};
+use serde::Deserialize;
+use serde::Serialize;
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
@@ -69,7 +84,7 @@ impl AddressedPushRouter {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl<T, U> AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>, Error> for AddressedPushRouter
 where
     T: Data + Serialize,
@@ -122,7 +137,7 @@ where
         let ctrl = serde_json::to_vec(&control_message)?;
         let data = serde_json::to_vec(&request)?;
 
-        log::trace!(
+        tracing::trace!(
             request_id,
             "packaging two-part message; ctrl: {} bytes, data: {} bytes",
             ctrl.len(),
@@ -139,18 +154,19 @@ where
 
         // TRANSPORT ABSTRACT REQUIRED - END HERE
 
-        log::trace!(request_id, "enqueueing two-part message to nats");
+        tracing::trace!(request_id, "enqueueing two-part message to nats");
 
         // Insert Trace Context into Headers
         // Enables span to be created in push_endpoint before
         // payload is parsed
 
+        // Prepare trace headers using the OpenTelemetry injector pattern
+        // This handles traceparent and tracestate headers according to W3C Trace Context standard
         let mut headers = HeaderMap::new();
+        inject_otel_context_into_nats_headers(&mut headers, None);
+
+        // Add additional custom headers that aren't handled by the OpenTelemetry propagator
         if let Some(trace_context) = get_distributed_tracing_context() {
-            headers.insert("traceparent", trace_context.create_traceparent());
-            if let Some(tracestate) = trace_context.tracestate {
-                headers.insert("tracestate", tracestate);
-            }
             if let Some(x_request_id) = trace_context.x_request_id {
                 headers.insert("x-request-id", x_request_id);
             }
@@ -166,7 +182,7 @@ where
             .request_with_headers(address.to_string(), headers, buffer)
             .await?;
 
-        log::trace!(request_id, "awaiting transport handshake");
+        tracing::trace!(request_id, "awaiting transport handshake");
         let response_stream = response_stream_provider
             .await
             .map_err(|_| PipelineError::DetachedStreamReceiver)?
@@ -204,7 +220,7 @@ where
                     Err(err) => {
                         // legacy log print
                         let json_str = String::from_utf8_lossy(&res_bytes);
-                        log::warn!(%err, %json_str, "Failed deserializing JSON to response");
+                        tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
 
                         Some(U::from_err(Error::new(err).into()))
                     }
@@ -216,11 +232,11 @@ where
                 // Gracefully end the stream if 'stop_generating()' was called. Do NOT check for
                 // 'is_killed()' here because it implies the stream ended abnormally which should be
                 // handled by the error branch below.
-                log::debug!("Request cancelled and then trying to read a response");
+                tracing::debug!("Request cancelled and then trying to read a response");
                 None
             } else {
                 // stream ended unexpectedly
-                log::debug!("{STREAM_ERR_MSG}");
+                tracing::debug!("{STREAM_ERR_MSG}");
                 Some(U::from_err(Error::msg(STREAM_ERR_MSG).into()))
             }
         });

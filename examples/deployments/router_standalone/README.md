@@ -80,7 +80,7 @@ While not implemented in this example, the router can also operate in a pure pre
 - Integrates with vLLM's OpenAI serving components for request preprocessing and response formatting
 
 ### `perf.sh`
-- Benchmarking script using `genai-perf` to test the router setup
+- Benchmarking script using `aiperf` to test the router setup
 - Configured for streaming chat completions with synthetic workloads
 - Tests concurrent requests to evaluate routing performance
 

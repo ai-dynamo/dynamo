@@ -6,6 +6,7 @@ use anyhow::Result;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use validator::Validate;
 
 // [gluo TODO] whether it makes sense to have aggregator for tensor..
@@ -112,18 +113,26 @@ impl FlattenTensor {
     }
 }
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Validate, Debug, Clone, PartialEq)]
 pub struct TensorMetadata {
     pub name: String,
     pub data_type: DataType,
     pub shape: Vec<i64>,
+
+    /// Optional parameters for this tensor
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub parameters: Parameters,
 }
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Validate, Debug, Clone, PartialEq, Default)]
 pub struct TensorModelConfig {
     pub name: String,
     pub inputs: Vec<TensorMetadata>,
     pub outputs: Vec<TensorMetadata>,
+    // Optional Triton model config in serialized protobuf string,
+    // if provided, it supersedes the basic model config defined above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triton_model_config: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -183,6 +192,10 @@ pub struct NvCreateTensorRequest {
     /// Input tensors.
     pub tensors: Vec<Tensor>,
 
+    /// Optional request-level parameters
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub parameters: Parameters,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
 }
@@ -199,6 +212,10 @@ pub struct NvCreateTensorResponse {
 
     /// Output tensors.
     pub tensors: Vec<Tensor>,
+
+    /// Optional response-level parameters
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub parameters: Parameters,
 }
 
 /// Implements `NvExtProvider` for `NvCreateTensorRequest`,
@@ -291,3 +308,15 @@ impl NvCreateTensorResponse {
         }
     }
 }
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum ParameterValue {
+    Bool(bool),
+    Int64(i64),
+    String(String),
+    Double(f64),
+    Uint64(u64),
+}
+
+pub type Parameters = HashMap<String, ParameterValue>;

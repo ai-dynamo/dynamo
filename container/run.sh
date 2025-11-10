@@ -259,8 +259,6 @@ get_options() {
         fi
 
         ENVIRONMENT_VARIABLES+=" -e HF_TOKEN"
-
-        INTERACTIVE=" -it "
     fi
 
     if [[ ${HF_HOME^^} == "NONE" ]]; then

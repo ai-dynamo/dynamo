@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::block_manager::locality::{Logical, LogicalBlockData, LogicalResources};
+use crate::block_manager::{
+    OffloadFilter,
+    locality::{Logical, LogicalBlockData, LogicalResources},
+};
 
 #[derive(Debug)]
 pub struct LogicalBlockFactory<S: Storage, R: LogicalResources> {
@@ -12,6 +15,7 @@ pub struct LogicalBlockFactory<S: Storage, R: LogicalResources> {
     resources: Arc<R>,
     storage_type: StorageType,
     storage: std::marker::PhantomData<S>,
+    offload_filter: Option<Arc<dyn OffloadFilter>>,
 }
 
 impl<S: Storage, R: LogicalResources> LogicalBlockFactory<S, R> {
@@ -21,6 +25,7 @@ impl<S: Storage, R: LogicalResources> LogicalBlockFactory<S, R> {
         worker_id: WorkerID,
         resources: Arc<R>,
         storage_type: StorageType,
+        offload_filter: Option<Arc<dyn OffloadFilter>>,
     ) -> Self {
         Self {
             layout_config,
@@ -29,6 +34,7 @@ impl<S: Storage, R: LogicalResources> LogicalBlockFactory<S, R> {
             resources,
             storage_type,
             storage: std::marker::PhantomData,
+            offload_filter,
         }
     }
 }
@@ -56,6 +62,10 @@ impl<S: Storage, R: LogicalResources> BlockFactory<S, Logical<R>> for LogicalBlo
 
     fn layout_config(&self) -> &LayoutConfig {
         &self.layout_config
+    }
+
+    fn offload_filter(&self) -> Option<Arc<dyn OffloadFilter>> {
+        self.offload_filter.clone()
     }
 }
 
@@ -89,6 +99,7 @@ mod tests {
             TEST_WORKER_ID,
             Arc::new(NullResources),
             StorageType::Pinned,
+            None,
         );
 
         let block_data = factory.create_block_data(0).unwrap();

@@ -92,7 +92,7 @@ When you need to add or modify metrics in Method 1 (ForwardPassMetrics Pub/Sub v
        // ... existing gauges ...
 
        // Manually create and register new Prometheus gauge
-       let new_metric_gauge = component.create_gauge(
+       let new_metric_gauge = component.metrics().create_gauge(
            "new_metric_name",
            "Description of new metric",
            &[],  // labels
@@ -117,7 +117,7 @@ When you need to add or modify metrics in Method 1 (ForwardPassMetrics Pub/Sub v
    }
    ```
 
-4. **`components/backends/sglang/.../publisher.py`** - Update Python code to compute new metric:
+4. **`components/src/dynamo/sglang/publisher.py`** - Update Python code to compute new metric:
    ```python
    def collect_metrics():
        worker_stats = WorkerStats(
@@ -188,7 +188,7 @@ def update_metrics():
     request_slots.set(compute_current_slots())
     gpu_usage.set(get_gpu_usage())
 
-endpoint.metrics.register_update_callback(update_metrics)
+endpoint.metrics.register_callback(update_metrics)
 ```
 
 Both examples support vector metrics with labels:
@@ -216,7 +216,7 @@ Method 2 supports all standard Prometheus metric types:
 - **CounterVec**: `CounterVec` (float with labels), `IntCounterVec` (integer with labels)
 - **Histograms**: `Histogram`
 
-All metrics are imported from `dynamo._prometheus_metrics`.
+All metrics are imported from `dynamo.prometheus_metrics`.
 
 #### Adding/Changing Metrics in Method 2
 
@@ -268,7 +268,7 @@ Dynamic Registration provides type hints (via `.pyi` stub files) for typed metri
 ```mermaid
 graph TB
     subgraph "Python Layer"
-        PY[Python Application<br/>components/backends/sglang/main.py]
+        PY[Python Application<br/>components/src/dynamo/sglang/main.py]
         style PY fill:#3776ab,color:#fff
     end
 
@@ -290,8 +290,7 @@ graph TB
             NATS[NATS Server<br/>KV_METRICS_SUBJECT]
         end
 
-        subgraph "Aggregator Process Components"
-            AGG[KvMetricsAggregator<br/>llm/src/kv_router/metrics_aggregator.rs]
+        subgraph "Other Consumers (e.g., KvWorkerMonitor)"
             SUB[NATS Subscriber<br/>component/namespace.rs]
         end
 
@@ -303,7 +302,6 @@ graph TB
         style WATCH fill:#ce422b,color:#fff
         style PROM1 fill:#ce422b,color:#fff
         style NATS fill:#27aae1,color:#fff
-        style AGG fill:#ce422b,color:#fff
         style SUB fill:#ce422b,color:#fff
         style SS fill:#6c757d,color:#fff
     end
@@ -316,9 +314,7 @@ graph TB
     WMP -->|"tx.send(metrics)"| WATCH
     WATCH -->|"publish(KV_METRICS_SUBJECT, LoadEvent)"| NATS
     NATS -->|"subscribe_with_type LoadEvent"| SUB
-    SUB -->|"discover endpoints"| AGG
     SS -->|"Worker: gather() from PROM1"| PROM1
-    SS -->|"Aggregator: scrape_stats()"| AGG
 ```
 
 ##### Method 2: Dynamic Registration - Component View
@@ -349,13 +345,13 @@ graph TD
     end
 
     PY -->|endpoint.metrics.create_intgauge| PM
-    PM -->|endpoint.create_intgauge| EP
+    PM -->|endpoint.metrics.create_intgauge| EP
     EP -->|create & register| PROM
     PM -->|wrap & return| MT
     MT -->|return to Python| PY
     PY -->|metric.set/get| MT
     MT -->|direct FFI call| PROM
-    PY -.->|endpoint.metrics.register_update_callback| PM
+    PY -.->|endpoint.metrics.register_callback| PM
     PM -.->|drt.register_metrics_callback| DRT
     SS ==>|execute_metrics_callbacks| DRT
     DRT -.->|invoke Python callback| PY
@@ -383,19 +379,18 @@ maturin develop
 
 ```bash
 cd ~/dynamo/lib/bindings/python/examples/metrics
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 ./server_with_loop.py
+DYN_SYSTEM_PORT=8081 ./server_with_loop.py
 ```
 
 #### Run Example B: Callback-based Updates
 
 ```bash
 cd ~/dynamo/lib/bindings/python/examples/metrics
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 ./server_with_callback.py
+DYN_SYSTEM_PORT=8081 ./server_with_callback.py
 ```
 
-**Note:** The environment variables are required:
-- `DYN_SYSTEM_ENABLED=true` - Enables the system status server
-- `DYN_SYSTEM_PORT=8081` - Sets the port for the metrics endpoint
+**Note:** The environment variable is required:
+- `DYN_SYSTEM_PORT=8081` - Sets the port for the metrics endpoint (automatically enables the system status server)
 
 #### Check the Metrics
 

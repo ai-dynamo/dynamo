@@ -192,7 +192,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 				Args:    append([]string{}, tt.initialArgs...),
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentOverridesSpec{}, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
 
 			if !reflect.DeepEqual(container.Command, tt.expectedCommand) {
 				t.Errorf("UpdateContainer() command = %v, want %v", container.Command, tt.expectedCommand)
@@ -317,7 +317,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 				Args:    append([]string{}, tt.initialArgs...),
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentOverridesSpec{}, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
 
 			if !reflect.DeepEqual(container.Args, tt.expectedArgs) {
 				t.Errorf("UpdateContainer() args = %v, want %v", container.Args, tt.expectedArgs)
@@ -491,7 +491,7 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 				StartupProbe:   startupProbe,
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentOverridesSpec{}, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
 
 			if tt.expectProbesRemoved {
 				if container.LivenessProbe != nil {
@@ -523,21 +523,19 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 
 	tests := []struct {
 		name                       string
-		component                  *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		component                  *v1alpha1.DynamoComponentDeploymentSharedSpec
 		volumeMounts               []corev1.VolumeMount
 		expectNoEnvVarChanges      bool
 		expectLoggedPartialSupport bool
 	}{
 		{
 			name: "SGLang backend with useAsCompilationCache volume mount",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					VolumeMounts: []v1alpha1.VolumeMount{
-						{
-							Name:                  "sglang-cache",
-							MountPoint:            "/cache/sglang",
-							UseAsCompilationCache: true,
-						},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{
+						Name:                  "sglang-cache",
+						MountPoint:            "/cache/sglang",
+						UseAsCompilationCache: true,
 					},
 				},
 			},
@@ -547,14 +545,12 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 		},
 		{
 			name: "SGLang backend with useAsCompilationCache at custom volume mount",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					VolumeMounts: []v1alpha1.VolumeMount{
-						{
-							Name:                  "custom-cache",
-							MountPoint:            "/custom/cache/path",
-							UseAsCompilationCache: true,
-						},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{
+						Name:                  "custom-cache",
+						MountPoint:            "/custom/cache/path",
+						UseAsCompilationCache: true,
 					},
 				},
 			},
@@ -564,13 +560,11 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 		},
 		{
 			name: "SGLang backend without useAsCompilationCache volume mount",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					VolumeMounts: []v1alpha1.VolumeMount{
-						{
-							Name:       "regular-volume",
-							MountPoint: "/data",
-						},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{
+						Name:       "regular-volume",
+						MountPoint: "/data",
 					},
 				},
 			},
@@ -580,10 +574,8 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 		},
 		{
 			name: "SGLang backend with no volume mounts",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					VolumeMounts: nil,
-				},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				VolumeMounts: nil,
 			},
 			volumeMounts:               []corev1.VolumeMount{},
 			expectNoEnvVarChanges:      true,

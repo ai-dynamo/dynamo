@@ -75,6 +75,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - coordination.k8s.io
   resources:
   - leases
@@ -85,6 +97,14 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - events.k8s.io
@@ -160,7 +180,9 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments
+  - dynamographdeploymentrequests
   - dynamographdeployments
+  - dynamomodels
   verbs:
   - create
   - delete
@@ -173,14 +195,18 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/finalizers
+  - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
+  - dynamomodels/finalizers
   verbs:
   - update
 - apiGroups:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/status
+  - dynamographdeploymentrequests/status
   - dynamographdeployments/status
+  - dynamomodels/status
   verbs:
   - get
   - patch

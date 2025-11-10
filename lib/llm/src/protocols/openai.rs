@@ -8,7 +8,7 @@ use super::{
     ContentProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
-use crate::protocols::openai::common_ext::{CommonExtProvider, choose_with_deprecation};
+use crate::protocols::openai::common_ext::CommonExtProvider;
 
 pub mod chat_completions;
 pub mod common_ext;
@@ -65,14 +65,9 @@ trait OpenAIStopConditionsProvider {
         None
     }
 
-    /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
-    /// CommonExt (root-level) takes precedence over NvExt.
+    /// Get the effective ignore_eos value from CommonExt.
     fn get_ignore_eos(&self) -> Option<bool> {
-        choose_with_deprecation(
-            "ignore_eos",
-            self.get_common_ignore_eos().as_ref(),
-            self.nvext().and_then(|nv| nv.ignore_eos.as_ref()),
-        )
+        self.get_common_ignore_eos()
     }
 
     /// Get max_thinking_tokens from nvext

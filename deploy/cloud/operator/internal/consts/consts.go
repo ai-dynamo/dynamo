@@ -38,6 +38,9 @@ const (
 	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
 	KubeLabelDynamoComponentType        = "nvidia.com/dynamo-component-type"
 	KubeLabelDynamoSubComponentType     = "nvidia.com/dynamo-sub-component-type"
+	KubeLabelDynamoBaseModel            = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoBaseModelHash        = "nvidia.com/dynamo-base-model-hash"
+	KubeAnnotationDynamoBaseModel       = "nvidia.com/dynamo-base-model"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -47,6 +50,8 @@ const (
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
 	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
+
+	GlobalDynamoNamespace = "dynamo"
 
 	ComponentTypePlanner      = "planner"
 	ComponentTypeFrontend     = "frontend"

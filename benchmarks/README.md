@@ -15,12 +15,12 @@
 
 # Benchmarks
 
-This directory contains benchmarking scripts and tools for performance evaluation of Dynamo deployments. The benchmarking framework is a wrapper around genai-perf that makes it easy to benchmark DynamoGraphDeployments or other deployments with exposed endpoints.
+This directory contains benchmarking scripts and tools for performance evaluation of Dynamo deployments. The benchmarking framework is a wrapper around aiperf that makes it easy to benchmark DynamoGraphDeployments or other deployments with exposed endpoints.
 
 ## Quick Start
 
 ### Benchmark a Dynamo Deployment
-First, deploy your DynamoGraphDeployment using the [deployment documentation](../components/backends/), then:
+First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/kubernetes/), then:
 
 ```bash
 # Port-forward your deployment to http://localhost:8000

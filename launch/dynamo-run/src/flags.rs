@@ -127,6 +127,12 @@ pub struct Flags {
     #[arg(long, default_value = "false")]
     pub static_worker: bool,
 
+    /// Which key-value backend to use: etcd, mem, file.
+    /// Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details.
+    /// File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.
+    #[arg(long, default_value = "etcd")]
+    pub store_kv: String,
+
     /// Everything after a `--`.
     /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]

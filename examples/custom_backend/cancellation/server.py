@@ -31,7 +31,7 @@ class DemoServer:
 async def main():
     """Start the demo server"""
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, True)
+    runtime = DistributedRuntime(loop, "mem", True)
 
     # Create server component
     component = runtime.namespace("demo").component("server")

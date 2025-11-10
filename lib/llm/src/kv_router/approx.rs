@@ -27,11 +27,11 @@ use crate::tokens::{SequenceHash, TokenBlockSequence};
 
 use crate::kv_router::indexer::{
     DumpRequest, KvIndexerInterface, KvRouterError, OverlapScores, RadixTree, RouterEvent,
-    WorkerId, compute_block_hash_for_seq,
+    compute_block_hash_for_seq,
 };
 use crate::kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash,
+    KvCacheStoredBlockData, LocalBlockHash, WorkerId, WorkerWithDpRank,
 };
 
 #[derive(Debug)]
@@ -44,8 +44,8 @@ struct MatchRequest {
 
 #[derive(Debug)]
 struct RouterResult {
-    /// The id of the selected worker.
-    worker_id: WorkerId,
+    /// The worker (with dp_rank) that was selected.
+    worker: WorkerWithDpRank,
 
     /// The local hashes of the tokens sent to the worker.
     local_hashes: Vec<LocalBlockHash>,
@@ -58,8 +58,8 @@ struct RouterResult {
 struct TimerEntry {
     /// The key of the timer.
     key: ExternalSequenceBlockHash,
-    /// The worker id that stored this block.
-    worker: WorkerId,
+    /// The worker (with dp_rank) that stored this block.
+    worker: WorkerWithDpRank,
 }
 
 /// A data structure to manage a collection of timers, addressable by a key.
@@ -184,6 +184,8 @@ impl ApproxKvIndexer {
         let (match_tx, mut match_rx) = mpsc::channel::<MatchRequest>(2048);
         let (route_tx, mut route_rx) = mpsc::channel::<RouterResult>(2048);
         let (remove_worker_tx, mut remove_worker_rx) = mpsc::channel::<WorkerId>(16);
+        let (_get_workers_tx, mut get_workers_rx) =
+            mpsc::channel::<super::indexer::GetWorkersRequest>(16);
         let (dump_tx, mut dump_rx) = mpsc::channel::<DumpRequest>(16);
         let cancel_clone = token.clone();
         let task = std::thread::spawn(move || {
@@ -217,6 +219,11 @@ impl ApproxKvIndexer {
                             trie.remove_worker(worker);
                         }
 
+                        Some(get_workers_req) = get_workers_rx.recv() => {
+                            let workers = trie.get_workers();
+                            let _ = get_workers_req.resp.send(workers);
+                        }
+
                         Some(result) = route_rx.recv() => {
                             let hashes = result.local_hashes.iter().zip(result.sequence_hashes.iter());
 
@@ -230,10 +237,11 @@ impl ApproxKvIndexer {
                             event_id += 1;
 
                             let event = RouterEvent::new(
-                                result.worker_id,
+                                result.worker.worker_id,
                                 KvCacheEvent {
                                     event_id,
                                     data: stored_event,
+                                    dp_rank: result.worker.dp_rank,
                                 }
                             );
 
@@ -241,7 +249,7 @@ impl ApproxKvIndexer {
 
                             timer_manager.insert(result.sequence_hashes.iter().map(|h| TimerEntry {
                                 key: ExternalSequenceBlockHash(*h),
-                                worker: result.worker_id,
+                                worker: result.worker,
                             }).collect());
                         }
 
@@ -262,12 +270,13 @@ impl ApproxKvIndexer {
                                 event_id += 1;
 
                                 let event = RouterEvent::new(
-                                    e.worker,
+                                    e.worker.worker_id,
                                     KvCacheEvent {
                                         event_id,
                                         data: KvCacheEventData::Removed(KvCacheRemoveData {
                                             block_hashes: vec![e.key],
                                         }),
+                                        dp_rank: e.worker.dp_rank,
                                     }
                                 );
 
@@ -300,13 +309,13 @@ impl ApproxKvIndexer {
     /// Core function to process a routing decision with pre-computed hashes
     pub async fn process_routing_decision(
         &self,
-        worker_id: WorkerId,
+        worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<(), KvRouterError> {
         self.route_tx
             .send(RouterResult {
-                worker_id,
+                worker,
                 local_hashes,
                 sequence_hashes,
             })
@@ -320,7 +329,7 @@ impl ApproxKvIndexer {
     pub async fn process_routing_decision_for_request(
         &self,
         tokens: &[u32],
-        worker_id: WorkerId,
+        worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
         let local_hashes = compute_block_hash_for_seq(tokens, self.kv_block_size);
 
@@ -331,7 +340,7 @@ impl ApproxKvIndexer {
             .map(|b| b.sequence_hash())
             .collect::<Vec<_>>();
 
-        self.process_routing_decision(worker_id, local_hashes, sequence_hashes)
+        self.process_routing_decision(worker, local_hashes, sequence_hashes)
             .await
     }
 }
@@ -519,14 +528,20 @@ mod tests {
 
         // 2. Inform indexer about routing decision
         indexer
-            .process_routing_decision_for_request(&tokens, worker_id)
+            .process_routing_decision_for_request(
+                &tokens,
+                WorkerWithDpRank::from_worker_id(worker_id),
+            )
             .await
             .unwrap();
 
         // Poll until we observe the match being registered
         spin_until(Duration::from_millis(100), || async {
             let s = indexer.find_matches_for_request(&tokens).await.unwrap();
-            s.scores.get(&worker_id).copied() == Some(1)
+            s.scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_id))
+                .copied()
+                == Some(1)
         })
         .await;
 
@@ -547,14 +562,18 @@ mod tests {
         let worker_id: WorkerId = 7;
 
         indexer
-            .process_routing_decision_for_request(&tokens, worker_id)
+            .process_routing_decision_for_request(
+                &tokens,
+                WorkerWithDpRank::from_worker_id(worker_id),
+            )
             .await
             .unwrap();
 
         // Wait until the worker is registered
         spin_until(Duration::from_millis(100), || async {
             let s = indexer.find_matches_for_request(&tokens).await.unwrap();
-            s.scores.contains_key(&worker_id)
+            s.scores
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_id))
         })
         .await;
 
@@ -564,7 +583,8 @@ mod tests {
         // Ensure the worker's entries are gone
         spin_until(Duration::from_millis(100), || async {
             let s = indexer.find_matches_for_request(&tokens).await.unwrap();
-            !s.scores.contains_key(&worker_id)
+            !s.scores
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_id))
         })
         .await;
     }
@@ -583,19 +603,31 @@ mod tests {
 
         // Register on both workers
         indexer
-            .process_routing_decision_for_request(&tokens, worker_0)
+            .process_routing_decision_for_request(
+                &tokens,
+                WorkerWithDpRank::from_worker_id(worker_0),
+            )
             .await
             .unwrap();
         indexer
-            .process_routing_decision_for_request(&tokens, worker_1)
+            .process_routing_decision_for_request(
+                &tokens,
+                WorkerWithDpRank::from_worker_id(worker_1),
+            )
             .await
             .unwrap();
 
         // Ensure both workers are registered
         spin_until(Duration::from_millis(100), || async {
             let s = indexer.find_matches_for_request(&tokens).await.unwrap();
-            s.scores.get(&worker_0).copied() == Some(1)
-                && s.scores.get(&worker_1).copied() == Some(1)
+            s.scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_0))
+                .copied()
+                == Some(1)
+                && s.scores
+                    .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                    .copied()
+                    == Some(1)
         })
         .await;
 
@@ -605,7 +637,12 @@ mod tests {
         // Confirm the removed worker is gone, and the other remains.
         spin_until(Duration::from_millis(100), || async {
             let s = indexer.find_matches_for_request(&tokens).await.unwrap();
-            !s.scores.contains_key(&worker_0) && s.scores.get(&worker_1).copied() == Some(1)
+            !s.scores
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+                && s.scores
+                    .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                    .copied()
+                    == Some(1)
         })
         .await;
     }
@@ -624,14 +661,20 @@ mod tests {
 
         // Register Sequence A on worker A
         indexer
-            .process_routing_decision_for_request(&seq_a, worker_a)
+            .process_routing_decision_for_request(
+                &seq_a,
+                WorkerWithDpRank::from_worker_id(worker_a),
+            )
             .await
             .unwrap();
 
         // Ensure the indexer has registered the block
         spin_until(Duration::from_millis(100), || async {
             let s = indexer.find_matches_for_request(&seq_a).await.unwrap();
-            s.scores.get(&worker_a).copied() == Some(1)
+            s.scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_a))
+                .copied()
+                == Some(1)
         })
         .await;
 
@@ -642,7 +685,12 @@ mod tests {
         let overlap = indexer.find_matches_for_request(&seq_b).await.unwrap();
 
         // Expect worker A to have an overlap score of 1 (shared first block)
-        assert_eq!(overlap.scores.get(&worker_a), Some(&1));
+        assert_eq!(
+            overlap
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_a)),
+            Some(&1)
+        );
     }
 
     /// When the same block resides on multiple workers, all should appear in the overlap scores.
@@ -659,25 +707,47 @@ mod tests {
 
         // Register the same sequence on two different workers
         indexer
-            .process_routing_decision_for_request(&tokens, worker_0)
+            .process_routing_decision_for_request(
+                &tokens,
+                WorkerWithDpRank::from_worker_id(worker_0),
+            )
             .await
             .unwrap();
         indexer
-            .process_routing_decision_for_request(&tokens, worker_1)
+            .process_routing_decision_for_request(
+                &tokens,
+                WorkerWithDpRank::from_worker_id(worker_1),
+            )
             .await
             .unwrap();
 
         // Wait until both workers are reflected in overlap scores
         spin_until(Duration::from_millis(100), || async {
             let s = indexer.find_matches_for_request(&tokens).await.unwrap();
-            s.scores.get(&worker_0).copied() == Some(1)
-                && s.scores.get(&worker_1).copied() == Some(1)
+            s.scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_0))
+                .copied()
+                == Some(1)
+                && s.scores
+                    .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                    .copied()
+                    == Some(1)
         })
         .await;
 
         let scores = indexer.find_matches_for_request(&tokens).await.unwrap();
 
-        assert_eq!(scores.scores.get(&worker_0), Some(&1));
-        assert_eq!(scores.scores.get(&worker_1), Some(&1));
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_0)),
+            Some(&1)
+        );
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_1)),
+            Some(&1)
+        );
     }
 }
