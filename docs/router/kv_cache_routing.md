@@ -65,12 +65,13 @@ The prefill router is automatically created when:
 2. A prefill worker is detected with the same model name and `ModelType.Prefill`
 
 **Key characteristics of the prefill router:**
-- **Always uses KV-aware routing** regardless of the frontend's `--router-mode` setting
 - **Always disables active block tracking** (`track_active_blocks=false`) since prefill workers don't perform decode
 - **Seamlessly integrated** into the request pipeline between preprocessing and decode routing
 - **Falls back gracefully** to decode-only mode if prefill fails or no prefill workers are available
 
 ### Setup Example
+
+When both workers are registered, requests are automatically routed.
 
 ```python
 # Decode worker registration (in your decode worker)
@@ -92,12 +93,8 @@ await register_llm(
 )
 ```
 
-When both workers are registered, requests are automatically routed:
-1. **Prefill phase** → Prefill router selects best prefill worker (KV-aware)
-2. **Decode phase** → Decode router selects decode worker (uses frontend's `--router-mode`)
-
 > [!Note]
-> **WIP**: Currently, the prefill router always uses KV routing. Future updates will provide more fine-grained control over prefill routing behavior to match user-specified frontend router modes.
+> The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh).
 
 ## Overview
 

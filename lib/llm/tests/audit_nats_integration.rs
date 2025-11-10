@@ -167,7 +167,7 @@ mod tests {
 
                 bus::init(100);
                 let drt = create_test_drt().await;
-                sink::spawn_workers_from_env(Some(&drt));
+                sink::spawn_workers_from_env(&drt);
                 time::sleep(Duration::from_millis(100)).await;
 
                 // Emit audit record
@@ -224,7 +224,7 @@ mod tests {
 
                 bus::init(100);
                 let drt = create_test_drt().await;
-                sink::spawn_workers_from_env(Some(&drt));
+                sink::spawn_workers_from_env(&drt);
                 time::sleep(Duration::from_millis(100)).await;
 
                 // Request with store=true (should be audited)

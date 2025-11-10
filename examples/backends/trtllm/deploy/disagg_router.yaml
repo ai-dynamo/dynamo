@@ -42,14 +42,12 @@ spec:
             - ./recipes/qwen3/trtllm/prefill.yaml
             - --disaggregation-mode
             - prefill
-            - --disaggregation-strategy
-            - prefill_first
             - --publish-events-and-metrics
     TRTLLMDecodeWorker:
       dynamoNamespace: trtllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
-      replicas: 1
+      replicas: 2
       resources:
         limits:
           gpu: "1"
@@ -70,5 +68,3 @@ spec:
             - ./recipes/qwen3/trtllm/decode.yaml
             - --disaggregation-mode
             - decode
-            - --disaggregation-strategy
-            - prefill_first

@@ -23,7 +23,6 @@ pub mod http;
 pub mod text;
 
 use dynamo_runtime::protocols::ENDPOINT_SCHEME;
-use either::Either;
 
 const BATCH_PREFIX: &str = "batch:";
 
@@ -107,15 +106,10 @@ impl Default for Input {
 /// For Input::Endpoint pass a DistributedRuntime. For everything else pass either a Runtime or a
 /// DistributedRuntime.
 pub async fn run_input(
-    rt: Either<dynamo_runtime::Runtime, dynamo_runtime::DistributedRuntime>,
+    drt: dynamo_runtime::DistributedRuntime,
     in_opt: Input,
     engine_config: super::EngineConfig,
 ) -> anyhow::Result<()> {
-    let runtime = match &rt {
-        Either::Left(rt) => rt.clone(),
-        Either::Right(drt) => drt.runtime().clone(),
-    };
-
     // Initialize audit bus + sink workers (off hot path; fan-out supported)
     if crate::audit::config::policy().enabled {
         let cap: usize = std::env::var("DYN_AUDIT_CAPACITY")
@@ -123,38 +117,30 @@ pub async fn run_input(
             .and_then(|v| v.parse().ok())
             .unwrap_or(1024);
         crate::audit::bus::init(cap);
-        // Pass DistributedRuntime if available for shared NATS client
-        let drt_ref = match &rt {
-            Either::Right(drt) => Some(drt),
-            Either::Left(_) => None,
-        };
-        crate::audit::sink::spawn_workers_from_env(drt_ref);
-        tracing::info!("Audit initialized: bus cap={}", cap);
+        crate::audit::sink::spawn_workers_from_env(&drt);
+        tracing::info!(cap, "Audit initialized");
     }
 
     match in_opt {
         Input::Http => {
-            http::run(runtime, engine_config).await?;
+            http::run(drt, engine_config).await?;
         }
         Input::Grpc => {
-            grpc::run(runtime, engine_config).await?;
+            grpc::run(drt, engine_config).await?;
         }
         Input::Text => {
-            text::run(runtime, None, engine_config).await?;
+            text::run(drt, None, engine_config).await?;
         }
         Input::Stdin => {
             let mut prompt = String::new();
             std::io::stdin().read_to_string(&mut prompt).unwrap();
-            text::run(runtime, Some(prompt), engine_config).await?;
+            text::run(drt, Some(prompt), engine_config).await?;
         }
         Input::Batch(path) => {
-            batch::run(runtime, path, engine_config).await?;
+            batch::run(drt, path, engine_config).await?;
         }
         Input::Endpoint(path) => {
-            let Either::Right(distributed_runtime) = rt else {
-                anyhow::bail!("Input::Endpoint requires passing a DistributedRuntime");
-            };
-            endpoint::run(distributed_runtime, path, engine_config).await?;
+            endpoint::run(drt, path, engine_config).await?;
         }
     }
     Ok(())

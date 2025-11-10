@@ -108,13 +108,13 @@ for ((i=1; i<=50; i++)); do
 
     if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"status":"healthy"' && echo "$body" | grep -q '"endpoints":\[[^]]*"dyn://dynamo.tensorrt_llm.generate"'; then
         if [[ "$kind" == *disagg* ]]; then
-            if echo "$body" | grep -q '"tensorrt_llm_next"'; then
+            if echo "$body" | grep -q '"prefill"'; then
                 echo "Health check succeeded on attempt $i"
                 echo "$body"
                 failed=false
                 break
             else
-                echo "Attempt $i: tensorrt_llm_next key not found in etcd."
+                echo "Attempt $i: prefill endpoint not found in health check."
             fi
         else
             echo "Health check succeeded on attempt $i"
