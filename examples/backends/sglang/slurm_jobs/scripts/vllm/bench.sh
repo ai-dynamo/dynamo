@@ -37,7 +37,6 @@ set -e
 # Warmup the model with a sweep of concurrencies
 warmup_isl=$chosen_isl
 warmup_osl=$chosen_osl
-warmup_prompts=5
 warmup_req_rate=250
 warmup_concurrency_list=(1 4 8 32 64 128 256 1024 4096)
 
@@ -45,6 +44,7 @@ for warmup_concurrency in "${warmup_concurrency_list[@]}"
 do
     echo "Warming up model with concurrency $warmup_concurrency"
     echo "$(date '+%Y-%m-%d %H:%M:%S')"
+    num_prompts=$((warmup_concurrency * 5))
     set -x
     python3 -u benchmark_serving.py \
         --model ${model_name} --tokenizer ${model_path} \
@@ -52,7 +52,7 @@ do
         --backend "dynamo" --endpoint /v1/completions \
         --disable-tqdm \
         --dataset-name random \
-        --num-prompts "$warmup_prompts" \
+        --num-prompts "$num_prompts" \
         --random-input-len $warmup_isl \
         --random-output-len $warmup_osl \
         --random-range-ratio 0.8 \
