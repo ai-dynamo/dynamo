@@ -9,7 +9,15 @@ use crate::logging::make_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
-use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Router,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post, delete},
+    extract::{Path, State, Json},
+};
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -88,6 +96,35 @@ impl SystemStatusState {
     }
 }
 
+/// Request body for POST /v1/loras
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoadLoraRequest {
+    pub lora_name: String,
+    pub source: LoraSource,
+}
+
+/// Source information for loading a LoRA
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoraSource {
+    pub uri: String,
+}
+
+/// Response body for LoRA operations
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoraResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lora_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lora_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loras: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+}
+
 /// Start system status server with metrics support
 pub async fn spawn_system_status_server(
     host: &str,
@@ -138,6 +175,24 @@ pub async fn spawn_system_status_server(
             get({
                 let state = Arc::clone(&server_state);
                 move || metadata_handler(state)
+            }),
+        )
+        .route(
+            "/v1/loras",
+            get({
+                let state = Arc::clone(&server_state);
+                move || list_loras_handler(State(state))
+            })
+            .post({
+                let state = Arc::clone(&server_state);
+                move |body| load_lora_handler(State(state), body)
+            }),
+        )
+        .route(
+            "/v1/loras/:lora_name",
+            delete({
+                let state = Arc::clone(&server_state);
+                move |path| unload_lora_handler(State(state), path)
             }),
         )
         .fallback(|| async {
@@ -266,6 +321,284 @@ async fn metadata_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
             )
                 .into_response()
         }
+    }
+}
+
+/// Handler for POST /v1/loras - Load a LoRA adapter
+#[tracing::instrument(skip_all, level = "debug")]
+async fn load_lora_handler(
+    State(state): State<Arc<SystemStatusState>>,
+    Json(request): Json<LoadLoraRequest>,
+) -> impl IntoResponse {
+    tracing::info!("Loading LoRA: {}", request.lora_name);
+
+    // Call the load_lora endpoint for each available backend
+    match call_lora_endpoint(
+        state.drt(),
+        "load_lora",
+        json!({
+            "lora_name": request.lora_name,
+            "lora_path": request.source.uri,
+        }),
+    )
+    .await
+    {
+        Ok(response) => {
+            tracing::info!("LoRA loaded successfully: {}", request.lora_name);
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            tracing::error!("Failed to load LoRA {}: {}", request.lora_name, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(LoraResponse {
+                    status: "error".to_string(),
+                    message: Some(e.to_string()),
+                    lora_name: Some(request.lora_name),
+                    lora_id: None,
+                    loras: None,
+                    count: None,
+                }),
+            )
+        }
+    }
+}
+
+/// Handler for DELETE /v1/loras/{lora_name} - Unload a LoRA adapter
+#[tracing::instrument(skip_all, level = "debug")]
+async fn unload_lora_handler(
+    State(state): State<Arc<SystemStatusState>>,
+    Path(lora_name): Path<String>,
+) -> impl IntoResponse {
+    tracing::info!("Unloading LoRA: {}", lora_name);
+
+    // Call the unload_lora endpoint for each available backend
+    match call_lora_endpoint(
+        state.drt(),
+        "unload_lora",
+        json!({
+            "lora_name": lora_name,
+        }),
+    )
+    .await
+    {
+        Ok(response) => {
+            tracing::info!("LoRA unloaded successfully: {}", lora_name);
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            tracing::error!("Failed to unload LoRA {}: {}", lora_name, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(LoraResponse {
+                    status: "error".to_string(),
+                    message: Some(e.to_string()),
+                    lora_name: Some(lora_name),
+                    lora_id: None,
+                    loras: None,
+                    count: None,
+                }),
+            )
+        }
+    }
+}
+
+/// Handler for GET /v1/loras - List all LoRA adapters
+#[tracing::instrument(skip_all, level = "debug")]
+async fn list_loras_handler(State(state): State<Arc<SystemStatusState>>) -> impl IntoResponse {
+    tracing::info!("Listing all LoRAs");
+
+    // Call the list_loras endpoint for each available backend
+    match call_lora_endpoint(state.drt(), "list_loras", json!({})).await {
+        Ok(response) => {
+            tracing::info!("Successfully retrieved LoRA list");
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            tracing::error!("Failed to list LoRAs: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(LoraResponse {
+                    status: "error".to_string(),
+                    message: Some(e.to_string()),
+                    lora_name: None,
+                    lora_id: None,
+                    loras: None,
+                    count: None,
+                }),
+            )
+        }
+    }
+}
+
+/// Helper function to call a LoRA management endpoint on available backends
+async fn call_lora_endpoint(
+    drt: &crate::DistributedRuntime,
+    endpoint_name: &str,
+    request_body: serde_json::Value,
+) -> anyhow::Result<LoraResponse> {
+    use crate::discovery::{DiscoveryInstance, DiscoveryQuery};
+    use crate::engine::AsyncEngine;
+    use crate::pipeline::{PushRouter, RouterMode};
+    use crate::protocols::annotated::Annotated;
+
+    // Use discovery to find all registered endpoints
+    let discovery = drt.discovery();
+    let all_endpoints = discovery.list(DiscoveryQuery::AllEndpoints).await?;
+
+    tracing::debug!(
+        "Discovered {} total endpoints, searching for '{}'",
+        all_endpoints.len(),
+        endpoint_name
+    );
+
+    // Find all instances of the target endpoint (e.g., "load_lora" or "unload_lora")
+    // Keep the full Instance info including instance_id for direct routing
+    let matching_endpoints: Vec<_> = all_endpoints
+        .into_iter()
+        .filter_map(|instance| {
+            if let DiscoveryInstance::Endpoint(inst) = instance {
+                if inst.endpoint == endpoint_name {
+                    Some(inst)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if matching_endpoints.is_empty() {
+        anyhow::bail!(
+            "No instances of endpoint '{}' found in discovery. Available endpoints can be queried via discovery.",
+            endpoint_name
+        );
+    }
+
+    tracing::debug!(
+        "Found {} instances of endpoint '{}'",
+        matching_endpoints.len(),
+        endpoint_name
+    );
+
+    // Try each matching endpoint until one succeeds
+    let mut last_error = None;
+
+    for instance in matching_endpoints {
+        tracing::debug!(
+            "Attempting to call {}.{}.{} (instance_id: {})",
+            instance.namespace,
+            instance.component,
+            instance.endpoint,
+            instance.instance_id
+        );
+
+        let ns = match drt.namespace(instance.namespace.clone()) {
+            Ok(ns) => ns,
+            Err(e) => {
+                tracing::warn!("Failed to get namespace {}: {}", instance.namespace, e);
+                last_error = Some(e.into());
+                continue;
+            }
+        };
+
+        let component = match ns.component(instance.component.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to get component {}: {}", instance.component, e);
+                last_error = Some(e.into());
+                continue;
+            }
+        };
+
+        let endpoint_obj = component.endpoint(&instance.endpoint);
+
+        // Try to create a client
+        let client = match endpoint_obj.client().await {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::warn!("Failed to create client for endpoint: {}", e);
+                last_error = Some(e.into());
+                continue;
+            }
+        };
+
+        // Wait briefly for instances to be available
+        if let Err(e) = client.wait_for_instances().await {
+            tracing::warn!("No instances available for endpoint: {}", e);
+            last_error = Some(e.into());
+            continue;
+        }
+
+        // Create router with direct mode targeting this specific instance
+        let router = match PushRouter::<serde_json::Value, Annotated<serde_json::Value>>::from_client(
+            client,
+            RouterMode::Direct(instance.instance_id),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Failed to create router: {}", e);
+                last_error = Some(e);
+                continue;
+            }
+        };
+
+        // Send request using the direct router
+        let mut stream = match router.generate(request_body.clone().into()).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to send request to instance {}: {}", instance.instance_id, e);
+                last_error = Some(e);
+                continue;
+            }
+        };
+
+        // Get the first (and likely only) response
+        if let Some(response) = stream.next().await {
+            let response_data = response.data.unwrap_or_default();
+
+            // Try to parse as LoraResponse
+            if let Ok(lora_response) =
+                serde_json::from_value::<LoraResponse>(response_data.clone())
+            {
+                return Ok(lora_response);
+            }
+
+            // If parsing fails, try to extract relevant fields
+            return Ok(LoraResponse {
+                status: response_data
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("success")
+                    .to_string(),
+                message: response_data
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string()),
+                lora_name: response_data
+                    .get("lora_name")
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string()),
+                lora_id: response_data
+                    .get("lora_id")
+                    .and_then(|id| id.as_u64()),
+                loras: response_data.get("loras").cloned(),
+                count: response_data
+                    .get("count")
+                    .and_then(|c| c.as_u64())
+                    .map(|c| c as usize),
+            });
+        }
+    }
+
+    // If we get here, all attempts failed
+    if let Some(e) = last_error {
+        anyhow::bail!("Failed to call endpoint '{}': {}", endpoint_name, e);
+    } else {
+        anyhow::bail!("No response received from endpoint '{}'", endpoint_name);
     }
 }
 

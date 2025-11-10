@@ -266,7 +266,13 @@ async fn register_model(mut config: ModelConfig) -> anyhow::Result<()> {
         let discovery = config.endpoint.inner.drt().discovery();
 
         let discovery_spec = dynamo_runtime::discovery::DiscoverySpec::from_model(
-            config.endpoint.inner.component().namespace().name().to_string(),
+            config
+                .endpoint
+                .inner
+                .component()
+                .namespace()
+                .name()
+                .to_string(),
             config.endpoint.inner.component().name().to_string(),
             config.endpoint.inner.name().to_string(),
             &card,
