@@ -16,7 +16,7 @@
 {{/* Validate installation to prevent conflicts */}}
 {{- include "dynamo-operator.validateClusterWideInstallation" . -}}
 {{- include "dynamo-operator.validateConfiguration" . -}}
-{{- include "dynamo-operator.validateDiscoverBackend" . -}}
+{{- include "dynamo-operator.validateDiscoveryBackend" . -}}
 
 ---
 apiVersion: apps/v1
