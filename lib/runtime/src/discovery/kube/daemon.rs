@@ -16,11 +16,12 @@ use tokio::sync::RwLock;
 
 use super::utils::{PodInfo, extract_endpoint_info, hash_pod_name};
 
-const SNAPSHOT_POLL_INTERVAL_MS: u64 = 500;
+const SNAPSHOT_POLL_INTERVAL_MS: u64 = 5000;
 const MAX_CONCURRENT_FETCHES: usize = 20;
 const METADATA_FETCH_TIMEOUT_SECS: u64 = 5;
 
 /// Discovers and aggregates metadata from pods in the cluster
+#[derive(Clone)]
 pub(super) struct DiscoveryDaemon {
     /// Kubernetes client
     kube_client: KubeClient,
@@ -28,9 +29,8 @@ pub(super) struct DiscoveryDaemon {
     http_client: reqwest::Client,
     /// Cache of remote pod metadata (instance_id -> metadata)
     cache: Arc<RwLock<HashMap<u64, Arc<DiscoveryMetadata>>>>,
-    /// This pod's info
+    // This pod's info
     pod_info: PodInfo,
-    /// Cancellation token
     cancel_token: CancellationToken,
 }
 
@@ -257,10 +257,9 @@ impl DiscoveryDaemon {
         }
 
         // Cache miss: fetch from HTTP
-        let target_host = self.resolve_target_host(pod_name, pod_ip);
-        let url = format!("http://{}/metadata", target_host);
+        let url = format!("http://{}:{}/metadata", pod_ip, self.pod_info.system_port);
 
-        tracing::debug!("Fetching metadata from {}", url);
+        tracing::debug!("Fetching metadata from {url}");
 
         let response = self
             .http_client
@@ -300,11 +299,6 @@ impl DiscoveryDaemon {
         Ok(metadata)
     }
 
-    /// Resolve target host for fetching metadata
-    fn resolve_target_host(&self, _pod_name: &str, pod_ip: &str) -> String {
-        format!("{}:{}", pod_ip, self.pod_info.system_port)
-    }
-
     /// Prune cache entries for removed instances
     async fn prune_cache(&self, removed_ids: &[u64]) {
         let mut cache = self.cache.write().await;
@@ -312,19 +306,6 @@ impl DiscoveryDaemon {
             if cache.remove(id).is_some() {
                 tracing::debug!("Pruned cache for removed instance_id={:x}", id);
             }
-        }
-    }
-}
-
-// Need Clone for spawning fetch tasks
-impl Clone for DiscoveryDaemon {
-    fn clone(&self) -> Self {
-        Self {
-            kube_client: self.kube_client.clone(),
-            http_client: self.http_client.clone(),
-            cache: self.cache.clone(),
-            pod_info: self.pod_info.clone(),
-            cancel_token: self.cancel_token.clone(),
         }
     }
 }

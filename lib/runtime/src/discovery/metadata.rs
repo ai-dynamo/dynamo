@@ -10,7 +10,7 @@ use super::{DiscoveryInstance, DiscoveryQuery};
 /// Key for organizing metadata internally
 /// Format: "namespace/component/endpoint"
 fn make_endpoint_key(namespace: &str, component: &str, endpoint: &str) -> String {
-    format!("{}/{}/{}", namespace, component, endpoint)
+    format!("{namespace}/{component}/{endpoint}")
 }
 
 /// Metadata stored on each pod and exposed via HTTP endpoint
