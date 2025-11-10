@@ -385,11 +385,16 @@ kubectl get configmap dgdr-output-<dgdr-name> -n $NAMESPACE -o yaml
 # View the planner profiling data (JSON format)
 kubectl get configmap planner-profile-data -n $NAMESPACE -o yaml
 
+# Update the PROMETHEUS_ENDPOINT environment variable in the planner template
+# to match your cluster's Prometheus service location (see comments in the template)
+
 # Update backend planner manifest as needed, then deploy
 kubectl apply -f examples/backends/<backend>/deploy/disagg_planner.yaml -n $NAMESPACE
 ```
 
 > **Note**: The standalone templates are provided as examples and may need customization for your model and requirements. The DGDR-generated configuration (Option 1) is recommended as it's automatically tuned to your profiling results and SLA targets.
+>
+> **Important - Prometheus Configuration**: The planner queries Prometheus to get frontend request metrics for scaling decisions. If you see errors like "Failed to resolve prometheus service", ensure the `PROMETHEUS_ENDPOINT` environment variable in your planner configuration correctly points to your Prometheus service. See the comments in the example templates for details.
 
 ### Relationship to DynamoGraphDeployment (DGD)
 
