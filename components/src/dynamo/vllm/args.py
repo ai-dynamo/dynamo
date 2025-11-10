@@ -329,15 +329,16 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     # There is a bug with KV events publishing when LORA is enabled.
     # This is fixed in https://github.com/vllm-project/vllm/pull/27728 but not released yet.
     # remove below check once new vLLM version is released with the fix.
-    if config.engine_args.enable_lora:
-        # Explicitly clear any user-provided kv_events_config to prevent upstream bug
-        logger.info(
-            "KV events disabled due to LoRA being enabled (upstream bug). "
-            "User-provided kv_events_config will be ignored. "
+    if (
+        config.engine_args.enable_lora
+        and config.engine_args.kv_events_config is not None
+    ):
+        message = (
+            "KV events doesn't work when LoRA is enabled due to upstream vLLM bug. "
             "See https://github.com/vllm-project/vllm/pull/27728"
         )
-        config.engine_args.kv_events_config = None
-        return None
+        logger.error(message)
+        raise ValueError(message)
 
     # If user provided their own config, use that
     if c := getattr(config.engine_args, "kv_events_config"):
