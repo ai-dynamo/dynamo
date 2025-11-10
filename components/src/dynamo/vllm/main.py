@@ -433,6 +433,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
     load_lora_endpoint = component.endpoint("load_lora")
+    unload_lora_endpoint = component.endpoint("unload_lora")
     list_loras_endpoint = component.endpoint("list_loras")
 
     factory = StatLoggerFactory(
@@ -524,6 +525,10 @@ async def init(runtime: DistributedRuntime, config: Config):
             ),
             load_lora_endpoint.serve_endpoint(
                 handler.load_lora,
+                metrics_labels=[("model", config.served_model_name or config.model)],
+            ),
+            unload_lora_endpoint.serve_endpoint(
+                handler.unload_lora,
                 metrics_labels=[("model", config.served_model_name or config.model)],
             ),
             list_loras_endpoint.serve_endpoint(

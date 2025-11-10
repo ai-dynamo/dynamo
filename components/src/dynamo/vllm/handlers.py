@@ -145,7 +145,6 @@ class BaseWorkerHandler(ABC):
             "lora_name": str,
             "lora_path": str,
         }
-        Note: Requires VLLM_ALLOW_RUNTIME_LORA_UPDATING=True environment variable and vLLM started with --enable-lora flag.
         """
         try:
             if request is None:
@@ -228,6 +227,60 @@ class BaseWorkerHandler(ABC):
             }
         except Exception as e:
             logger.error(f"Failed to load LoRA adapter: {e}")
+            yield {"status": "error", "message": str(e)}
+
+    async def unload_lora(self, request=None):
+        """
+        Unload a LoRA adapter dynamically from the vLLM's AsyncLLM engine.
+        Expected request format:
+        {
+            "lora_name": str,
+        }
+        """
+        try:
+            if request is None:
+                yield {
+                    "status": "error",
+                    "message": "Request is required with 'lora_name' field",
+                }
+                return
+            lora_name = request.get("lora_name")
+            if not lora_name:
+                yield {
+                    "status": "error",
+                    "message": "'lora_name' is required in request",
+                }
+                return
+
+            # Check if the LoRA exists
+            if lora_name not in self.lora_name_to_id:
+                yield {
+                    "status": "error",
+                    "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.lora_name_to_id.keys())}",
+                }
+                return
+
+            logger.info(f"Unloading LoRA adapter: {lora_name}")
+            lora_id = self.lora_name_to_id[lora_name]
+
+            await self.engine_client.remove_lora(lora_id)
+
+            # Remove from tracking dictionaries
+            del self.lora_name_to_id[lora_name]
+            if lora_name in self.lora_name_to_path:
+                del self.lora_name_to_path[lora_name]
+
+            logger.info(
+                f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
+            )
+            yield {
+                "status": "success",
+                "message": f"LoRA adapter '{lora_name}' unloaded successfully",
+                "lora_name": lora_name,
+                "lora_id": lora_id,
+            }
+        except Exception as e:
+            logger.error(f"Failed to unload LoRA adapter: {e}")
             yield {"status": "error", "message": str(e)}
 
     async def list_loras(self, request=None):
