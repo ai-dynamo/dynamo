@@ -5556,10 +5556,10 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.7.0"
-source = "git+https://github.com/ai-dynamo/nixl?rev=00bac00#00bac003950fd00cccc05dc880f58c17ae46ebd1"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d80bd4b5b8363cfd933000a8757a453e58ee10ee6e400c38ae31db512444a31"
 dependencies = [
- "anyhow",
  "bindgen 0.71.1",
  "cc",
  "libc",

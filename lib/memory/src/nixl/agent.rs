@@ -32,10 +32,6 @@ pub struct NixlAgent {
 impl NixlAgent {
     /// Create a NIXL agent without any backends.
     pub fn new(name: &str) -> Result<Self> {
-        if nixl_sys::is_stub() {
-            return Err(anyhow::anyhow!("NIXL is stubbed, cannot create agent"));
-        }
-
         let agent = Agent::new(name)?;
 
         Ok(Self {

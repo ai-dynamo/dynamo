@@ -8,10 +8,17 @@ use anyhow::Result;
 
 use dynamo_async_openai::types::ChatCompletionRequestUserMessageContentPart;
 
-use super::common::EncodedMediaData;
-use super::decoders::{Decoder, MediaDecoder};
-use super::rdma::{RdmaMediaDataDescriptor, get_nixl_agent};
-use dynamo_memory::nixl::NixlAgent;
+use super::decoders::{MediaDecoder};
+use super::rdma::RdmaMediaDataDescriptor;
+
+#[cfg(feature = "media-nixl")]
+use {
+    super::rdma::get_nixl_agent,
+    dynamo_memory::nixl::NixlAgent,
+    super::common::EncodedMediaData,
+    super::decoders::Decoder
+};
+
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -38,10 +45,13 @@ impl Default for MediaFetcher {
 }
 
 pub struct MediaLoader {
+    #[allow(dead_code)]
     media_decoder: MediaDecoder,
+    #[allow(dead_code)]
     http_client: reqwest::Client,
     media_fetcher: MediaFetcher,
-    nixl_agent: Option<NixlAgent>,
+    #[cfg(feature = "media-nixl")]
+    nixl_agent: NixlAgent,
 }
 
 impl MediaLoader {
@@ -55,20 +65,14 @@ impl MediaLoader {
 
         let http_client = http_client_builder.build()?;
 
-        let nixl_agent = match get_nixl_agent() {
-            Ok(agent) => Some(agent),
-            Err(e) => {
-                tracing::warn!(
-                    "Error when creating NIXL agent (will not be able to register media data): {e}"
-                );
-                None
-            }
-        };
+        #[cfg(feature = "media-nixl")]
+        let nixl_agent = get_nixl_agent()?;
 
         Ok(Self {
             media_decoder,
             http_client,
             media_fetcher,
+            #[cfg(feature = "media-nixl")]
             nixl_agent,
         })
     }
@@ -104,36 +108,40 @@ impl MediaLoader {
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
         // TODO: request-level options
     ) -> Result<RdmaMediaDataDescriptor> {
-        if self.nixl_agent.is_none() {
-            anyhow::bail!("NIXL agent is not available, cannot decode and register media data");
+        #[cfg(not(feature = "media-nixl"))]
+        anyhow::bail!("NIXL is not supported, cannot decode and register media data {oai_content_part:?}");
+
+        #[cfg(feature = "media-nixl")]
+        {
+            // fetch the media, decode and NIXL-register
+            let decoded = match oai_content_part {
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
+                    let url = &image_part.image_url.url;
+                    self.check_if_url_allowed(url)?;
+                    let data = EncodedMediaData::from_url(url, &self.http_client).await?;
+                    self.media_decoder.image_decoder.decode_async(data).await?
+                }
+                ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
+                    let url = &video_part.video_url.url;
+                    self.check_if_url_allowed(url)?;
+                    EncodedMediaData::from_url(url, &self.http_client).await?;
+                    anyhow::bail!("Video decoding is not supported yet");
+                }
+                ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
+                    anyhow::bail!("Audio decoding is not supported yet");
+                }
+                _ => anyhow::bail!("Unsupported media type"),
+            };
+
+
+            let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
+            Ok(rdma_descriptor)
         }
 
-        // fetch the media, decode and NIXL-register
-        let decoded = match oai_content_part {
-            ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
-                let url = &image_part.image_url.url;
-                self.check_if_url_allowed(url)?;
-                let data = EncodedMediaData::from_url(url, &self.http_client).await?;
-                self.media_decoder.image_decoder.decode_async(data).await?
-            }
-            ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
-                let url = &video_part.video_url.url;
-                self.check_if_url_allowed(url)?;
-                EncodedMediaData::from_url(url, &self.http_client).await?;
-                anyhow::bail!("Video decoding is not supported yet");
-            }
-            ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
-                anyhow::bail!("Audio decoding is not supported yet");
-            }
-            _ => anyhow::bail!("Unsupported media type"),
-        };
-
-        let rdma_descriptor = decoded.into_rdma_descriptor(self.nixl_agent.as_ref().unwrap())?;
-        Ok(rdma_descriptor)
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "media-nixl"))]
 mod tests {
     use super::super::rdma::DataType;
     use super::*;
@@ -205,6 +213,11 @@ mod tests {
             "Source storage should be registered with NIXL"
         );
     }
+}
+
+#[cfg(test)]
+mod tests_non_nixl {
+    use super::*;
 
     #[test]
     fn test_direct_ip_blocked() {

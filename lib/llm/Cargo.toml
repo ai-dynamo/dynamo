@@ -24,7 +24,7 @@ testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-media-nixl = ["dep:dynamo-memory", "dep:nixl-sys"]
+media-nixl = ["dep:nixl-sys", "dep:dynamo-memory"]
 
 [[bench]]
 name = "tokenizer"
@@ -98,7 +98,7 @@ dialoguer = { version = "0.11", default-features = false, features = [
 
 # block_manager
 aligned-vec = { version = "0.6.4", optional = true }
-nixl-sys = { git = "https://github.com/ai-dynamo/nixl", rev = "00bac00", optional = true }
+nixl-sys = { version = "0.7", optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
