@@ -9,6 +9,10 @@ homepage.workspace = true
 repository.workspace = true
 keywords.workspace = true
 
+[features]
+default = ["ucx"]
+ucx = ["dep:async-ucx"]
+
 [dependencies]
 dynamo-identity = { workspace = true }
 
@@ -25,14 +29,22 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }
 xxhash-rust = { workspace = true }
 
+base64 = "0.22"
 flume = "0.11.1"
 futures = "0.3"
 hashbrown = "0.16"
 lru = { version = "0.16", features = ["hashbrown"]}
 rmp-serde = "1.1"
 serde_bytes = "0.11"
-socket2 = "0.5"
+socket2 = "0.6"
 tokio-util = { version = "0.7", features = ["codec"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.29", features = ["sched"] }
+nix = { version = "0.30", features = ["sched"] }
+
+# optional dependencies
+async-ucx = { git = "https://github.com/ryanolson/async-ucx.git", branch = "ryan/ucx", optional = true, features = ["am", "event"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

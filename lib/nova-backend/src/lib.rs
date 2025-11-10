@@ -4,24 +4,28 @@
 //! Nova Backend: transport-specific address types and helpers.
 
 mod address;
-mod message;
-mod response;
+//mod message;
+//mod response;
 pub mod tcp;
+
+#[cfg(feature = "ucx")]
+pub mod ucx;
+
 mod transport;
 
 use std::{collections::HashMap, sync::Arc};
 
 use dashmap::DashMap;
+use parking_lot::Mutex;
 
 // Public re-exports from dynamo-identity
 pub use dynamo_identity::{InstanceId, WorkerId};
 
 // Re-export identity types
 pub use address::{PeerInfo, WorkerAddress};
-pub use message::ActiveMessage;
-pub use response::{ResponseAwaiter, ResponseId, ResponseManager};
 pub use transport::{
     DataStreams, MessageType, Transport, TransportAdapter, TransportErrorHandler, TransportKey,
+    make_channels,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -34,21 +38,27 @@ pub enum NovaBackendError {
 
     #[error("Transport not found: {0}")]
     TransportNotFound(TransportKey),
+
+    #[error("Invalid transport priority: {0}")]
+    InvalidTransportPriority(String),
 }
 
 pub struct NovaBackend {
     instance_id: InstanceId,
     address: WorkerAddress,
-    priorities: Vec<TransportKey>,
+    priorities: Mutex<Vec<TransportKey>>,
     transports: HashMap<TransportKey, Arc<dyn Transport>>,
     primary_transport: DashMap<InstanceId, Arc<dyn Transport>>,
     alternative_transports: DashMap<InstanceId, Vec<TransportKey>>,
+
     #[allow(dead_code)]
     runtime: tokio::runtime::Handle,
 }
 
 impl NovaBackend {
-    pub async fn new(backend_transports: Vec<Arc<dyn Transport>>) -> anyhow::Result<Self> {
+    pub async fn new(
+        backend_transports: Vec<Arc<dyn Transport>>,
+    ) -> anyhow::Result<(Self, DataStreams)> {
         let instance_id = InstanceId::new_v4();
 
         // build worker address
@@ -56,27 +66,30 @@ impl NovaBackend {
         let mut builder = WorkerAddress::builder();
         let mut transports = HashMap::new();
 
-        let (egress_channels, _ingress_channels) = transport::make_channels();
+        let (adapter, data_streams) = transport::make_channels();
 
         let runtime = tokio::runtime::Handle::current();
 
         for transport in backend_transports {
-            transport.start(egress_channels.clone(), runtime.clone())?;
+            transport.start(adapter.clone(), runtime.clone())?;
             builder.merge(&transport.address())?;
             priorities.push(transport.key());
             transports.insert(transport.key(), transport);
         }
         let address = builder.build()?;
 
-        Ok(Self {
-            instance_id,
-            address,
-            transports,
-            priorities,
-            primary_transport: DashMap::new(),
-            alternative_transports: DashMap::new(),
-            runtime,
-        })
+        Ok((
+            Self {
+                instance_id,
+                address,
+                transports,
+                priorities: Mutex::new(priorities),
+                primary_transport: DashMap::new(),
+                alternative_transports: DashMap::new(),
+                runtime,
+            },
+            data_streams,
+        ))
     }
 
     pub fn peer_info(&self) -> PeerInfo {
@@ -119,6 +132,7 @@ impl NovaBackend {
         // sort against the preferred transports
         let sorted_transports = self
             .priorities
+            .lock()
             .iter()
             .filter(|key| compatible_transports.contains(key))
             .cloned()
@@ -139,7 +153,7 @@ impl NovaBackend {
 
     /// Get the available transports.
     pub fn available_transports(&self) -> Vec<TransportKey> {
-        unimplemented!()
+        self.transports.keys().cloned().collect()
     }
 
     /// Set the priority of the transports.
@@ -147,8 +161,28 @@ impl NovaBackend {
     /// The list of [`TransportKey`]s must be an order set of the available transports.
     pub fn set_transport_priority(
         &self,
-        _priorities: Vec<TransportKey>,
+        priorities: Vec<TransportKey>,
     ) -> Result<(), NovaBackendError> {
-        unimplemented!()
+        let required_transports = self.available_transports();
+        if required_transports.len() != priorities.len() {
+            return Err(NovaBackendError::InvalidTransportPriority(format!(
+                "Required transports: {:?}, provided priorities: {:?}",
+                required_transports, priorities
+            )));
+        }
+
+        for priority in priorities {
+            if !required_transports.contains(&priority) {
+                return Err(NovaBackendError::InvalidTransportPriority(format!(
+                    "Priority transport not found: {:?}",
+                    priority
+                )));
+            }
+        }
+
+        let mut priorities = self.priorities.lock();
+        *priorities = priorities.clone();
+
+        Ok(())
     }
 }

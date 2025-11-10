@@ -81,7 +81,7 @@ pub struct DataStreams {
     pub event_stream: flume::Receiver<(Bytes, Bytes)>,
 }
 
-pub(crate) fn make_channels() -> (TransportAdapter, DataStreams) {
+pub fn make_channels() -> (TransportAdapter, DataStreams) {
     let (message_tx, message_rx) = flume::unbounded();
     let (response_tx, response_rx) = flume::unbounded();
     let (event_tx, event_rx) = flume::unbounded();
