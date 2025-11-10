@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod approx;
 pub mod indexer;
+pub mod mm_hash;
 pub mod prefill_router;
 pub mod protocols;
 pub mod publisher;
@@ -315,6 +316,7 @@ impl KvRouter {
         &self,
         context_id: Option<&str>,
         tokens: &[u32],
+        mm_hash: Option<u64>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
@@ -325,7 +327,13 @@ impl KvRouter {
 
         let isl_tokens = tokens.len();
 
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+        let mut block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+
+        // Prepend MM hash as virtual block 0 if present
+        if let Some(mm_hash) = mm_hash {
+            block_hashes.insert(0, LocalBlockHash(mm_hash));
+        }
+
         let seq_hashes = compute_seq_hash_for_block(&block_hashes);
 
         let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
@@ -374,13 +382,20 @@ impl KvRouter {
         &self,
         request_id: String,
         tokens: &[u32],
+        mm_hash: Option<u64>,
         overlap_blocks: u32,
         worker: WorkerWithDpRank,
     ) {
         let isl_tokens = tokens.len();
 
         let maybe_seq_hashes = self.kv_router_config.router_track_active_blocks.then(|| {
-            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+            let mut block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+
+            // Prepend MM hash as virtual block 0 if present
+            if let Some(mm_hash) = mm_hash {
+                block_hashes.insert(0, LocalBlockHash(mm_hash));
+            }
+
             compute_seq_hash_for_block(&block_hashes)
         });
 
@@ -408,13 +423,29 @@ impl KvRouter {
     }
 
     /// Get potential prefill and decode loads for all workers
-    pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
+    pub async fn get_potential_loads(
+        &self,
+        tokens: &[u32],
+        mm_hash: Option<u64>,
+    ) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+        let mut block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+
+        // Prepend MM hash as virtual block 0 if present
+        if let Some(mm_hash) = mm_hash {
+            block_hashes.insert(0, LocalBlockHash(mm_hash));
+        }
+
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
 
         let maybe_seq_hashes = self.kv_router_config.router_track_active_blocks.then(|| {
-            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+            let mut block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+
+            // Prepend MM hash as virtual block 0 if present
+            if let Some(mm_hash) = mm_hash {
+                block_hashes.insert(0, LocalBlockHash(mm_hash));
+            }
+
             compute_seq_hash_for_block(&block_hashes)
         });
 
@@ -444,7 +475,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let response = match request {
             RouterRequest::New { tokens } => {
                 let (best_worker, overlap_blocks) = self
-                    .find_best_match(Some(&context_id), &tokens, None, true)
+                    .find_best_match(Some(&context_id), &tokens, None, None, true)
                     .await?;
 
                 RouterResponse::New {
@@ -514,6 +545,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 // Extract context ID for request tracking
                 let context_id = request.context().id().to_string();
 
+                // Extract multimodal hash for cache differentiation
+                let mm_hash = request.mm_hash;
+
                 // Check if this is a query_instance_id request first
                 let query_instance_id = request.has_annotation("query_instance_id");
 
@@ -529,8 +563,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     }
 
                     // Compute actual overlap blocks by querying the indexer
-                    let block_hashes =
+                    let mut block_hashes =
                         compute_block_hash_for_seq(&request.token_ids, self.chooser.block_size());
+
+                    // Prepend MM hash as virtual block 0 if present
+                    if let Some(mm_hash) = mm_hash {
+                        block_hashes.insert(0, LocalBlockHash(mm_hash));
+                    }
+
                     let overlap_scores = self.chooser.indexer.find_matches(block_hashes).await?;
                     let worker = WorkerWithDpRank::new(id, dp_rank);
                     let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
@@ -539,6 +579,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         .add_request(
                             context_id.clone(),
                             &request.token_ids,
+                            mm_hash,
                             overlap_blocks,
                             worker,
                         )
@@ -551,6 +592,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         .find_best_match(
                             Some(&context_id),
                             &request.token_ids,
+                            mm_hash,
                             request.router_config_override.as_ref(),
                             !query_instance_id, // Don't update states if query_instance_id
                         )
