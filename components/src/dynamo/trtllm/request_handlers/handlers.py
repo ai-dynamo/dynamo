@@ -178,7 +178,9 @@ class PrefillHandler(HandlerBase):
                                 ]
         # Normal flow: Generate the prefill response locally with embeddings
         response_count = 0
-        async for res in self.generate_locally(request, context, embeddings_tensor, ep_disaggregated_params):
+        async for res in self.generate_locally(
+            request, context, embeddings_tensor, ep_disaggregated_params
+        ):
             response_count += 1
             if response_count > 1:
                 raise ValueError("Prefill response should be generated only once.")
