@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::discovery::{DiscoveryMetadata, MetadataSnapshot};
-use crate::{CancellationToken, Result};
+use crate::CancellationToken;
+use anyhow::Result;
 use futures::StreamExt;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{
@@ -42,7 +43,7 @@ impl DiscoveryDaemon {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(METADATA_FETCH_TIMEOUT_SECS))
             .build()
-            .map_err(|e| crate::error!("Failed to create HTTP client: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
 
         Ok(Self {
             kube_client,
@@ -266,12 +267,12 @@ impl DiscoveryDaemon {
             .get(&url)
             .send()
             .await
-            .map_err(|e| crate::error!("Failed to fetch metadata from {}: {}", url, e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to fetch metadata from {}: {}", url, e))?;
 
         let metadata: DiscoveryMetadata = response
             .json()
             .await
-            .map_err(|e| crate::error!("Failed to parse metadata from {}: {}", url, e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse metadata from {}: {}", url, e))?;
 
         let metadata = Arc::new(metadata);
 

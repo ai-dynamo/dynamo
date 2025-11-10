@@ -13,7 +13,8 @@ use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryMetadata, DiscoveryQuery, DiscoverySpec,
     DiscoveryStream, MetadataSnapshot,
 };
-use crate::{CancellationToken, Result};
+use crate::CancellationToken;
+use anyhow::Result;
 use async_trait::async_trait;
 use kube::Client as KubeClient;
 use std::collections::HashSet;
@@ -50,7 +51,7 @@ impl KubeDiscoveryClient {
 
         let kube_client = KubeClient::try_default()
             .await
-            .map_err(|e| crate::error!("Failed to create Kubernetes client: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create Kubernetes client: {}", e))?;
 
         // Create watch channel with initial empty snapshot
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::Result;
+use anyhow::Result;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use std::hash::{Hash, Hasher};
 
@@ -65,7 +65,7 @@ impl PodInfo {
     /// Discover pod information from environment variables
     pub fn from_env() -> Result<Self> {
         let pod_name = std::env::var("POD_NAME")
-            .map_err(|_| crate::error!("POD_NAME environment variable not set"))?;
+            .map_err(|_| anyhow::anyhow!("POD_NAME environment variable not set"))?;
 
         let pod_namespace = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| {
             tracing::warn!("POD_NAMESPACE not set, defaulting to 'default'");

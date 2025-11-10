@@ -4,9 +4,10 @@
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
 };
-use crate::{CancellationToken, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 /// Shared in-memory registry for mock discovery
 #[derive(Clone, Default)]

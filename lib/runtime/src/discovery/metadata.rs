@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::Result;
+use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -39,7 +39,7 @@ impl DiscoveryMetadata {
             self.endpoints.insert(key, instance);
             Ok(())
         } else {
-            crate::raise!("Cannot register non-endpoint instance as endpoint")
+            anyhow::bail!("Cannot register non-endpoint instance as endpoint")
         }
     }
 
@@ -56,7 +56,7 @@ impl DiscoveryMetadata {
             self.model_cards.insert(key, instance);
             Ok(())
         } else {
-            crate::raise!("Cannot register non-model-card instance as model card")
+            anyhow::bail!("Cannot register non-model-card instance as model card")
         }
     }
 
