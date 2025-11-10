@@ -4,7 +4,6 @@
 import json
 import logging
 import re
-from typing import Literal
 
 import yaml
 
@@ -24,6 +23,7 @@ from benchmarks.profiler.utils.config import (
 from benchmarks.profiler.utils.defaults import (
     DEFAULT_MODEL_NAME,
     DYNAMO_RUN_DEFAULT_PORT,
+    EngineType,
 )
 from dynamo.planner.defaults import SubComponentType
 
@@ -84,7 +84,7 @@ class TrtllmConfigModifier:
     def convert_config(
         cls,
         config: dict,
-        target: Literal["prefill", "decode"],
+        target: EngineType,
         is_moe_model: bool = False,
     ) -> dict:
         if is_moe_model:
@@ -101,7 +101,7 @@ class TrtllmConfigModifier:
         if "Planner" in cfg.spec.services:
             del cfg.spec.services["Planner"]
 
-        if target == "prefill":
+        if target == EngineType.PREFILL:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "trtllm", SubComponentType.PREFILL
@@ -157,7 +157,7 @@ class TrtllmConfigModifier:
 
             worker_service.extraPodSpec.mainContainer.args = args
 
-        elif target == "decode":
+        elif target == EngineType.DECODE:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "trtllm", SubComponentType.PREFILL

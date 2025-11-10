@@ -225,6 +225,12 @@ def parse_args():
         ),
         help=f"Interval in seconds for polling custom backend metrics. Set to > 0 to enable polling (default: 0=disabled, suggested: 9.2s which is less than typical Prometheus scrape interval). Can be set via {CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR} env var.",
     )
+    parser.add_argument(
+        "--store-kv",
+        type=str,
+        default=os.environ.get("DYN_STORE_KV", "etcd"),
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
 
     flags = parser.parse_args()
 
@@ -245,6 +251,16 @@ async def async_main():
     dump_config(flags.dump_config_to, flags)
     is_static = bool(flags.static_endpoint)  # true if the string has a value
 
+    # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
+    if os.environ.get("DYN_SYSTEM_PORT"):
+        logger.warning(
+            "=" * 80 + "\n"
+            "WARNING: DYN_SYSTEM_PORT is set but NOT used by the frontend!\n"
+            "The frontend does not expose a system metrics server.\n"
+            "Only backend workers should set DYN_SYSTEM_PORT.\n"
+            "Use --http-port to configure the frontend HTTP API port.\n" + "=" * 80
+        )
+
     # Configure Dynamo frontend HTTP service metrics prefix
     if flags.metrics_prefix is not None:
         prefix = flags.metrics_prefix.strip()
@@ -252,8 +268,7 @@ async def async_main():
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
     loop = asyncio.get_running_loop()
-
-    runtime = DistributedRuntime(loop, is_static)
+    runtime = DistributedRuntime(loop, flags.store_kv, is_static)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))

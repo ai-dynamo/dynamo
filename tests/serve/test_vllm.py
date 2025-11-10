@@ -104,10 +104,10 @@ vllm_configs = {
             completion_payload_default(expected_response=["joke"]),
         ],
     ),
-    "multimodal_agg_llava": VLLMConfig(
-        name="multimodal_agg_llava",
+    "multimodal_agg_llava_epd": VLLMConfig(
+        name="multimodal_agg_llava_epd",
         directory=vllm_dir,
-        script_name="agg_multimodal.sh",
+        script_name="agg_multimodal_epd.sh",
         marks=[pytest.mark.gpu_2],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
@@ -128,10 +128,10 @@ vllm_configs = {
             )
         ],
     ),
-    "multimodal_agg_qwen": VLLMConfig(
-        name="multimodal_agg_qwen",
+    "multimodal_agg_qwen_epd": VLLMConfig(
+        name="multimodal_agg_qwen_epd",
         directory=vllm_dir,
-        script_name="agg_multimodal.sh",
+        script_name="agg_multimodal_epd.sh",
         marks=[pytest.mark.gpu_2],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
@@ -151,6 +151,46 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=["bus"],
             )
+        ],
+    ),
+    "multimodal_agg_qwen": VLLMConfig(
+        name="multimodal_agg_qwen",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[pytest.mark.gpu_2],
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
+        delayed_start=0,
+        timeout=360,
+        request_payloads=[
+            # HTTP URL test
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["bus"],
+            ),
+            # Base64 data URL test (1x1 PNG inline, avoids network fetch)
+            chat_payload(
+                [
+                    {"type": "text", "text": "What do you see in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=[],  # Just validate no error
+            ),
         ],
     ),
     # TODO: Update this test case when we have video multimodal support in vllm official components

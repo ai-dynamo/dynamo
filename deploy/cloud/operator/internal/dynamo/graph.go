@@ -106,10 +106,6 @@ func (s ServiceConfig) GetNamespace() *string {
 	return &s.Config.Dynamo.Namespace
 }
 
-func GetDefaultDynamoNamespace(dynamoDeployment *v1alpha1.DynamoGraphDeployment) string {
-	return fmt.Sprintf("dynamo-%s", dynamoDeployment.Name)
-}
-
 func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeploymentConfig, error) {
 	var config DynDeploymentConfig
 	err := json.Unmarshal(jsonContent, &config)
@@ -119,25 +115,22 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
-	graphDynamoNamespace, err := getDynamoNamespace(parentDynamoGraphDeployment)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get the graph dynamo namespace: %w", err)
-	}
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
+		dynamoNamespace := getDynamoNamespace(parentDynamoGraphDeployment, component)
 		deployment := &v1alpha1.DynamoComponentDeployment{}
 		deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
 		deployment.Name = GetDynamoComponentName(parentDynamoGraphDeployment, componentName)
 		deployment.Spec.BackendFramework = parentDynamoGraphDeployment.Spec.BackendFramework
 		deployment.Namespace = parentDynamoGraphDeployment.Namespace
 		deployment.Spec.ServiceName = componentName
-		deployment.Spec.DynamoNamespace = &graphDynamoNamespace
+		deployment.Spec.DynamoNamespace = &dynamoNamespace
 		labels := make(map[string]string)
 		// add the labels in the spec in order to label all sub-resources
 		deployment.Spec.Labels = labels
 		// and add the labels to the deployment itself
 		deployment.Labels = labels
 		labels[commonconsts.KubeLabelDynamoComponent] = componentName
-		labels[commonconsts.KubeLabelDynamoNamespace] = graphDynamoNamespace
+		labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 		labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDynamoGraphDeployment.Name
 
 		// Propagate metrics annotation from parent deployment if present
@@ -187,22 +180,11 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 	return deployments, nil
 }
 
-func getDynamoNamespace(parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment) (string, error) {
-	graphDynamoNamespace := ""
-	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
-		dynamoNamespace := ""
-		if component.DynamoNamespace != nil && *component.DynamoNamespace != "" {
-			dynamoNamespace = *component.DynamoNamespace
-		}
-		if graphDynamoNamespace != "" && graphDynamoNamespace != dynamoNamespace {
-			return "", fmt.Errorf("namespace mismatch for component %s: graph uses namespace %s but component specifies %s", componentName, graphDynamoNamespace, dynamoNamespace)
-		}
-		graphDynamoNamespace = dynamoNamespace
+func getDynamoNamespace(object metav1.Object, service *v1alpha1.DynamoComponentDeploymentSharedSpec) string {
+	if service.GlobalDynamoNamespace {
+		return commonconsts.GlobalDynamoNamespace
 	}
-	if graphDynamoNamespace == "" {
-		graphDynamoNamespace = GetDefaultDynamoNamespace(parentDynamoGraphDeployment)
-	}
-	return graphDynamoNamespace, nil
+	return fmt.Sprintf("%s-%s", object.GetNamespace(), object.GetName())
 }
 
 // updateDynDeploymentConfig updates the runtime config object for the given dynamoDeploymentComponent
@@ -933,12 +915,9 @@ func GenerateGrovePodCliqueSet(
 		}
 	}
 
-	dynamoNamespace, err := getDynamoNamespace(dynamoDeployment)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get the graph dynamo namespace: %w", err)
-	}
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
+		dynamoNamespace := getDynamoNamespace(dynamoDeployment, component)
 		component.DynamoNamespace = &dynamoNamespace
 		// Determine backend framework using hybrid approach
 		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)

@@ -132,7 +132,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && rm -rf /opt/dynamo/wheelhouse
