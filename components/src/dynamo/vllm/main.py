@@ -29,6 +29,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_handlers import (
     EncodeWorkerHandler,
+    MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
     ProcessorHandler,
 )
@@ -105,7 +106,11 @@ async def worker():
     elif config.multimodal_encode_worker:
         await init_multimodal_encode_worker(runtime, config)
         logger.debug("init_multimodal_encode_worker completed")
-    elif config.multimodal_worker or config.multimodal_encode_prefill_worker:
+    elif (
+        config.multimodal_worker
+        or config.multimodal_decode_worker
+        or config.multimodal_encode_prefill_worker
+    ):
         await init_multimodal_worker(runtime, config)
         logger.debug("init_multimodal_worker completed")
     elif config.is_prefill_worker:
@@ -129,7 +134,6 @@ def setup_kv_event_publisher(
     """
     Set up KV event publishers for prefix caching if enabled.
     Creates one publisher per dp_rank since each dp_rank publishes to a different port.
-
     Args:
         config: Worker configuration
         component: Component for runtime integration
@@ -632,13 +636,28 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
 
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
 
-    # For aggregated mode, no downstream client is needed
-    # TODO: Implement disaggregated mode with proper decode worker client
-    downstream_client = None
+    # Set up decode worker client for disaggregated mode
+    decode_worker_client = None
+    if config.is_prefill_worker:
+        # Prefill worker needs to connect to decode worker
+        decode_worker_client = (
+            await runtime.namespace(config.namespace)
+            .component("decoder")
+            .endpoint("generate")
+            .client()
+        )
+        await decode_worker_client.wait_for_instances()
+        logger.info("Connected to decode worker for disaggregated mode")
 
-    handler = MultimodalPDWorkerHandler(
-        runtime, component, engine_client, config, downstream_client
-    )
+    # Choose handler based on worker type
+    if config.multimodal_decode_worker:
+        handler = MultimodalDecodeWorkerHandler(
+            runtime, component, engine_client, config
+        )
+    else:
+        handler = MultimodalPDWorkerHandler(
+            runtime, component, engine_client, config, decode_worker_client
+        )
 
     await handler.async_init(runtime)
 
