@@ -182,43 +182,18 @@ impl EtcdBucket {
         let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd create: {k}");
 
-        // Use atomic transaction to check and create in one operation
-        let put_options = PutOptions::new().with_lease(self.client.lease_id() as i64);
-
-        // Build transaction that creates key only if it doesn't exist
-        let txn = Txn::new()
-            .when(vec![Compare::version(k.as_str(), CompareOp::Equal, 0)]) // Atomic check
-            .and_then(vec![TxnOp::put(k.as_str(), value, Some(put_options))]) // Only if check passes
-            .or_else(vec![
-                TxnOp::get(k.as_str(), None), // Key exists, get its info
-            ]);
-
-        // Execute the transaction
-        let result = self
+        match self
             .client
-            .etcd_client()
-            .kv_client()
-            .txn(txn)
+            .kv_create(k.as_str(), value.into(), None)
             .await
-            .map_err(|e| StoreError::EtcdError(e.to_string()))?;
-
-        if result.succeeded() {
-            // Key was created successfully
-            return Ok(StoreOutcome::Created(1)); // version of new key is always 1
-        }
-
-        // Key already existed, get its version
-        if let Some(etcd_client::TxnOpResponse::Get(get_resp)) =
-            result.op_responses().into_iter().next()
-            && let Some(kv) = get_resp.kvs().first()
+            .map_err(|e| StoreError::EtcdError(e.to_string()))?
         {
-            let version = kv.version() as u64;
-            return Ok(StoreOutcome::Exists(version));
+            None => {
+                // Key was created successfully
+                Ok(StoreOutcome::Created(1)) // version of new key is always 1
+            }
+            Some(revision) => Ok(StoreOutcome::Exists(revision)),
         }
-        // Shouldn't happen, but handle edge case
-        Err(StoreError::EtcdError(
-            "Unexpected transaction response".to_string(),
-        ))
     }
 
     async fn update(
