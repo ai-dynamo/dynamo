@@ -359,24 +359,24 @@ spec:
 Then manually extract and apply the generated DGD:
 
 ```bash
-# Extract generated config
-kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedConfig}' > my-dgd.yaml
+# Extract generated DGD from DGDR status
+kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedDeployment}' | kubectl apply -f -
 
-# Review and modify if needed
+# Or save to file first for review/modification
+kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedDeployment}' > my-dgd.yaml
+
 vi my-dgd.yaml
-
-# Deploy manually
 kubectl apply -f my-dgd.yaml -n $NAMESPACE
 ```
 
-The generated DGD includes optimized configurations and the SLA planner component.
+The generated DGD includes optimized configurations and the SLA planner component. The required `planner-profile-data` ConfigMap is automatically created when profiling completes, so the DGD will deploy successfully.
 
 #### Option 2: Use Standalone Planner Templates (Advanced)
 
 For advanced use cases, you can manually deploy using the standalone planner templates in `examples/backends/*/deploy/disagg_planner.yaml`:
 
 ```bash
-# After profiling completes, profiling data is stored in ConfigMaps
+# After profiling completes, profiling data is automatically stored in ConfigMaps
 
 # OPTIONAL: Inspect profiling results stored in ConfigMaps
 # View the generated DGD configuration

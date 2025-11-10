@@ -396,6 +396,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	// Record spec generation event
 	r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonSpecGenerated, MessageSpecGenerated)
 
+	// Create additional resources (ConfigMaps) immediately after profiling
+	// This ensures that the `planner-profile-data` ConfigMap is available for both auto and manual deployment
+	targetNamespace := dgdr.Namespace
+	if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.Namespace != "" {
+		targetNamespace = dgdr.Spec.DeploymentOverrides.Namespace
+	}
+	if err := r.createAdditionalResources(ctx, dgdr, targetNamespace); err != nil {
+		logger.Error(err, "Failed to create additional resources after profiling")
+		// Don't fail the DGDR, just log the error - ConfigMaps can be created manually
+		r.Recorder.Event(dgdr, corev1.EventTypeWarning, "ConfigMapCreationFailed",
+			fmt.Sprintf("Failed to create ConfigMaps from profiling output: %v", err))
+	}
+
 	// If autoApply is enabled, transition to Deploying state
 	if dgdr.Spec.AutoApply {
 		logger.Info("AutoApply enabled, transitioning to Deploying state")
@@ -470,20 +483,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx contex
 
 	// Check if we need to create DGD
 	if dgdr.Status.Deployment == nil || !dgdr.Status.Deployment.Created {
-		// Determine target namespace for deployment
-		targetNamespace := dgdr.Namespace
-		if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.Namespace != "" {
-			targetNamespace = dgdr.Spec.DeploymentOverrides.Namespace
-		}
-
-		// Deploy additional resources (ConfigMaps) from the profiling output first
-		if err := r.createAdditionalResources(ctx, dgdr, targetNamespace); err != nil {
-			logger.Error(err, "Failed to create additional resources")
-			r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageDeploymentCreationFailed,
-				fmt.Sprintf("Failed to create additional resources: %v", err))
-			return ctrl.Result{}, err
-		}
-
 		return r.createDGD(ctx, dgdr)
 	}
 
