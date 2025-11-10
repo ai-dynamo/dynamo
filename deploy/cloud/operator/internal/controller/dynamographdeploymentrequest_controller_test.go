@@ -291,14 +291,12 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(job.Spec.Template.Spec.Containers[0].Name).Should(Equal(ContainerNameProfiler))
 			Expect(job.Spec.Template.Spec.Containers[1].Name).Should(Equal(ContainerNameOutputCopier))
 
-			// Verify PVC volume mount
+			// Verify emptyDir volume (not PVC)
 			Expect(job.Spec.Template.Spec.Volumes).Should(ContainElement(
 				corev1.Volume{
 					Name: VolumeNameProfilingOutput,
 					VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "dynamo-pvc",
-						},
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
 					},
 				},
 			))

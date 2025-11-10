@@ -303,3 +303,27 @@ class VllmV1ConfigModifier:
                 f"Failed to parse KV cache size from line: {line}. Error: {e}"
             )
         return 0
+
+    @classmethod
+    def set_prefill_config(
+        cls, config: dict, max_batch_size: int, max_num_tokens: int
+    ) -> dict:
+        """
+        Configure prefill-related limits for aggregated prefill runs.
+        vLLM uses --max-num-seqs to limit concurrency and
+        --max-num-batched-tokens to cap total tokens per step.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="vllm", sub_component_type=SubComponentType.DECODE
+        )
+        args = validate_and_get_worker_args(worker_service, backend="vllm")
+        args = break_arguments(args)
+
+        # Concurrency / batch size
+        args = set_argument_value(args, "--max-num-seqs", str(max_batch_size))
+        # Token cap per step
+        args = set_argument_value(args, "--max-num-batched-tokens", str(max_num_tokens))
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()

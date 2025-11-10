@@ -4,7 +4,7 @@
 accelerate==1.6.0
 aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@11b6d821f1fbb34300bb0ed4945f647e89fb411a
 aiofiles
-aiperf @ git+https://github.com/ai-dynamo/aiperf.git@e8f69abf180ff9ea96de9f9a8c955df8c024625b
+aiperf @ git+https://github.com/ai-dynamo/aiperf.git@16dad7c02fcd959ba96823d7bfe7e681e5d5b41d
 av==15.0.0
 fastapi==0.120.1
 ftfy

@@ -58,7 +58,6 @@ The Dynamo Operator watches for DGDRs and automatically:
 Before creating a DGDR, ensure:
 - **Dynamo platform installed** with the operator running (see [Installation Guide](/docs/kubernetes/installation_guide.md))
 - **[kube-prometheus-stack](/docs/kubernetes/observability/metrics.md) installed and running** (required for SLA planner)
-- **Profiling PVC created** (see [Benchmarking Resource Setup](/deploy/utils/README.md#benchmarking-resource-setup#BenchmarkingResourceSetup))
 - **Image pull secrets configured** if using private registries (typically `nvcr-imagepullsecret` for NVIDIA images)
 - **Sufficient GPU resources** available in your cluster for profiling
 - **Runtime images available** that contain both profiler and runtime components
@@ -360,41 +359,42 @@ spec:
 Then manually extract and apply the generated DGD:
 
 ```bash
-# Extract generated config
-kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedConfig}' > my-dgd.yaml
+# Extract generated DGD from DGDR status
+kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedDeployment}' | kubectl apply -f -
 
-# Review and modify if needed
+# Or save to file first for review/modification
+kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedDeployment}' > my-dgd.yaml
+
 vi my-dgd.yaml
-
-# Deploy manually
 kubectl apply -f my-dgd.yaml -n $NAMESPACE
 ```
 
-The generated DGD includes optimized configurations and the SLA planner component.
+The generated DGD includes optimized configurations and the SLA planner component. The required `planner-profile-data` ConfigMap is automatically created when profiling completes, so the DGD will deploy successfully.
 
 #### Option 2: Use Standalone Planner Templates (Advanced)
 
 For advanced use cases, you can manually deploy using the standalone planner templates in `examples/backends/*/deploy/disagg_planner.yaml`:
 
 ```bash
-# After profiling completes, profiling data is stored on the PVC at /data
+# After profiling completes, profiling data is automatically stored in ConfigMaps
 
-# OPTIONAL: Download profiling results for local inspection
-# Create access pod (skip this step if access pod is already running)
-kubectl apply -f deploy/utils/manifests/pvc-access-pod.yaml -n $NAMESPACE
-kubectl wait --for=condition=Ready pod/pvc-access-pod -n $NAMESPACE --timeout=60s
+# OPTIONAL: Inspect profiling results stored in ConfigMaps
+# View the generated DGD configuration
+kubectl get configmap dgdr-output-<dgdr-name> -n $NAMESPACE -o yaml
 
-# Download the data
-kubectl cp $NAMESPACE/pvc-access-pod:/data ./profiling_data
+# View the planner profiling data (JSON format)
+kubectl get configmap planner-profile-data -n $NAMESPACE -o yaml
 
-# Cleanup
-kubectl delete pod pvc-access-pod -n $NAMESPACE
+# Update the PROMETHEUS_ENDPOINT environment variable in the planner template
+# to match your cluster's Prometheus service location (see comments in the template)
 
 # Update backend planner manifest as needed, then deploy
 kubectl apply -f examples/backends/<backend>/deploy/disagg_planner.yaml -n $NAMESPACE
 ```
 
 > **Note**: The standalone templates are provided as examples and may need customization for your model and requirements. The DGDR-generated configuration (Option 1) is recommended as it's automatically tuned to your profiling results and SLA targets.
+>
+> **Important - Prometheus Configuration**: The planner queries Prometheus to get frontend request metrics for scaling decisions. If you see errors like "Failed to resolve prometheus service", ensure the `PROMETHEUS_ENDPOINT` environment variable in your planner configuration correctly points to your Prometheus service. See the comments in the example templates for details.
 
 ### Relationship to DynamoGraphDeployment (DGD)
 

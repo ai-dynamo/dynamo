@@ -6,7 +6,7 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 
-from benchmarks.profiler.utils.aiperf import benchmark_decode
+from benchmarks.profiler.utils.aiperf import get_decode_itl_and_thpt_per_gpu
 from benchmarks.profiler.utils.defaults import DECODE_MAX_CONCURRENCY
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.plot import plot_decode_3d_surface
@@ -114,7 +114,7 @@ def profile_decode(
 ):
     def get_itl_and_thpt_per_gpu(isl, osl, num_request):
         ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{isl}_osl{osl}_n{num_request}"
-        aiperf_result = benchmark_decode(
+        return get_decode_itl_and_thpt_per_gpu(
             isl,
             osl,
             num_request,
@@ -122,12 +122,8 @@ def profile_decode(
             model_name,
             tokenizer,
             base_url=url,
+            num_gpus=num_gpus,
         )
-        if aiperf_result is not None:
-            itl = aiperf_result["inter_token_latency"]["avg"]
-            thpt_per_gpu = aiperf_result["output_token_throughput"]["avg"] / num_gpus
-            return itl, thpt_per_gpu
-        return None, None
 
     return _profile_decode_helper(
         work_dir,
