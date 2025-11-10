@@ -18,7 +18,7 @@
 # - Pushes to main: publish to S3 under 'dev' (development docs)
 # - Version tags: publish to S3 under 'archive/vX.Y[.Z][suffix]' AND update 'latest' to match the release
 # - Akamai: always flushes cache for the target path after publish
-# - Repo variable required: PUBLISH_S3_TARGET_PATH (prefix under s3://brightspot-assets-prod/developer/docs)
+# - Repo variable required: DOCS_PUBLISH_S3_TARGET_PATH (prefix under s3://brightspot-assets-prod/developer/docs)
 # - Secrets required: AWS credentials (role or keys), AKAMAI_* EdgeGrid creds
 # - Flags: Include in commit message to control behavior:
 #   - '/skip-dev': skip publishing 'dev' on main branch
@@ -69,10 +69,10 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           # Use OIDC (role assumption) if available, otherwise use IAM keys
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-access-key-id: ${{ secrets.AWS_ROLE_TO_ASSUME && '' || secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_ROLE_TO_ASSUME && '' || secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+          role-to-assume: ${{ secrets.DOCS_AWS_IAM_STS_ROLE }}
+          aws-access-key-id: ${{ secrets.DOCS_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.DOCS_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.DOCS_AWS_REGION || 'us-east-1' }}
 
       - name: Verify AWS identity
         run: |
@@ -163,13 +163,13 @@ jobs:
         id: vars
         env:
           ARTIFACTS_PATH: dynamo-docs
-          TARGET_PATH: ${{ vars.PUBLISH_S3_TARGET_PATH }}
+          TARGET_PATH: ${{ vars.DOCS_PUBLISH_S3_TARGET_PATH }}
         shell: bash
         run: |
           set -euo pipefail
 
           if [[ -z "${TARGET_PATH}" ]]; then
-            echo "::error::target-path was not provided. Set repository variable PUBLISH_S3_TARGET_PATH."
+            echo "::error::target-path was not provided. Set repository variable DOCS_PUBLISH_S3_TARGET_PATH."
             exit 1
           fi
 
@@ -195,7 +195,7 @@ jobs:
         id: paths
         env:
           S3_TARGET_ROOT: ${{ env.S3_BUCKET }}
-          TARGET_PATH: ${{ vars.PUBLISH_S3_TARGET_PATH }}
+          TARGET_PATH: ${{ vars.DOCS_PUBLISH_S3_TARGET_PATH }}
         shell: bash
         run: |
           set -euo pipefail
