@@ -260,7 +260,7 @@ jobs:
             --set dynamo-operator.controllerManager.manager.image.tag=${{ env.OPERATOR_IMAGE_TAG }} \
             --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
 
-      - name: Configure image pull secrets and deploy vllm graph
+      - name: Configure image pull secrets and deploy Dynamo graph
         shell: bash
         env:
           KUBECONFIG: ${{ github.workspace }}/.kubeconfig
@@ -268,25 +268,73 @@ jobs:
           set -euo pipefail
           export KUBE_NS=${NAMESPACE}
           export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${VLLM_IMAGE_TAG}"
-          # Secrets
-          kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n ${KUBE_NS} || true
-          # Deploy vllm backend graph
-          pwd
-          ls
-          cd ${{ github.workspace }}/./examples/backends/${FRAMEWORK}/deploy/
-          export GRAPH_NAME=$(yq e '.metadata.name' ${DEPLOYMENT_FILE})
-          yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' ${DEPLOYMENT_FILE}
-          kubectl apply -n ${KUBE_NS} -f ${DEPLOYMENT_FILE}
-          sleep 20
-          kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" -n ${KUBE_NS} --timeout=1000s
 
-      # - name: Install GAIE CRDs and Kgateway
-      #   shell: bash
-      #   env:
-      #     KUBECONFIG: ${{ github.workspace }}/.kubeconfig
-      #   run: |
-      #     set -euo pipefail
-      #     ${{ github.workspace }}/deploy/inference-gateway/install_gaie_crd_kgateway.sh
+          echo "Namespace: ${KUBE_NS}"
+          echo "FRAMEWORK_RUNTIME_IMAGE=${FRAMEWORK_RUNTIME_IMAGE}"
+
+          # Secrets
+          kubectl create secret generic hf-token-secret \
+            --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} \
+            -n ${KUBE_NS} || true
+
+          # Deploy vllm backend graph
+          echo "Current dir before cd:"
+          pwd
+          cd "${{ github.workspace }}/examples/backends/${FRAMEWORK}/deploy/"
+          echo "Now in:"
+          pwd
+          ls -l
+
+          echo "DEPLOYMENT_FILE=${DEPLOYMENT_FILE}"
+          export GRAPH_NAME
+          GRAPH_NAME=$(yq e '.metadata.name' "${DEPLOYMENT_FILE}")
+          echo "GRAPH_NAME=${GRAPH_NAME}"
+
+          echo "Patching image in ${DEPLOYMENT_FILE}..."
+          yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' "${DEPLOYMENT_FILE}"
+
+          echo "Applying ${DEPLOYMENT_FILE} to namespace ${KUBE_NS}..."
+          kubectl apply -n ${KUBE_NS} -f "${DEPLOYMENT_FILE}"
+
+          echo "Sleeping 20s before waiting for pods..."
+          sleep 20
+
+          echo "Waiting for pods with label nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} to become Ready..."
+          if ! kubectl wait --for=condition=ready pod \
+              -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" \
+              -n ${KUBE_NS} \
+              --timeout=1000s; then
+            echo "Pods for graph ${GRAPH_NAME} did NOT become Ready within timeout."
+            echo
+            echo "=== Current pods for this graph ==="
+            kubectl get pods -n ${KUBE_NS} -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" -o wide || true
+
+            # Grab pod names
+            PODS=$(kubectl get pods -n ${KUBE_NS} -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" -o jsonpath='{.items[*].metadata.name}' || true)
+            echo "PODS=${PODS}"
+            for P in ${PODS}; do
+              echo
+              echo "===== describe pod ${P} ====="
+              kubectl describe pod "${P}" -n ${KUBE_NS} || true
+
+              echo
+              echo "===== container statuses for ${P} ====="
+              kubectl get pod "${P}" -n ${KUBE_NS} -o jsonpath='{.status.containerStatuses}{"\n"}' || true
+
+              echo
+              echo "===== logs for ${P} (all containers, last 200 lines) ====="
+              kubectl logs "${P}" -n ${KUBE_NS} --all-containers=true --tail=200 || true
+            done
+
+            echo
+            echo "=== Recent events in namespace ${KUBE_NS} ==="
+            kubectl get events -n ${KUBE_NS} --sort-by=.lastTimestamp | tail -n 50 || true
+
+            # Explicitly fail after dumping debug info
+            exit 1
+          fi
+
+          echo "Pods are Ready for graph ${GRAPH_NAME}."
 
       - name: Clone GAIE repo into separate folder and set environment
         shell: bash
