@@ -58,7 +58,6 @@ The Dynamo Operator watches for DGDRs and automatically:
 Before creating a DGDR, ensure:
 - **Dynamo platform installed** with the operator running (see [Installation Guide](/docs/kubernetes/installation_guide.md))
 - **[kube-prometheus-stack](/docs/kubernetes/observability/metrics.md) installed and running** (required for SLA planner)
-- **Profiling PVC created** (see [Benchmarking Resource Setup](/deploy/utils/README.md#benchmarking-resource-setup#BenchmarkingResourceSetup))
 - **Image pull secrets configured** if using private registries (typically `nvcr-imagepullsecret` for NVIDIA images)
 - **Sufficient GPU resources** available in your cluster for profiling
 - **Runtime images available** that contain both profiler and runtime components
@@ -377,18 +376,14 @@ The generated DGD includes optimized configurations and the SLA planner componen
 For advanced use cases, you can manually deploy using the standalone planner templates in `examples/backends/*/deploy/disagg_planner.yaml`:
 
 ```bash
-# After profiling completes, profiling data is stored on the PVC at /data
+# After profiling completes, profiling data is stored in ConfigMaps
 
-# OPTIONAL: Download profiling results for local inspection
-# Create access pod (skip this step if access pod is already running)
-kubectl apply -f deploy/utils/manifests/pvc-access-pod.yaml -n $NAMESPACE
-kubectl wait --for=condition=Ready pod/pvc-access-pod -n $NAMESPACE --timeout=60s
+# OPTIONAL: Inspect profiling results stored in ConfigMaps
+# View the generated DGD configuration
+kubectl get configmap dgdr-output-<dgdr-name> -n $NAMESPACE -o yaml
 
-# Download the data
-kubectl cp $NAMESPACE/pvc-access-pod:/data ./profiling_data
-
-# Cleanup
-kubectl delete pod pvc-access-pod -n $NAMESPACE
+# View the planner profiling data (JSON format)
+kubectl get configmap planner-profile-data -n $NAMESPACE -o yaml
 
 # Update backend planner manifest as needed, then deploy
 kubectl apply -f examples/backends/<backend>/deploy/disagg_planner.yaml -n $NAMESPACE
