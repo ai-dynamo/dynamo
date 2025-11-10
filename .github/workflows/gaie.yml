@@ -260,7 +260,7 @@ jobs:
             --set dynamo-operator.controllerManager.manager.image.tag=${{ env.OPERATOR_IMAGE_TAG }} \
             --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
 
-      - name: Configure image pull secrets and deploy Dynamo graph
+      - name: Configure image pull secrets and deploy vllm graph
         shell: bash
         env:
           KUBECONFIG: ${{ github.workspace }}/.kubeconfig
@@ -278,16 +278,10 @@ jobs:
             -n ${KUBE_NS} || true
 
           # Deploy vllm backend graph
-          echo "Current dir before cd:"
-          pwd
           cd "${{ github.workspace }}/examples/backends/${FRAMEWORK}/deploy/"
-          echo "Now in:"
-          pwd
-          ls -l
-
           echo "DEPLOYMENT_FILE=${DEPLOYMENT_FILE}"
-          export GRAPH_NAME
           GRAPH_NAME=$(yq e '.metadata.name' "${DEPLOYMENT_FILE}")
+          export GRAPH_NAME
           echo "GRAPH_NAME=${GRAPH_NAME}"
 
           echo "Patching image in ${DEPLOYMENT_FILE}..."
@@ -296,45 +290,83 @@ jobs:
           echo "Applying ${DEPLOYMENT_FILE} to namespace ${KUBE_NS}..."
           kubectl apply -n ${KUBE_NS} -f "${DEPLOYMENT_FILE}"
 
-          echo "Sleeping 20s before waiting for pods..."
-          sleep 20
+          echo "Waiting for frontend pods to be Ready and decodeworker pods to be Running..."
+          ATTEMPTS=60
+          SLEEP=10
+          OK=0
 
-          echo "Waiting for pods with label nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} to become Ready..."
-          if ! kubectl wait --for=condition=ready pod \
+          for i in $(seq 1 ${ATTEMPTS}); do
+            echo "Attempt ${i}/${ATTEMPTS}..."
+
+            POD_JSON=$(kubectl get pods -n ${KUBE_NS} \
               -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" \
-              -n ${KUBE_NS} \
-              --timeout=1000s; then
-            echo "Pods for graph ${GRAPH_NAME} did NOT become Ready within timeout."
-            echo
-            echo "=== Current pods for this graph ==="
+              -o json 2>/dev/null || echo "")
+
+            COUNT=$(echo "${POD_JSON}" | jq '.items | length' 2>/dev/null || echo 0)
+            if [[ "${COUNT}" -eq 0 ]]; then
+              echo "No pods yet for graph ${GRAPH_NAME}..."
+              sleep ${SLEEP}
+              continue
+            fi
+
+            echo "Current pods:"
             kubectl get pods -n ${KUBE_NS} -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" -o wide || true
 
-            # Grab pod names
-            PODS=$(kubectl get pods -n ${KUBE_NS} -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" -o jsonpath='{.items[*].metadata.name}' || true)
-            echo "PODS=${PODS}"
-            for P in ${PODS}; do
-              echo
-              echo "===== describe pod ${P} ====="
-              kubectl describe pod "${P}" -n ${KUBE_NS} || true
+            # Fail fast on obvious bad states (for ANY pod)
+            if echo "${POD_JSON}" | jq -e \
+              '.items[] | select(.status.containerStatuses != null) | .status.containerStatuses[] | select(.state.waiting.reason=="CrashLoopBackOff" or .state.waiting.reason=="ImagePullBackOff" or .state.waiting.reason=="ErrImagePull")' >/dev/null; then
+              echo "Detected CrashLoopBackOff/ImagePullBackOff/ErrImagePull in vLLM pods" >&2
+              kubectl describe pods -n ${KUBE_NS} -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" || true
+              exit 1
+            fi
 
-              echo
-              echo "===== container statuses for ${P} ====="
-              kubectl get pod "${P}" -n ${KUBE_NS} -o jsonpath='{.status.containerStatuses}{"\n"}' || true
+            # Frontend pods: name contains "-frontend-"
+            FRONT_COUNT=$(echo "${POD_JSON}" | jq '[.items[] | select(.metadata.name | contains("-frontend-"))] | length')
+            # Decodeworker pods: name contains "vllmdecodeworker"
+            DECODE_COUNT=$(echo "${POD_JSON}" | jq '[.items[] | select(.metadata.name | contains("vllmdecodeworker"))] | length')
 
-              echo
-              echo "===== logs for ${P} (all containers, last 200 lines) ====="
-              kubectl logs "${P}" -n ${KUBE_NS} --all-containers=true --tail=200 || true
-            done
+            echo "Frontend pods count: ${FRONT_COUNT}"
+            echo "Decodeworker pods count: ${DECODE_COUNT}"
 
-            echo
-            echo "=== Recent events in namespace ${KUBE_NS} ==="
+            if [[ "${FRONT_COUNT}" -eq 0 || "${DECODE_COUNT}" -eq 0 ]]; then
+              echo "Waiting for both frontend and decodeworker pods to be created..."
+              sleep ${SLEEP}
+              continue
+            fi
+
+            # Check: all frontend pods Ready == True
+            FRONT_NOT_READY=$(echo "${POD_JSON}" | jq \
+              '[.items[]
+                | select(.metadata.name | contains("-frontend-"))
+                | {conds: (.status.conditions // [])}
+                | select([.conds[]? | select(.type=="Ready") | .status] | first != "True")
+               ] | length')
+            # Check: all decodeworker pods have phase == Running
+            DECODE_NOT_RUNNING=$(echo "${POD_JSON}" | jq \
+              '[.items[]
+                | select(.metadata.name | contains("vllmdecodeworker") and .status.phase != "Running")
+               ] | length')
+
+            echo "Frontend not ready count: ${FRONT_NOT_READY}"
+            echo "Decodeworker not running count: ${DECODE_NOT_RUNNING}"
+
+            if [[ "${FRONT_NOT_READY}" -eq 0 && "${DECODE_NOT_RUNNING}" -eq 0 ]]; then
+              echo "All frontend pods are Ready and all decodeworker pods are Running."
+              OK=1
+              break
+            fi
+
+            sleep ${SLEEP}
+          done
+
+          if [[ "${OK}" -ne 1 ]]; then
+            echo "vLLM graph pods for ${GRAPH_NAME} did not reach desired states (frontend Ready, decodeworker Running) in time; dumping debug info..."
+            kubectl get pods -n ${KUBE_NS} -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" -o wide || true
             kubectl get events -n ${KUBE_NS} --sort-by=.lastTimestamp | tail -n 50 || true
-
-            # Explicitly fail after dumping debug info
             exit 1
           fi
 
-          echo "Pods are Ready for graph ${GRAPH_NAME}."
+          echo "vLLM graph is up: frontend Ready, Backend Running."
 
       - name: Clone GAIE repo into separate folder and set environment
         shell: bash
