@@ -17,6 +17,8 @@ on:
     branches:
       - main
   push:
+    branches:
+      - nealv/docs_build  # TEMPORARY: for testing only
     tags:
       - '*'
   workflow_dispatch:
