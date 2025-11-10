@@ -40,9 +40,6 @@ spec:
         mainContainer:
           image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/src/dynamo/planner
-          # The planner queries Prometheus to get frontend metrics for scaling decisions
-          # Default: http://{dynamoNamespace}-prometheus.{namespace}.svc.cluster.local:9090
-          # Update the env value PROMETHEUS_ENDPOINT to match your Prometheus service location
           ports:
             - name: metrics
               containerPort: 9085

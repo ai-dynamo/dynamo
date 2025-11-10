@@ -23,9 +23,6 @@ spec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/src/dynamo/planner
-          # The planner queries Prometheus to get frontend metrics for scaling decisions
-          # Default: http://{dynamoNamespace}-prometheus.{namespace}.svc.cluster.local:9090
-          # Update the env value PROMETHEUS_ENDPOINT to match your Prometheus service location
           command:
           - python3
           - -m
