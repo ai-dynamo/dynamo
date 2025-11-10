@@ -327,14 +327,21 @@ impl OpenAIPreprocessor {
         // Execute all fetch tasks
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
-            let _results = futures::future::join_all(
+            let results = futures::future::join_all(
                 fetch_tasks
                     .iter()
                     .map(|(_, content_part)| loader.fetch_and_decode_media_part(content_part)),
             )
             .await;
 
-            // TODO: decode and pass NIXL descriptors to the media map
+            for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {
+                // if one item fails, errors the whole request, other items will be cleaned up by Drop
+                let rdma_descriptor = result?;
+                media_map
+                    .entry(type_str)
+                    .or_default()
+                    .push(MultimodalData::Decoded(rdma_descriptor));
+            }
         }
 
         if !media_map.is_empty() {
