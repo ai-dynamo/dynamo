@@ -10,7 +10,7 @@ use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     ErrorContext,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
-    discovery::DiscoveryClient,
+    discovery::Discovery,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     service::ServiceClient,
@@ -92,12 +92,13 @@ impl DistributedRuntime {
 
         let nats_client_for_metrics = nats_client.clone();
 
-        // Initialize discovery client with mock implementation
-        // TODO: Replace MockDiscoveryClient with KeyValueStoreDiscoveryClient or KubeDiscoveryClient
+        // Initialize discovery backed by KV store
         let discovery_client = {
-            use crate::discovery::{MockDiscoveryClient, SharedMockRegistry};
-            let registry = SharedMockRegistry::new();
-            Arc::new(MockDiscoveryClient::new(None, registry)) as Arc<dyn DiscoveryClient>
+            use crate::discovery::KVStoreDiscovery;
+            Arc::new(KVStoreDiscovery::new(
+                store.clone(),
+                runtime.primary_token(),
+            )) as Arc<dyn Discovery>
         };
 
         let distributed_runtime = Self {
@@ -242,9 +243,9 @@ impl DistributedRuntime {
         Namespace::new(self.clone(), name.into(), self.is_static)
     }
 
-    /// TODO: Return discovery client when KeyValueDiscoveryClient or KubeDiscoveryClient is implemented
-    pub fn discovery_client(&self) -> Result<Arc<dyn DiscoveryClient>> {
-        Err(error!("Discovery client not implemented!"))
+    /// Returns the discovery interface for service registration and discovery
+    pub fn discovery(&self) -> Arc<dyn Discovery> {
+        self.discovery_client.clone()
     }
 
     pub(crate) fn service_client(&self) -> Option<ServiceClient> {
