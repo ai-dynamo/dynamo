@@ -101,7 +101,7 @@ impl Resources {
         layout_builder
             .num_layers(model.num_layers)
             .outer_dim(model.outer_dim)
-            .page_size(model.page_size)
+            .page_size(model.page_size * self.config.offload_block_size_ratio)
             .inner_dim(model.inner_dim)
             .dtype_width_bytes(model.dtype_width_bytes);
 

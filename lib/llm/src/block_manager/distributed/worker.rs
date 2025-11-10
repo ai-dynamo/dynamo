@@ -119,6 +119,7 @@ async fn perform_allocation_and_build_handler(
         max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
         num_outer_components: device_layout.config().outer_dim,
         num_layers: device_layout.config().num_layers,
+        offload_block_size_ratio: worker_config.offload_page_size / worker_config.engine_page_size,
     };
     let transfer_context = Arc::new(TransferContext::new(
         Arc::new(Some(agent)),
@@ -367,7 +368,10 @@ pub struct KvbmWorkerConfig {
     num_device_blocks: usize,
 
     #[builder(default = "32")]
-    page_size: usize,
+    engine_page_size: usize,
+
+    #[builder(default = "32")]
+    offload_page_size: usize,
 
     #[builder(default = "Vec::new()")]
     tensors: Vec<Arc<dyn TorchTensor>>,
@@ -411,9 +415,10 @@ pub struct KvbmWorker {
 impl KvbmWorker {
     pub async fn new(config: KvbmWorkerConfig, layout_blocking: bool) -> anyhow::Result<Self> {
         tracing::info!(
-            "Initializing KvbmWorker with params: num_device_blocks={}, page_size={}, dtype_width_bytes={}",
+            "Initializing KvbmWorker with params: num_device_blocks={}, engine_page_size={}, offload_page_size={}, dtype_width_bytes={}",
             config.num_device_blocks,
-            config.page_size,
+            config.engine_page_size,
+            config.offload_page_size,
             config.dtype_width_bytes
         );
 
@@ -434,12 +439,13 @@ impl KvbmWorker {
             LayoutType::FullyContiguous => {
                 let num_layers = shape[1];
                 let outer_dim = shape[2];
-                let inner_dim = shape[3..].iter().product::<usize>() / config.page_size;
+                let inner_dim = shape[3..].iter().product::<usize>() / config.engine_page_size;
                 tracing::info!(
-                    "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
+                    "Inferred layout: num_layers={}, outer_dim={}, page_size={}/{}, inner_dim={}",
                     num_layers,
                     outer_dim,
-                    config.page_size,
+                    config.engine_page_size,
+                    config.offload_page_size,
                     inner_dim
                 );
 
@@ -462,14 +468,15 @@ impl KvbmWorker {
                 };
 
                 let num_layers = device_tensors.len();
-                let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
+                let inner_dim = shape[2..].iter().product::<usize>() / config.engine_page_size;
 
                 tracing::info!(
-                    "Inferred layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}",
+                    "Inferred layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}/{}, inner_dim={}",
                     num_layers,
                     outer_dim,
                     outer_contiguous,
-                    config.page_size,
+                    config.engine_page_size,
+                    config.offload_page_size,
                     inner_dim
                 );
 
@@ -477,14 +484,17 @@ impl KvbmWorker {
             }
         };
 
-        let bytes_per_block =
-            num_layers * outer_dim * config.page_size * inner_dim * config.dtype_width_bytes;
+        let offload_bytes_per_block = num_layers
+            * outer_dim
+            * config.offload_page_size
+            * inner_dim
+            * config.dtype_width_bytes;
 
         let mut layout_builder_instance = LayoutConfigBuilder::default();
         let layout_builder = layout_builder_instance
             .num_layers(num_layers)
             .outer_dim(outer_dim)
-            .page_size(config.page_size)
+            .page_size(config.engine_page_size)
             .inner_dim(inner_dim)
             .dtype_width_bytes(config.dtype_width_bytes);
 
@@ -493,12 +503,12 @@ impl KvbmWorker {
             .build()?
             .create_layout(layout_type, device_tensors)?;
 
-        let layout_builder = layout_builder.clone();
+        let layout_builder = layout_builder.page_size(config.offload_page_size).clone();
 
         let (task, handler_rx) = if layout_blocking {
             Self::run_blocking_layout_initialization(
                 config,
-                bytes_per_block,
+                offload_bytes_per_block,
                 device_layout,
                 layout_builder,
                 layout_type,
@@ -507,7 +517,7 @@ impl KvbmWorker {
         } else {
             Self::run_non_blocking_layout_initialization(
                 config,
-                bytes_per_block,
+                offload_bytes_per_block,
                 device_layout,
                 layout_builder,
                 layout_type,
@@ -692,14 +702,6 @@ impl KvbmWorker {
 
         // Build handlers map
         let mut handlers: HashMap<String, Arc<dyn Handler>> = HashMap::new();
-
-        handlers.insert(
-            ZMQ_PING_MESSAGE.to_string(),
-            Arc::new(GatedPing {
-                state: state.clone(),
-                layout_ready_tx,
-            }) as Arc<dyn Handler>,
-        );
 
         handlers.insert(
             ZMQ_WORKER_METADATA_MESSAGE.to_string(),
