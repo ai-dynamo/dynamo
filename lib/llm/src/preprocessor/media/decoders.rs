@@ -32,6 +32,5 @@ pub struct MediaDecoder {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum DecodedMediaMetadata {
-    #[allow(dead_code)] // used in followup MR
     Image(ImageMetadata),
 }
