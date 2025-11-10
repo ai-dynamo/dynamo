@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from benchmarks.profiler.utils.defaults import EngineType
+from benchmarks.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS, EngineType
 from benchmarks.profiler.utils.model_info import ModelInfo
 
 logger = logging.getLogger(__name__)
@@ -69,21 +69,19 @@ class ParallelizationMapping:
             return self.dep
         return 1  # TP has expert split of 1
 
-    def get_attn_dp_size(self, num_gpus: int) -> int:
+    def get_attn_dp_size(self) -> int:
         """
         Get the attention data parallelism size.
-        DEP uses data parallelism for attention (returns num_gpus).
+        DEP uses data parallelism for attention (returns dep size).
         TP and TEP don't use data parallelism for attention (returns 1).
 
         Args:
-            num_gpus: Total number of GPUs being used
+            None
 
         Returns:
             The attention data parallelism size
         """
-        if self.dep is not None:
-            return num_gpus
-        return 1  # TP and TEP have attention DP size of 1
+        return self.dep if self.dep is not None else 1  # TP and TEP → 1
 
 
 def _check_divisibility(
@@ -169,7 +167,10 @@ def get_candidate_parallel_mappings(
     candidates: list[ParallelizationMapping] = []
     if is_moe:
         if phase == EngineType.PREFILL:
-            candidates = [ParallelizationMapping(tep=num_gpus)]
+            candidates = [
+                ParallelizationMapping(tep=num_gpus),
+                ParallelizationMapping(dep=num_gpus),
+            ]
         elif phase == EngineType.DECODE:
             candidates = [
                 ParallelizationMapping(dep=num_gpus),
@@ -212,10 +213,19 @@ def apply_parallel_mapping_to_config(
     cfg = copy.deepcopy(base_config)
     if mapping.tp is not None:
         cfg = config_modifier.set_config_tp_size(cfg, mapping.tp)
-    elif phase == EngineType.PREFILL and mapping.tep is not None:
+    elif mapping.tep is not None:
         cfg = config_modifier.set_config_tep_size(cfg, mapping.tep, num_gpus_per_node)
-    elif phase == EngineType.DECODE and mapping.dep is not None:
+    elif mapping.dep is not None:
         cfg = config_modifier.set_config_dep_size(cfg, mapping.dep, num_gpus_per_node)
     else:
-        pass
+        raise ValueError(f"Invalid mapping: {mapping.label()}")
+
+    # for prefill,set batch size to attention_dp_size
+    # (this assume prompt is long enough to saturate the GPU, which is usually valid in disagg)
+    if phase == EngineType.PREFILL:
+        cfg = config_modifier.set_prefill_config(
+            cfg,
+            max_batch_size=mapping.get_attn_dp_size(),
+            max_num_tokens=PREFILL_MAX_NUM_TOKENS,
+        )
     return cfg

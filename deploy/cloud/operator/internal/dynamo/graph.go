@@ -1005,6 +1005,8 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dyn
 	if component.SubComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoSubComponentType] = component.SubComponentType
 	}
+	// Add base model label if modelRef is specified
+	AddBaseModelLabel(labels, component.ModelRef)
 	setMetricsLabels(labels, dynamoDeployment)
 	if component.Labels != nil {
 		err := mergo.Merge(&labels, component.Labels, mergo.WithOverride)

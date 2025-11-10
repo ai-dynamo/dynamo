@@ -206,7 +206,7 @@ def generate_dgd_config_with_planner(
         mc_mounts.append(
             {
                 "name": "planner-profile-data",
-                "mountPath": cm_mount_path,
+                "mountPoint": cm_mount_path,
                 "readOnly": True,
             }
         )

@@ -217,6 +217,7 @@ Key customization points include:
 
 - **[Examples](../examples/README.md)** - Complete working examples
 - **[Create Custom Deployments](./deployment/create_deployment.md)** - Build your own CRDs
+- **[Managing Models with DynamoModel](./deployment/dynamomodel-guide.md)** - Deploy LoRA adapters and manage models
 - **[Operator Documentation](./dynamo_operator.md)** - How the platform works
 - **[Helm Charts](../../deploy/helm/README.md)** - For advanced users
 - **[GitOps Deployment with FluxCD](./fluxcd.md)** - For advanced users

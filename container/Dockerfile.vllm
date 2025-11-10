@@ -222,15 +222,28 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 # Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
-# Copy UCX from dev image as plugin for NIXL
-# Copy NIXL source from devr image
-# Copy dynamo wheels for gitlab artifacts
-COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
-COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
-ENV PATH=/usr/local/ucx/bin:$PATH
+# DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
+# is not properly set for complilation. Set CPATH to help nvcc find the headers.
+ENV CPATH=/usr/local/cuda/include
 
-# Copies vllm, DeepEP, DeepGEMM, PPLX repos (all editable installs) and nvshmem binaries
-COPY --from=framework /opt/vllm /opt/vllm
+# Copy uv to system /bin
+COPY --from=framework /bin/uv /bin/uvx /bin/
+
+# Create dynamo user with group 0 for OpenShift compatibility
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -m -s /bin/bash -g 0 dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && mkdir -p /home/dynamo/.cache /opt/dynamo \
+    && chown -R dynamo: /workspace /home/dynamo /opt/dynamo \
+    && chmod -R g+w /workspace /home/dynamo/.cache /opt/dynamo
+
+USER dynamo
+ENV HOME=/home/dynamo
+
+# Copy UCX and NIXL to system directories
+COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo: --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+ENV PATH=/usr/local/ucx/bin:$PATH
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
@@ -240,19 +253,17 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib/ucx:\
 $LD_LIBRARY_PATH
 
-# DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
-# is not properly set for complilation. Set CPATH to help nvcc find the headers.
-ENV CPATH=/usr/local/cuda/include
-
 ### VIRTUAL ENVIRONMENT SETUP ###
 
-# Copy uv and entire virtual environment from framework container
-COPY --from=framework /bin/uv /bin/uvx /bin/
-COPY --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+# Copy entire virtual environment from framework container with correct ownership
+COPY --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+
+# Copy vllm with correct ownership
+COPY --chown=dynamo: --from=framework /opt/vllm /opt/vllm
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
-COPY benchmarks/ /opt/dynamo/benchmarks/
-COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
+COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -273,16 +284,23 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
-# Copy benchmarks, examples, and tests for CI
-COPY . /workspace/
+# Copy benchmarks, examples, and tests for CI with correct ownership
+COPY --chown=dynamo: . /workspace/
 
 # Copy attribution files
-COPY ATTRIBUTION* LICENSE /workspace/
-# Copy launch banner
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
-    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc && \
-    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
+
+# Setup launch banner in common directory accessible to all users
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
+
+# Setup environment for all users
+USER root
+RUN chmod 755 /opt/dynamo/.launch_screen && \
+    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+USER dynamo
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
@@ -305,6 +323,7 @@ FROM runtime AS dev
 # Don't want ubuntu to be editable, just change uid and gid.
 ARG WORKSPACE_DIR=/workspace
 
+USER root
 # Install utilities as root
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends  \
