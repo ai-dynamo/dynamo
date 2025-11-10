@@ -63,6 +63,8 @@ spec:
         volumes:
           - name: planner-profile-data
             configMap:
+              # Must be pre-created before deployment by the profiler
+              # See docs/planner/sla_planner_quickstart.md for more details
               name: planner-profile-data
     TRTLLMDecodeWorker:
       dynamoNamespace: trtllm-disagg-planner
