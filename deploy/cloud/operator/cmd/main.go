@@ -146,7 +146,7 @@ func main() {
 	var namespaceScopeLeaseDuration time.Duration
 	var namespaceScopeLeaseRenewInterval time.Duration
 	var operatorVersion string
-	var discoverBackend string
+	var discoveryBackend string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -195,7 +195,7 @@ func main() {
 		"Interval for renewing namespace scope marker lease (namespace-restricted mode only)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
-	flag.StringVar(&discoverBackend, "discover-backend", "",
+	flag.StringVar(&discoveryBackend, "discovery-backend", "",
 		"Discovery backend to use: empty string (default, uses ETCD) or 'kubernetes' (uses Kubernetes API)")
 	opts := zap.Options{
 		Development: true,
@@ -209,12 +209,12 @@ func main() {
 	}
 
 	// Validate discoverBackend value
-	if discoverBackend != "" && discoverBackend != "kubernetes" {
-		setupLog.Error(nil, "invalid discover-backend value, must be empty string or 'kubernetes'", "value", discoverBackend)
+	if discoveryBackend != "" && discoveryBackend != "kubernetes" {
+		setupLog.Error(nil, "invalid discover-backend value, must be empty string or 'kubernetes'", "value", discoveryBackend)
 		os.Exit(1)
 	}
-	if discoverBackend != "" {
-		setupLog.Info("Discovery backend configured", "backend", discoverBackend)
+	if discoveryBackend != "" {
+		setupLog.Info("Discovery backend configured", "backend", discoveryBackend)
 	} else {
 		setupLog.Info("Discovery backend configured", "backend", "etcd (default)")
 	}
@@ -267,6 +267,7 @@ func main() {
 			PlannerClusterRoleName:       plannerClusterRoleName,
 			DGDRProfilingClusterRoleName: dgdrProfilingClusterRoleName,
 		},
+		DiscoveryBackend: discoveryBackend,
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()

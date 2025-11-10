@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/discovery"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -153,6 +154,16 @@ func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName
 	}
 
 	logger.Info("API group not available", "group", groupName)
+	return false
+}
+
+// For DGD, pass in the meta annotations
+// For DCD, pass in the spec annotations
+func (c Config) IsK8sDiscoveryEnabled(annotations map[string]string) bool {
+	dgdDiscoveryBackend := annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]
+	if dgdDiscoveryBackend == "kubernetes" || (dgdDiscoveryBackend == "" && c.DiscoveryBackend == "kubernetes") {
+		return true
+	}
 	return false
 }
 

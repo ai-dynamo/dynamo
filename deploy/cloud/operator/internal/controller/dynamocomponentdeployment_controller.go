@@ -1269,46 +1269,39 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		},
 	}
 
-	// Creating service per component
-	// Would only want to do this when the service discovery backend is k8s - else only create service for frontend
-	if !opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled {
+	isK8sDiscovery := r.Config.IsK8sDiscoveryEnabled(opt.dynamoComponentDeployment.Spec.Annotations)
+
+	// if discovery backend is k8s we want to create a service for each component
+	// else, only create for the frontend component
+	if !opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled && (isK8sDiscovery || opt.dynamoComponentDeployment.IsFrontendComponent()) {
 		// if it's not the main component or if it's not a generic service and not contains stealing traffic debug mode enabled, we don't need to create the service
 		return kubeService, true, nil
 	}
 
-	// For Grove selector
-	// nvidia.com/selector: sglang-disagg-multinode-frontend
+	labels := r.getKubeLabels(opt.dynamoComponentDeployment)
 
-	// For single node non-Grove
-	// nvidia.com/dynamo-component: Frontend                                                                                                                                                                                                        │
-	// nvidia.com/dynamo-component-type: frontend
-	// nvidia.com/dynamo-graph-deployment-name: vllm-disagg
-	// nvidia.com/dynamo-namespace: tm-vllm-disagg
-	// nvidia.com/metrics-enabled: "true"
-	// nvidia.com/selector: vllm-disagg-frontend
+	if _, exists := labels[commonconsts.KubeLabelDynamoComponentType]; !exists {
+		labels[commonconsts.KubeLabelDynamoComponentType] = opt.dynamoComponentDeployment.Spec.ComponentType
+	}
 
-	// labels := r.getKubeLabels(opt.dynamoComponentDeployment)
-
-	// selector := make(map[string]string)
-
-	// for k, v := range labels {
-	// 	selector[k] = v
-	// }
-
-	// // If using LeaderWorkerSet, modify selector to only target leaders
-	// if opt.dynamoComponentDeployment.IsMultinode() {
-	// 	selector["role"] = "leader" // doesn't seem like Grove has this label
-	// }
-
-	// if opt.isStealingTrafficDebugModeEnabled {
-	// 	selector[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
-	// }
+	if opt.dynamoComponentDeployment.Spec.DynamoNamespace == nil {
+		return nil, false, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", opt.dynamoComponentDeployment.Name)
+	}
+	if _, exists := labels[commonconsts.KubeLabelDynamoNamespace]; !exists {
+		labels[commonconsts.KubeLabelDynamoNamespace] = *opt.dynamoComponentDeployment.Spec.DynamoNamespace
+	}
 
 	selector := map[string]string{
 		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,
-		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace, // TODO: nilness check
+		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace,
 	}
-	labels := selector
+	// // If using LeaderWorkerSet, modify selector to only target leaders
+	if opt.dynamoComponentDeployment.IsMultinode() {
+		selector["role"] = "leader"
+	}
+	if opt.isStealingTrafficDebugModeEnabled {
+		selector[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
+	}
 	labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
 
 	var servicePort corev1.ServicePort
@@ -1319,7 +1312,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
 			Protocol:   corev1.ProtocolTCP,
 		}
-	} else { // only in case of a worker - what about other components??
+	} else { // TODO: only for worker components
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoSystemPortName,
 			Port:       commonconsts.DynamoSystemPort,

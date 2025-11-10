@@ -31,7 +31,7 @@ const (
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
-	KubeAnnotationDynamoDiscoverBackend           = "nvidia.com/dynamo-discovery-backend"
+	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 
 	KubeLabelDynamoGraphDeploymentName  = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"

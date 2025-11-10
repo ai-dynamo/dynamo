@@ -25,13 +25,12 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller/serviceaccount"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	v1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -50,6 +49,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
+	rbacv1 "k8s.io/api/rbac/v1"
 )
 
 type State string
@@ -202,6 +202,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return "", "", "", fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
 	}
 
+	// Reconcile the SA, Role and RoleBinding if k8s discovery is enabled
+	err = r.reconcileK8sDiscoveryResources(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile K8s discovery resources")
+		return "", "", "", fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
+	}
+
 	// Orchestrator selection via single boolean annotation: nvidia.com/enable-grove
 	// Unset or not "false": Grove if available; else component mode
 	// "false": component mode (multinode -> LWS; single-node -> standard)
@@ -312,45 +319,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
-
-	// TODO: this should be based on if k8s service discovery is enabled
-	// service account, role and role binding for k8s service discovery
-	serviceAccount := serviceaccount.GetKubernetesDiscoveryServiceAccount(fmt.Sprintf("%s-k8s-service-discovery", dynamoDeployment.Name), dynamoDeployment.Namespace)
-	_, syncedServiceAccount, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
-		return serviceAccount.ServiceAccount, false, nil
-	})
-	if err != nil {
-		logger.Error(err, "failed to sync the service account")
-		return "", "", "", fmt.Errorf("failed to sync the service account: %w", err)
-	}
-	serviceAccountAsResource := commonController.WrapResource(syncedServiceAccount,
-		func() (bool, string) {
-			return true, ""
-		})
-
-	// role and role binding for k8s service discovery
-	_, syncedRole, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*v1.Role, bool, error) {
-		return serviceAccount.Role, false, nil
-	})
-	if err != nil {
-		logger.Error(err, "failed to sync the service account")
-		return "", "", "", fmt.Errorf("failed to sync the service account: %w", err)
-	}
-	roleAsResource := commonController.WrapResource(syncedRole,
-		func() (bool, string) {
-			return true, ""
-		})
-	_, syncedRoleBinding, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*v1.RoleBinding, bool, error) {
-		return serviceAccount.RoleBinding, false, nil
-	})
-	if err != nil {
-		logger.Error(err, "failed to sync the role binding")
-		return "", "", "", fmt.Errorf("failed to sync the role binding: %w", err)
-	}
-	roleBindingAsResource := commonController.WrapResource(syncedRoleBinding,
-		func() (bool, string) {
-			return true, ""
-		})
 
 	// generate the dynamoComponentsDeployments from the config
 	groveGangSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever)
@@ -545,6 +513,47 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVC(ctx context.Context, dyna
 	}
 
 	return pvc, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileK8sDiscoveryResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	logger := log.FromContext(ctx)
+
+	if !r.Config.IsK8sDiscoveryEnabled(dynamoDeployment.Annotations) {
+		logger.Info("K8s discovery is not enabled")
+		return nil
+	} else {
+		logger.Info("K8s discovery is enabled")
+	}
+
+	serviceAccount := discovery.GetK8sDiscoveryServiceAccount(dynamoDeployment)
+	_, _, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
+		return serviceAccount, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the k8s discovery service account")
+		return fmt.Errorf("failed to sync the k8s discovery service account: %w", err)
+	}
+
+	role := discovery.GetK8sDiscoveryRole(dynamoDeployment)
+	_, _, err = commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*rbacv1.Role, bool, error) {
+		return role, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the k8s discovery role")
+		return fmt.Errorf("failed to sync the k8s discovery role: %w", err)
+	}
+
+	roleBinding := discovery.GetK8sDiscoveryRoleBinding(dynamoDeployment)
+	_, _, err = commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*rbacv1.RoleBinding, bool, error) {
+		return roleBinding, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the k8s discovery role binding")
+		return fmt.Errorf("failed to sync the k8s discovery role binding: %w", err)
+	}
+
+	return nil
+
 }
 
 // reconcilePVCs reconciles all top-level PVCs defined in the DynamoGraphDeployment spec

@@ -666,8 +666,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						Name:      "test-dynamographdeployment",
 						Namespace: "default",
 						Annotations: map[string]string{
-							commonconsts.KubeAnnotationEnableMetrics:         "false",
-							commonconsts.KubeAnnotationDynamoDiscoverBackend: "test",
+							commonconsts.KubeAnnotationEnableMetrics:          "false",
+							commonconsts.KubeAnnotationDynamoDiscoveryBackend: "test",
 						},
 					},
 					Spec: v1alpha1.DynamoGraphDeploymentSpec{
@@ -705,8 +705,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						BackendFramework: string(BackendFrameworkSGLang),
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							Annotations: map[string]string{
-								commonconsts.KubeAnnotationEnableMetrics:         "false",
-								commonconsts.KubeAnnotationDynamoDiscoverBackend: "test",
+								commonconsts.KubeAnnotationEnableMetrics:          "false",
+								commonconsts.KubeAnnotationDynamoDiscoveryBackend: "test",
 							},
 							ServiceName:     "service1",
 							DynamoNamespace: &[]string{"default-test-dynamographdeployment"}[0],
@@ -4744,7 +4744,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 			name: "Discover backend should be set",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoDiscoverBackend: "kubernetes",
+					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes",
 				},
 			},
 			wantEnvVar: "kubernetes",
@@ -4753,7 +4753,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 			name: "Discover backend should override the controller config",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoDiscoverBackend: "test",
+					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "test",
 				},
 			},
 			controllerConfig: controller_common.Config{
@@ -4775,7 +4775,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 			name: "Discover backend empty string",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoDiscoverBackend: "",
+					commonconsts.KubeAnnotationDynamoDiscoveryBackend: "",
 				},
 			},
 			controllerConfig: controller_common.Config{

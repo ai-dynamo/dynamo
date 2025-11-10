@@ -141,8 +141,8 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationEnableMetrics]; exists {
 				deployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics] = val
 			}
-			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend]; exists {
-				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend] = val
+			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
+				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = val
 			}
 		}
 
@@ -890,8 +890,8 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 	componentContext.DiscoverBackend = discoverBackend
 
 	// If the user has set a discover backend in the annotations, use that instead
-	if component.Annotations != nil && component.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend] != "" {
-		componentContext.DiscoverBackend = component.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend]
+	if component.Annotations != nil && component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] != "" {
+		componentContext.DiscoverBackend = component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]
 	}
 	return componentContext
 }
@@ -948,8 +948,8 @@ func GenerateGrovePodCliqueSet(
 	}
 
 	var discoverBackend string
-	if dynamoDeployment.Annotations != nil && dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend] != "" {
-		discoverBackend = dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend]
+	if dynamoDeployment.Annotations != nil && dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] != "" {
+		discoverBackend = dynamoDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]
 	}
 
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
@@ -966,7 +966,7 @@ func GenerateGrovePodCliqueSet(
 			if component.Annotations == nil {
 				component.Annotations = make(map[string]string)
 			}
-			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoverBackend] = discoverBackend
+			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = discoverBackend
 		}
 
 		numberOfNodes := component.GetNumberOfNodes()

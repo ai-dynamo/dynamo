@@ -43,7 +43,7 @@ dynamo-operator:
       renewInterval: 10s
 
   # -- The Dynamo discovery backend to use. By default, will rely on ETCD for discovery. Can be set to "kubernetes" to use Kubernetes API for service discovery. --
-  discoverBackend: ""
+  discoveryBackend: ""
 
   # Controller manager configuration
   controllerManager:

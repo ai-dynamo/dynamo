@@ -3,9 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-package serviceaccount
+package discovery
 
 import (
+	"fmt"
+
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,32 +20,15 @@ const (
 	apiGroupCore       = ""
 )
 
-// KubernetesDiscoveryResources contains all RBAC resources needed for Kubernetes endpoint discovery
-type KubernetesDiscoveryResources struct {
-	ServiceAccount *corev1.ServiceAccount
-	Role           *rbacv1.Role
-	RoleBinding    *rbacv1.RoleBinding
+func IsK8sDiscoveryEnabled()
+
+func GetK8sDiscoveryServiceAccountName(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) string {
+	return fmt.Sprintf("%s-k8s-service-discovery", dynamoDeployment.Name)
 }
 
-// GetKubernetesDiscoveryServiceAccount returns a ServiceAccount with associated Role and RoleBinding
-// that allows listing/reading of endpoints resources in the specified namespace.
-//
-// Parameters:
-//   - name: the name of the ServiceAccount to create
-//   - namespace: the namespace to create the resources in
-//
-// Returns:
-//   - KubernetesDiscoveryResources containing the ServiceAccount, Role, and RoleBinding
-func GetKubernetesDiscoveryServiceAccount(name, namespace string) *KubernetesDiscoveryResources {
-	return &KubernetesDiscoveryResources{
-		ServiceAccount: getServiceAccount(name, namespace),
-		Role:           getEndpointsDiscoveryRole(name, namespace),
-		RoleBinding:    getRoleBinding(name, namespace),
-	}
-}
-
-// getServiceAccount creates a ServiceAccount resource
-func getServiceAccount(name, namespace string) *corev1.ServiceAccount {
+func GetK8sDiscoveryServiceAccount(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) *corev1.ServiceAccount {
+	name := GetK8sDiscoveryServiceAccountName(dynamoDeployment)
+	namespace := dynamoDeployment.Namespace
 	return &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -56,8 +42,9 @@ func getServiceAccount(name, namespace string) *corev1.ServiceAccount {
 	}
 }
 
-// getEndpointsDiscoveryRole creates a Role that allows listing and reading endpoints
-func getEndpointsDiscoveryRole(name, namespace string) *rbacv1.Role {
+func GetK8sDiscoveryRole(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) *rbacv1.Role {
+	name := GetK8sDiscoveryServiceAccountName(dynamoDeployment)
+	namespace := dynamoDeployment.Namespace
 	roleName := name + "-role"
 	return &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
@@ -84,8 +71,9 @@ func getEndpointsDiscoveryRole(name, namespace string) *rbacv1.Role {
 	}
 }
 
-// getRoleBinding creates a RoleBinding that binds the ServiceAccount to the Role
-func getRoleBinding(name, namespace string) *rbacv1.RoleBinding {
+func GetK8sDiscoveryRoleBinding(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) *rbacv1.RoleBinding {
+	name := GetK8sDiscoveryServiceAccountName(dynamoDeployment)
+	namespace := dynamoDeployment.Namespace
 	roleName := name + "-role"
 	bindingName := name + "-binding"
 	return &rbacv1.RoleBinding{
