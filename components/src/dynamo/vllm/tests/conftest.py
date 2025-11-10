@@ -23,23 +23,6 @@ def pytest_ignore_collect(collection_path, config):
     return None
 
 
-@pytest.hookimpl(tryfirst=True)
-def pytest_collection_modifyitems(config, items):
-    """
-    Auto-apply nightly marker to tests with certain markers.
-    """
-    auto_nightly_markers = {"pre_merge", "post_merge"}
-
-    for item in items:
-        # Auto-apply nightly marker FIRST before skip check
-        item_marker_names = {m.name for m in item.own_markers}
-        if (
-            item_marker_names & auto_nightly_markers
-            and "nightly" not in item_marker_names
-        ):
-            item.add_marker(pytest.mark.nightly)
-
-
 def make_cli_args_fixture(module_name: str):
     """Create a pytest fixture for mocking CLI arguments for vllm backend."""
 
