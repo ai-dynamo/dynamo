@@ -37,9 +37,7 @@ async fn test_backend_with_metrics() -> Result<()> {
             info.port()
         }
         None => {
-            panic!(
-                "System status server not started - check DYN_SYSTEM_PORT environment variable"
-            );
+            panic!("System status server not started - check DYN_SYSTEM_PORT environment variable");
         }
     };
 
