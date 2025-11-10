@@ -620,11 +620,32 @@ jobs:
         kubectl apply -n $KUBE_NS -f $DEPLOYMENT_FILE
 
         # --- Wait for all pods in the dynamo graph deployment to be ready ---
-        sleep 20
         # Get the deployment name from the file
         export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
-        echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
-        # Wait for all pods with the deployment label to be ready
+        echo "Waiting for pods to be created with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
+
+        # First, wait for at least one pod to exist (retry loop)
+        MAX_WAIT=120  # Wait up to 2 minutes for pods to be created
+        ELAPSED=0
+        while [ $ELAPSED -lt $MAX_WAIT ]; do
+          POD_COUNT=$(kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --no-headers 2>/dev/null | wc -l)
+          if [ "$POD_COUNT" -gt 0 ]; then
+            echo "Found $POD_COUNT pod(s), proceeding to wait for ready condition"
+            break
+          fi
+          echo "No pods found yet, waiting... (${ELAPSED}s elapsed)"
+          sleep 5
+          ELAPSED=$((ELAPSED + 5))
+        done
+
+        if [ $ELAPSED -ge $MAX_WAIT ]; then
+          echo "ERROR: No pods were created after ${MAX_WAIT}s"
+          kubectl get dynamographdeployments -n ${KUBE_NS}
+          exit 1
+        fi
+
+        # Now wait for all pods with the deployment label to be ready
+        echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME to be ready"
         kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1300s
 
         # Debug: Show final pod statuses for the deployment
