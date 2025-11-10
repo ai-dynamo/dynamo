@@ -18,6 +18,7 @@ import logging
 import os
 import random
 import subprocess
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -36,6 +37,7 @@ def _get_common_aiperf_cmd(
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     tokenizer="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     base_url="http://localhost:8000",
+    warmup_request_count: int = 3,
 ):
     return [
         "aiperf",
@@ -56,11 +58,13 @@ def _get_common_aiperf_cmd(
         "--extra-inputs",
         '{"nvext":{"ignore_eos":true}}',
         "--warmup-request-count",
-        "3",
+        str(warmup_request_count),
         "--artifact-dir",
         artifact_dir,
         "--random-seed",
         str(seed),
+        "--request-timeout-seconds",
+        "1800",
     ]
 
 
@@ -72,6 +76,9 @@ def get_prefill_aiperf_cmd(
     tokenizer="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     osl=5,
     base_url="http://localhost:8000",
+    concurrency: int = 1,
+    request_count: int = 1,
+    warmup_request_count: int = 3,
 ):
     return _get_common_aiperf_cmd(
         artifact_dir,
@@ -79,6 +86,7 @@ def get_prefill_aiperf_cmd(
         model,
         tokenizer,
         base_url,
+        warmup_request_count=warmup_request_count,
     ) + [
         "--synthetic-input-tokens-mean",
         str(isl),
@@ -93,9 +101,9 @@ def get_prefill_aiperf_cmd(
         "--extra-inputs",
         f"min_tokens:{osl}",
         "--concurrency",
-        "1",
+        str(concurrency),
         "--request-count",
-        "1",
+        str(request_count),
     ]
 
 
@@ -157,6 +165,9 @@ def benchmark_prefill(
     model_name,
     tokenizer,
     base_url="http://localhost:8000",
+    concurrency: int = 1,
+    request_count: int = 1,
+    warmup_request_count: int = 3,
 ):
     logger.info(f"Running aiperf with isl {isl}")
     aiperf_cmd = get_prefill_aiperf_cmd(
@@ -165,9 +176,12 @@ def benchmark_prefill(
         model=model_name,
         tokenizer=tokenizer,
         base_url=base_url,
+        concurrency=concurrency,
+        request_count=request_count,
+        warmup_request_count=warmup_request_count,
     )
-    print(f"aiperf cmd: {aiperf_cmd}")
-    # import pdb; pdb.set_trace()
+    logger.debug(f"aiperf cmd: {aiperf_cmd}")
+
     aiperf_process = subprocess.Popen(
         aiperf_cmd,
         stdout=subprocess.PIPE,
@@ -177,13 +191,105 @@ def benchmark_prefill(
     stdout, stderr = aiperf_process.communicate()
     if aiperf_process.returncode == 0:
         logger.info("AIperf profiling completed successfully")
-        logger.info(stdout)
+        logger.debug(stdout)
         aiperf_result = get_aiperf_result(aiperf_artifact_dir)
         return aiperf_result
     else:
         logger.error(f"AIPerf failed with error code: {aiperf_process.returncode}")
         logger.error(f"stderr: {stderr}")
         return None
+
+
+def get_prefill_ttft(
+    isl: int,
+    aiperf_artifact_dir: str,
+    model_name: str,
+    tokenizer: str,
+    base_url: str = "http://localhost:8000",
+    attention_dp_size: int = 1,
+    attn_dp_num_req_ratio: int = 4,
+) -> Optional[float]:
+    """
+    Run prefill benchmark and extract TTFT (ms). Returns None on failure.
+    If attention_dp_size > 1 (DEP), send attn_dp_size * attn_dp_num_req_ratio concurrent requests (single burst),
+    then compute TTFT as (max TTFT across burst) / attn_dp_num_req_ratio.
+    attn_dp_num_req_ratio defaults to 4 rounds to account for the error margin caused
+    by the first batch being launched too early without enough requests.
+    """
+    # DEP-aware measurement (waves of size attention_dp_size)
+    if attention_dp_size > 1:
+        total_concurrency = attention_dp_size * attn_dp_num_req_ratio
+        logger.info(
+            f"DEP prefill measurement: isl={isl}, attn_dp={attention_dp_size}, attn_dp_num_req_ratio={attn_dp_num_req_ratio}, "
+            f"total_concurrency={total_concurrency}"
+        )
+        # Run aiperf with the requested concurrency; allow normal warmup behavior
+        aiperf_result = benchmark_prefill(
+            isl,
+            aiperf_artifact_dir,
+            model_name,
+            tokenizer,
+            base_url=base_url,
+            concurrency=total_concurrency,
+            request_count=total_concurrency,
+        )
+        try:
+            max_ttft = float(aiperf_result["time_to_first_token"]["max"])
+            return max_ttft / float(attn_dp_num_req_ratio)
+        except (KeyError, TypeError, ValueError):
+            logger.warning(
+                "Failed to extract max TTFT from AIPerf result for DEP prefill"
+            )
+            return None
+
+    # Default path (non-DEP): use AIPerf's TTFT metric
+    aiperf_result = benchmark_prefill(
+        isl,
+        aiperf_artifact_dir,
+        model_name,
+        tokenizer,
+        base_url=base_url,
+    )
+    try:
+        return float(aiperf_result["time_to_first_token"]["avg"])
+    except (KeyError, TypeError, ValueError):
+        logger.warning("Failed to extract TTFT from AIPerf result")
+        return None
+
+
+def get_decode_itl_and_thpt_per_gpu(
+    isl: int,
+    osl: int,
+    num_request: int,
+    aiperf_artifact_dir: str,
+    model_name: str,
+    tokenizer: str,
+    base_url: str = "http://localhost:8000",
+    num_gpus: int = 1,
+) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Run decode benchmark and extract (ITL ms, throughput per GPU).
+    Returns (None, None) on failure.
+    """
+    aiperf_result = benchmark_decode(
+        isl,
+        osl,
+        num_request,
+        aiperf_artifact_dir,
+        model_name,
+        tokenizer,
+        base_url=base_url,
+    )
+    if aiperf_result is None:
+        return None, None
+    try:
+        itl = float(aiperf_result["inter_token_latency"]["avg"])
+        thpt_total = float(aiperf_result["output_token_throughput"]["avg"])
+        thpt_per_gpu = thpt_total / max(num_gpus, 1)
+        return itl, thpt_per_gpu
+    except (KeyError, TypeError, ValueError):
+        logger.warning("Failed to extract decode metrics from AIPerf result")
+        return None, None
 
 
 def benchmark_decode(
@@ -238,7 +344,7 @@ def benchmark_decode(
     stdout, stderr = aiperf_process.communicate()
     if aiperf_process.returncode == 0:
         logger.info("AIperf profiling completed successfully")
-        logger.info(stdout)
+        logger.debug(stdout)
         aiperf_result = get_aiperf_result(aiperf_artifact_dir)
         return aiperf_result
     else:

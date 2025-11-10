@@ -6,9 +6,6 @@ kind: DynamoGraphDeployment
 metadata:
   name: trtllm-disagg-planner
 spec:
-  pvcs:
-    - name: dynamo-pvc
-      create: false
   services:
     Frontend:
       dynamoNamespace: trtllm-disagg-planner
@@ -39,9 +36,6 @@ spec:
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
-      volumeMounts:
-        - name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
-          mountPoint: /data
       extraPodSpec:
         mainContainer:
           image: my-registry/trtllm-runtime:my-tag
@@ -57,8 +51,18 @@ spec:
             - --environment=kubernetes
             - --backend=trtllm
             - --adjustment-interval=60
-            - --profile-results-dir=/data
+            - --profile-results-dir=/workspace/profiling_results
             - --prometheus-port=9085
+          volumeMounts:
+            - name: planner-profile-data
+              mountPath: /workspace/profiling_results
+              readOnly: true
+        volumes:
+          - name: planner-profile-data
+            configMap:
+              # Must be pre-created before deployment by the profiler
+              # See docs/planner/sla_planner_quickstart.md for more details
+              name: planner-profile-data
     TRTLLMDecodeWorker:
       dynamoNamespace: trtllm-disagg-planner
       envFromSecret: hf-token-secret

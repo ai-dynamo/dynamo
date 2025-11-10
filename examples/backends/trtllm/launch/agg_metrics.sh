@@ -23,7 +23,7 @@ python3 -m dynamo.frontend --http-port 8000 &
 DYNAMO_PID=$!
 
 # Run worker
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=8081 \
 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \

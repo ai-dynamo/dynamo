@@ -256,7 +256,7 @@ async def test_server_context_cancel(server, client):
     except ValueError as e:
         # Verify the expected cancellation exception is received
         # TODO: Should this be a asyncio.CancelledError?
-        assert str(e) == "Stream ended before generation completed"
+        assert str(e).startswith("Stream ended before generation completed")
 
     # Verify server context cancellation status
     assert handler.context_is_stopped

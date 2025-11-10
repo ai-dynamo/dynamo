@@ -8,15 +8,16 @@
 // component's "service state"
 
 use crate::{
-    DistributedRuntime, Result,
+    DistributedRuntime,
     component::Component,
-    error,
     metrics::{MetricsHierarchy, prometheus_names, prometheus_names::nats_service},
     traits::*,
     transports::nats,
     utils::stream,
 };
 
+use anyhow::Result;
+use anyhow::anyhow as error;
 use async_nats::Message;
 use async_stream::try_stream;
 use bytes::Bytes;
