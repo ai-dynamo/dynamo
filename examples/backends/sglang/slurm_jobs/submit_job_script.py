@@ -112,65 +112,58 @@ def submit_job(job_script_path, extra_slurm_args=[]):
 def create_job_metadata(
     job_id: str,
     timestamp: str,
-    prefill_workers: int,
-    decode_workers: int,
-    prefill_nodes: int,
-    decode_nodes: int,
-    gpus_per_node: int,
+    args: argparse.Namespace,
     profiler_config: dict,
-    container_image: str,
-    is_aggregated: bool = False,
-    agg_workers: int = 0,
 ):
     """
-    Create job metadata dictionary.
+    Create job metadata dictionary from job submission args.
 
     Returns:
         Dictionary with job metadata.
     """
-    # Calculate TP and DP sizes based on configuration
-    if is_aggregated:
-        # For aggregated mode, all GPUs on a worker are used for TP
-        nodes_per_worker = (prefill_nodes + decode_nodes) // agg_workers if agg_workers > 0 else 0
-        tp_size = nodes_per_worker * gpus_per_node
-        dp_size = agg_workers
-        prefill_dp = agg_workers
-        decode_dp = agg_workers
-        prefill_tp = tp_size
-        decode_tp = tp_size
-    else:
-        # For disaggregated mode
-        prefill_nodes_per_worker = prefill_nodes // prefill_workers if prefill_workers > 0 else 0
-        decode_nodes_per_worker = decode_nodes // decode_workers if decode_workers > 0 else 0
-        prefill_tp = prefill_nodes_per_worker * gpus_per_node
-        decode_tp = decode_nodes_per_worker * gpus_per_node
-        prefill_dp = prefill_workers
-        decode_dp = decode_workers
-
     metadata = {
         "version": "1.0",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "run_metadata": {
             "slurm_job_id": job_id,
             "run_date": timestamp,
-            "is_agg": is_aggregated,
-            "prefill_dp": prefill_dp,
-            "decode_dp": decode_dp,
-            "prefill_tp": prefill_tp,
-            "decode_tp": decode_tp,
-            "container": container_image,
+            "job_name": args.job_name,
+            "account": args.account,
+            "partition": args.partition,
+            "time_limit": args.time_limit,
+            "container": args.container_image,
+            "model_dir": args.model_dir,
+            "config_dir": args.config_dir,
+            "gpus_per_node": args.gpus_per_node,
+            "network_interface": args.network_interface,
+            "gpu_type": args.gpu_type,
+            "script_variant": args.script_variant,
+            "use_init_location": args.use_init_location,
+            "enable_config_dump": args.enable_config_dump,
+            "run_in_ci": args.run_in_ci,
         },
-        "profiler_metadata": {
-            "profiler_type": profiler_config.get("type", "manual"),
-        }
+        "profiler_metadata": profiler_config,
     }
 
-    # Add all profiler-specific fields to profiler_metadata
-    profiler_fields = ["isl", "osl", "concurrencies", "req-rate"]
-    for field in profiler_fields:
-        if field in profiler_config:
-            metadata["profiler_metadata"][field] = profiler_config[field]
-    
+    # Add mode-specific metadata
+    if args.agg_nodes is not None:
+        metadata["run_metadata"]["mode"] = "aggregated"
+        metadata["run_metadata"]["agg_nodes"] = args.agg_nodes
+        metadata["run_metadata"]["agg_workers"] = args.agg_workers
+    else:
+        metadata["run_metadata"]["mode"] = "disaggregated"
+        metadata["run_metadata"]["prefill_nodes"] = args.prefill_nodes
+        metadata["run_metadata"]["decode_nodes"] = args.decode_nodes
+        metadata["run_metadata"]["prefill_workers"] = args.prefill_workers
+        metadata["run_metadata"]["decode_workers"] = args.decode_workers
+
+    # Add multiple frontends info if enabled
+    if args.enable_multiple_frontends:
+        metadata["run_metadata"]["enable_multiple_frontends"] = True
+        metadata["run_metadata"]["num_additional_frontends"] = (
+            args.num_additional_frontends
+        )
+
     return metadata
 
 
@@ -531,15 +524,8 @@ def main(input_args: list[str] | None = None):
         metadata = create_job_metadata(
             job_id=job_id,
             timestamp=timestamp,
-            prefill_workers=prefill_workers,
-            decode_workers=decode_workers,
-            prefill_nodes=prefill_nodes,
-            decode_nodes=decode_nodes,
-            gpus_per_node=args.gpus_per_node,
+            args=args,
             profiler_config=profiler_config,
-            container_image=args.container_image,
-            is_aggregated=is_aggregated,
-            agg_workers=agg_workers,
         )
         metadata_path = os.path.join(log_dir_path, f"{job_id}.json")
         with open(metadata_path, "w") as f:
@@ -578,20 +564,13 @@ def main(input_args: list[str] | None = None):
                 logging.info(
                     f"Saved rendered sbatch script to {retry_sbatch_script_path}"
                 )
-                
+
                 # Create and save job metadata for retry job
                 retry_metadata = create_job_metadata(
                     job_id=job_id,
                     timestamp=timestamp,
-                    prefill_workers=prefill_workers,
-                    decode_workers=decode_workers,
-                    prefill_nodes=prefill_nodes,
-                    decode_nodes=decode_nodes,
-                    gpus_per_node=args.gpus_per_node,
+                    args=args,
                     profiler_config=profiler_config,
-                    container_image=args.container_image,
-                    is_aggregated=is_aggregated,
-                    agg_workers=agg_workers,
                 )
                 retry_metadata_path = os.path.join(retry_log_dir_path, f"{job_id}.json")
                 with open(retry_metadata_path, "w") as f:
