@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional, Tuple
 
 import pytest
-import tritonclient.grpc as grpcclient
 import tritonclient.grpc.model_config_pb2 as mc
 from tritonclient.utils import InferenceServerException
 
@@ -17,7 +16,7 @@ pytestmark = pytest.mark.pre_merge
 
 
 async def _fetch_model_config(
-    client: grpcclient.InferenceServerClient,
+    client,
     model_name: str,
     retries: int = 30,
 ) -> Any:
@@ -87,8 +86,10 @@ def tensor_service(runtime):
 
 
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_model_config_uses_runtime_config(tensor_service):
     """Ensure tensor runtime_config is returned via the ModelConfig endpoint."""
+    import tritonclient.grpc as grpcclient
     model_name = "tensor-config-model"
     tensor_config = {
         "name": model_name,
@@ -130,9 +131,11 @@ async def test_model_config_uses_runtime_config(tensor_service):
 
 
 @pytest.mark.asyncio
+@pytest.mark.forked
 async def test_model_config_missing_runtime_config_errors(tensor_service):
     """ModelConfig should return NOT_FOUND when no tensor runtime_config is saved."""
     model_name = "tensor-config-missing"
+    import tritonclient.grpc as grpcclient
 
     async with tensor_service(model_name, runtime_config=None) as (host, port):
         client = grpcclient.InferenceServerClient(url=f"{host}:{port}")
