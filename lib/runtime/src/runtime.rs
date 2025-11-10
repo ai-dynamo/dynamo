@@ -14,8 +14,10 @@
 //! private; however, for now we are exposing most objects as fully public while the API is maturing.
 
 use super::utils::GracefulShutdownTracker;
-use super::{Result, Runtime, RuntimeType, error};
-use crate::config::{self, RuntimeConfig};
+use crate::{
+    compute,
+    config::{self, RuntimeConfig},
+};
 
 use futures::Future;
 use once_cell::sync::OnceCell;
@@ -24,8 +26,28 @@ use tokio::{signal, sync::Mutex, task::JoinHandle};
 
 pub use tokio_util::sync::CancellationToken;
 
+/// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
+#[derive(Clone)]
+enum RuntimeType {
+    Shared(Arc<tokio::runtime::Runtime>),
+    External(tokio::runtime::Handle),
+}
+
+/// Local [Runtime] which provides access to shared resources local to the physical node/machine.
+#[derive(Debug, Clone)]
+pub struct Runtime {
+    id: Arc<String>,
+    primary: RuntimeType,
+    secondary: RuntimeType,
+    cancellation_token: CancellationToken,
+    endpoint_shutdown_token: CancellationToken,
+    graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
+    compute_pool: Option<Arc<compute::ComputePool>>,
+    block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
+}
+
 impl Runtime {
-    fn new(runtime: RuntimeType, secondary: Option<RuntimeType>) -> Result<Runtime> {
+    fn new(runtime: RuntimeType, secondary: Option<RuntimeType>) -> anyhow::Result<Runtime> {
         // worker id
         let id = Arc::new(uuid::Uuid::new_v4().to_string());
 
@@ -65,7 +87,7 @@ impl Runtime {
         runtime: RuntimeType,
         secondary: Option<RuntimeType>,
         config: &RuntimeConfig,
-    ) -> Result<Runtime> {
+    ) -> anyhow::Result<Runtime> {
         let mut rt = Self::new(runtime, secondary)?;
 
         // Create compute pool from configuration
@@ -123,7 +145,7 @@ impl Runtime {
 
     /// Initialize thread-local compute context on all worker threads using a barrier
     /// This ensures every worker thread has its thread-local context initialized
-    pub async fn initialize_all_thread_locals(&self) -> Result<()> {
+    pub async fn initialize_all_thread_locals(&self) -> anyhow::Result<()> {
         if let (Some(pool), Some(permits)) = (&self.compute_pool, &self.block_in_place_permits) {
             // First, detect how many worker threads we actually have
             let num_workers = self.detect_worker_thread_count().await;
@@ -207,11 +229,11 @@ impl Runtime {
         count
     }
 
-    pub fn from_current() -> Result<Runtime> {
+    pub fn from_current() -> anyhow::Result<Runtime> {
         Runtime::from_handle(tokio::runtime::Handle::current())
     }
 
-    pub fn from_handle(handle: tokio::runtime::Handle) -> Result<Runtime> {
+    pub fn from_handle(handle: tokio::runtime::Handle) -> anyhow::Result<Runtime> {
         let primary = RuntimeType::External(handle.clone());
         let secondary = RuntimeType::External(handle);
         Runtime::new(primary, Some(secondary))
@@ -219,7 +241,7 @@ impl Runtime {
 
     /// Create a [`Runtime`] instance from the settings
     /// See [`config::RuntimeConfig::from_settings`]
-    pub fn from_settings() -> Result<Runtime> {
+    pub fn from_settings() -> anyhow::Result<Runtime> {
         let config = config::RuntimeConfig::from_settings()?;
         let runtime = Arc::new(config.create_runtime()?);
         let primary = RuntimeType::Shared(runtime.clone());
@@ -228,7 +250,7 @@ impl Runtime {
     }
 
     /// Create a [`Runtime`] with two single-threaded async tokio runtime
-    pub fn single_threaded() -> Result<Runtime> {
+    pub fn single_threaded() -> anyhow::Result<Runtime> {
         let config = config::RuntimeConfig::single_threaded();
         let owned = RuntimeType::Shared(Arc::new(config.create_runtime()?));
         Runtime::new(owned, None)

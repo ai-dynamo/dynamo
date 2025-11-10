@@ -20,5 +20,6 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [workspace.dependencies]
 # local or crates.io
+anyhow = "1"
 dynamo-runtime = { path = "../" }
 prometheus = { version = "0.14" }
