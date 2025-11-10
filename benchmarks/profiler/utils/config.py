@@ -35,11 +35,6 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-class VolumeMount(BaseModel):
-    name: str
-    mountPoint: str
-
-
 class Container(BaseModel):
     image: Optional[str] = None
     workingDir: Optional[str] = None
