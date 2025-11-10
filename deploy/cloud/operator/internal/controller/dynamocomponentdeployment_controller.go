@@ -1273,7 +1273,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 
 	// if discovery backend is k8s we want to create a service for each component
 	// else, only create for the frontend component
-	if !opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled && (isK8sDiscovery || opt.dynamoComponentDeployment.IsFrontendComponent()) {
+	if !opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled && !(isK8sDiscovery || opt.dynamoComponentDeployment.IsFrontendComponent()) {
 		// if it's not the main component or if it's not a generic service and not contains stealing traffic debug mode enabled, we don't need to create the service
 		return kubeService, true, nil
 	}
