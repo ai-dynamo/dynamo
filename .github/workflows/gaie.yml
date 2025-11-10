@@ -356,26 +356,60 @@ jobs:
             kubectl get deploy -n ${NS} || true
             exit 1
           fi
-          echo "Deployment qwen-epp found. Waiting for rollout to complete..."
-          echo "Deployment image:"
+
+          echo
+          echo "=== Deployment qwen-epp found. Basic info ==="
+          kubectl get deploy qwen-epp -n ${NS} -o wide || true
+
+          echo
+          echo "=== Deployment image ==="
           kubectl get deploy/qwen-epp -n ${NS} -o jsonpath='{.spec.template.spec.containers[*].image}{"\n"}' || true
 
+          echo
+          echo "=== Pod template imagePullSecrets ==="
+          kubectl get deploy/qwen-epp -n ${NS} -o jsonpath='{.spec.template.spec.imagePullSecrets}{"\n"}' || true
+
+          echo
           echo "Deriving pod selector from Deployment..."
           SELECTOR=$(kubectl get deploy/qwen-epp -n ${NS} -o json | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')
           if [[ -n "${SELECTOR}" ]]; then
             echo "Using selector: ${SELECTOR}"
-            echo "Current pods (name, image, ready, waitingReason, restartCount):"
-            kubectl get pods -n ${NS} -l "${SELECTOR}" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\t"}{range .status.containerStatuses[*]}{.ready}{"\t"}{.state.waiting.reason}{"\t"}{.restartCount}{"\n"}{end}{end}' || true
+            echo
+            echo "=== Current pods (name, image, ready, waitingReason, restartCount) ==="
+            kubectl get pods -n ${NS} -l "${SELECTOR}" \
+              -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\t"}{range .status.containerStatuses[*]}{.ready}{"\t"}{.state.waiting.reason}{"\t"}{.restartCount}{"\n"}{end}{end}' || true
 
-            # Fail fast on common crash conditions
-            if kubectl get pods -n ${NS} -l "${SELECTOR}" -o json | jq -e '.items[] | select(.status.containerStatuses != null) | .status.containerStatuses[] | select(.state.waiting.reason=="CrashLoopBackOff" or .state.waiting.reason=="ImagePullBackOff" or .state.waiting.reason=="ErrImagePull")' >/dev/null; then
+            # Pick first pod for deeper inspection
+            POD=$(kubectl get pods -n ${NS} -l "${SELECTOR}" -o jsonpath='{.items[0].metadata.name}')
+            echo
+            echo "=== describe pod ${POD} ==="
+            kubectl describe pod "${POD}" -n ${NS} || true
+
+            echo
+            echo "=== Last 50 events in namespace ${NS} (sorted by time) ==="
+            kubectl get events -n ${NS} --sort-by=.lastTimestamp | tail -n 50 || true
+
+            echo
+            echo "=== Pod logs (may be empty if stuck in ContainerCreating) ==="
+            kubectl logs "${POD}" -n ${NS} --all-containers=true --tail=200 || true
+
+            echo
+            echo "Checking for common crash conditions..."
+            if kubectl get pods -n ${NS} -l "${SELECTOR}" -o json | jq -e \
+              '.items[] | select(.status.containerStatuses != null) | .status.containerStatuses[] | select(.state.waiting.reason=="CrashLoopBackOff" or .state.waiting.reason=="ImagePullBackOff" or .state.waiting.reason=="ErrImagePull")' >/dev/null; then
               echo "Detected CrashLoopBackOff/ImagePullBackOff/ErrImagePull in qwen-epp pods" >&2
               exit 1
             fi
           else
             echo "Could not derive a label selector from Deployment; skipping pod checks."
           fi
+
+          echo
+          echo "=== Waiting for Deployment/qwen-epp rollout to complete ==="
+          # This will fail with the 'progress deadline exceeded' error if it never becomes Ready
           kubectl rollout status deploy/qwen-epp -n ${NS} --timeout=600s
+          echo
+          echo "=== Final qwen-epp Deployment status ==="
           kubectl get deploy qwen-epp -n ${NS} -o wide
 
       - name: Cleanup
