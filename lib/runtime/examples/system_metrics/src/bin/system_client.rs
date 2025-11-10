@@ -5,17 +5,17 @@ use futures::StreamExt;
 use system_metrics::{DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE};
 
 use dynamo_runtime::{
-    DistributedRuntime, Result, Runtime, Worker, logging, pipeline::PushRouter,
+    DistributedRuntime, Runtime, Worker, logging, pipeline::PushRouter,
     protocols::annotated::Annotated, utils::Duration,
 };
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     logging::init();
     let worker = Worker::from_settings()?;
     worker.execute(app)
 }
 
-async fn app(runtime: Runtime) -> Result<()> {
+async fn app(runtime: Runtime) -> anyhow::Result<()> {
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
     let namespace = distributed.namespace(DEFAULT_NAMESPACE)?;

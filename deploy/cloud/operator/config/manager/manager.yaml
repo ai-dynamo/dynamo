@@ -103,4 +103,4 @@ spec:
             cpu: 1024m
             memory: 1Gi
       serviceAccountName: controller-manager
-      terminationGracePeriodSeconds: 10
+      terminationGracePeriodSeconds: 30

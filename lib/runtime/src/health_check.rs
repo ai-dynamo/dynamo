@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::component::{Client, Component, Endpoint, Instance};
+use crate::config::HealthStatus;
 use crate::pipeline::PushRouter;
 use crate::pipeline::{AsyncEngine, Context, ManyOut, SingleIn};
 use crate::protocols::annotated::Annotated;
 use crate::protocols::maybe_error::MaybeError;
-use crate::{DistributedRuntime, HealthStatus, SystemHealth};
+use crate::{DistributedRuntime, SystemHealth};
 use futures::StreamExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -99,10 +100,7 @@ impl HealthCheckManager {
     /// Start the health check manager by spawning per-endpoint monitoring tasks
     pub async fn start(self: Arc<Self>) -> anyhow::Result<()> {
         // Get all registered endpoints at startup
-        let targets = {
-            let system_health = self.drt.system_health.lock();
-            system_health.get_health_check_targets()
-        };
+        let targets = self.drt.system_health().lock().get_health_check_targets();
 
         info!(
             "Starting health check tasks for {} endpoints with canary_wait_time: {:?}",
@@ -131,12 +129,12 @@ impl HealthCheckManager {
         let endpoint_subject_clone = endpoint_subject.clone();
 
         // Get the endpoint-specific notifier
-        let notifier = {
-            let system_health = self.drt.system_health.lock();
-            system_health
-                .get_endpoint_health_check_notifier(&endpoint_subject)
-                .expect("Notifier should exist for registered endpoint")
-        };
+        let notifier = self
+            .drt
+            .system_health()
+            .lock()
+            .get_endpoint_health_check_notifier(&endpoint_subject)
+            .expect("Notifier should exist for registered endpoint");
 
         let task = tokio::spawn(async move {
             let endpoint_subject = endpoint_subject_clone;
@@ -150,10 +148,7 @@ impl HealthCheckManager {
                         info!("Canary timer expired for {}, sending health check", endpoint_subject);
 
                         // Get the health check payload for this endpoint
-                        let target = {
-                            let system_health = manager.drt.system_health.lock();
-                            system_health.get_health_check_target(&endpoint_subject)
-                        };
+                        let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
 
                         if let Some(target) = target {
                             if let Err(e) = manager.send_health_check_request(&endpoint_subject, &target.payload).await {
@@ -197,12 +192,14 @@ impl HealthCheckManager {
         let manager = self.clone();
 
         // Get the receiver (can only be taken once)
-        let mut rx = {
-            let system_health = manager.drt.system_health.lock();
-            system_health.take_new_endpoint_receiver().ok_or_else(|| {
+        let mut rx = manager
+            .drt
+            .system_health()
+            .lock()
+            .take_new_endpoint_receiver()
+            .ok_or_else(|| {
                 anyhow::anyhow!("Endpoint receiver already taken - this should only be called once")
-            })?
-        };
+            })?;
 
         tokio::spawn(async move {
             info!("Starting dynamic endpoint discovery monitor with channel-based notifications");
@@ -246,14 +243,14 @@ impl HealthCheckManager {
         endpoint_subject: &str,
         payload: &serde_json::Value,
     ) -> anyhow::Result<()> {
-        let target = {
-            let system_health = self.drt.system_health.lock();
-            system_health
-                .get_health_check_target(endpoint_subject)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("No health check target found for {}", endpoint_subject)
-                })?
-        };
+        let target = self
+            .drt
+            .system_health()
+            .lock()
+            .get_health_check_target(endpoint_subject)
+            .ok_or_else(|| {
+                anyhow::anyhow!("No health check target found for {}", endpoint_subject)
+            })?;
 
         debug!(
             "Sending health check to {} (instance_id: {})",
@@ -274,7 +271,7 @@ impl HealthCheckManager {
         let request: SingleIn<serde_json::Value> = Context::new(payload.clone());
 
         // Clone what we need for the spawned task
-        let system_health = self.drt.system_health.clone();
+        let system_health = self.drt.system_health().clone();
         let endpoint_subject_owned = endpoint_subject.to_string();
         let instance_id = target.instance.instance_id;
         let timeout = self.config.request_timeout;
@@ -364,18 +361,16 @@ pub async fn get_health_check_status(
     drt: &DistributedRuntime,
 ) -> anyhow::Result<serde_json::Value> {
     // Get endpoints list from SystemHealth
-    let endpoint_subjects: Vec<String> = {
-        let system_health = drt.system_health.lock();
-        system_health.get_health_check_endpoints()
-    };
+    let endpoint_subjects: Vec<String> = drt.system_health().lock().get_health_check_endpoints();
 
     let mut endpoint_statuses = HashMap::new();
 
     // Check each endpoint's health status
     {
-        let system_health = drt.system_health.lock();
+        let system_health = drt.system_health();
+        let system_health_lock = system_health.lock();
         for endpoint_subject in &endpoint_subjects {
-            let health_status = system_health
+            let health_status = system_health_lock
                 .get_endpoint_health_status(endpoint_subject)
                 .unwrap_or(HealthStatus::NotReady);
 
@@ -408,7 +403,6 @@ pub async fn get_health_check_status(
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
     use super::*;
-    use crate::HealthStatus;
     use crate::distributed::distributed_test_utils::create_test_drt_async;
     use std::sync::Arc;
     use std::time::Duration;
@@ -429,8 +423,6 @@ mod integration_tests {
 
         assert_eq!(manager.config.canary_wait_time, canary_wait_time);
         assert_eq!(manager.config.request_timeout, request_timeout);
-
-        assert!(Arc::ptr_eq(&manager.drt.system_health, &drt.system_health));
     }
 
     #[tokio::test]
@@ -443,7 +435,7 @@ mod integration_tests {
             "_health_check": true
         });
 
-        drt.system_health.lock().register_health_check_target(
+        drt.system_health().lock().register_health_check_target(
             endpoint,
             crate::component::Instance {
                 component: "test_component".to_string(),
@@ -456,7 +448,7 @@ mod integration_tests {
         );
 
         let retrieved = drt
-            .system_health
+            .system_health()
             .lock()
             .get_health_check_target(endpoint)
             .map(|t| t.payload);
@@ -464,7 +456,7 @@ mod integration_tests {
         assert_eq!(retrieved.unwrap(), payload);
 
         // Verify endpoint appears in the list
-        let endpoints = drt.system_health.lock().get_health_check_endpoints();
+        let endpoints = drt.system_health().lock().get_health_check_endpoints();
         assert!(endpoints.contains(&endpoint.to_string()));
     }
 
@@ -478,7 +470,7 @@ mod integration_tests {
                 "prompt": format!("test{}", i),
                 "_health_check": true
             });
-            drt.system_health.lock().register_health_check_target(
+            drt.system_health().lock().register_health_check_target(
                 &endpoint,
                 crate::component::Instance {
                     component: "test_component".to_string(),
@@ -521,7 +513,7 @@ mod integration_tests {
         });
 
         // Register the endpoint
-        drt.system_health.lock().register_health_check_target(
+        drt.system_health().lock().register_health_check_target(
             endpoint,
             crate::component::Instance {
                 component: "test_component".to_string(),
@@ -535,7 +527,7 @@ mod integration_tests {
 
         // Verify that a notifier was created for this endpoint
         let notifier = drt
-            .system_health
+            .system_health()
             .lock()
             .get_endpoint_health_check_notifier(endpoint);
 
@@ -551,7 +543,7 @@ mod integration_tests {
 
         // Initially, the endpoint should be Ready (default after registration)
         let status = drt
-            .system_health
+            .system_health()
             .lock()
             .get_endpoint_health_status(endpoint);
         assert_eq!(status, Some(HealthStatus::NotReady));

@@ -10142,6 +10142,20 @@ spec:
                             format: int32
                             type: integer
                         type: object
+                      modelRef:
+                        description: |-
+                          ModelRef references a model that this component serves
+                          When specified, a headless service will be created for endpoint discovery
+                        properties:
+                          name:
+                            description: Name is the base model identifier (e.g., "llama-3-70b-instruct-v1")
+                            type: string
+                          revision:
+                            description: Revision is the model revision/version (optional)
+                            type: string
+                        required:
+                          - name
+                        type: object
                       multinode:
                         description: Multinode is the configuration for multinode components.
                         properties:

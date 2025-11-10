@@ -37,8 +37,7 @@ spec:
 
       # Engine configuration
       engine:
-        max_context_length: 16384  # Maximum context length supported by the model
-        is_moe_model: false  # Enable MoE model support (uses TEP/DEP instead of TP)
+        max_context_length: 16384  # will override max context length of the model if provided
 
       # Hardware configuration
       hardware:

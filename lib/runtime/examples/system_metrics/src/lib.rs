@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
-    DistributedRuntime, Result,
+    DistributedRuntime,
     metrics::MetricsHierarchy,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
@@ -64,7 +64,10 @@ impl RequestHandler {
 
 #[async_trait]
 impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for RequestHandler {
-    async fn generate(&self, input: SingleIn<String>) -> Result<ManyOut<Annotated<String>>> {
+    async fn generate(
+        &self,
+        input: SingleIn<String>,
+    ) -> anyhow::Result<ManyOut<Annotated<String>>> {
         let (data, ctx) = input.into_parts();
 
         // Track data bytes processed if metrics are available
@@ -85,7 +88,7 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for Reques
 
 /// Backend function that sets up the system status server with metrics and ingress handler
 /// This function can be reused by integration tests to ensure they use the exact same setup
-pub async fn backend(drt: DistributedRuntime, endpoint_name: Option<&str>) -> Result<()> {
+pub async fn backend(drt: DistributedRuntime, endpoint_name: Option<&str>) -> anyhow::Result<()> {
     let endpoint_name = endpoint_name.unwrap_or(DEFAULT_ENDPOINT);
 
     let mut component = drt
