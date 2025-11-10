@@ -5,8 +5,6 @@ ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG BASE_IMAGE_TAG="25.08-py3" # TODO: test on 25.09-py3
 ARG RELEASE_BUILD
 ARG ENABLE_KVBM=false
-# ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-# ARG RUNTIME_IMAGE_TAG="13.0.0-runtime-ubuntu24.04" # TODO: test on 13.0.1
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/tensorrt-llm/release"
 ARG RUNTIME_IMAGE_TAG="1.2.0rc1" # TODO: check for 1.2.0rc2
 
@@ -59,9 +57,6 @@ ARG PYTHON_VERSION=3.12
 WORKDIR /workspace
 
 ARG ARCH_ALT
-# ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-# ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-# ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
 # Install Python, build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
@@ -87,21 +82,8 @@ COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 # Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
-# Copy UCX from dynamo_base image as plugin for NIXL
-# Copy NIXL source from dynamo_base image
-# Copy dynamo wheels for gitlab artifacts
-# COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
-# COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
-# ENV PATH=/usr/local/ucx/bin:$PATH
 
 ENV DYNAMO_HOME=/workspace
-# ENV LD_LIBRARY_PATH=\
-# $NIXL_LIB_DIR:\
-# $NIXL_PLUGIN_DIR:\
-# /usr/local/ucx/lib:\
-# /usr/local/ucx/lib/ucx:\
-# /opt/hpcx/ompi/lib:\
-# $LD_LIBRARY_PATH
 
 ENV LD_LIBRARY_PATH=\
 /opt/hpcx/ompi/lib:\
@@ -110,16 +92,8 @@ $LD_LIBRARY_PATH
 ENV PATH="/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
-### VIRTUAL ENVIRONMENT SETUP ###
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-# Create virtual environment
-# RUN mkdir -p /opt/dynamo/venv && \
-#     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
-
-# Activate virtual environment
-# ENV VIRTUAL_ENV=/opt/dynamo/venv \
-#     PATH="/opt/dynamo/venv/bin:${PATH}"
 
 ENV ENV=${ENV:-/etc/shinit_v2}
 
@@ -137,7 +111,6 @@ RUN cd /opt/dynamo/wheelhouse/ && \
     uv pip install --system --break-system-packages --no-cache \
         ai_dynamo_runtime-*.whl \
         ai_dynamo-*.whl &&\
-        # nixl/nixl-*.whl &&\
     pip list
 
 # Install benchmarks
@@ -161,22 +134,24 @@ ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
 # Cleanup workspace since TRTLLM has some files there and Dynamo uses /workspace as home
 RUN rm -rf /workspace/*
 
-# Copy tests, benchmarks, deploy and components for CI
-COPY tests /workspace/tests
-COPY examples /workspace/examples
-COPY benchmarks /workspace/benchmarks
-COPY deploy /workspace/deploy
-COPY components/ /workspace/components/
-COPY recipes /workspace/recipes
-
-# Copy attribution files
-COPY ATTRIBUTION* LICENSE /workspace/
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
-    # echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
+# Copy attribution files
+COPY ATTRIBUTION* LICENSE /workspace/
 
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh && cd /workspace"]
+# Copy tests, benchmarks, deploy and components for CI
+COPY benchmarks /workspace/benchmarks
+COPY components /workspace/components
+COPY deploy     /workspace/deploy
+COPY examples   /workspace/examples
+COPY recipes    /workspace/recipes
+COPY tests      /workspace/tests
+
+# Use UCX KVCACHE by default
+ENV TRTLLM_USE_UCX_KVCACHE=1 
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
