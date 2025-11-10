@@ -9,11 +9,11 @@ pub use utils::hash_pod_name;
 use daemon::DiscoveryDaemon;
 use utils::PodInfo;
 
+use crate::CancellationToken;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryMetadata, DiscoveryQuery, DiscoverySpec,
     DiscoveryStream, MetadataSnapshot,
 };
-use crate::CancellationToken;
 use anyhow::Result;
 use async_trait::async_trait;
 use kube::Client as KubeClient;

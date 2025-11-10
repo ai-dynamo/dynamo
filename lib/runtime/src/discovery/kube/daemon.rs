@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::discovery::{DiscoveryMetadata, MetadataSnapshot};
 use crate::CancellationToken;
+use crate::discovery::{DiscoveryMetadata, MetadataSnapshot};
 use anyhow::Result;
 use futures::StreamExt;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
