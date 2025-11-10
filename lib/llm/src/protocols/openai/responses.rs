@@ -182,12 +182,14 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 top_p: resp.inner.top_p,
                 max_completion_tokens: resp.inner.max_output_tokens,
                 top_logprobs,
+                metadata: resp.inner.metadata,
                 stream: Some(true), // Set this to Some(True) by default to aggregate stream
                 ..Default::default()
             },
             common: Default::default(),
             nvext: resp.nvext,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         })
     }
 }

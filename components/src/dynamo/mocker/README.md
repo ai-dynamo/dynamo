@@ -1,0 +1,46 @@
+# Mocker engine
+
+The mocker engine is a mock vLLM implementation designed for testing and development purposes. It simulates realistic token generation timing without requiring actual model inference, making it useful for:
+
+- Testing distributed system components without GPU resources
+- Benchmarking infrastructure and networking overhead
+- Developing and debugging Dynamo components
+- Load testing and performance analysis
+
+## Basic usage
+
+The mocker engine now supports a vLLM-style CLI interface with individual arguments for all configuration options.
+
+### Required arguments:
+- `--model-path`: Path to model directory or HuggingFace model ID (required for tokenizer)
+
+### MockEngineArgs parameters (vLLM-style):
+- `--num-gpu-blocks-override`: Number of GPU blocks for KV cache (default: 16384)
+- `--block-size`: Token block size for KV cache blocks (default: 64)
+- `--max-num-seqs`: Maximum number of sequences per iteration (default: 256)
+- `--max-num-batched-tokens`: Maximum number of batched tokens per iteration (default: 8192)
+- `--enable-prefix-caching` / `--no-enable-prefix-caching`: Enable/disable automatic prefix caching (default: True)
+- `--enable-chunked-prefill` / `--no-enable-chunked-prefill`: Enable/disable chunked prefill (default: True)
+- `--watermark`: KV cache watermark threshold as a fraction (default: 0.01)
+- `--speedup-ratio`: Speed multiplier for token generation (default: 1.0). Higher values make the simulation engines run faster
+- `--data-parallel-size`: Number of data parallel workers to simulate (default: 1)
+- `--num-workers`: Number of mocker workers to launch in the same process (default: 1). All workers share the same tokio runtime and thread pool
+
+### Example with individual arguments (vLLM-style):
+```bash
+# Start mocker with custom configuration
+python -m dynamo.mocker \
+  --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+  --num-gpu-blocks-override 8192 \
+  --block-size 16 \
+  --speedup-ratio 10.0 \
+  --max-num-seqs 512 \
+  --num-workers 4 \
+  --enable-prefix-caching
+
+# Start frontend server
+python -m dynamo.frontend --http-port 8000
+```
+
+> [!Note]
+> Each mocker instance runs as a single process, and each DP worker (specified by `--data-parallel-size`) is spawned as a lightweight async task within that process. For benchmarking (e.g., router testing), you can use `--num-workers` to launch multiple mocker engines in the same process, which is more efficient than launching separate processes since they all share the same tokio runtime and thread pool.

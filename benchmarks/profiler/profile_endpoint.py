@@ -5,8 +5,9 @@ import argparse
 import logging
 import os
 
-from utils.profile_decode import profile_decode
-from utils.profile_prefill import profile_prefill
+from benchmarks.profiler.utils.defaults import EngineType
+from benchmarks.profiler.utils.profile_decode import profile_decode
+from benchmarks.profiler.utils.profile_prefill import profile_prefill
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -22,6 +23,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="profile a given endpoint's performance for prefill or decode"
     )
+    # TODO: use kebab case
     parser.add_argument(
         "--mode",
         type=str,
@@ -79,12 +81,22 @@ if __name__ == "__main__":
         default=8,
         help="interpolation granularity for the results",
     )
+    parser.add_argument(
+        "--attention_dp_size",
+        type=int,
+        default=1,
+        help="attention dp size of the endpoint for MoE models",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.work_dir, exist_ok=True)
     if args.tokenizer_path == "":
         args.tokenizer_path = args.model_name
-    if args.mode == "prefill":
+
+    # Convert string mode to EngineType
+    mode = EngineType(args.mode)
+
+    if mode == EngineType.PREFILL:
         profile_prefill(
             args.work_dir,
             args.model_name,
@@ -94,7 +106,7 @@ if __name__ == "__main__":
             args.max_context_length,
             args.interpolation_granularity,
         )
-    elif args.mode == "decode":
+    elif mode == EngineType.DECODE:
         assert args.max_kv_tokens > 0, "max_kv_tokens must be provided for decode"
         profile_decode(
             args.work_dir,
@@ -105,6 +117,7 @@ if __name__ == "__main__":
             args.max_kv_tokens,
             args.max_context_length,
             args.interpolation_granularity,
+            args.attention_dp_size,
         )
     else:
-        raise ValueError(f"Invalid mode: {args.mode}")
+        raise ValueError(f"Invalid mode: {mode}")

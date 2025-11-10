@@ -12,16 +12,15 @@ use anyhow::Context as _;
 
 pub mod backend;
 pub mod common;
-pub mod disagg_router;
 pub mod discovery;
 pub mod endpoint_type;
 pub mod engines;
 pub mod entrypoint;
-pub mod gguf;
 pub mod grpc;
 pub mod http;
 pub mod hub;
 // pub mod key_value_store;
+pub mod audit;
 pub mod kv_router;
 pub mod local_model;
 pub mod migration;
@@ -37,6 +36,7 @@ pub mod request_template;
 pub mod tokenizers;
 pub mod tokens;
 pub mod types;
+pub mod utils;
 
 #[cfg(feature = "block-manager")]
 pub mod block_manager;

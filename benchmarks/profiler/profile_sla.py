@@ -13,34 +13,107 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
 import asyncio
 import logging
 import math
 import os
+from dataclasses import dataclass, field
 
 import numpy as np
 import yaml
 
-from benchmarks.profiler.utils.config import CONFIG_MODIFIERS, WORKER_COMPONENT_NAMES
-from benchmarks.profiler.utils.defaults import DECODE_NUM_REQUESTS_RANGE
-from benchmarks.profiler.utils.genai_perf import benchmark_decode, benchmark_prefill
+from benchmarks.profiler.utils.aiperf import (
+    get_decode_itl_and_thpt_per_gpu,
+    get_prefill_ttft,
+)
+from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
+    ParallelizationMapping,
+    apply_parallel_mapping_to_config,
+    get_candidate_parallel_mappings,
+)
+from benchmarks.profiler.utils.defaults import EngineType
+from benchmarks.profiler.utils.dgd_generation import generate_dgd_config_with_planner
+from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
+    plot_pd_joint_results,
     plot_prefill_performance,
 )
-from benchmarks.profiler.utils.profile_cache import (
-    check_decode_results_exist,
-    check_prefill_results_exist,
-    load_existing_decode_results,
-    load_existing_prefill_results,
+from benchmarks.profiler.utils.profile_decode import (
+    get_num_request_range,
+    profile_decode,
+    profile_decode_aiconfigurator,
 )
-from benchmarks.profiler.utils.profile_decode import profile_decode
-from benchmarks.profiler.utils.profile_prefill import profile_prefill
+from benchmarks.profiler.utils.profile_prefill import (
+    profile_prefill,
+    profile_prefill_aiconfigurator,
+)
+from benchmarks.profiler.utils.profiler_argparse import create_profiler_parser
 from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
+
+
+@dataclass
+class PrefillProfileData:
+    """Container for prefill profiling results."""
+
+    num_gpus: list[int] = field(default_factory=list)
+    ttft: list[float] = field(default_factory=list)
+    thpt_per_gpu: list[float] = field(default_factory=list)
+    parallel_mapping_labels: list[str] = field(default_factory=list)
+    parallel_mappings: list[ParallelizationMapping] = field(default_factory=list)
+
+    def add_data(
+        self,
+        num_gpus: int,
+        ttft: float,
+        thpt_per_gpu: float,
+        parallel_mapping_label: str,
+        parallel_mapping: ParallelizationMapping,
+    ) -> None:
+        """Add a complete data point to the profile data."""
+        self.num_gpus.append(num_gpus)
+        self.ttft.append(ttft)
+        self.thpt_per_gpu.append(thpt_per_gpu)
+        self.parallel_mapping_labels.append(parallel_mapping_label)
+        self.parallel_mappings.append(parallel_mapping)
+
+
+@dataclass
+class DecodeProfileData:
+    """Container for decode profiling results."""
+
+    num_gpus: list[int] = field(default_factory=list)
+    itl: list[float] = field(default_factory=list)
+    thpt_per_gpu: list[float] = field(default_factory=list)
+    concurrency: list[int] = field(default_factory=list)
+    kv_cache_size: list[int] = field(default_factory=list)
+    parallel_mapping_labels: list[str] = field(default_factory=list)
+    parallel_mappings: list[ParallelizationMapping] = field(default_factory=list)
+
+    def add_data(
+        self,
+        num_gpus: int,
+        itl: float,
+        thpt_per_gpu: float,
+        concurrency: int,
+        kv_cache_size: int,
+        parallel_mapping_label: str,
+        parallel_mapping: ParallelizationMapping,
+    ) -> None:
+        """Add a complete data point to the profile data."""
+        self.num_gpus.append(num_gpus)
+        self.itl.append(itl)
+        self.thpt_per_gpu.append(thpt_per_gpu)
+        self.concurrency.append(concurrency)
+        self.kv_cache_size.append(kv_cache_size)
+        self.parallel_mapping_labels.append(parallel_mapping_label)
+        self.parallel_mappings.append(parallel_mapping)
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -57,357 +130,437 @@ async def run_profile(args):
     # List to track all created deployment clients for cleanup in case of failure
     deployment_clients = []
 
+    # Inherit aic_backend from backend if not explicitly set
+    if not args.aic_backend:
+        args.aic_backend = args.backend
+
     try:
+        # Log MoE model support
+        if args.model_info.is_moe:
+            logger.info(
+                "MoE (Mixture of Experts) model profiling, sweeping TEP/DEP size for prefill and decode"
+            )
+            assert args.backend in [
+                "sglang"
+            ], "MoE model support is only available for SGLang"
+            assert (
+                not args.use_ai_configurator
+            ), "MoE model is not supported in ai-configurator"
+        else:
+            logger.info(
+                "Dense model profiling, sweeping TP size for prefill and decode"
+            )
+
         config_modifier = CONFIG_MODIFIERS[args.backend]
 
         with open(args.config, "r") as f:
             config = yaml.safe_load(f)
 
-        profile_tp_size = [
+        if args.dgd_image:
+            config = config_modifier.update_image(config, args.dgd_image)
+            logger.debug(f"Using DGD image: {args.dgd_image}")
+
+        profile_num_gpus = [
             2**i
             for i in range(int(math.log2(args.max_num_gpus_per_engine)) + 1)
             if args.min_num_gpus_per_engine <= 2**i <= args.max_num_gpus_per_engine
         ]
-        logger.info(f"Profiling TP sizes: {profile_tp_size}")
+        if args.model_info.is_moe:
+            logger.info(f"Profiling MoE GPU counts (TEP/DEP): {profile_num_gpus}")
+        else:
+            logger.info(f"Profiling dense model GPU counts (TP): {profile_num_gpus}")
 
         os.makedirs(args.output_dir, exist_ok=True)
 
         model_name = config_modifier.get_model_name(config)
 
-        # Log skip behavior
-        if args.force_rerun:
-            logger.info(
-                "Force rerun enabled - will re-run all tests even if results exist"
+        # Determine sweep max context length: allow user-provided cap to override model's if smaller
+        use_specified_max_context_len = getattr(args, "max_context_length", None)
+        model_max_context_len = args.model_info.max_context_length
+        if not use_specified_max_context_len and not model_max_context_len:
+            raise ValueError(
+                "No max_context_length available from args.max_context_length or model_info from HF config"
             )
-        elif args.skip_existing_results:
+        elif not use_specified_max_context_len:
+            sweep_max_context_length = model_max_context_len
             logger.info(
-                "Skip existing results enabled - will skip TP sizes with existing results"
+                f"Using model's maximum context length: {model_max_context_len}"
+            )
+        elif not model_max_context_len:
+            sweep_max_context_length = use_specified_max_context_len
+            logger.info(
+                f"Using user-provided max_context_length: {use_specified_max_context_len}"
             )
         else:
-            logger.info("Skip existing results disabled - will re-run all tests")
-
-        # first profile prefill
-        prefill_tp_size = []
-        prefill_ttft = []
-        prefill_thpt_per_gpu = []
-        logger.info("Profiling prefill...")
-        prefill_config = config_modifier.convert_config(config, "prefill")
-        frontend_port = config_modifier.get_port(config)
-        for tp_size in profile_tp_size:
-            logger.info(f"Profiling prefill with TP size {tp_size}...")
-
-            # Check if results already exist for this TP size
-            if (
-                args.skip_existing_results
-                and not args.force_rerun
-                and check_prefill_results_exist(args.output_dir, tp_size, args.isl)
-            ):
-                logger.info(f"Skipping prefill TP{tp_size} - results already exist")
-                ttft, thpt_per_gpu = load_existing_prefill_results(
-                    args.output_dir, tp_size, args.isl
-                )
-                if ttft is not None and thpt_per_gpu is not None:
-                    prefill_tp_size.append(tp_size)
-                    prefill_ttft.append(ttft)
-                    prefill_thpt_per_gpu.append(thpt_per_gpu)
-                    logger.info(
-                        f"Loaded existing prefill results: TP{tp_size} TTFT={ttft:.2f}ms, throughput={thpt_per_gpu:.2f} tokens/s/GPU"
-                    )
-                continue
-
-            prefill_config = config_modifier.set_config_tp_size(prefill_config, tp_size)
-            logger.info(f"Dynamo config: {prefill_config}")
-
-            work_dir = f"{args.output_dir}/prefill_tp{tp_size}"
-            os.makedirs(work_dir, exist_ok=True)
-
-            prefill_config_fn = f"{work_dir}/config.yaml"
-            with open(prefill_config_fn, "w") as f:
-                yaml.dump(prefill_config, f)
-
-            if args.dry_run:
-                logger.info("Skipping deployment creation in dry run mode")
-            else:
-                client = DynamoDeploymentClient(
-                    namespace=args.namespace,
-                    base_log_dir=work_dir,
-                    model_name=model_name,
-                    service_name=args.service_name,
-                    frontend_port=frontend_port,
-                    deployment_name=prefill_config["metadata"]["name"],
-                )
-                logger.info(f"Created client with service_name: {client.service_name}")
-                deployment_clients.append(client)  # Track for cleanup
-                await client.create_deployment(prefill_config_fn)
-                logger.info("Waiting for deployment to be ready...")
-                await client.wait_for_deployment_ready()
-                logger.info("Deployment is ready")
-
-                logger.info("Getting deployment logs...")
-                await client.get_deployment_logs()
-                logger.info(
-                    f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
-                )
-
-                # run genai-perf
-                base_url = client.get_service_url()
-                genai_perf_artifact_dir = f"{work_dir}/gap_isl{args.isl}"
-                gap_result = benchmark_prefill(
-                    args.isl,
-                    genai_perf_artifact_dir,
-                    model_name,
-                    model_name,
-                    base_url=base_url,
-                )
-                if gap_result is not None:
-                    ttft = gap_result["time_to_first_token"]["avg"]
-                    prefill_tp_size.append(tp_size)
-                    prefill_ttft.append(ttft)
-                    prefill_thpt_per_gpu.append(args.isl / ttft / tp_size * 1000)
-
-                logger.info("Cleaning up deployment...")
-                await client.delete_deployment()
-                deployment_clients.remove(client)
-                logger.info("Deployment deleted")
-
-        # Plot the results as a 2D scatter plot
-        if prefill_tp_size and prefill_ttft and prefill_thpt_per_gpu:
-            plot_prefill_performance(
-                prefill_tp_size,
-                prefill_ttft,
-                prefill_thpt_per_gpu,
-                args.ttft,
-                args.output_dir,
+            sweep_max_context_length = min(
+                use_specified_max_context_len, model_max_context_len
+            )
+            logger.info(
+                f"Using minimum of user-provided and model's maximum context length: {sweep_max_context_length}"
             )
 
-        # then profile decode
-        decode_tp_size = []
-        decode_itl = []
-        decode_thpt_per_gpu = []
-        decode_concurrency = []
-        decode_kv_cache_size = []
-        decode_results = []  # Store partial results for plotting later
-        logger.info("Profiling decode...")
-        decode_config = config_modifier.convert_config(config, "decode")
-        for tp_size in profile_tp_size:
-            logger.info(f"Profiling decode with TP size {tp_size}...")
-
-            # Check if results already exist for this TP size
-            if (
-                args.skip_existing_results
-                and not args.force_rerun
-                and check_decode_results_exist(
-                    args.output_dir, tp_size, args.isl, args.osl
+        if args.use_ai_configurator:
+            if not args.aic_system:
+                raise ValueError(
+                    "Must provide --aic-system when using --use-ai-configurator."
                 )
-            ):
-                logger.info(f"Skipping decode TP{tp_size} - results already exist")
-                existing_results = load_existing_decode_results(
-                    args.output_dir, tp_size, args.isl, args.osl
+            if not args.aic_model_name:
+                raise ValueError(
+                    "Must provide --aic-model-name when using --use-ai-configurator."
                 )
-                if existing_results:
-                    # Add existing results to our arrays
-                    engine_decode_itl = []
-                    engine_decode_thpt_per_gpu = []
-                    for itl, thpt_per_gpu, concurrency in existing_results:
-                        decode_tp_size.append(tp_size)
-                        decode_itl.append(itl)
-                        decode_thpt_per_gpu.append(thpt_per_gpu)
-                        decode_concurrency.append(concurrency)
-                        # We need to get kv_cache_size from existing logs or estimate it
-                        estimated_kv_cache = max(
-                            100000, concurrency * (args.isl + args.osl) * 2
-                        )  # Conservative estimate
-                        decode_kv_cache_size.append(estimated_kv_cache)
-                        engine_decode_itl.append(itl)
-                        engine_decode_thpt_per_gpu.append(thpt_per_gpu)
+            if not args.aic_backend_version:
+                raise ValueError(
+                    "Must provide --aic-backend-version when using --use-ai-configurator."
+                )
 
-                    # Store results for plotting
-                    decode_results.append(
-                        (tp_size, engine_decode_itl, engine_decode_thpt_per_gpu)
+            logger.info("Using aiconfigurator to estimate performance...")
+            ai_configurator_perf_estimator = AIConfiguratorPerfEstimator(
+                args.aic_model_name,
+                args.aic_system.lower(),
+                args.aic_backend,
+                args.aic_backend_version,
+            )
+        else:
+            if args.aic_system or args.aic_model_name or args.aic_backend_version:
+                logger.warning(
+                    "Ignoring --aic-system, --aic-model-name, and/or --backend-version "
+                    "when not using --use-ai-configurator."
+                )
+
+        # first profile prefill
+        prefill_data = PrefillProfileData()
+        logger.info("Profiling prefill...")
+        base_prefill_config = config_modifier.convert_config(
+            config, EngineType.PREFILL, is_moe_model=args.model_info.is_moe
+        )
+        frontend_port = config_modifier.get_port(config)
+        itl: float | None = None
+        thpt_per_gpu: float | None = None
+        for num_gpus in profile_num_gpus:
+            logger.info(f"Profiling prefill with {num_gpus} GPUs...")
+            candidate_mappings = get_candidate_parallel_mappings(
+                num_gpus, args.model_info, EngineType.PREFILL
+            )
+
+            for mapping in candidate_mappings:
+                # Apply parallel mapping to config
+                prefill_config = apply_parallel_mapping_to_config(
+                    base_prefill_config,
+                    mapping,
+                    EngineType.PREFILL,
+                    config_modifier,
+                    args.num_gpus_per_node,
+                )
+                logger.debug(f"Dynamo config: {prefill_config}")
+
+                # Work dir includes mapping label (safe chars only)
+                parallel_mapping_tag = (
+                    mapping.label().replace("=", "").replace("/", "_")
+                )
+                work_dir = (
+                    f"{args.output_dir}/prefill_{num_gpus}gpus_{parallel_mapping_tag}"
+                )
+                os.makedirs(work_dir, exist_ok=True)
+
+                prefill_config_fn = f"{work_dir}/config.yaml"
+                with open(prefill_config_fn, "w") as f:
+                    yaml.dump(prefill_config, f)
+
+                ttft = None
+                if args.dry_run:
+                    logger.info("Skipping deployment creation in dry run mode")
+                elif args.use_ai_configurator:
+                    logger.info("Using ai-configurator to estimate prefill latency")
+                    perf_dict = ai_configurator_perf_estimator.estimate_prefill_perf(
+                        args.isl,
+                        tp_size=mapping.get_tp_size(),
+                    )
+                    ttft = perf_dict["context_latency"]
+                    logger.info(f"Estimated prefill TTFT: {ttft:.2f}ms")
+                else:
+                    client = DynamoDeploymentClient(
+                        namespace=args.namespace,
+                        base_log_dir=work_dir,
+                        model_name=model_name,
+                        service_name=args.service_name,
+                        frontend_port=frontend_port,
+                        deployment_name=prefill_config["metadata"]["name"],
                     )
                     logger.info(
-                        f"Loaded {len(existing_results)} existing decode results for TP{tp_size}"
+                        f"Created client with service_name: {client.service_name}"
                     )
-                continue
+                    deployment_clients.append(client)  # Track for cleanup
+                    await client.create_deployment(prefill_config_fn)
+                    logger.info("Waiting for deployment to be ready...")
+                    await client.wait_for_deployment_ready()
+                    logger.info("Deployment is ready")
 
-            decode_config = config_modifier.set_config_tp_size(decode_config, tp_size)
-            logger.info(f"Dynamo config: {decode_config}")
+                    logger.info("Getting deployment logs...")
+                    await client.get_deployment_logs()
+                    logger.info(
+                        f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
+                    )
 
-            work_dir = f"{args.output_dir}/decode_tp{tp_size}"
-            os.makedirs(work_dir, exist_ok=True)
-
-            decode_config_fn = f"{work_dir}/config.yaml"
-            with open(decode_config_fn, "w") as f:
-                yaml.dump(decode_config, f)
-
-            if args.dry_run:
-                logger.info("Skipping deployment creation in dry run mode")
-            else:
-                client = DynamoDeploymentClient(
-                    namespace=args.namespace,
-                    base_log_dir=work_dir,
-                    model_name=model_name,
-                    service_name=args.service_name,
-                    frontend_port=frontend_port,
-                    deployment_name=decode_config["metadata"]["name"],
-                )
-                deployment_clients.append(client)  # Track for cleanup
-                await client.create_deployment(decode_config_fn)
-                logger.info("Waiting for deployment to be ready...")
-                await client.wait_for_deployment_ready()
-                logger.info("Deployment is ready")
-
-                logger.info("Getting deployment logs...")
-                await client.get_deployment_logs()
-                logger.info(
-                    f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
-                )
-
-                max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                    f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log"
-                )
-                max_concurrency = max_kv_tokens // (args.isl + args.osl)
-                sweep_num_request = [
-                    num for num in DECODE_NUM_REQUESTS_RANGE if num <= max_concurrency
-                ]
-                logger.info(
-                    f"Sweeping num_request range based on maximum number of kv tokens: {sweep_num_request}"
-                )
-
-                engine_decode_itl = []
-                engine_decode_thpt_per_gpu = []
-                base_url = client.get_service_url()
-                for num_request in sweep_num_request:
-                    genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
-                    gap_result = benchmark_decode(
+                    # run ai-perf
+                    base_url = client.get_service_url()
+                    ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{args.isl}"
+                    ttft = get_prefill_ttft(
                         args.isl,
-                        args.osl,
-                        num_request,
-                        genai_perf_artifact_dir,
+                        ai_perf_artifact_dir,
                         model_name,
                         model_name,
-                        base_url=base_url,
+                        base_url,
+                        attention_dp_size=mapping.get_attn_dp_size(),
                     )
-                    if gap_result is not None:
-                        itl = gap_result["inter_token_latency"]["avg"]
-                        thpt_per_gpu = (
-                            gap_result["output_token_throughput"]["avg"] / tp_size
-                        )
-                        engine_decode_itl.append(itl)
-                        engine_decode_thpt_per_gpu.append(thpt_per_gpu)
-                        decode_tp_size.append(tp_size)
-                        decode_itl.append(itl)
-                        decode_thpt_per_gpu.append(thpt_per_gpu)
-                        decode_concurrency.append(num_request)
-                        decode_kv_cache_size.append(max_kv_tokens)
 
-                logger.info("Cleaning up deployment...")
-                await client.delete_deployment()
-                deployment_clients.remove(client)
-                logger.info("Deployment deleted")
+                    logger.info("Cleaning up deployment...")
+                    await client.delete_deployment()
+                    deployment_clients.remove(client)
+                    logger.info("Deployment deleted")
 
-                # Store partial results for plotting later
-                decode_results.append(
-                    (tp_size, engine_decode_itl, engine_decode_thpt_per_gpu)
+                if ttft is not None:
+                    prefill_data.add_data(
+                        num_gpus=num_gpus,
+                        ttft=ttft,
+                        thpt_per_gpu=args.isl
+                        / ttft
+                        / num_gpus
+                        * 1000
+                        * mapping.get_attn_dp_size(),
+                        parallel_mapping_label=mapping.label(),
+                        parallel_mapping=mapping,
+                    )
+
+        # Plot the results as a 2D scatter plot
+        if prefill_data.num_gpus and prefill_data.ttft and prefill_data.thpt_per_gpu:
+            plot_prefill_performance(prefill_data, args.ttft, args.output_dir)
+
+        # then profile decode
+        decode_data = DecodeProfileData()
+        logger.info("Profiling decode...")
+        base_decode_config = config_modifier.convert_config(
+            config, EngineType.DECODE, is_moe_model=args.model_info.is_moe
+        )
+        for num_gpus in profile_num_gpus:
+            logger.info(f"Profiling decode with {num_gpus} GPUs...")
+            candidate_mappings = get_candidate_parallel_mappings(
+                num_gpus, args.model_info, EngineType.DECODE
+            )
+
+            for mapping in candidate_mappings:
+                # Apply parallel mapping to config
+                decode_config = apply_parallel_mapping_to_config(
+                    base_decode_config,
+                    mapping,
+                    EngineType.DECODE,
+                    config_modifier,
+                    args.num_gpus_per_node,
                 )
+                logger.debug(f"Dynamo config: {decode_config}")
+
+                parallel_mapping_tag = (
+                    mapping.label()
+                    .replace("=", "")
+                    .replace("/", "_")  # safe chars for directory
+                )
+                work_dir = (
+                    f"{args.output_dir}/decode_{num_gpus}gpus_{parallel_mapping_tag}"
+                )
+                os.makedirs(work_dir, exist_ok=True)
+
+                decode_config_fn = f"{work_dir}/config.yaml"
+                with open(decode_config_fn, "w") as f:
+                    yaml.dump(decode_config, f)
+
+                if args.dry_run:
+                    logger.info("Skipping deployment creation in dry run mode")
+
+                elif args.use_ai_configurator:
+                    # Compute max_concurrency and max_kv_tokens to know which
+                    # num_request to sweep over.
+                    max_concurrency = ai_configurator_perf_estimator.get_max_batch_size(
+                        args.isl, args.osl, tp_size=mapping.get_tp_size()
+                    )
+                    max_kv_tokens = max_concurrency * (args.isl + args.osl)
+
+                else:
+                    client = DynamoDeploymentClient(
+                        namespace=args.namespace,
+                        base_log_dir=work_dir,
+                        model_name=model_name,
+                        service_name=args.service_name,
+                        frontend_port=frontend_port,
+                        deployment_name=decode_config["metadata"]["name"],
+                    )
+                    deployment_clients.append(client)  # Track for cleanup
+                    await client.create_deployment(decode_config_fn)
+                    logger.info("Waiting for deployment to be ready...")
+                    await client.wait_for_deployment_ready()
+                    logger.info("Deployment is ready")
+
+                    logger.info("Getting deployment logs...")
+                    await client.get_deployment_logs()
+                    logger.info(
+                        f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
+                    )
+
+                    # Compute max_concurrency and max_kv_tokens to know which
+                    # num_request to sweep over.
+                    attention_dp_size = mapping.get_attn_dp_size()
+                    max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
+                        f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
+                        attention_dp_size=attention_dp_size,
+                    )
+                    max_concurrency = max_kv_tokens // (args.isl + args.osl)
+
+                if not args.dry_run:
+                    attention_dp_size = mapping.get_attn_dp_size()
+                    sweep_num_request = get_num_request_range(
+                        attention_dp_size,
+                        max_concurrency,
+                        args.decode_interpolation_granularity,
+                    )
+                    logger.info(
+                        f"Sweeping num_request range based on maximum number of kv tokens: {sweep_num_request}"
+                    )
+
+                    for num_request in sweep_num_request:
+                        itl = thpt_per_gpu = None
+                        if args.use_ai_configurator:
+                            logger.info(
+                                "Using ai-configurator to estimate decode latency."
+                            )
+                            perf_dict = ai_configurator_perf_estimator.estimate_perf(
+                                args.isl,
+                                args.osl,
+                                num_request,
+                                mode=EngineType.DECODE,
+                                tp_size=mapping.get_tp_size(),
+                            )
+
+                            itl = perf_dict["tpot"]
+                            thpt_per_gpu = perf_dict["tokens/s/gpu"]
+                            logger.info(f"Estimated decode ITL: {itl:.2f}ms")
+                            logger.info(
+                                f"Estimated decode throughput per GPU: {thpt_per_gpu:.2f} tokens/s/GPU"
+                            )
+                        else:
+                            base_url = client.get_service_url()
+                            ai_perf_artifact_dir = f"{work_dir}/aiperf_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
+                            itl, thpt_per_gpu = get_decode_itl_and_thpt_per_gpu(
+                                args.isl,
+                                args.osl,
+                                num_request,
+                                ai_perf_artifact_dir,
+                                model_name,
+                                model_name,
+                                base_url=base_url,
+                                num_gpus=num_gpus,
+                            )
+
+                        if itl is not None and thpt_per_gpu is not None:
+                            decode_data.add_data(
+                                num_gpus=num_gpus,
+                                itl=itl,
+                                thpt_per_gpu=thpt_per_gpu,
+                                concurrency=num_request,
+                                kv_cache_size=max_kv_tokens,
+                                parallel_mapping_label=mapping.label(),
+                                parallel_mapping=mapping,
+                            )
+
+                if not args.dry_run and not args.use_ai_configurator:
+                    logger.info("Cleaning up deployment...")
+                    await client.delete_deployment()
+                    deployment_clients.remove(client)
+                    logger.info("Deployment deleted")
 
         # Plot all decode results after profiling is complete
-        if decode_results:
-            plot_decode_performance(decode_results, args.itl, args.output_dir)
+        if decode_data.num_gpus:
+            plot_decode_performance(decode_data, args.itl, args.output_dir)
+
+        if prefill_data.num_gpus and decode_data.num_gpus:
+            plot_pd_joint_results(
+                args.isl, args.osl, prefill_data, decode_data, args.output_dir
+            )
 
         if args.dry_run:
             logger.info("Skipping recommendations in dry run mode")
         else:
             logger.info("Analyzing results and generate recommendations...")
             # Safety guards: no results → exit early with a clear message
-            if not (prefill_tp_size and prefill_ttft and prefill_thpt_per_gpu):
+            if not prefill_data.num_gpus:
                 logger.error("No prefill results produced; skipping recommendations.")
 
-            # select best tp size for prefill
-            if min(prefill_ttft) > args.ttft:
-                logger.info(
-                    "No TP size satisfies the TTFT requirement, please try a smaller model or a more powerful GPU SKU"
+            # select best parallel mapping for prefill
+            if min(prefill_data.ttft) > args.ttft:
+                logger.warning(
+                    "No engine configuration satisfies the TTFT requirement, please try a smaller model or more powerful hardware"
                 )
-                selected_prefill_idx = int(np.argmin(np.array(prefill_ttft)))
+                selected_prefill_idx = int(np.argmin(np.array(prefill_data.ttft)))
             else:
                 valid_indices = [
-                    i for i, ttft in enumerate(prefill_ttft) if ttft <= args.ttft
+                    i for i, ttft in enumerate(prefill_data.ttft) if ttft <= args.ttft
                 ]
                 # Among valid TP sizes, select the one with highest throughput per GPU
-                valid_thpts = [prefill_thpt_per_gpu[i] for i in valid_indices]
+                valid_thpts = [prefill_data.thpt_per_gpu[i] for i in valid_indices]
                 max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
                 selected_prefill_idx = max_thpt_idx
             logger.info(
-                f"Suggested prefill TP:{prefill_tp_size[selected_prefill_idx]} (TTFT {prefill_ttft[selected_prefill_idx]:.2f} ms, throughput {prefill_thpt_per_gpu[selected_prefill_idx]:.2f} tokens/s/GPU)"
+                f"Suggested prefill parallel mapping: {prefill_data.parallel_mapping_labels[selected_prefill_idx]} on {prefill_data.num_gpus[selected_prefill_idx]} GPU(s) (TTFT {prefill_data.ttft[selected_prefill_idx]:.2f} ms, throughput {prefill_data.thpt_per_gpu[selected_prefill_idx]:.2f} tokens/s/GPU)"
             )
 
-            # scale up if estimated TTFT is 120% of target TTFT
-            prefill_queue_size_upper_bound = max(
-                0.1, args.ttft * 1.2 / prefill_ttft[selected_prefill_idx] - 1
-            )
-            # scale down if estimated TTFT is 80% of target TTFT
-            prefill_queue_size_lower_bound = max(
-                0.1, args.ttft * 0.8 / prefill_ttft[selected_prefill_idx] - 1
-            )
-            logger.info(
-                f"Suggested planner upper/lower bound for prefill queue size: {prefill_queue_size_upper_bound:.2f}/{prefill_queue_size_lower_bound:.2f}"
-            )
-
-            # select best tp size for decode
-            if not (
-                decode_tp_size
-                and decode_itl
-                and decode_thpt_per_gpu
-                and decode_concurrency
-                and decode_kv_cache_size
-            ):
+            # select best parallel mapping for decode
+            if not decode_data.num_gpus:
                 logger.error("No decode results produced; skipping recommendations.")
                 return
-            if min(decode_itl) > args.itl:
-                logger.info(
-                    "No TP size satisfies the ITL requirement, please try a smaller model or a more powerful GPU SKU"
+            if min(decode_data.itl) > args.itl:
+                logger.warning(
+                    "No engine configuration satisfies the ITL requirement, please try a smaller model or more powerful hardware"
                 )
-                selected_decode_idx = int(np.argmin(np.array(decode_itl)))
+                selected_decode_idx = int(np.argmin(np.array(decode_data.itl)))
             else:
                 valid_indices = [
-                    i for i, itl in enumerate(decode_itl) if itl <= args.itl
+                    i for i, itl in enumerate(decode_data.itl) if itl <= args.itl
                 ]
                 # Among valid TP sizes, select the one with highest throughput per GPU
-                valid_thpts = [decode_thpt_per_gpu[i] for i in valid_indices]
+                valid_thpts = [decode_data.thpt_per_gpu[i] for i in valid_indices]
                 max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
                 selected_decode_idx = max_thpt_idx
             logger.info(
-                f"Suggested decode TP:{decode_tp_size[selected_decode_idx]} (ITL {decode_itl[selected_decode_idx]:.2f} ms, throughput {decode_thpt_per_gpu[selected_decode_idx]:.2f} tokens/s/GPU)"
-            )
-
-            # calculate kv cache utlization for the selected TP and concurrency
-            selected_decode_kv_cache_utilization = (
-                decode_concurrency[selected_decode_idx]
-                * (args.isl + (args.osl / 2))
-                / decode_kv_cache_size[selected_decode_idx]
-            )
-            # set a +- 20% range for the kv cache utilization
-            logger.info(
-                f"Suggested planner upper/lower bound for decode kv cache utilization: {min(1, selected_decode_kv_cache_utilization + 0.2):.2f}/{max(0.1, selected_decode_kv_cache_utilization - 0.2):.2f}"
+                f"Suggested decode parallel mapping: {decode_data.parallel_mapping_labels[selected_decode_idx]} on {decode_data.num_gpus[selected_decode_idx]} GPU(s) (ITL {decode_data.itl[selected_decode_idx]:.2f} ms, throughput {decode_data.thpt_per_gpu[selected_decode_idx]:.2f} tokens/s/GPU)"
             )
 
         if args.dry_run:
-            # use min value for prefill and decode TP sizes
-            prefill_tp_size = [args.min_num_gpus_per_engine]
-            decode_tp_size = [args.min_num_gpus_per_engine]
+            # use min value for prefill and decode GPU counts
+            prefill_data.num_gpus = [args.min_num_gpus_per_engine]
+            decode_data.num_gpus = [args.min_num_gpus_per_engine]
+            prefill_data.parallel_mappings = [
+                ParallelizationMapping(tp=args.min_num_gpus_per_engine)
+            ]
+            decode_data.parallel_mappings = [
+                ParallelizationMapping(tp=args.min_num_gpus_per_engine)
+            ]
             selected_prefill_idx = 0
             selected_decode_idx = 0
 
-        # interpolate ISL - TTFT with best prefill TP
-        best_prefill_tp = prefill_tp_size[selected_prefill_idx]
+        # interpolate ISL - TTFT with best prefill parallel mapping
+        best_prefill_gpus = prefill_data.num_gpus[selected_prefill_idx]
+        best_prefill_mapping = prefill_data.parallel_mappings[selected_prefill_idx]
         logger.info(
-            f"Profiling prefill under best TP {best_prefill_tp} with different ISL..."
+            f"Profiling prefill under best {best_prefill_gpus} GPU(s) with parallel mapping [{best_prefill_mapping.label()}] with different ISL..."
         )
-        prefill_config = config_modifier.convert_config(config, "prefill")
-        prefill_config = config_modifier.set_config_tp_size(
-            prefill_config, best_prefill_tp
+        prefill_config = config_modifier.convert_config(
+            config, EngineType.PREFILL, is_moe_model=args.model_info.is_moe
         )
-        logger.info(f"Dynamo config: {prefill_config}")
+        prefill_config = apply_parallel_mapping_to_config(
+            prefill_config,
+            best_prefill_mapping,
+            EngineType.PREFILL,
+            config_modifier,
+            args.num_gpus_per_node,
+        )
+        logger.debug(f"Dynamo config: {prefill_config}")
 
         work_dir = f"{args.output_dir}/selected_prefill_interpolation"
         os.makedirs(work_dir, exist_ok=True)
@@ -418,6 +571,15 @@ async def run_profile(args):
 
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
+        elif args.use_ai_configurator:
+            profile_prefill_aiconfigurator(
+                work_dir,
+                best_prefill_gpus,  # num_gpus
+                sweep_max_context_length,
+                args.prefill_interpolation_granularity,
+                ai_configurator_perf_estimator,
+                tp_size=best_prefill_mapping.get_tp_size(),
+            )
         else:
             client = DynamoDeploymentClient(
                 namespace=args.namespace,
@@ -433,10 +595,11 @@ async def run_profile(args):
             try:
                 await client.wait_for_deployment_ready()
                 logger.info("Deployment is ready")
+
                 skip_profile = False
             except TimeoutError:
                 logger.error(
-                    "Deployment failed to become ready within timeout, skipping profiling"
+                    "Deployment or model failed to become ready within timeout, skipping profiling"
                 )
                 skip_profile = True
 
@@ -454,9 +617,10 @@ async def run_profile(args):
                 model_name,
                 model_name,
                 base_url,
-                best_prefill_tp,
-                args.max_context_length,
+                best_prefill_gpus,
+                sweep_max_context_length,
                 args.prefill_interpolation_granularity,
+                attention_dp_size=best_prefill_mapping.get_attn_dp_size(),
             )
 
             logger.info("Cleaning up deployment...")
@@ -464,13 +628,23 @@ async def run_profile(args):
             deployment_clients.remove(client)
             logger.info("Deployment deleted")
 
-        # interpolate ITL - Active_KV_Cache - Decode_Context_Length with best decode TP
-        best_decode_tp = decode_tp_size[selected_decode_idx]
-        logger.info(f"Profiling decode with TP size {best_decode_tp}...")
-        decode_config = config_modifier.set_config_tp_size(
-            decode_config, best_decode_tp
+        # interpolate ITL - Active_KV_Cache - Decode_Context_Length with best decode parallel mapping
+        best_decode_gpus = decode_data.num_gpus[selected_decode_idx]
+        best_decode_mapping = decode_data.parallel_mappings[selected_decode_idx]
+        logger.info(
+            f"Profiling decode with {best_decode_gpus} GPUs with parallel mapping [{best_decode_mapping.label()}]..."
         )
-        logger.info(f"Dynamo config: {decode_config}")
+        decode_config = config_modifier.convert_config(
+            config, EngineType.DECODE, is_moe_model=args.model_info.is_moe
+        )
+        decode_config = apply_parallel_mapping_to_config(
+            decode_config,
+            best_decode_mapping,
+            EngineType.DECODE,
+            config_modifier,
+            args.num_gpus_per_node,
+        )
+        logger.debug(f"Dynamo config: {decode_config}")
 
         work_dir = f"{args.output_dir}/selected_decode_interpolation"
         os.makedirs(work_dir, exist_ok=True)
@@ -481,6 +655,21 @@ async def run_profile(args):
 
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
+        elif args.use_ai_configurator:
+            attention_dp_size = best_decode_mapping.get_attn_dp_size()
+            max_kv_tokens = ai_configurator_perf_estimator.get_max_kv_tokens(
+                args.isl, args.osl, tp_size=best_decode_mapping.get_tp_size()
+            )
+            profile_decode_aiconfigurator(
+                work_dir,
+                best_decode_gpus,  # num_gpus
+                max_kv_tokens,
+                sweep_max_context_length,
+                args.decode_interpolation_granularity,
+                ai_configurator_perf_estimator,
+                attention_dp_size,
+                tp_size=best_decode_mapping.get_tp_size(),
+            )
         else:
             client = DynamoDeploymentClient(
                 namespace=args.namespace,
@@ -502,8 +691,10 @@ async def run_profile(args):
                 f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
             )
 
+            attention_dp_size = best_decode_mapping.get_attn_dp_size()
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log"
+                f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
+                attention_dp_size=attention_dp_size,
             )
 
             base_url = client.get_service_url()
@@ -513,16 +704,37 @@ async def run_profile(args):
                 model_name,
                 model_name,
                 base_url,
-                best_decode_tp,
+                best_decode_gpus,
                 max_kv_tokens,
-                args.max_context_length,
+                sweep_max_context_length,
                 args.decode_interpolation_granularity,
+                attention_dp_size,
             )
 
             logger.info("Cleaning up deployment...")
             await client.delete_deployment()
             deployment_clients.remove(client)
             logger.info("Deployment deleted")
+
+        # generate DGD with planner based on profiling results
+        config = generate_dgd_config_with_planner(
+            config_path=args.config,
+            config_modifier=config_modifier,
+            best_prefill_gpus=best_prefill_gpus,
+            best_decode_gpus=best_decode_gpus,
+            output_dir=args.output_dir,
+            args=args,
+            is_moe_model=args.model_info.is_moe,
+            num_gpus_per_node=args.num_gpus_per_node,
+        )
+        logger.debug(f"Final DGD config with planner: {config}")
+
+        # save DGD config with planner; support multi-document output when a ConfigMap is included
+        with open(f"{args.output_dir}/config_with_planner.yaml", "w") as f:
+            if isinstance(config, list):
+                yaml.dump_all(config, f)
+            else:
+                yaml.dump(config, f)
 
     except Exception as e:
         logger.error(f"Profile job failed with error: {e}")
@@ -535,98 +747,16 @@ async def run_profile(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Profile the TTFT and ITL of the Prefill and Decode engine with different parallelization mapping. When profiling prefill we mock/fix decode,when profiling decode we mock/fix prefill."
+    args = create_profiler_parser()
+
+    # setup file logging
+    os.makedirs(args.output_dir, exist_ok=True)
+    log_file_handler = logging.FileHandler(f"{args.output_dir}/profile_sla.log")
+    log_file_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S"
     )
-    parser.add_argument(
-        "--namespace",
-        type=str,
-        default="dynamo-sla-profiler",
-        help="Kubernetes namespace to deploy the DynamoGraphDeployment",
-    )
-    parser.add_argument(
-        "--backend",
-        type=str,
-        default="vllm",
-        choices=["vllm", "sglang", "trtllm"],
-        help="backend type, currently support [vllm, sglang, trtllm]",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the DynamoGraphDeployment config file",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="profiling_results",
-        help="Path to the output results directory",
-    )
-    parser.add_argument(
-        "--min-num-gpus-per-engine",
-        type=int,
-        default=1,
-        help="minimum number of GPUs per engine",
-    )
-    parser.add_argument(
-        "--max-num-gpus-per-engine",
-        type=int,
-        default=8,
-        help="maximum number of GPUs per engine",
-    )
-    parser.add_argument(
-        "--skip-existing-results",
-        action="store_true",
-        help="Skip TP sizes that already have results in the output directory",
-    )
-    parser.add_argument(
-        "--force-rerun",
-        action="store_true",
-        help="Force re-running all tests even if results already exist (overrides --skip-existing-results)",
-    )
-    parser.add_argument(
-        "--isl", type=int, default=3000, help="target input sequence length"
-    )
-    parser.add_argument(
-        "--osl", type=int, default=500, help="target output sequence length"
-    )
-    parser.add_argument(
-        "--ttft", type=int, default=50, help="target Time To First Token in ms"
-    )
-    parser.add_argument(
-        "--itl", type=int, default=10, help="target Inter Token Latency in ms"
-    )
-    # below are arguments used for interpolating TTFT and ITL under different ISL/OSL
-    parser.add_argument(
-        "--max-context-length",
-        type=int,
-        default=16384,
-        help="maximum context length supported by the served model",
-    )
-    parser.add_argument(
-        "--prefill-interpolation-granularity",
-        type=int,
-        default=16,
-        help="how many samples to benchmark to interpolate TTFT under different ISL",
-    )
-    parser.add_argument(
-        "--decode-interpolation-granularity",
-        type=int,
-        default=6,
-        help="how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length",
-    )
-    parser.add_argument(
-        "--service-name",
-        type=str,
-        default="",
-        help="Service name for port forwarding (default: {deployment_name}-frontend)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Dry run the profile job",
-    )
-    args = parser.parse_args()
+    log_file_handler.setFormatter(formatter)
+    logger.addHandler(log_file_handler)
 
     asyncio.run(run_profile(args))

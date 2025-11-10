@@ -33,7 +33,7 @@ pub struct Checksum {
     algorithm: CryptographicHashMethods,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CryptographicHashMethods {
     #[serde(rename = "blake3")]
     BLAKE3,
@@ -98,6 +98,29 @@ impl CheckedFile {
                 tracing::error!(disk_file = %disk_file.as_ref().display(), checked_file = self.to_string(), %error, "Checksum does not match");
                 false
             }
+        }
+    }
+
+    /// Is the CheckedFile a path on disk that exists?
+    pub fn is_local(&self) -> bool {
+        match self.path.as_ref() {
+            Either::Left(path) => path.exists(),
+            Either::Right(_) => false, // is a Url
+        }
+    }
+
+    /// Keep the filename but change it's containing directory to `dir`.
+    /// This is used to point at a model file (e.g. `tokenizer.json`) in the HF cache dir.
+    pub fn update_dir(&mut self, dir: &Path) {
+        match self.path.as_mut() {
+            Either::Left(path) => {
+                if let Some(file_name) = path.file_name() {
+                    let mut new_path = PathBuf::from(dir);
+                    new_path.push(file_name);
+                    *path = new_path;
+                }
+            }
+            Either::Right(_) => tracing::warn!("Cannot update directory on URL"),
         }
     }
 }
@@ -256,6 +279,15 @@ impl TryFrom<&str> for Checksum {
         };
 
         Ok(Checksum::new(parts[1], algo))
+    }
+}
+
+impl Default for Checksum {
+    fn default() -> Self {
+        Self {
+            hash: "".to_string(),
+            algorithm: CryptographicHashMethods::BLAKE3,
+        }
     }
 }
 

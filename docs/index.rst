@@ -26,7 +26,7 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
 .. admonition:: 💎 Discover the latest developments!
    :class: seealso
 
-   This guide is a snapshot at a specific point in time. For the latest information and examples, see the `Dynamo GitHub repository <https://github.com/ai-dynamo/dynamo>`_.
+   This guide is a snapshot of a specific point in time. For the latest information, examples, and Release Assets, see the `Dynamo GitHub repository <https://github.com/ai-dynamo/dynamo/releases/latest>`_.
 
 Quickstart
 ==========
@@ -42,34 +42,44 @@ Quickstart
 
    Quickstart <self>
    Installation <_sections/installation>
-   Support Matrix <support_matrix.md>
-   Architecture <_sections/architecture>
+   Support Matrix <reference/support-matrix.md>
    Examples <_sections/examples>
 
 .. toctree::
    :hidden:
    :caption: Kubernetes Deployment
 
-   Quickstart (K8s) <../guides/dynamo_deploy/README.md>
-   Dynamo Operator <../guides/dynamo_deploy/dynamo_operator.md>
-   Metrics <../guides/dynamo_deploy/metrics.md>
-   Logging <../guides/dynamo_deploy/logging.md>
-   Multinode <../guides/dynamo_deploy/multinode-deployment.md>
-   Minikube Setup <../guides/dynamo_deploy/minikube.md>
+   Deployment Guide <_sections/k8s_deployment>
+   Observability (K8s) <_sections/k8s_observability>
+   Multinode <_sections/k8s_multinode>
+
+.. toctree::
+   :hidden:
+   :caption: User Guides
+
+   Tool Calling <agents/tool-calling.md>
+   Multimodality Support <multimodal/multimodal_intro.md>
+   Finding Best Initial Configs <performance/aiconfigurator.md>
+   Benchmarking <benchmarks/benchmarking.md>
+   Tuning Disaggregated Performance <performance/tuning.md>
+   Writing Python Workers in Dynamo <development/backend-guide.md>
+   Observability (Local) <_sections/observability>
+   Glossary <reference/glossary.md>
 
 .. toctree::
    :hidden:
    :caption: Components
 
    Backends <_sections/backends>
-   Router <components/router/README>
-   Planner <architecture/planner_intro>
-   KVBM <architecture/kvbm_intro>
+   Router <router/README>
+   Planner <planner/planner_intro>
+   KVBM <kvbm/kvbm_intro>
 
 .. toctree::
    :hidden:
-   :caption: Developer Guide
+   :caption: Design Docs
 
-   Tuning Disaggregated Serving Performance <guides/disagg_perf_tuning.md>
-   Writing Python Workers in Dynamo <guides/backend.md>
-   Glossary <dynamo_glossary.md>
+   Overall Architecture <design_docs/architecture.md>
+   Architecture Flow <design_docs/dynamo_flow.md>
+   Disaggregated Serving <design_docs/disagg_serving.md>
+   Distributed Runtime <design_docs/distributed_runtime.md>

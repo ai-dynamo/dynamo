@@ -64,14 +64,9 @@ spec:
                     - vllm
                     - trtllm
                   type: string
-                dynamoGraph:
-                  description: |-
-                    DynamoGraph selects the graph (workflow/topology) to deploy. This must match
-                    a graph name packaged with the Dynamo archive.
-                  type: string
                 envs:
                   description: |-
-                    Envs are environment variables applied to all services in the graph unless
+                    Envs are environment variables applied to all services in the deployment unless
                     overridden by service-specific configuration.
                   items:
                     description: EnvVar represents an environment variable present in a Container.
@@ -179,6 +174,39 @@ spec:
                     required:
                       - name
                     type: object
+                  type: array
+                pvcs:
+                  description: |-
+                    PVCs defines a list of persistent volume claims that can be referenced by components.
+                    Each PVC must have a unique name that can be referenced in component specifications.
+                  items:
+                    properties:
+                      create:
+                        description: Create indicates to create a new PVC
+                        type: boolean
+                      name:
+                        description: Name is the name of the PVC
+                        type: string
+                      size:
+                        anyOf:
+                          - type: integer
+                          - type: string
+                        description: Size of the volume in Gi, used during PVC creation. Required when create is true.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      storageClass:
+                        description: StorageClass to be used for PVC creation. Required when create is true.
+                        type: string
+                      volumeAccessMode:
+                        description: VolumeAccessMode is the volume access mode of the PVC. Required when create is true.
+                        type: string
+                    required:
+                      - name
+                    type: object
+                    x-kubernetes-validations:
+                      - message: When create is true, size, storageClass, and volumeAccessMode are required
+                        rule: '!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))'
+                  maxItems: 100
                   type: array
                 services:
                   additionalProperties:
@@ -785,7 +813,9 @@ spec:
                         description: ComponentType indicates the role of this component (for example, "main").
                         type: string
                       dynamoNamespace:
-                        description: dynamo namespace of the service (allows to override the dynamo namespace of the service defined in annotations inside the dynamo archive)
+                        description: |-
+                          DynamoNamespace is deprecated and will be removed in a future version.
+                          The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
                         type: string
                       envFromSecret:
                         description: |-
@@ -915,8 +945,9 @@ spec:
                         type: object
                       extraPodSpec:
                         description: |-
-                          ExtraPodSpec merges additional fields into the generated PodSpec for advanced
-                          customization (tolerations, node selectors, affinity, etc.).
+                          ExtraPodSpec allows to override the main pod spec configuration.
+                          It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field
+                          that allows overriding the main container configuration.
                         properties:
                           activeDeadlineSeconds:
                             description: |-
@@ -9914,6 +9945,9 @@ spec:
                             x-kubernetes-list-type: map
                         required: []
                         type: object
+                      globalDynamoNamespace:
+                        description: GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+                        type: boolean
                       ingress:
                         description: Ingress config to expose the component outside the cluster (or through a service mesh).
                         properties:
@@ -10108,6 +10142,20 @@ spec:
                             format: int32
                             type: integer
                         type: object
+                      modelRef:
+                        description: |-
+                          ModelRef references a model that this component serves
+                          When specified, a headless service will be created for endpoint discovery
+                        properties:
+                          name:
+                            description: Name is the base model identifier (e.g., "llama-3-70b-instruct-v1")
+                            type: string
+                          revision:
+                            description: Revision is the model revision/version (optional)
+                            type: string
+                        required:
+                          - name
+                        type: object
                       multinode:
                         description: Multinode is the configuration for multinode components.
                         properties:
@@ -10122,31 +10170,6 @@ spec:
                             type: integer
                         required:
                           - nodeCount
-                        type: object
-                      pvc:
-                        description: PVC config describing volumes to be mounted by the component.
-                        properties:
-                          create:
-                            description: Create indicates to create a new PVC
-                            type: boolean
-                          mountPoint:
-                            type: string
-                          name:
-                            description: Name is the name of the PVC
-                            type: string
-                          size:
-                            anyOf:
-                              - type: integer
-                              - type: string
-                            description: Size of the NIM cache in Gi, used during PVC creation
-                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                            x-kubernetes-int-or-string: true
-                          storageClass:
-                            description: StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created.
-                            type: string
-                          volumeAccessMode:
-                            description: VolumeAccessMode is the volume access mode of the PVC
-                            type: string
                         type: object
                       readinessProbe:
                         description: ReadinessProbe to signal when the container is ready to receive traffic.
@@ -10304,6 +10327,26 @@ spec:
                           Resources requested and limits for this component, including CPU, memory,
                           GPUs/devices, and any runtime-specific resources.
                         properties:
+                          claims:
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                                - name
+                              type: object
+                            type: array
                           limits:
                             properties:
                               cpu:
@@ -10338,7 +10381,7 @@ spec:
                             type: object
                         type: object
                       serviceName:
-                        description: contains the name of the component
+                        description: The name of the component
                         type: string
                       sharedMemory:
                         description: SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).
@@ -10352,12 +10395,36 @@ spec:
                             pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                             x-kubernetes-int-or-string: true
                         type: object
+                      subComponentType:
+                        description: SubComponentType indicates the sub-role of this component (for example, "prefill").
+                        type: string
+                      volumeMounts:
+                        description: VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
+                        items:
+                          description: VolumeMount references a PVC defined at the top level for volumes to be mounted by the component
+                          properties:
+                            mountPoint:
+                              description: |-
+                                MountPoint specifies where to mount the volume.
+                                If useAsCompilationCache is true and mountPoint is not specified,
+                                a backend-specific default will be used.
+                              type: string
+                            name:
+                              description: Name references a PVC name defined in the top-level PVCs map
+                              type: string
+                            useAsCompilationCache:
+                              default: false
+                              description: |-
+                                UseAsCompilationCache indicates this volume should be used as a compilation cache.
+                                When true, backend-specific environment variables will be set and default mount points may be used.
+                              type: boolean
+                          required:
+                            - name
+                          type: object
+                        type: array
                     type: object
-                  description: |-
-                    Services allows per-service overrides of the component deployment settings.
-                    - key: name of the service defined by the DynamoComponent
-                    - value: overrides for that service
-                    If not set for a service, the default DynamoComponentDeployment values are used.
+                  description: Services are the services to deploy as part of this deployment.
+                  maxProperties: 25
                   type: object
               type: object
             status:

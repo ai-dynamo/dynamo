@@ -358,18 +358,20 @@ impl AsyncEngineContext for Controller {
 
     async fn stopped(&self) {
         let mut rx = self.rx.clone();
-        if *rx.borrow_and_update() != State::Live {
-            return;
+        loop {
+            if *rx.borrow_and_update() != State::Live || rx.changed().await.is_err() {
+                return;
+            }
         }
-        let _ = rx.changed().await;
     }
 
     async fn killed(&self) {
         let mut rx = self.rx.clone();
-        if *rx.borrow_and_update() == State::Killed {
-            return;
+        loop {
+            if *rx.borrow_and_update() == State::Killed || rx.changed().await.is_err() {
+                return;
+            }
         }
-        let _ = rx.changed().await;
     }
 
     fn stop_generating(&self) {

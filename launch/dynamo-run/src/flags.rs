@@ -8,7 +8,6 @@ use clap::ValueEnum;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::kv_router::KvRouterConfig;
-use dynamo_llm::local_model::LocalModel;
 use dynamo_llm::mocker::protocols::MockEngineArgs;
 use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
 
@@ -21,7 +20,6 @@ pub struct Flags {
     /// The model. The options depend on the engine.
     ///
     /// The full list - only mistralrs supports all three currently:
-    /// - Full path to a GGUF file
     /// - Full path of a checked out Hugging Face repository containing safetensor files
     /// - Name of a Hugging Face repository, e.g 'google/flan-t5-small'. The model will be
     ///   downloaded and cached.
@@ -53,27 +51,12 @@ pub struct Flags {
     #[arg(short = 'v', action = clap::ArgAction::Count, default_value_t = 0)]
     pub verbosity: u8,
 
-    /// llamacpp only
-    ///
-    /// The path to the tokenizer and model config because:
-    /// - llama_cpp only runs GGUF files
-    /// - our engine is a 'core' engine in that we do the tokenization, so we need the vocab
-    /// - TODO: we don't yet extract that from the GGUF. Once we do we can remove this flag.
-    #[arg(long)]
-    pub model_config: Option<PathBuf>,
-
     /// If using `out=dyn` with multiple instances, this says how to route the requests.
     ///
     /// Mostly interesting for KV-aware routing.
     /// Defaults to RouterMode::RoundRobin
     #[arg(long, default_value = "round-robin")]
     pub router_mode: RouterMode,
-
-    /// Maximum number of batched tokens for KV routing
-    /// Needed for informing the KV router
-    /// NOTE: this is not actually used for now
-    #[arg(long, default_value = "8192")]
-    pub max_num_batched_tokens: Option<u32>,
 
     /// KV Router: Weight for overlap score in worker selection.
     /// Higher values prioritize KV cache reuse. Default: 1.0
@@ -98,6 +81,13 @@ pub struct Flags {
     /// Default: false
     #[arg(long)]
     pub router_replica_sync: Option<bool>,
+
+    /// KV Router: Whether to track active blocks in the router for memory management.
+    /// When false, the router will not maintain state about which blocks are active,
+    /// reducing memory overhead but potentially affecting scheduling decisions.
+    /// Default: true
+    #[arg(long)]
+    pub router_track_active_blocks: Option<bool>,
 
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
@@ -137,6 +127,12 @@ pub struct Flags {
     #[arg(long, default_value = "false")]
     pub static_worker: bool,
 
+    /// Which key-value backend to use: etcd, mem, file.
+    /// Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details.
+    /// File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.
+    #[arg(long, default_value = "etcd")]
+    pub store_kv: String,
+
     /// Everything after a `--`.
     /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]
@@ -146,12 +142,7 @@ pub struct Flags {
 impl Flags {
     /// For each Output variant, check if it would be able to run.
     /// This takes validation out of the main engine creation path.
-    pub fn validate(
-        &self,
-        local_model: &LocalModel,
-        in_opt: &Input,
-        out_opt: &Output,
-    ) -> anyhow::Result<()> {
+    pub fn validate(&self, in_opt: &Input, out_opt: &Output) -> anyhow::Result<()> {
         match in_opt {
             Input::Endpoint(_) => {}
             _ => {
@@ -195,14 +186,6 @@ impl Flags {
             Output::Echo => {}
             #[cfg(feature = "mistralrs")]
             Output::MistralRs => {}
-            #[cfg(feature = "llamacpp")]
-            Output::LlamaCpp => {
-                if !local_model.path().is_file() {
-                    anyhow::bail!(
-                        "--model-path should refer to a GGUF file. llama_cpp does not support safetensors."
-                    );
-                }
-            }
             Output::Mocker => {
                 // nothing to check here
             }
@@ -228,7 +211,7 @@ impl Flags {
                 self.router_temperature,
                 self.use_kv_events,
                 self.router_replica_sync,
-                self.max_num_batched_tokens,
+                self.router_track_active_blocks,
                 // defaulting below args (no longer maintaining new flags for dynamo-run)
                 None,
                 None,

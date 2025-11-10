@@ -63,6 +63,14 @@ rules:
   - update
   - watch
 - apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - ""
   resources:
   - serviceaccounts
@@ -359,7 +367,9 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments
+  - dynamographdeploymentrequests
   - dynamographdeployments
+  - dynamomodels
   verbs:
   - create
   - delete
@@ -372,14 +382,18 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/finalizers
+  - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
+  - dynamomodels/finalizers
   verbs:
   - update
 - apiGroups:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/status
+  - dynamographdeploymentrequests/status
   - dynamographdeployments/status
+  - dynamomodels/status
   verbs:
   - get
   - patch

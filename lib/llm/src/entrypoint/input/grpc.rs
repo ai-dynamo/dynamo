@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use crate::{
-    discovery::{MODEL_ROOT_PATH, ModelManager, ModelWatcher},
+    discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{self, EngineConfig, input::common},
     grpc::service::kserve,
@@ -15,57 +15,45 @@ use crate::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::transports::etcd;
-use dynamo_runtime::{DistributedRuntime, Runtime};
-use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
+use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::pipeline::RouterMode;
 
 /// Build and run an KServe gRPC service
-pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
-    let mut grpc_service_builder = kserve::KserveService::builder()
+pub async fn run(
+    distributed_runtime: DistributedRuntime,
+    engine_config: EngineConfig,
+) -> anyhow::Result<()> {
+    let grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .with_request_template(engine_config.local_model().request_template());
 
     let grpc_service = match engine_config {
         EngineConfig::Dynamic(_) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-            let etcd_client = distributed_runtime.etcd_client();
-            // This allows the /health endpoint to query etcd for active instances
-            grpc_service_builder = grpc_service_builder.with_etcd_client(etcd_client.clone());
             let grpc_service = grpc_service_builder.build()?;
-            match etcd_client {
-                Some(ref etcd_client) => {
-                    let router_config = engine_config.local_model().router_config();
-                    // Listen for models registering themselves in etcd, add them to gRPC service
-                    let namespace = engine_config.local_model().namespace().unwrap_or("");
-                    let target_namespace = if is_global_namespace(namespace) {
-                        None
-                    } else {
-                        Some(namespace.to_string())
-                    };
-                    run_watcher(
-                        distributed_runtime,
-                        grpc_service.state().manager_clone(),
-                        etcd_client.clone(),
-                        MODEL_ROOT_PATH,
-                        router_config.router_mode,
-                        Some(router_config.kv_router_config),
-                        router_config.busy_threshold,
-                        target_namespace,
-                    )
-                    .await?;
-                }
-                None => {
-                    // Static endpoints don't need discovery
-                }
-            }
+            let router_config = engine_config.local_model().router_config();
+            // Listen for models registering themselves, add them to gRPC service
+            let namespace = engine_config.local_model().namespace().unwrap_or("");
+            let target_namespace = if is_global_namespace(namespace) {
+                None
+            } else {
+                Some(namespace.to_string())
+            };
+            run_watcher(
+                distributed_runtime.clone(),
+                grpc_service.state().manager_clone(),
+                router_config.router_mode,
+                Some(router_config.kv_router_config),
+                router_config.busy_threshold,
+                target_namespace,
+            )
+            .await?;
             grpc_service
         }
         EngineConfig::StaticRemote(local_model) => {
             let card = local_model.card();
+            let checksum = card.mdcsum();
             let router_mode = local_model.router_config().router_mode;
 
-            let dst_config = DistributedConfig::from_settings(true); // true means static
-            let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
             let grpc_service = grpc_service_builder.build()?;
             let manager = grpc_service.model_manager();
 
@@ -79,7 +67,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(
                     manager
                         .kv_chooser_for(
-                            local_model.display_name(),
                             &component,
                             card.kv_cache_block_size,
                             Some(local_model.router_config().kv_router_config),
@@ -101,17 +88,33 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 None,
                 kv_chooser.clone(),
                 tokenizer_hf.clone(),
+                None, // No prefill chooser in grpc static mode
             )
             .await?;
-            manager.add_chat_completions_model(local_model.display_name(), chat_engine)?;
+            manager.add_chat_completions_model(
+                local_model.display_name(),
+                checksum,
+                chat_engine,
+            )?;
 
-            let completions_engine =
-                entrypoint::build_routed_pipeline::<
-                    NvCreateCompletionRequest,
-                    NvCreateCompletionResponse,
-                >(card, &client, router_mode, None, kv_chooser, tokenizer_hf)
-                .await?;
-            manager.add_completions_model(local_model.display_name(), completions_engine)?;
+            let completions_engine = entrypoint::build_routed_pipeline::<
+                NvCreateCompletionRequest,
+                NvCreateCompletionResponse,
+            >(
+                card,
+                &client,
+                router_mode,
+                None,
+                kv_chooser,
+                tokenizer_hf,
+                None, // No prefill chooser in grpc static mode
+            )
+            .await?;
+            manager.add_completions_model(
+                local_model.display_name(),
+                checksum,
+                completions_engine,
+            )?;
 
             grpc_service
         }
@@ -119,8 +122,9 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let grpc_service = grpc_service_builder.build()?;
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = grpc_service.model_manager();
-            manager.add_completions_model(model.service_name(), engine.clone())?;
-            manager.add_chat_completions_model(model.service_name(), engine)?;
+            let checksum = model.card().mdcsum();
+            manager.add_completions_model(model.service_name(), checksum, engine.clone())?;
+            manager.add_chat_completions_model(model.service_name(), checksum, engine)?;
             grpc_service
         }
         EngineConfig::StaticCore {
@@ -130,6 +134,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         } => {
             let grpc_service = grpc_service_builder.build()?;
             let manager = grpc_service.model_manager();
+            let checksum = model.card().mdcsum();
 
             let tokenizer_hf = model.card().tokenizer_hf()?;
             let chat_pipeline =
@@ -138,53 +143,59 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                     NvCreateChatCompletionStreamResponse,
                 >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
                 .await?;
-            manager.add_chat_completions_model(model.service_name(), chat_pipeline)?;
+            manager.add_chat_completions_model(model.service_name(), checksum, chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
             >(model.card(), inner_engine, tokenizer_hf)
             .await?;
-            manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
+            manager.add_completions_model(model.service_name(), checksum, cmpl_pipeline)?;
             grpc_service
         }
     };
-    grpc_service.run(runtime.primary_token()).await?;
-    runtime.shutdown(); // Cancel primary token
+    grpc_service
+        .run(distributed_runtime.primary_token())
+        .await?;
+    distributed_runtime.shutdown(); // Cancel primary token
     Ok(())
 }
 
-/// Spawns a task that watches for new models in etcd at network_prefix,
+/// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
-#[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
-    etcd_client: etcd::Client,
-    network_prefix: &str,
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
     busy_threshold: Option<f64>,
     target_namespace: Option<String>,
 ) -> anyhow::Result<()> {
     let watch_obj = ModelWatcher::new(
-        runtime,
+        runtime.clone(),
         model_manager,
         router_mode,
         kv_router_config,
         busy_threshold,
     );
-    tracing::info!("Watching for remote model at {network_prefix}");
-    let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
-    let (_prefix, _watcher, receiver) = models_watcher.dissolve();
+    tracing::debug!("Waiting for remote model");
+    let discovery = runtime.discovery();
+    let discovery_stream = discovery
+        .list_and_watch(
+            dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+            Some(runtime.primary_token()),
+        )
+        .await?;
 
     // [gluo NOTE] This is different from http::run_watcher where it alters the HTTP service
     // endpoint being exposed, gRPC doesn't have the same concept as the KServe service
     // only has one kind of inference endpoint.
 
-    // Pass the sender to the watcher
+    // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(receiver, target_namespace.as_deref()).await;
+        watch_obj
+            .watch(discovery_stream, target_namespace.as_deref())
+            .await;
     });
 
     Ok(())

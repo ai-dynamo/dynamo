@@ -7,10 +7,32 @@ use crate::{
     protocols::common::{self},
     types::TokenIdType,
 };
-use dynamo_parsers::{ParserResult, ReasoningParser, ReasoningParserType, ReasoningParserWrapper};
 
 /// Provides a method for generating a [`DeltaGenerator`] from a chat completion request.
 impl NvCreateChatCompletionRequest {
+    /// Enables usage tracking for non-streaming requests to comply with OpenAI API specification.
+    ///
+    /// According to OpenAI API spec, non-streaming chat completion responses (stream=false)
+    /// must always include usage statistics. This method ensures `stream_options.include_usage`
+    /// is set to `true` for non-streaming requests.
+    ///
+    /// # Arguments
+    /// * `original_stream_flag` - The original value of the `stream` field before any internal processing
+    pub fn enable_usage_for_nonstreaming(&mut self, original_stream_flag: bool) {
+        if !original_stream_flag {
+            // For non-streaming requests (stream=false), enable usage by default
+            if self.inner.stream_options.is_none() {
+                self.inner.stream_options =
+                    Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                        include_usage: true,
+                    });
+            } else if let Some(ref mut opts) = self.inner.stream_options {
+                // If stream_options exists, ensure include_usage is true for non-streaming
+                opts.include_usage = true;
+            }
+        }
+    }
+
     /// Creates a [`DeltaGenerator`] instance based on the chat completion request.
     ///
     /// # Arguments
@@ -66,11 +88,6 @@ pub struct DeltaGenerator {
     msg_counter: u64,
     /// Configuration options for response generation.
     options: DeltaGeneratorOptions,
-
-    /// Reasoning Parser object
-    /// This is used to parse reasoning content in the response.
-    /// None means no reasoning parsing will be performed.
-    reasoning_parser: Option<ReasoningParserWrapper>,
 }
 
 impl DeltaGenerator {
@@ -101,14 +118,6 @@ impl DeltaGenerator {
             completion_tokens_details: None,
         };
 
-        // Reasoning parser type
-        // If no parser is specified (None), no reasoning parsing will be performed
-        let reasoning_parser = options
-            .runtime_config
-            .reasoning_parser
-            .as_deref()
-            .map(ReasoningParserType::get_reasoning_parser_from_name);
-
         let chatcmpl_id = format!("chatcmpl-{request_id}");
 
         Self {
@@ -121,7 +130,6 @@ impl DeltaGenerator {
             usage,
             msg_counter: 0,
             options,
-            reasoning_parser,
         }
     }
 
@@ -198,24 +206,6 @@ impl DeltaGenerator {
         })
     }
 
-    fn create_reasoning_content(
-        &mut self,
-        text: &Option<String>,
-        token_ids: &[u32],
-    ) -> Option<ParserResult> {
-        // If no reasoning parser is configured, return None
-        let reasoning_parser = self.reasoning_parser.as_mut()?;
-
-        let text_ref = text.as_deref().unwrap_or("");
-        if text_ref.is_empty() && token_ids.is_empty() {
-            return None;
-        }
-        let parser_result =
-            reasoning_parser.parse_reasoning_streaming_incremental(text_ref, token_ids);
-
-        Some(parser_result)
-    }
-
     /// Creates a choice within a chat completion response.
     ///
     /// # Arguments
@@ -231,7 +221,6 @@ impl DeltaGenerator {
         &mut self,
         index: u32,
         text: Option<String>,
-        reasoning_content: Option<String>,
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
         logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
     ) -> NvCreateChatCompletionStreamResponse {
@@ -245,7 +234,7 @@ impl DeltaGenerator {
                 None
             },
             refusal: None,
-            reasoning_content,
+            reasoning_content: None,
         };
 
         let choice = dynamo_async_openai::types::ChatChoiceStream {
@@ -357,25 +346,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             None => None,
         };
 
-        // Handle reasoning parsing if enabled, otherwise treat all text as normal
-        let (normal_text, reasoning_content) =
-            match self.create_reasoning_content(&delta.text, &delta.token_ids) {
-                Some(reasoning_parser_result) => (
-                    reasoning_parser_result.get_some_normal_text(),
-                    reasoning_parser_result.get_some_reasoning(),
-                ),
-                None => (delta.text, None),
-            };
-
         // Create the streaming response.
         let index = 0;
-        let stream_response = self.create_choice(
-            index,
-            normal_text,
-            reasoning_content,
-            finish_reason,
-            logprobs,
-        );
+        let stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
         Ok(stream_response)
     }
@@ -390,5 +363,69 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
     fn is_usage_enabled(&self) -> bool {
         DeltaGenerator::is_usage_enabled(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_async_openai::types::{
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
+        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
+    };
+
+    fn create_test_request() -> NvCreateChatCompletionRequest {
+        let messages = vec![ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text("test".to_string()),
+                name: None,
+            },
+        )];
+
+        NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages,
+                stream: Some(false),
+                stream_options: None,
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+            unsupported_fields: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_enable_usage_for_nonstreaming_enables_usage() {
+        // Test that non-streaming requests get usage enabled
+        let mut request = create_test_request();
+        assert!(request.inner.stream_options.is_none());
+
+        request.enable_usage_for_nonstreaming(false); // false = non-streaming
+
+        assert!(
+            request.inner.stream_options.is_some(),
+            "Non-streaming request should have stream_options created"
+        );
+        assert!(
+            request.inner.stream_options.unwrap().include_usage,
+            "Non-streaming request should have include_usage=true for OpenAI compliance"
+        );
+    }
+
+    #[test]
+    fn test_enable_usage_for_nonstreaming_ignores_streaming() {
+        // Test that streaming requests are not modified
+        let mut request = create_test_request();
+        assert!(request.inner.stream_options.is_none());
+
+        request.enable_usage_for_nonstreaming(true); // true = streaming
+
+        assert!(
+            request.inner.stream_options.is_none(),
+            "Streaming request should not have stream_options modified"
+        );
     }
 }

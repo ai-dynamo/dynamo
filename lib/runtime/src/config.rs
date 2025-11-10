@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::Result;
+use anyhow::Result;
 use derive_builder::Builder;
 use figment::{
     Figment,
@@ -14,8 +14,8 @@ use validator::Validate;
 /// Default system host for health and metrics endpoints
 const DEFAULT_SYSTEM_HOST: &str = "0.0.0.0";
 
-/// Default system port for health and metrics endpoints
-const DEFAULT_SYSTEM_PORT: u16 = 9090;
+/// Default system port for health and metrics endpoints (-1 = disabled)
+const DEFAULT_SYSTEM_PORT: i16 = -1;
 
 /// Default health endpoint paths
 const DEFAULT_SYSTEM_HEALTH_PATH: &str = "/health";
@@ -94,14 +94,19 @@ pub struct RuntimeConfig {
     pub system_host: String,
 
     /// System status server port for health and metrics endpoints
-    /// If set to 0, the system will assign a random available port
+    /// Set to -1 to disable the system status server (default)
+    /// Set to a positive port number (e.g. 8081) to enable it
     /// Set this at runtime with environment variable DYN_SYSTEM_PORT
     #[builder(default = "DEFAULT_SYSTEM_PORT")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
-    pub system_port: u16,
+    pub system_port: i16,
 
-    /// Health and metrics System status server enabled
-    /// Set this at runtime with environment variable DYN_SYSTEM_ENABLED
+    /// Health and metrics System status server enabled (DEPRECATED)
+    /// This field is deprecated. Use system_port instead (set to positive value to enable)
+    /// Environment variable DYN_SYSTEM_ENABLED is deprecated
+    #[deprecated(
+        note = "Use system_port instead. Set DYN_SYSTEM_PORT to enable the system metrics server."
+    )]
     #[builder(default = "false")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub system_enabled: bool,
@@ -130,6 +135,26 @@ pub struct RuntimeConfig {
     #[builder(default = "DEFAULT_SYSTEM_LIVE_PATH.to_string()")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub system_live_path: String,
+
+    /// Number of threads for the Rayon compute pool
+    /// If not set, defaults to num_cpus / 2
+    /// Set this at runtime with environment variable DYN_COMPUTE_THREADS
+    #[builder(default = "None")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub compute_threads: Option<usize>,
+
+    /// Stack size for compute threads in bytes
+    /// Defaults to 2MB (2097152 bytes)
+    /// Set this at runtime with environment variable DYN_COMPUTE_STACK_SIZE
+    #[builder(default = "Some(2 * 1024 * 1024)")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub compute_stack_size: Option<usize>,
+
+    /// Thread name prefix for compute pool threads
+    /// Set this at runtime with environment variable DYN_COMPUTE_THREAD_PREFIX
+    #[builder(default = "\"compute\".to_string()")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub compute_thread_prefix: String,
 
     /// Enable active health checking with payloads
     /// Set this at runtime with environment variable DYN_HEALTH_CHECK_ENABLED
@@ -161,7 +186,6 @@ impl fmt::Display for RuntimeConfig {
         write!(f, "max_blocking_threads={}, ", self.max_blocking_threads)?;
         write!(f, "system_host={}, ", self.system_host)?;
         write!(f, "system_port={}, ", self.system_port)?;
-        write!(f, "system_enabled={}", self.system_enabled)?;
         write!(
             f,
             "use_endpoint_health_status={:?}",
@@ -225,6 +249,23 @@ impl RuntimeConfig {
                     _ => None,
                 }
             }))
+            .merge(Env::prefixed("DYN_COMPUTE_").filter_map(|k| {
+                let full_key = format!("DYN_COMPUTE_{}", k.as_str());
+                // filters out empty environment variables
+                match std::env::var(&full_key) {
+                    Ok(v) if !v.is_empty() => {
+                        // Map DYN_COMPUTE_* to the correct field names
+                        let mapped_key = match k.as_str() {
+                            "THREADS" => "compute_threads",
+                            "STACK_SIZE" => "compute_stack_size",
+                            "THREAD_PREFIX" => "compute_thread_prefix",
+                            _ => k.as_str(),
+                        };
+                        Some(mapped_key.into())
+                    }
+                    _ => None,
+                }
+            }))
             .merge(Env::prefixed("DYN_HEALTH_CHECK_").filter_map(|k| {
                 let full_key = format!("DYN_HEALTH_CHECK_{}", k.as_str());
                 // filters out empty environment variables
@@ -267,12 +308,20 @@ impl RuntimeConfig {
     ///
     /// Environment variables are prefixed with `DYN_RUNTIME_` and `DYN_SYSTEM`
     pub fn from_settings() -> Result<RuntimeConfig> {
-        // Check for deprecated environment variable
+        // Check for deprecated environment variables
         if std::env::var("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS").is_ok() {
             tracing::warn!(
                 "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS is deprecated and no longer used. \
                 System health is now determined by endpoints that register with health check payloads. \
                 Please update your configuration to register health check payloads directly on endpoints."
+            );
+        }
+
+        if std::env::var("DYN_SYSTEM_ENABLED").is_ok() {
+            tracing::warn!(
+                "DYN_SYSTEM_ENABLED is deprecated. \
+                System metrics server is now controlled solely by DYN_SYSTEM_PORT. \
+                Set DYN_SYSTEM_PORT to a positive value to enable the server, or set to -1 to disable (default)."
             );
         }
 
@@ -282,9 +331,11 @@ impl RuntimeConfig {
     }
 
     /// Check if System server should be enabled
-    /// System server is disabled by default, but can be enabled by setting DYN_SYSTEM_ENABLED to true
+    /// System server is enabled when DYN_SYSTEM_PORT is set to a positive value
+    /// Negative values disable the server
+    /// TODO: Support port = 0 to bind to a random available port
     pub fn system_server_enabled(&self) -> bool {
-        self.system_enabled
+        self.system_port > 0
     }
 
     pub fn single_threaded() -> Self {
@@ -293,11 +344,15 @@ impl RuntimeConfig {
             max_blocking_threads: 1,
             system_host: DEFAULT_SYSTEM_HOST.to_string(),
             system_port: DEFAULT_SYSTEM_PORT,
+            #[allow(deprecated)]
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
             use_endpoint_health_status: vec![],
             system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
             system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
+            compute_threads: Some(1),
+            compute_stack_size: Some(2 * 1024 * 1024),
+            compute_thread_prefix: "compute".to_string(),
             health_check_enabled: false,
             canary_wait_time_secs: DEFAULT_CANARY_WAIT_TIME_SECS,
             health_check_request_timeout_secs: DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
@@ -325,11 +380,15 @@ impl Default for RuntimeConfig {
             max_blocking_threads: num_cores,
             system_host: DEFAULT_SYSTEM_HOST.to_string(),
             system_port: DEFAULT_SYSTEM_PORT,
+            #[allow(deprecated)]
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
             use_endpoint_health_status: vec![],
             system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
             system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
+            compute_threads: None,
+            compute_stack_size: Some(2 * 1024 * 1024),
+            compute_thread_prefix: "compute".to_string(),
             health_check_enabled: false,
             canary_wait_time_secs: DEFAULT_CANARY_WAIT_TIME_SECS,
             health_check_request_timeout_secs: DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
@@ -352,6 +411,19 @@ impl RuntimeConfigBuilder {
 /// as a boolean value.
 pub fn is_truthy(val: &str) -> bool {
     matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes")
+}
+
+pub fn parse_bool(val: &str) -> anyhow::Result<bool> {
+    if is_truthy(val) {
+        Ok(true)
+    } else if is_falsey(val) {
+        Ok(false)
+    } else {
+        anyhow::bail!(
+            "Invalid boolean value: '{}'. Expected one of: true/false, 1/0, on/off, yes/no",
+            val
+        )
+    }
 }
 
 /// Check if a string is falsey
@@ -479,35 +551,29 @@ mod tests {
     }
 
     #[test]
-    fn test_system_server_enabled_by_default() {
-        temp_env::with_vars(vec![("DYN_SYSTEM_ENABLED", None::<&str>)], || {
+    fn test_system_server_disabled_by_default() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_PORT", None::<&str>)], || {
             let config = RuntimeConfig::from_settings().unwrap();
             assert!(!config.system_server_enabled());
+            assert_eq!(config.system_port, -1);
         });
     }
 
     #[test]
-    fn test_system_server_disabled_explicitly() {
-        temp_env::with_vars(vec![("DYN_SYSTEM_ENABLED", Some("false"))], || {
+    fn test_system_server_disabled_with_negative_port() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_PORT", Some("-1"))], || {
             let config = RuntimeConfig::from_settings().unwrap();
             assert!(!config.system_server_enabled());
+            assert_eq!(config.system_port, -1);
         });
     }
 
     #[test]
-    fn test_system_server_enabled_explicitly() {
-        temp_env::with_vars(vec![("DYN_SYSTEM_ENABLED", Some("true"))], || {
+    fn test_system_server_enabled_with_port() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_PORT", Some("9527"))], || {
             let config = RuntimeConfig::from_settings().unwrap();
             assert!(config.system_server_enabled());
-        });
-    }
-
-    #[test]
-    fn test_system_server_enabled_by_port() {
-        temp_env::with_vars(vec![("DYN_SYSTEM_PORT", Some("8080"))], || {
-            let config = RuntimeConfig::from_settings().unwrap();
-            assert!(!config.system_server_enabled());
-            assert_eq!(config.system_port, 8080);
+            assert_eq!(config.system_port, 9527);
         });
     }
 

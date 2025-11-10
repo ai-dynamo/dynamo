@@ -20,8 +20,6 @@
 package v1alpha1
 
 import (
-	"strings"
-
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -38,22 +36,12 @@ const (
 
 // DynamoComponentDeploymentSpec defines the desired state of DynamoComponentDeployment
 type DynamoComponentDeploymentSpec struct {
-	// DynamoComponent selects the Dynamo component from the archive to deploy.
-	// Typically corresponds to a component defined in the packaged Dynamo artifacts.
-	DynamoComponent string `json:"dynamoComponent,omitempty"`
-	// contains the tag of the DynamoComponent: for example, "my_package:MyService"
-	DynamoTag string `json:"dynamoTag,omitempty"`
-
 	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm")
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
 	BackendFramework string `json:"backendFramework,omitempty"`
 
 	// DynamoComponentDeploymentSharedSpec embeds common deployment and runtime
 	// settings that apply to the component (resources, scaling, ingress, etc.).
-	DynamoComponentDeploymentSharedSpec `json:",inline"`
-}
-
-type DynamoComponentDeploymentOverridesSpec struct {
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
@@ -73,8 +61,16 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// ComponentType indicates the role of this component (for example, "main").
 	ComponentType string `json:"componentType,omitempty"`
 
-	// Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
+	// SubComponentType indicates the sub-role of this component (for example, "prefill").
+	SubComponentType string `json:"subComponentType,omitempty"`
+
+	// DynamoNamespace is deprecated and will be removed in a future version.
+	// The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
+	// +kubebuilder:validation:Optional
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
+
+	// GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
 	// Resources requested and limits for this component, including CPU, memory,
 	// GPUs/devices, and any runtime-specific resources.
@@ -86,11 +82,16 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// EnvFromSecret references a Secret whose key/value pairs will be exposed as
 	// environment variables in the component containers.
 	EnvFromSecret *string `json:"envFromSecret,omitempty"`
-	// PVC config describing volumes to be mounted by the component.
-	PVC *PVC `json:"pvc,omitempty"`
+	// VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
+	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
 
 	// Ingress config to expose the component outside the cluster (or through a service mesh).
 	Ingress *IngressSpec `json:"ingress,omitempty"`
+
+	// ModelRef references a model that this component serves
+	// When specified, a headless service will be created for endpoint discovery
+	// +optional
+	ModelRef *ModelReference `json:"modelRef,omitempty"`
 
 	// SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).
 	SharedMemory *SharedMemorySpec `json:"sharedMemory,omitempty"`
@@ -226,7 +227,7 @@ func (s *DynamoComponentDeployment) SetSpec(spec any) {
 }
 
 func (s *DynamoComponentDeployment) IsFrontendComponent() bool {
-	return strings.HasSuffix(s.Spec.DynamoTag, s.Spec.ServiceName) || s.Spec.ComponentType == commonconsts.ComponentTypeFrontend
+	return s.Spec.ComponentType == commonconsts.ComponentTypeFrontend
 }
 
 func (s *DynamoComponentDeployment) GetDynamoDeploymentConfig() []byte {
@@ -277,4 +278,15 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
 
 func (s *DynamoComponentDeployment) GetParentGraphDeploymentNamespace() string {
 	return s.GetNamespace()
+}
+
+// ModelReference identifies a model served by this component
+type ModelReference struct {
+	// Name is the base model identifier (e.g., "llama-3-70b-instruct-v1")
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Revision is the model revision/version (optional)
+	// +optional
+	Revision string `json:"revision,omitempty"`
 }

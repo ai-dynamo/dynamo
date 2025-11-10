@@ -30,11 +30,17 @@ const (
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
+	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
+
 	KubeLabelDynamoGraphDeploymentName  = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"
 	KubeLabelDynamoNamespace            = "nvidia.com/dynamo-namespace"
 	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
 	KubeLabelDynamoComponentType        = "nvidia.com/dynamo-component-type"
+	KubeLabelDynamoSubComponentType     = "nvidia.com/dynamo-sub-component-type"
+	KubeLabelDynamoBaseModel            = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoBaseModelHash        = "nvidia.com/dynamo-base-model-hash"
+	KubeAnnotationDynamoBaseModel       = "nvidia.com/dynamo-base-model"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -44,6 +50,8 @@ const (
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
 	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
+
+	GlobalDynamoNamespace = "dynamo"
 
 	ComponentTypePlanner      = "planner"
 	ComponentTypeFrontend     = "frontend"
@@ -62,6 +70,9 @@ const (
 	DefaultSharedMemoryMountPath = "/dev/shm"
 	DefaultSharedMemorySize      = "8Gi"
 
+	// Compilation cache default mount points
+	DefaultVLLMCacheMountPoint = "/root/.cache/vllm"
+
 	// Kai-scheduler related constants
 	KubeAnnotationKaiSchedulerQueue = "nvidia.com/kai-scheduler-queue" // User-provided annotation to specify queue name
 	KubeLabelKaiSchedulerQueue      = "kai.scheduler/queue"            // Label injected into pods for kai-scheduler
@@ -72,7 +83,7 @@ const (
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
 
-	MpiRunSshSecretName = "mpi-run-ssh-secret"
+	MainContainerName = "main"
 )
 
 type MultinodeDeploymentType string

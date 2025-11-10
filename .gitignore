@@ -38,6 +38,10 @@ CMakeCache.txt
 *pytest_report.md
 *pytest_report.xml
 
+# Test artifacts and output directories
+*.shakespeare.txt
+test_determinism_*/
+
 **/__pycache__
 **/venv
 **/.venv
@@ -68,6 +72,7 @@ llm_engine.h
 
 ### Virtual Environment ###
 .venv/
+.venv-docs/
 
 ### Ruff ###
 .ruff_cache/
@@ -92,7 +97,6 @@ generated-values.yaml
 **/.devcontainer/.env
 TensorRT-LLM
 
-
 # Ruler Generated Files
 /.cursor/instructions.md
 /.cursor/instructions.md.bak
@@ -101,3 +105,7 @@ TensorRT-LLM
 
 # Benchmarks
 benchmarks/results
+profiling_results*
+
+# Direnv
+.envrc

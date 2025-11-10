@@ -1,25 +1,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::context::{callable_accepts_kwarg, Context};
+use std::sync::Arc;
+
+use anyhow::{Error, Result};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::{PyAny, PyErr};
 use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio_stream::{wrappers::ReceiverStream, StreamExt};
-
-pub use dynamo_runtime::{
-    pipeline::{
-        async_trait, AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,
-        SingleIn,
-    },
-    protocols::annotated::Annotated,
-    CancellationToken, Error, Result,
-};
 pub use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_util::sync::CancellationToken;
+
+use dynamo_runtime::logging::get_distributed_tracing_context;
+pub use dynamo_runtime::{
+    pipeline::{AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn},
+    protocols::annotated::Annotated,
+};
+
+use super::context::{Context, callable_accepts_kwarg};
 
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -86,7 +87,7 @@ impl PythonAsyncEngine {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error> for PythonAsyncEngine
 where
     Req: Data + Serialize,
@@ -140,7 +141,7 @@ enum ResponseProcessingError {
     OffloadError(String),
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error>
     for PythonServerStreamingEngine
 where
@@ -154,6 +155,9 @@ where
 
         let id = context.id().to_string();
         tracing::trace!("processing request: {}", id);
+
+        // Capture current trace context
+        let current_trace_context = get_distributed_tracing_context();
 
         // Clone the PyObject to move into the thread
 
@@ -178,9 +182,11 @@ where
         let stream = tokio::task::spawn_blocking(move || {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
-                let py_ctx = Py::new(py, Context::new(ctx_python.clone()))?;
 
-                let gen = if has_context {
+                // Create context with trace information
+                let py_ctx = Py::new(py, Context::new(ctx_python.clone(), current_trace_context))?;
+
+                let gen_result = if has_context {
                     // Pass context as a kwarg
                     let kwarg = PyDict::new(py);
                     kwarg.set_item("context", &py_ctx)?;
@@ -191,7 +197,10 @@ where
                 }?;
 
                 let locals = TaskLocals::new(event_loop.bind(py).clone());
-                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(locals, gen.into_bound(py))
+                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
+                    locals,
+                    gen_result.into_bound(py),
+                )
             })
         })
         .await??;
@@ -234,18 +243,27 @@ where
                                 // right now, this is impossible as we are not passing the context to the python async generator
                                 // todo: add task-local context to the python async generator
                                 ctx.stop_generating();
-                                let msg = format!("critical error: invalid response object from python async generator; application-logic-mismatch: {}", e);
+                                let msg = format!(
+                                    "critical error: invalid response object from python async generator; application-logic-mismatch: {}",
+                                    e
+                                );
                                 msg
                             }
                             ResponseProcessingError::PyGeneratorExit(_) => {
                                 "Stream ended before generation completed".to_string()
                             }
                             ResponseProcessingError::PythonException(e) => {
-                                let msg = format!("a python exception was caught while processing the async generator: {}", e);
+                                let msg = format!(
+                                    "a python exception was caught while processing the async generator: {}",
+                                    e
+                                );
                                 msg
                             }
                             ResponseProcessingError::OffloadError(e) => {
-                                let msg = format!("critical error: failed to offload the python async generator to a new thread: {}", e);
+                                let msg = format!(
+                                    "critical error: failed to offload the python async generator to a new thread: {}",
+                                    e
+                                );
                                 msg
                             }
                         };

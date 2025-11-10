@@ -1,36 +1,33 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use anyhow::Result;
+use rmp_serde as rmps;
+use serde::Deserialize;
+use serde::Serialize;
+use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use zeromq::{Socket, SocketRecv, SubSocket};
+
+use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
+use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
+use dynamo_runtime::{
+    component::{Component, Namespace},
+    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
+};
+
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT, KV_METRICS_SUBJECT,
+    KV_EVENT_SUBJECT, KV_METRICS_SUBJECT,
     indexer::{RouterEvent, compute_block_hash_for_seq},
     protocols::*,
     scoring::LoadEvent,
 };
-use async_trait::async_trait;
-use dynamo_runtime::metrics::{MetricsRegistry, prometheus_names::kvstats};
-use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
-use dynamo_runtime::{
-    Error, Result,
-    component::{Component, Namespace},
-    pipeline::{
-        AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
-        network::Ingress,
-    },
-    protocols::annotated::Annotated,
-    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
-};
-use futures::stream;
-use std::sync::{Arc, OnceLock};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-
-use rmp_serde as rmps;
-use serde::Deserialize;
-use serde::Serialize;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
-use zeromq::{Socket, SocketRecv, SubSocket};
 
 // -------------------------------------------------------------------------
 // KV Event Publishers -----------------------------------------------------
@@ -102,13 +99,15 @@ pub struct KvEventPublisher {
 impl KvEventPublisher {
     pub fn new(
         component: Component,
-        worker_id: i64,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+
+        // Infer worker_id from component's connection
+        let worker_id = component.drt().connection_id();
 
         // Create our event source (if any)
         let mut source = None;
@@ -179,7 +178,7 @@ impl Drop for KvEventPublisher {
 
 async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
     publisher: P,
-    worker_id: i64,
+    worker_id: u64,
     cancellation_token: CancellationToken,
     mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
 ) {
@@ -324,13 +323,16 @@ pub async fn start_zmq_listener(
                 };
 
                 tracing::trace!(
-                    "ZMQ listener on {} received batch with {} events (seq={})",
+                    "ZMQ listener on {} received batch with {} events (seq={}, dp_rank={})",
                     zmq_endpoint,
                     batch.events.len(),
-                    seq
+                    seq,
+                    batch.data_parallel_rank
                 );
+
+                let dp_rank = batch.data_parallel_rank;
                 for raw_event in batch.events.into_iter() {
-                    let event = convert_event(raw_event, seq, kv_block_size, &warning_count);
+                    let event = convert_event(raw_event, seq, kv_block_size, dp_rank, &warning_count);
                     if tx.send(event).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         exit_reason = "channel receiver dropped";
@@ -354,6 +356,7 @@ fn convert_event(
     raw: RawKvEvent,
     event_id: u64,
     kv_block_size: u32,
+    dp_rank: u32,
     warning_count: &Arc<AtomicU32>,
 ) -> KvCacheEvent {
     match raw {
@@ -363,26 +366,35 @@ fn convert_event(
             token_ids,
             block_size,
             lora_id,
+            ..
         } => {
             let num_block_tokens = vec![block_size as u64; block_hashes.len()];
+            let block_hashes_u64: Vec<u64> = block_hashes
+                .into_iter()
+                .map(BlockHashValue::into_u64)
+                .collect();
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: parent_block_hash.map(ExternalSequenceBlockHash::from),
+                    parent_hash: parent_block_hash
+                        .map(BlockHashValue::into_u64)
+                        .map(ExternalSequenceBlockHash::from),
                     blocks: create_stored_blocks(
                         kv_block_size,
                         &token_ids,
                         &num_block_tokens,
-                        &block_hashes,
+                        &block_hashes_u64,
                         lora_id.unwrap_or(0),
                         warning_count,
                     ),
                 }),
+                dp_rank,
             }
         }
-        RawKvEvent::BlockRemoved { block_hashes } => {
+        RawKvEvent::BlockRemoved { block_hashes, .. } => {
             let hashes = block_hashes
                 .into_iter()
+                .map(BlockHashValue::into_u64)
                 .map(ExternalSequenceBlockHash::from)
                 .collect();
             KvCacheEvent {
@@ -390,22 +402,31 @@ fn convert_event(
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: hashes,
                 }),
+                dp_rank,
             }
         }
         RawKvEvent::AllBlocksCleared => KvCacheEvent {
             event_id,
             data: KvCacheEventData::Cleared,
+            dp_rank,
         },
     }
 }
 
 pub fn create_stored_block_from_parts(
     kv_block_size: u32,
-    block_hash: i64,
+    block_hash: u64,
     token_ids: &[u32],
     _lora_id: u64,
 ) -> KvCacheStoredBlockData {
     let tokens_hash = compute_block_hash_for_seq(token_ids, kv_block_size)[0];
+    tracing::trace!(
+        "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}",
+        block_hash,
+        tokens_hash.0,
+        token_ids,
+        kv_block_size
+    );
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash::from(block_hash),
         tokens_hash,
@@ -416,7 +437,7 @@ pub fn create_stored_blocks(
     kv_block_size: u32,
     token_ids: &[u32],
     num_block_tokens: &[u64],
-    block_hashes: &[i64],
+    block_hashes: &[u64],
     lora_id: u64,
     warning_count: &Arc<AtomicU32>,
 ) -> Vec<KvCacheStoredBlockData> {
@@ -460,20 +481,204 @@ struct KvEventBatch {
     data_parallel_rank: u32, // we are ignoring this for now
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(untagged)]
+enum BlockHashValue {
+    Signed(i64),
+    Unsigned(u64),
+}
+
+impl BlockHashValue {
+    fn into_u64(self) -> u64 {
+        match self {
+            BlockHashValue::Signed(v) => v as u64,
+            BlockHashValue::Unsigned(v) => v,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "type")] // msgspec encodes variant tag as a string when `tag=True`
 enum RawKvEvent {
     BlockStored {
-        block_hashes: Vec<i64>,
-        parent_block_hash: Option<i64>,
+        /// Block hashes may be emitted as either signed or unsigned 64-bit values.
+        /// We normalize them to `u64` while deserializing to support both producers.
+        block_hashes: Vec<BlockHashValue>,
+        parent_block_hash: Option<BlockHashValue>,
         token_ids: Vec<u32>,
         block_size: usize,
         lora_id: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium: Option<String>,
     },
     BlockRemoved {
-        block_hashes: Vec<i64>,
+        block_hashes: Vec<BlockHashValue>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium: Option<String>,
     },
     AllBlocksCleared,
+}
+
+/// Our producers use msgspec with `tag=True` and `array_like=True`, which
+/// encodes each event as either a tagged map or a tagged tuple. To be tolerant of
+/// additional fields that may be appended in the future, we implement a custom
+/// deserializer that ignores unknown keys and any extra positional elements.
+///
+/// This keeps us compatible with older payloads while safely
+/// accepting newer ones that include extra metadata.
+impl<'de> Deserialize<'de> for RawKvEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(RawKvEventVisitor)
+    }
+}
+
+struct RawKvEventVisitor;
+
+impl<'de> Visitor<'de> for RawKvEventVisitor {
+    type Value = RawKvEvent;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a kv event encoded as a tagged map or sequence")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut event_type: Option<String> = None;
+        let mut block_hashes: Option<Vec<BlockHashValue>> = None;
+        let mut parent_block_hash: Option<Option<BlockHashValue>> = None;
+        let mut token_ids: Option<Vec<u32>> = None;
+        let mut block_size: Option<usize> = None;
+        let mut lora_id: Option<Option<u64>> = None;
+        let mut medium: Option<Option<String>> = None;
+
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "type" => {
+                    event_type = Some(map.next_value()?);
+                }
+                "block_hashes" => {
+                    block_hashes = Some(map.next_value()?);
+                }
+                "parent_block_hash" => {
+                    parent_block_hash = Some(map.next_value()?);
+                }
+                "token_ids" => {
+                    token_ids = Some(map.next_value()?);
+                }
+                "block_size" => {
+                    block_size = Some(map.next_value()?);
+                }
+                "lora_id" => {
+                    lora_id = Some(map.next_value()?);
+                }
+                "medium" => {
+                    medium = Some(map.next_value()?);
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        match event_type.as_deref() {
+            Some("BlockStored") => {
+                let block_hashes =
+                    block_hashes.ok_or_else(|| de::Error::missing_field("block_hashes"))?;
+                let token_ids = token_ids.ok_or_else(|| de::Error::missing_field("token_ids"))?;
+                let block_size =
+                    block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
+                Ok(RawKvEvent::BlockStored {
+                    block_hashes,
+                    parent_block_hash: parent_block_hash.unwrap_or(None),
+                    token_ids,
+                    block_size,
+                    lora_id: lora_id.unwrap_or(None),
+                    medium: medium.unwrap_or(None),
+                })
+            }
+            Some("BlockRemoved") => {
+                let block_hashes =
+                    block_hashes.ok_or_else(|| de::Error::missing_field("block_hashes"))?;
+                Ok(RawKvEvent::BlockRemoved {
+                    block_hashes,
+                    medium: medium.unwrap_or(None),
+                })
+            }
+            Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared),
+            Some(other) => Err(de::Error::unknown_variant(
+                other,
+                &["BlockStored", "BlockRemoved", "AllBlocksCleared"],
+            )),
+            None => Err(de::Error::missing_field("type")),
+        }
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let tag: Option<String> = seq.next_element()?;
+        let Some(tag) = tag else {
+            return Err(de::Error::invalid_length(
+                0,
+                &"sequence must start with event tag",
+            ));
+        };
+
+        match tag.as_str() {
+            "BlockStored" => {
+                let block_hashes: Vec<BlockHashValue> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
+                let parent_block_hash: Option<BlockHashValue> = seq.next_element()?.unwrap_or(None);
+                let token_ids: Vec<u32> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(3, &"missing token_ids"))?;
+                let block_size: usize = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(4, &"missing block_size"))?;
+                let lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
+                let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+
+                Ok(RawKvEvent::BlockStored {
+                    block_hashes,
+                    parent_block_hash,
+                    token_ids,
+                    block_size,
+                    lora_id,
+                    medium,
+                })
+            }
+            "BlockRemoved" => {
+                let block_hashes: Vec<BlockHashValue> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
+                let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+
+                Ok(RawKvEvent::BlockRemoved {
+                    block_hashes,
+                    medium,
+                })
+            }
+            "AllBlocksCleared" => {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(RawKvEvent::AllBlocksCleared)
+            }
+            other => Err(de::Error::unknown_variant(
+                other,
+                &["BlockStored", "BlockRemoved", "AllBlocksCleared"],
+            )),
+        }
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -499,25 +704,25 @@ struct KvStatsPrometheusGauges {
 impl KvStatsPrometheusGauges {
     /// Create a new KvStatsPrometheusGauges instance with all metrics registered
     fn new(component: &Component) -> Result<Self> {
-        let kv_active_blocks_gauge = component.create_gauge(
+        let kv_active_blocks_gauge = component.metrics().create_gauge(
             kvstats::ACTIVE_BLOCKS,
             "Number of active KV cache blocks currently in use",
             &[],
         )?;
 
-        let kv_total_blocks_gauge = component.create_gauge(
+        let kv_total_blocks_gauge = component.metrics().create_gauge(
             kvstats::TOTAL_BLOCKS,
             "Total number of KV cache blocks available",
             &[],
         )?;
 
-        let gpu_cache_usage_gauge = component.create_gauge(
+        let gpu_cache_usage_gauge = component.metrics().create_gauge(
             kvstats::GPU_CACHE_USAGE_PERCENT,
             "GPU cache usage as a percentage (0.0-1.0)",
             &[],
         )?;
 
-        let gpu_prefix_cache_hit_rate_gauge = component.create_gauge(
+        let gpu_prefix_cache_hit_rate_gauge = component.metrics().create_gauge(
             kvstats::GPU_PREFIX_CACHE_HIT_RATE,
             "GPU prefix cache hit rate as a percentage (0.0-1.0)",
             &[],
@@ -582,51 +787,17 @@ impl WorkerMetricsPublisher {
         Ok(())
     }
 
-    pub async fn create_endpoint(
-        &self,
-        component: Component,
-        metrics_labels: Option<&[(&str, &str)]>,
-    ) -> Result<()> {
-        let mut metrics_rx = self.rx.clone();
-        let handler = Arc::new(KvLoadEndpointHandler::new(metrics_rx.clone()));
-        let handler = Ingress::for_engine(handler)?;
-
-        let worker_id = component
-            .drt()
-            .primary_lease()
-            .map(|lease| lease.id())
-            .unwrap_or_else(|| {
-                tracing::warn!("Component is static, assuming worker_id of 0");
-                0
-            });
-
+    pub async fn create_endpoint(&self, component: Component) -> Result<()> {
+        let worker_id = component.drt().connection_id();
         self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
-
-        let metrics_labels = metrics_labels.map(|v| {
-            v.iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<Vec<_>>()
-        });
-
-        component
-            .endpoint(KV_METRICS_ENDPOINT)
-            .endpoint_builder()
-            .stats_handler(move |_| {
-                let metrics = metrics_rx.borrow_and_update().clone();
-                serde_json::to_value(&*metrics).unwrap()
-            })
-            .metrics_labels(metrics_labels)
-            .handler(handler)
-            .start()
-            .await
+        Ok(())
     }
 
     /// Starts a background task to publish metrics over NATS
     ///
     /// This task monitors metric changes (specifically kv_active_blocks and num_requests_waiting)
     /// and publishes stable metrics to NATS after they've been unchanged for 1ms.
-    #[allow(dead_code)]
-    fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: i64) {
+    fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: u64) {
         let nats_rx = self.rx.clone();
 
         tokio::spawn(async move {
@@ -692,36 +863,16 @@ impl WorkerMetricsPublisher {
                                 tracing::warn!("Failed to publish metrics over NATS: {}", e);
                             }
                         }
+
+                        // Reset timer to pending state to avoid tight loop
+                        // It will be reset to 1ms when metrics actually change
+                        publish_timer.as_mut().reset(
+                            tokio::time::Instant::now() + tokio::time::Duration::from_secs(3600)
+                        );
                     }
                 }
             }
         });
-    }
-}
-
-struct KvLoadEndpointHandler {
-    metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
-}
-
-impl KvLoadEndpointHandler {
-    pub fn new(metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>) -> Self {
-        Self { metrics_rx }
-    }
-}
-
-#[async_trait]
-impl AsyncEngine<SingleIn<()>, ManyOut<Annotated<ForwardPassMetrics>>, Error>
-    for KvLoadEndpointHandler
-{
-    async fn generate(
-        &self,
-        request: SingleIn<()>,
-    ) -> Result<ManyOut<Annotated<ForwardPassMetrics>>> {
-        let context = request.context();
-        let metrics = self.metrics_rx.borrow().clone();
-        let metrics = (*metrics).clone();
-        let stream = stream::iter(vec![Annotated::from_data(metrics)]);
-        Ok(ResponseStream::new(Box::pin(stream), context))
     }
 }
 
@@ -745,7 +896,7 @@ mod test_event_processing {
 
         let stored = create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, 0);
 
-        assert_eq!(stored.block_hash.0, blk_hash as u64);
+        assert_eq!(stored.block_hash.0, blk_hash);
         let expected_hash = compute_block_hash_for_seq(&token_ids, 4)[0];
         assert_eq!(stored.tokens_hash, expected_hash);
     }
@@ -759,7 +910,7 @@ mod test_event_processing {
         // two blocks, each of size 4
         let token_ids = vec![1, 2, 3, 4, 5, 6, 7, 8];
         let num_block_tokens = vec![4_u64, 4_u64];
-        let block_hashes = vec![111_i64, 222_i64];
+        let block_hashes = vec![111_u64, 222_u64];
 
         let blocks = create_stored_blocks(
             kv_block_size,
@@ -781,7 +932,7 @@ mod test_event_processing {
         // second block is the wrong size
         let token_ids = vec![1, 2, 3, 4, 5, 6, 7];
         let num_block_tokens = vec![4_u64, 3_u64];
-        let block_hashes = vec![111_i64, 222_i64];
+        let block_hashes = vec![111_u64, 222_u64];
         let warning_count = Arc::new(AtomicU32::new(0));
 
         let blocks = create_stored_blocks(
@@ -805,14 +956,15 @@ mod test_event_processing {
     fn test_convert_event_block_stored() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::BlockStored {
-            block_hashes: vec![10, 11],
-            parent_block_hash: Some(99),
+            block_hashes: vec![BlockHashValue::Unsigned(10), BlockHashValue::Unsigned(11)],
+            parent_block_hash: Some(BlockHashValue::Unsigned(99)),
             token_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
             block_size: 4,
             lora_id: Some(0),
+            medium: None,
         };
 
-        let out = convert_event(raw_evt, 42, kv_block_size, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(raw_evt, 42, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
         assert!(matches!(out.data, KvCacheEventData::Stored(_)));
     }
 
@@ -820,9 +972,10 @@ mod test_event_processing {
     fn test_convert_event_block_removed() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::BlockRemoved {
-            block_hashes: vec![123, 456],
+            block_hashes: vec![BlockHashValue::Unsigned(123), BlockHashValue::Signed(456)],
+            medium: None,
         };
-        let out = convert_event(raw_evt, 7, kv_block_size, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(raw_evt, 7, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
 
         assert!(matches!(out.data, KvCacheEventData::Removed(_)));
     }
@@ -831,7 +984,7 @@ mod test_event_processing {
     fn test_convert_event_all_blocks_cleared() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::AllBlocksCleared;
-        let out = convert_event(raw_evt, 1, kv_block_size, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(raw_evt, 1, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
         assert!(matches!(out.data, KvCacheEventData::Cleared));
     }
 }
@@ -874,7 +1027,7 @@ mod tests_startup_helpers {
             &self,
             event_name: impl AsRef<str> + Send + Sync,
             event: &(impl serde::Serialize + Send + Sync),
-        ) -> dynamo_runtime::Result<()> {
+        ) -> anyhow::Result<()> {
             let bytes = rmp_serde::to_vec(event).unwrap();
             self.published
                 .lock()
@@ -887,7 +1040,7 @@ mod tests_startup_helpers {
             &self,
             event_name: impl AsRef<str> + Send + Sync,
             bytes: Vec<u8>,
-        ) -> dynamo_runtime::Result<()> {
+        ) -> anyhow::Result<()> {
             self.published
                 .lock()
                 .unwrap()
@@ -912,6 +1065,7 @@ mod tests_startup_helpers {
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: vec![ExternalSequenceBlockHash(1), ExternalSequenceBlockHash(2)],
             }),
+            dp_rank: 0,
         };
 
         let token = CancellationToken::new();
@@ -965,11 +1119,12 @@ mod tests_startup_helpers {
         let seq: u64 = 77;
 
         let events = vec![RawKvEvent::BlockStored {
-            block_hashes: vec![42],
+            block_hashes: vec![BlockHashValue::Unsigned(42)],
             parent_block_hash: None,
             token_ids: vec![0, 1, 2, 3],
             block_size: 4,
             lora_id: None,
+            medium: None,
         }];
 
         let batch = KvEventBatch {
@@ -1180,7 +1335,6 @@ mod test_integration_publisher {
     #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
     async fn test_kvstats_prometheus_gauge_updates() {
         use crate::kv_router::publisher::kvstats;
-        use dynamo_runtime::metrics::MetricsRegistry;
 
         // Test that publish() updates Prometheus gauges correctly using real Component
         let publisher = WorkerMetricsPublisher::new().unwrap();
@@ -1234,8 +1388,8 @@ mod test_integration_publisher {
         assert_eq!(hit_rate_gauge.get(), 0.75);
 
         // Test 4: Verify metrics are properly registered in the component's registry
-        // Component implements MetricsRegistry trait which provides prometheus_metrics_fmt()
-        let prometheus_output = component.prometheus_metrics_fmt().unwrap();
+        // Component implements MetricsRegistry trait which provides prometheus_expfmt()
+        let prometheus_output = component.metrics().prometheus_expfmt().unwrap();
 
         // Verify metric names are present
         assert!(prometheus_output.contains(kvstats::ACTIVE_BLOCKS));

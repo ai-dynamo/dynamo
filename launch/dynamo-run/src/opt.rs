@@ -19,12 +19,7 @@ pub enum Output {
     Static(String),
 
     #[cfg(feature = "mistralrs")]
-    /// Run inference on a model in a GGUF file using mistralrs w/ candle
     MistralRs,
-
-    #[cfg(feature = "llamacpp")]
-    /// Run inference using llama.cpp
-    LlamaCpp,
 
     Mocker,
 }
@@ -36,9 +31,6 @@ impl TryFrom<&str> for Output {
         match s {
             #[cfg(feature = "mistralrs")]
             "mistralrs" => Ok(Output::MistralRs),
-
-            #[cfg(feature = "llamacpp")]
-            "llamacpp" | "llama_cpp" => Ok(Output::LlamaCpp),
 
             "mocker" => Ok(Output::Mocker),
             "echo" | "echo_full" => Ok(Output::Echo),
@@ -61,9 +53,6 @@ impl fmt::Display for Output {
             #[cfg(feature = "mistralrs")]
             Output::MistralRs => "mistralrs",
 
-            #[cfg(feature = "llamacpp")]
-            Output::LlamaCpp => "llamacpp",
-
             Output::Mocker => "mocker",
             Output::Echo => "echo",
 
@@ -82,12 +71,6 @@ impl Output {
         {
             out.push(Output::MistralRs.to_string());
         }
-
-        #[cfg(feature = "llamacpp")]
-        {
-            out.push(Output::LlamaCpp.to_string());
-        }
-
         out
     }
 }

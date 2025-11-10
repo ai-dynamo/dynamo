@@ -208,6 +208,7 @@ func TestCanonicalizePodSpec(t *testing.T) {
 					{Name: "registry-z"},
 					{Name: "registry-a"},
 					{Name: "registry-b"},
+					{Name: "registry-a"},
 				},
 			},
 			expected: &corev1.PodSpec{
@@ -216,6 +217,15 @@ func TestCanonicalizePodSpec(t *testing.T) {
 					{Name: "registry-b"},
 					{Name: "registry-z"},
 				},
+			},
+		},
+		{
+			name: "sorts nil image pull secrets",
+			input: &corev1.PodSpec{
+				ImagePullSecrets: nil,
+			},
+			expected: &corev1.PodSpec{
+				ImagePullSecrets: nil,
 			},
 		},
 		{

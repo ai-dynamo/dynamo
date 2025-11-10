@@ -66,6 +66,9 @@ pub const MAX_N: u8 = 128;
 /// Allowed range of values for `n` (number of choices)
 pub const N_RANGE: (u8, u8) = (MIN_N, MAX_N);
 
+/// Maximum allowed total number of choices (batch_size × n)
+pub const MAX_TOTAL_CHOICES: usize = 128;
+
 /// Minimum allowed value for OpenAI's `logit_bias` values
 pub const MIN_LOGIT_BIAS: f32 = -100.0;
 /// Maximum allowed value for OpenAI's `logit_bias` values
@@ -82,16 +85,9 @@ pub const BEST_OF_RANGE: (u8, u8) = (MIN_BEST_OF, MAX_BEST_OF);
 pub const MAX_STOP_SEQUENCES: usize = 4;
 /// Maximum allowed number of tools
 pub const MAX_TOOLS: usize = 128;
-/// Maximum allowed number of metadata key-value pairs
-pub const MAX_METADATA_PAIRS: usize = 16;
-/// Maximum allowed length for metadata keys
-pub const MAX_METADATA_KEY_LENGTH: usize = 64;
-/// Maximum allowed length for metadata values
-pub const MAX_METADATA_VALUE_LENGTH: usize = 512;
+// Metadata validation constants removed - we are no longer restricting the metadata field char limits
 /// Maximum allowed length for function names
 pub const MAX_FUNCTION_NAME_LENGTH: usize = 64;
-/// Maximum allowed value for Prompt IntegerArray elements
-pub const MAX_PROMPT_TOKEN_ID: u32 = 50256;
 /// Minimum allowed value for `repetition_penalty`
 pub const MIN_REPETITION_PENALTY: f32 = 0.0;
 /// Maximum allowed value for `repetition_penalty`
@@ -100,6 +96,20 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 //
 // Shared Fields
 //
+
+/// Validates that no unsupported fields are present in the request
+pub fn validate_no_unsupported_fields(
+    unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), anyhow::Error> {
+    if !unsupported_fields.is_empty() {
+        let fields: Vec<_> = unsupported_fields
+            .keys()
+            .map(|s| format!("`{}`", s))
+            .collect();
+        anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
+    }
+    Ok(())
+}
 
 /// Validates the temperature parameter
 pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Error> {
@@ -129,6 +139,15 @@ pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
         );
     }
     Ok(())
+}
+
+// Validate top_k
+pub fn validate_top_k(top_k: Option<i32>) -> Result<(), anyhow::Error> {
+    match top_k {
+        None => Ok(()),
+        Some(k) if k == -1 || k >= 1 => Ok(()),
+        _ => anyhow::bail!("Top_k must be null, -1, or greater than or equal to 1"),
+    }
 }
 
 /// Validates mutual exclusion of temperature and top_p
@@ -175,14 +194,30 @@ pub fn validate_presence_penalty(presence_penalty: Option<f32>) -> Result<(), an
 }
 
 pub fn validate_repetition_penalty(repetition_penalty: Option<f32>) -> Result<(), anyhow::Error> {
+    // It should be greater than 0.0 and less than equal to 2.0
     if let Some(penalty) = repetition_penalty
-        && !(MIN_REPETITION_PENALTY..=MAX_REPETITION_PENALTY).contains(&penalty)
+        && (penalty <= MIN_REPETITION_PENALTY || penalty > MAX_REPETITION_PENALTY)
     {
         anyhow::bail!(
             "Repetition penalty must be between {} and {}, got {}",
             MIN_REPETITION_PENALTY,
             MAX_REPETITION_PENALTY,
             penalty
+        );
+    }
+    Ok(())
+}
+
+/// Validates min_p parameter
+pub fn validate_min_p(min_p: Option<f32>) -> Result<(), anyhow::Error> {
+    if let Some(p) = min_p
+        && !(MIN_MIN_P..=MAX_MIN_P).contains(&p)
+    {
+        anyhow::bail!(
+            "Min_p must be between {} and {}, got {}",
+            MIN_MIN_P,
+            MAX_MIN_P,
+            p
         );
     }
     Ok(())
@@ -225,6 +260,42 @@ pub fn validate_n(n: Option<u8>) -> Result<(), anyhow::Error> {
         && !(MIN_N..=MAX_N).contains(&value)
     {
         anyhow::bail!("n must be between {} and {}, got {}", MIN_N, MAX_N, value);
+    }
+    Ok(())
+}
+
+/// Validates total choices (batch_size × n) doesn't exceed maximum
+pub fn validate_total_choices(batch_size: usize, n: u8) -> Result<(), anyhow::Error> {
+    let total_choices = batch_size * (n as usize);
+    if total_choices > MAX_TOTAL_CHOICES {
+        anyhow::bail!(
+            "Total choices (batch_size × n = {} × {} = {}) exceeds maximum of {}",
+            batch_size,
+            n,
+            total_choices,
+            MAX_TOTAL_CHOICES
+        );
+    }
+    Ok(())
+}
+
+/// Validates n and temperature interaction
+/// When n > 1, temperature must be > 0 to ensure diverse outputs
+pub fn validate_n_with_temperature(
+    n: Option<u8>,
+    temperature: Option<f32>,
+) -> Result<(), anyhow::Error> {
+    if let Some(n_value) = n
+        && n_value > 1
+    {
+        let temp = temperature.unwrap_or(1.0);
+        if temp == 0.0 {
+            anyhow::bail!(
+                "When n > 1, temperature must be greater than 0 to ensure diverse outputs. Got n={}, temperature={}",
+                n_value,
+                temp
+            );
+        }
     }
     Ok(())
 }
@@ -339,45 +410,6 @@ pub fn validate_tools(
     Ok(())
 }
 
-/// Validates metadata
-pub fn validate_metadata(metadata: &Option<serde_json::Value>) -> Result<(), anyhow::Error> {
-    let metadata = match metadata {
-        Some(val) => val,
-        None => return Ok(()),
-    };
-
-    if let Some(obj) = metadata.as_object() {
-        if obj.len() > MAX_METADATA_PAIRS {
-            anyhow::bail!(
-                "Metadata cannot have more than {} key-value pairs, got {}",
-                MAX_METADATA_PAIRS,
-                obj.len()
-            );
-        }
-
-        for (key, value) in obj {
-            if key.len() > MAX_METADATA_KEY_LENGTH {
-                anyhow::bail!(
-                    "Metadata key '{}' exceeds {} character limit",
-                    key,
-                    MAX_METADATA_KEY_LENGTH
-                );
-            }
-
-            if let Some(value_str) = value.as_str()
-                && value_str.len() > MAX_METADATA_VALUE_LENGTH
-            {
-                anyhow::bail!(
-                    "Metadata value for key '{}' exceeds {} character limit",
-                    key,
-                    MAX_METADATA_VALUE_LENGTH
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Validates reasoning effort parameter
 pub fn validate_reasoning_effort(
     _reasoning_effort: &Option<dynamo_async_openai::types::ReasoningEffort>,
@@ -424,16 +456,6 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
             if arr.is_empty() {
                 anyhow::bail!("Prompt integer array cannot be empty");
             }
-            for (i, &token_id) in arr.iter().enumerate() {
-                if token_id > MAX_PROMPT_TOKEN_ID {
-                    anyhow::bail!(
-                        "Token ID at index {} must be between 0 and {}, got {}",
-                        i,
-                        MAX_PROMPT_TOKEN_ID,
-                        token_id
-                    );
-                }
-            }
         }
         dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
             if arr.is_empty() {
@@ -442,17 +464,6 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
             for (i, inner_arr) in arr.iter().enumerate() {
                 if inner_arr.is_empty() {
                     anyhow::bail!("Prompt integer array at index {} cannot be empty", i);
-                }
-                for (j, &token_id) in inner_arr.iter().enumerate() {
-                    if token_id > MAX_PROMPT_TOKEN_ID {
-                        anyhow::bail!(
-                            "Token ID at index [{}][{}] must be between 0 and {}, got {}",
-                            i,
-                            j,
-                            MAX_PROMPT_TOKEN_ID,
-                            token_id
-                        );
-                    }
                 }
             }
         }

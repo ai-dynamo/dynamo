@@ -42,10 +42,13 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 			},
 		},
 		PeriodSeconds:    5,
-		TimeoutSeconds:   30,
-		FailureThreshold: 1,
+		TimeoutSeconds:   4, // TimeoutSeconds should be < PeriodSeconds
+		FailureThreshold: 1, // Note this default FailureThreshold is 3, with 1 a single failure will restart Pod
 	}
 
+	// ReadinessProbe in Dynamo worker context doesn't determine that the worker is ready to receive traffic
+	// Since worker registration is done through external KvStore and Transport does not use Kubernetes Service
+	// Still important for external depencies that rely on Pod Readiness
 	container.ReadinessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
@@ -54,8 +57,8 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 			},
 		},
 		PeriodSeconds:    10,
-		TimeoutSeconds:   30,
-		FailureThreshold: 60,
+		TimeoutSeconds:   4,
+		FailureThreshold: 3,
 	}
 
 	container.StartupProbe = &corev1.Probe{
@@ -67,14 +70,10 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 		},
 		PeriodSeconds:    10,
 		TimeoutSeconds:   5,
-		FailureThreshold: 60,
+		FailureThreshold: 720, // 10s * 720 = 7200s = 2h
 	}
 
 	container.Env = append(container.Env, []corev1.EnvVar{
-		{
-			Name:  "DYN_SYSTEM_ENABLED",
-			Value: "true",
-		},
 		{
 			Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
 			Value: "[\"generate\"]",

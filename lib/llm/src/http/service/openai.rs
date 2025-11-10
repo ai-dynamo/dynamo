@@ -9,8 +9,11 @@ use std::{
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::State,
+    http::Request,
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{
         IntoResponse, Response,
         sse::{KeepAlive, Sse},
@@ -65,18 +68,32 @@ fn get_body_limit() -> usize {
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct ErrorMessage {
-    error: String,
+    message: String,
+    #[serde(rename = "type")]
+    error_type: String,
+    code: u16,
+}
+
+fn map_error_code_to_error_type(code: StatusCode) -> String {
+    match code.canonical_reason() {
+        Some(reason) => reason.to_string(),
+        None => "UnknownError".to_string(),
+    }
 }
 
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
+        let code = StatusCode::NOT_FOUND;
+        let error_type = map_error_code_to_error_type(code);
         (
-            StatusCode::NOT_FOUND,
+            code,
             Json(ErrorMessage {
-                error: "Model not found".to_string(),
+                message: "Model not found".to_string(),
+                error_type,
+                code: code.as_u16(),
             }),
         )
     }
@@ -84,10 +101,14 @@ impl ErrorMessage {
     /// Service Unavailable
     /// This is returned when the service is live, but not ready.
     pub fn _service_unavailable() -> ErrorResponse {
+        let code = StatusCode::SERVICE_UNAVAILABLE;
+        let error_type = map_error_code_to_error_type(code);
         (
-            StatusCode::SERVICE_UNAVAILABLE,
+            code,
             Json(ErrorMessage {
-                error: "Service is not ready".to_string(),
+                message: "Service is not ready".to_string(),
+                error_type,
+                code: code.as_u16(),
             }),
         )
     }
@@ -98,10 +119,14 @@ impl ErrorMessage {
     /// Internal Services errors are the result of misconfiguration or bugs in the service.
     pub fn internal_server_error(msg: &str) -> ErrorResponse {
         tracing::error!("Internal server error: {msg}");
+        let code = StatusCode::INTERNAL_SERVER_ERROR;
+        let error_type = map_error_code_to_error_type(code);
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            code,
             Json(ErrorMessage {
-                error: msg.to_string(),
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
             }),
         )
     }
@@ -111,10 +136,14 @@ impl ErrorMessage {
     /// This should be used for features that are planned but not available.
     pub fn not_implemented_error(msg: &str) -> ErrorResponse {
         tracing::error!("Not Implemented error: {msg}");
+        let code = StatusCode::NOT_IMPLEMENTED;
+        let error_type = map_error_code_to_error_type(code);
         (
-            StatusCode::NOT_IMPLEMENTED,
+            code,
             Json(ErrorMessage {
-                error: msg.to_string(),
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
             }),
         )
     }
@@ -135,7 +164,9 @@ impl ErrorMessage {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorMessage {
-                    error: pipeline_err.to_string(),
+                    message: pipeline_err.to_string(),
+                    error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE),
+                    code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 }),
             );
         }
@@ -153,7 +184,14 @@ impl ErrorMessage {
             return ErrorMessage::internal_server_error(&err.message);
         }
         match StatusCode::from_u16(err.code) {
-            Ok(code) => (code, Json(ErrorMessage { error: err.message })),
+            Ok(code) => (
+                code,
+                Json(ErrorMessage {
+                    message: err.message,
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
+                }),
+            ),
             Err(_) => ErrorMessage::internal_server_error(&err.message),
         }
     }
@@ -161,7 +199,40 @@ impl ErrorMessage {
 
 impl From<HttpError> for ErrorMessage {
     fn from(err: HttpError) -> Self {
-        ErrorMessage { error: err.message }
+        ErrorMessage {
+            message: err.message,
+            error_type: map_error_code_to_error_type(
+                StatusCode::from_u16(err.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            ),
+            code: err.code,
+        }
+    }
+}
+
+// Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
+// But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
+// Solution: Intercept the response from handlers and convert ANY 422 status codes to 400 with the actual error message.
+pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> Response {
+    let response = next.run(request).await;
+
+    if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
+        let (_parts, body) = response.into_parts();
+        let body_bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .unwrap_or_default();
+        let error_message = String::from_utf8_lossy(&body_bytes).to_string();
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorMessage {
+                message: error_message,
+                error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
+                code: StatusCode::BAD_REQUEST.as_u16(),
+            }),
+        )
+            .into_response()
+    } else {
+        // Pass through if it is not a 422
+        response
     }
 }
 
@@ -247,11 +318,33 @@ async fn completions(
     request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
+    use crate::protocols::openai::completions::get_prompt_batch_size;
+
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
     validate_completion_fields_generic(&request)?;
 
+    // Detect batch prompts
+    let batch_size = get_prompt_batch_size(&request.inner.prompt);
+    let n = request.inner.n.unwrap_or(1);
+
+    // If single prompt or single-element batch, use original flow
+    if batch_size == 1 {
+        return completions_single(state, request, stream_handle).await;
+    }
+
+    // Batch processing: handle multiple prompts
+    completions_batch(state, request, stream_handle, batch_size, n).await
+}
+
+/// Handle single prompt completions (original logic)
+#[tracing::instrument(skip_all)]
+async fn completions_single(
+    state: Arc<service_v2::State>,
+    request: Context<NvCreateCompletionRequest>,
+    stream_handle: ConnectionHandle,
+) -> Result<Response, ErrorResponse> {
     let request_id = request.id().to_string();
 
     // todo - decide on default
@@ -262,12 +355,6 @@ async fn completions(
     let model = request.inner.model.clone();
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
-
-    // update the request to always stream
-    let request = request.map(|mut req| {
-        req.inner.stream = Some(true);
-        req
-    });
 
     // todo - error handling should be more robust
     let engine = state
@@ -357,7 +444,166 @@ async fn completions(
                     request_id,
                     e
                 );
-                ErrorMessage::internal_server_error("Failed to fold completions stream")
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to fold completions stream for {}: {:?}",
+                    request_id, e
+                ))
+            })?;
+
+        inflight_guard.mark_ok();
+        Ok(Json(response).into_response())
+    }
+}
+
+/// Handle batch prompt completions (multiple prompts with n choices each)
+#[tracing::instrument(skip_all)]
+async fn completions_batch(
+    state: Arc<service_v2::State>,
+    request: Context<NvCreateCompletionRequest>,
+    stream_handle: ConnectionHandle,
+    batch_size: usize,
+    n: u8,
+) -> Result<Response, ErrorResponse> {
+    use crate::protocols::openai::completions::extract_single_prompt;
+    use futures::stream::{self, StreamExt};
+
+    let request_id = request.id().to_string();
+    let streaming = request.inner.stream.unwrap_or(false);
+    let model = request.inner.model.clone();
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
+    let engine = state
+        .manager()
+        .get_completions_engine(&model)
+        .map_err(|_| ErrorMessage::model_not_found())?;
+
+    let parsing_options = state.manager().get_parsing_options(&model);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    // prepare to process any annotations
+    let annotations = request.annotations();
+
+    // Create inflight_guard before calling engine to ensure errors are counted
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Completions, streaming);
+
+    // Generate streams for each prompt in the batch
+    let mut all_streams = Vec::new();
+    let mut first_ctx = None;
+
+    for prompt_idx in 0..batch_size {
+        // Extract single prompt at this index
+        let single_prompt = extract_single_prompt(&request.inner.prompt, prompt_idx);
+
+        // Create a new request with this single prompt
+        let mut single_request = request.content().clone();
+        single_request.inner.prompt = single_prompt;
+
+        // Generate unique request_id for each prompt: original_id-{prompt_idx}
+        let unique_request_id = format!("{}-{}", request.id(), prompt_idx);
+        let single_request_context = Context::with_id(single_request, unique_request_id);
+
+        // Generate stream for this prompt
+        let stream = engine
+            .generate(single_request_context)
+            .await
+            .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+
+        // Capture context from first stream
+        if first_ctx.is_none() {
+            first_ctx = Some(stream.context());
+        }
+
+        // Remap choice indices: choice.index += prompt_idx * n
+        let prompt_idx_u32 = prompt_idx as u32;
+        let n_u32 = n as u32;
+        let remapped_stream = stream.map(move |mut response| {
+            if let Some(ref mut data) = response.data {
+                for choice in &mut data.inner.choices {
+                    choice.index += prompt_idx_u32 * n_u32;
+                }
+            }
+            response
+        });
+
+        all_streams.push(remapped_stream);
+    }
+
+    // Merge all streams
+    let merged_stream = stream::select_all(all_streams);
+
+    // capture the context to cancel the stream if the client disconnects
+    let ctx = first_ctx.expect("At least one stream should be generated");
+
+    let annotations_vec = annotations.map_or(Vec::new(), |annotations| {
+        annotations
+            .iter()
+            .filter_map(|annotation| {
+                if annotation == ANNOTATION_REQUEST_ID {
+                    Annotated::<NvCreateCompletionResponse>::from_annotation(
+                        ANNOTATION_REQUEST_ID,
+                        &request_id,
+                    )
+                    .ok()
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+
+    // apply any annotations to the front of the stream
+    let merged_stream = stream::iter(annotations_vec).chain(merged_stream);
+
+    if streaming {
+        // For streaming, we'll drop the http_queue_guard on the first token
+        let mut http_queue_guard = Some(http_queue_guard);
+        let stream = merged_stream.map(move |response| {
+            // Calls observe_response() on each token
+            process_response_using_event_converter_and_observe_metrics(
+                EventConverter::from(response),
+                &mut response_collector,
+                &mut http_queue_guard,
+            )
+        });
+        let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
+
+        let mut sse_stream = Sse::new(stream);
+
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+
+        Ok(sse_stream.into_response())
+    } else {
+        // Tap the stream to collect metrics for non-streaming requests without altering items
+        let mut http_queue_guard = Some(http_queue_guard);
+        let stream = merged_stream.inspect(move |response| {
+            // Calls observe_response() on each token - drops http_queue_guard on first token
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+        });
+
+        let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to fold completions stream for {}: {:?}",
+                    request_id,
+                    e
+                );
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to fold completions stream for {}: {:?}",
+                    request_id, e
+                ))
             })?;
 
         inflight_guard.mark_ok();
@@ -518,12 +764,6 @@ async fn chat_completions(
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
 
-    // update the request to always stream
-    let request = request.map(|mut req| {
-        req.inner.stream = Some(true);
-        req
-    });
-
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     // todo - determine the proper error code for when a request model is not present
@@ -639,12 +879,6 @@ pub fn validate_chat_completion_unsupported_fields(
     request: &NvCreateChatCompletionRequest,
 ) -> Result<(), ErrorResponse> {
     let inner = &request.inner;
-
-    if inner.parallel_tool_calls == Some(true) {
-        return Err(ErrorMessage::not_implemented_error(
-            "`parallel_tool_calls: true` is not supported.",
-        ));
-    }
 
     if inner.function_call.is_some() {
         return Err(ErrorMessage::not_implemented_error(
@@ -911,16 +1145,6 @@ pub fn validate_response_unsupported_fields(
             "`max_tool_calls` is not supported.",
         ));
     }
-    if inner.metadata.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`metadata` is not supported.",
-        ));
-    }
-    if inner.parallel_tool_calls == Some(true) {
-        return Some(ErrorMessage::not_implemented_error(
-            "`parallel_tool_calls: true` is not supported.",
-        ));
-    }
     if inner.previous_response_id.is_some() {
         return Some(ErrorMessage::not_implemented_error(
             "`previous_response_id` is not supported.",
@@ -1018,8 +1242,8 @@ async fn list_models_openai(
         data.push(ModelListing {
             id: model_name.clone(),
             object: "object",
-            created,                        // Where would this come from? The GGUF?
-            owned_by: "nvidia".to_string(), // Get organization from GGUF
+            created,                        // Where would this come from?
+            owned_by: "nvidia".to_string(), // Get organization from config
         });
     }
 
@@ -1054,6 +1278,7 @@ pub fn completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_completions))
+        .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
@@ -1070,6 +1295,7 @@ pub fn chat_completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_chat_completions))
+        .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc], router)
@@ -1085,6 +1311,7 @@ pub fn embeddings_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(embeddings))
+        .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
@@ -1117,13 +1344,13 @@ pub fn responses_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_responses))
+        .layer(middleware::from_fn(smart_json_error_middleware))
         .with_state((state, template));
     (vec![doc], router)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
 
     use super::*;
     use crate::discovery::ModelManagerError;
@@ -1189,36 +1416,36 @@ mod tests {
     #[test]
     fn test_http_error_response_from_anyhow() {
         let err = http_error_from_engine(400).unwrap_err();
-        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(response.error, "custom error message");
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message, "custom error message");
     }
 
     #[test]
     fn test_error_response_from_anyhow_out_of_range() {
         let err = http_error_from_engine(399).unwrap_err();
-        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.error, "custom error message");
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.1.message, "custom error message");
 
         let err = http_error_from_engine(500).unwrap_err();
-        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.error, "custom error message");
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.1.message, "custom error message");
 
         let err = http_error_from_engine(501).unwrap_err();
-        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.error, "custom error message");
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.1.message, "custom error message");
     }
 
     #[test]
     fn test_other_error_response_from_anyhow() {
         let err = other_error_from_engine().unwrap_err();
-        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
-            response.error,
+            response.1.message,
             format!(
                 "{}: {}",
                 BACKUP_ERROR_MESSAGE,
@@ -1235,10 +1462,10 @@ mod tests {
             "All workers are busy, please retry later".to_string(),
         )
         .into();
-        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
-            response.error,
+            response.1.message,
             "Service temporarily unavailable: All workers are busy, please retry later"
         );
     }
@@ -1270,6 +1497,14 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_unsupported_fields_accepts_parallel_tool_calls() {
+        let mut request = make_base_request();
+        request.inner.parallel_tool_calls = Some(true);
+        let result = validate_response_unsupported_fields(&request);
+        assert!(result.is_none(), "parallel_tool_calls should be supported");
+    }
+
+    #[test]
     fn test_validate_unsupported_fields_detects_flags() {
         #[allow(clippy::type_complexity)]
         let unsupported_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
@@ -1283,11 +1518,6 @@ mod tests {
                 Box::new(|r| r.instructions = Some("System prompt".into())),
             ),
             ("max_tool_calls", Box::new(|r| r.max_tool_calls = Some(3))),
-            ("metadata", Box::new(|r| r.metadata = Some(HashMap::new()))),
-            (
-                "parallel_tool_calls",
-                Box::new(|r| r.parallel_tool_calls = Some(true)),
-            ),
             (
                 "previous_response_id",
                 Box::new(|r| r.previous_response_id = Some("prev-id".into())),
@@ -1351,13 +1581,14 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "The 'messages' field cannot be empty. At least one message is required."
             );
         }
@@ -1379,6 +1610,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_ok());
@@ -1399,7 +1631,7 @@ mod tests {
     // 11. Repetition Penalty: Should be a float between 0.0 and 2.0 : Done
     // 12. Logprobs: Should be a positive integer between 0 and 5 : Done
     // invalid or non existing user : Only empty string is not allowed validation is there. How can we check non-extisting user ?
-    // add_special_tokens null or invalid : Not Done
+    // Unknown fields : Done (rejected via extra_fields catch-all)
     // guided_whitespace_pattern null or invalid : Not Done
     // "response_format": { "type": "invalid_format" } : Not Done
     // "logit_bias": { "invalid_token": "not_a_number" }, : Partial Validation is already there
@@ -1414,14 +1646,16 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            metadata: None,
+            unsupported_fields: Default::default(),
         };
 
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "Frequency penalty must be between -2 and 2, got -3"
             );
         }
@@ -1436,13 +1670,15 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "Presence penalty must be between -2 and 2, got -3"
             );
         }
@@ -1457,13 +1693,15 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "Temperature must be between 0 and 2, got -3"
             );
         }
@@ -1478,13 +1716,15 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "Top_p must be between 0 and 1, got -3"
             );
         }
@@ -1501,13 +1741,15 @@ mod tests {
                 .build()
                 .unwrap(),
             nvext: None,
+            metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "Repetition penalty must be between 0 and 2, got -3"
             );
         }
@@ -1522,16 +1764,47 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "Logprobs must be between 0 and 5, got 6"
             );
         }
+    }
+
+    #[test]
+    fn test_metadata_field_nested() {
+        use serde_json::json;
+
+        // Test metadata field with nested object
+        let request = NvCreateCompletionRequest {
+            inner: CreateCompletionRequest {
+                model: "test-model".to_string(),
+                prompt: "Hello".into(),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            metadata: json!({
+                "user": {"id": 1, "name": "user-1"},
+                "session": {"id": "session-1", "timestamp": 1640995200}
+            })
+            .into(),
+            unsupported_fields: Default::default(),
+        };
+
+        let result = validate_completion_fields_generic(&request);
+        assert!(result.is_ok());
+
+        // Verify metadata is accessible
+        assert!(request.metadata.is_some());
+        assert_eq!(request.metadata.as_ref().unwrap()["user"]["id"], 1);
     }
 
     #[test]
@@ -1552,14 +1825,15 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
 
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "Frequency penalty must be between -2 and 2, got -3"
             );
         }
@@ -1580,13 +1854,14 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "Presence penalty must be between -2 and 2, got -3"
             );
         }
@@ -1607,13 +1882,14 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "Temperature must be between 0 and 2, got -3"
             );
         }
@@ -1634,13 +1910,14 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "Top_p must be between 0 and 1, got -3"
             );
         }
@@ -1663,13 +1940,14 @@ mod tests {
                 .unwrap(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "Repetition penalty must be between 0 and 2, got -3"
             );
         }
@@ -1690,15 +1968,90 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
-                error_response.error,
+                error_response.1.message,
                 "Top_logprobs must be between 0 and 20, got 25"
             );
+        }
+    }
+
+    #[test]
+    fn test_chat_completions_unknown_fields_rejected() {
+        // Test that known unsupported fields are rejected and all shown in error message
+        let json = r#"{
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "test-model",
+            "add_special_tokens": true,
+            "documents": ["doc1"],
+            "chat_template": "custom",
+            "chat_template_kwargs": {"key": "val"}
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json).unwrap();
+
+        // Verify all unsupported fields were captured
+        assert!(
+            request
+                .unsupported_fields
+                .contains_key("add_special_tokens")
+        );
+        assert!(request.unsupported_fields.contains_key("documents"));
+        assert!(request.unsupported_fields.contains_key("chat_template"));
+        assert!(
+            request
+                .unsupported_fields
+                .contains_key("chat_template_kwargs")
+        );
+
+        let result = validate_chat_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            let msg = &error_response.1.message;
+            assert!(msg.contains("Unsupported parameter"));
+            // Verify all fields appear in the error message
+            assert!(msg.contains("add_special_tokens"));
+            assert!(msg.contains("documents"));
+            assert!(msg.contains("chat_template"));
+            assert!(msg.contains("chat_template_kwargs"));
+        }
+    }
+
+    #[test]
+    fn test_completions_unsupported_fields_rejected() {
+        // Test that known unsupported fields are rejected and all shown in error message
+        let json = r#"{
+            "model": "test-model",
+            "prompt": "Hello",
+            "add_special_tokens": true,
+            "response_format": {"type": "json_object"}
+        }"#;
+
+        let request: NvCreateCompletionRequest = serde_json::from_str(json).unwrap();
+
+        // Verify both unsupported fields were captured
+        assert!(
+            request
+                .unsupported_fields
+                .contains_key("add_special_tokens")
+        );
+        assert!(request.unsupported_fields.contains_key("response_format"));
+
+        let result = validate_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            let msg = &error_response.1.message;
+            assert!(msg.contains("Unsupported parameter"));
+            // Verify both fields appear in error message
+            assert!(msg.contains("add_special_tokens"));
+            assert!(msg.contains("response_format"));
         }
     }
 }

@@ -13,9 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.namespaceRestriction.enabled }}
 kind: Role
+{{- else }}
+kind: ClusterRole
+{{- end }}
 metadata:
   name: {{ include "dynamo-operator.fullname" . }}-leader-election-role
+  {{- if .Values.namespaceRestriction.enabled }}
+  namespace: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
+  {{- end }}
   labels:
     app.kubernetes.io/component: rbac
     app.kubernetes.io/created-by: dynamo-operator
@@ -55,9 +62,16 @@ rules:
   - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.namespaceRestriction.enabled }}
 kind: RoleBinding
+{{- else }}
+kind: ClusterRoleBinding
+{{- end }}
 metadata:
   name: {{ include "dynamo-operator.fullname" . }}-leader-election-rolebinding
+  {{- if .Values.namespaceRestriction.enabled }}
+  namespace: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
+  {{- end }}
   labels:
     app.kubernetes.io/component: rbac
     app.kubernetes.io/created-by: dynamo-operator
@@ -65,7 +79,11 @@ metadata:
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
+  {{- if .Values.namespaceRestriction.enabled }}
   kind: Role
+  {{- else }}
+  kind: ClusterRole
+  {{- end }}
   name: '{{ include "dynamo-operator.fullname" . }}-leader-election-role'
 subjects:
 - kind: ServiceAccount

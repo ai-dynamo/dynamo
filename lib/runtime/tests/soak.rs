@@ -18,7 +18,7 @@ mod integration {
     pub const DEFAULT_NAMESPACE: &str = "dynamo";
 
     use dynamo_runtime::{
-        DistributedRuntime, ErrorContext, Result, Runtime, Worker, logging,
+        DistributedRuntime, Runtime, Worker, logging,
         pipeline::{
             AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
             SingleIn, async_trait, network::Ingress,
@@ -26,6 +26,8 @@ mod integration {
         protocols::annotated::Annotated,
         stream,
     };
+
+    use anyhow::{Context, Result};
     use futures::StreamExt;
     use std::{
         sync::Arc,
@@ -116,12 +118,9 @@ mod integration {
 
         // // make the ingress discoverable via a component service
         // // we must first create a service, then we can attach one more more endpoints
-        runtime
-            .namespace(DEFAULT_NAMESPACE)?
-            .component("backend")?
-            .service_builder()
-            .create()
-            .await?
+        let mut component = runtime.namespace(DEFAULT_NAMESPACE)?.component("backend")?;
+        component.add_stats_service().await?;
+        component
             .endpoint("generate")
             .endpoint_builder()
             .handler(ingress)

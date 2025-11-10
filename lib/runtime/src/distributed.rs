@@ -1,34 +1,85 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub use crate::component::Component;
+use crate::component::Component;
+use crate::pipeline::PipelineError;
+use crate::storage::key_value_store::{
+    EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, KeyValueStoreSelect,
+    MemoryStore,
+};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
-    ErrorContext, RuntimeCallback,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
-    discovery::DiscoveryClient,
-    metrics::MetricsRegistry,
+    discovery::Discovery,
+    metrics::PrometheusUpdateCallback,
+    metrics::{MetricsHierarchy, MetricsRegistry},
     service::ServiceClient,
     transports::{etcd, nats, tcp},
 };
+use crate::{discovery, system_status_server, transports};
 
 use super::utils::GracefulShutdownTracker;
-use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
-use std::sync::OnceLock;
+use crate::SystemHealth;
+use crate::runtime::Runtime;
 
+use async_once_cell::OnceCell;
+use std::sync::{Arc, OnceLock, Weak};
+
+use anyhow::Result;
 use derive_getters::Dissolve;
 use figment::error;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-impl MetricsRegistry for DistributedRuntime {
+/// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
+/// communication protocols and transports.
+#[derive(Clone)]
+pub struct DistributedRuntime {
+    // local runtime
+    runtime: Runtime,
+
+    // we might consider a unifed transport manager here
+    etcd_client: Option<transports::etcd::Client>,
+    nats_client: Option<transports::nats::Client>,
+    store: KeyValueStoreManager,
+    tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
+
+    // Service discovery client
+    discovery_client: Arc<dyn discovery::Discovery>,
+
+    // local registry for components
+    // the registry allows us to use share runtime resources across instances of the same component object.
+    // take for example two instances of a client to the same remote component. The registry allows us to use
+    // a single endpoint watcher for both clients, this keeps the number background tasking watching specific
+    // paths in etcd to a minimum.
+    component_registry: component::Registry,
+
+    // Will only have static components that are not discoverable via etcd, they must be know at
+    // startup. Will not start etcd.
+    is_static: bool,
+
+    instance_sources: Arc<tokio::sync::Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
+
+    // Health Status
+    system_health: Arc<parking_lot::Mutex<SystemHealth>>,
+
+    // This hierarchy's own metrics registry
+    metrics_registry: MetricsRegistry,
+}
+
+impl MetricsHierarchy for DistributedRuntime {
     fn basename(&self) -> String {
         "".to_string() // drt has no basename. Basename only begins with the Namespace.
     }
 
-    fn parent_hierarchy(&self) -> Vec<String> {
-        vec![] // drt is the root, so no parent hierarchy
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        vec![] // drt is the root, so no parent hierarchies
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        &self.metrics_registry
     }
 }
 
@@ -40,17 +91,26 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let (etcd_config, nats_config, is_static) = config.dissolve();
+        let (selected_kv_store, nats_config, is_static) = config.dissolve();
 
         let runtime_clone = runtime.clone();
 
-        let etcd_client = if is_static {
-            None
-        } else {
-            Some(etcd::Client::new(etcd_config.clone(), runtime_clone).await?)
+        let (etcd_client, store) = match (is_static, selected_kv_store) {
+            (false, KeyValueStoreSelect::Etcd(etcd_config)) => {
+                let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
+                    // The returned error doesn't show because of a dropped runtime error, so
+                    // log it first.
+                    tracing::error!(%err, "Could not connect to etcd. Pass `--store-kv ..` to use a different backend or start etcd."))?;
+                let store = KeyValueStoreManager::etcd(etcd_client.clone());
+                (Some(etcd_client), store)
+            }
+            (false, KeyValueStoreSelect::File(root)) => (None, KeyValueStoreManager::file(root)),
+            (true, _) | (false, KeyValueStoreSelect::Memory) => {
+                (None, KeyValueStoreManager::memory())
+            }
         };
 
-        let nats_client = nats_config.clone().connect().await?;
+        let nats_client = Some(nats_config.clone().connect().await?);
 
         // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
@@ -65,7 +125,7 @@ impl DistributedRuntime {
         let use_endpoint_health_status = config.use_endpoint_health_status.clone();
         let health_endpoint_path = config.system_health_path.clone();
         let live_endpoint_path = config.system_live_path.clone();
-        let system_health = Arc::new(std::sync::Mutex::new(SystemHealth::new(
+        let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
             starting_health_status,
             use_endpoint_health_status,
             health_endpoint_path,
@@ -74,50 +134,59 @@ impl DistributedRuntime {
 
         let nats_client_for_metrics = nats_client.clone();
 
+        // Initialize discovery backed by KV store
+        let discovery_client = {
+            use crate::discovery::KVStoreDiscovery;
+            Arc::new(KVStoreDiscovery::new(
+                store.clone(),
+                runtime.primary_token(),
+            )) as Arc<dyn Discovery>
+        };
+
         let distributed_runtime = Self {
             runtime,
             etcd_client,
+            store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
+            discovery_client,
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
-            hierarchy_to_metricsregistry: Arc::new(std::sync::RwLock::new(HashMap::<
-                String,
-                crate::MetricsRegistryEntry,
-            >::new())),
+            metrics_registry: crate::MetricsRegistry::new(),
             system_health,
         };
 
-        let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
-            &distributed_runtime,
-            nats_client_for_metrics.client().clone(),
-        )?;
-        let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
-        drt_hierarchies.push(distributed_runtime.hierarchy());
-        // Register a callback to update NATS client metrics
-        let nats_client_callback = Arc::new({
-            let nats_client_clone = nats_client_metrics.clone();
-            move || {
-                nats_client_clone.set_from_client_stats();
-                Ok(())
-            }
-        });
-        distributed_runtime.register_metrics_callback(drt_hierarchies, nats_client_callback);
+        if let Some(nats_client_for_metrics) = nats_client_for_metrics {
+            let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
+                &distributed_runtime,
+                nats_client_for_metrics.client().clone(),
+            )?;
+            // Register a callback to update NATS client metrics on the DRT's metrics registry
+            let nats_client_callback = Arc::new({
+                let nats_client_clone = nats_client_metrics.clone();
+                move || {
+                    nats_client_clone.set_from_client_stats();
+                    Ok(())
+                }
+            });
+            distributed_runtime
+                .metrics_registry
+                .add_update_callback(nats_client_callback);
+        }
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
             .system_health
             .lock()
-            .unwrap()
             .initialize_uptime_gauge(&distributed_runtime)?;
 
         // Handle system status server initialization
         if let Some(cancel_token) = cancel_token {
             // System server is enabled - start both the state and HTTP server
             let host = config.system_host.clone();
-            let port = config.system_port;
+            let port = config.system_port as u16;
 
             // Start system status server (it creates SystemStatusState internally)
             match crate::system_status_server::spawn_system_status_server(
@@ -202,14 +271,24 @@ impl DistributedRuntime {
         self.runtime.primary_token()
     }
 
-    /// The etcd lease all our components will be attached to.
-    /// Not available for static workers.
-    pub fn primary_lease(&self) -> Option<etcd::Lease> {
-        self.etcd_client.as_ref().map(|c| c.primary_lease())
+    // TODO: Don't hand out pointers, instead have methods to use the registry in friendly ways
+    // (without being aware of async locks and so on)
+    pub fn component_registry(&self) -> &component::Registry {
+        &self.component_registry
+    }
+
+    // TODO: Don't hand out pointers, instead provide system health related services.
+    pub fn system_health(&self) -> Arc<parking_lot::Mutex<SystemHealth>> {
+        self.system_health.clone()
+    }
+
+    pub fn connection_id(&self) -> u64 {
+        self.store.connection_id()
     }
 
     pub fn shutdown(&self) {
         self.runtime.shutdown();
+        self.store.shutdown();
     }
 
     /// Create a [`Namespace`]
@@ -217,29 +296,13 @@ impl DistributedRuntime {
         Namespace::new(self.clone(), name.into(), self.is_static)
     }
 
-    // /// Create a [`Component`]
-    // pub fn component(
-    //     &self,
-    //     name: impl Into<String>,
-    //     namespace: impl Into<String>,
-    // ) -> Result<Component> {
-    //     Ok(ComponentBuilder::from_runtime(self.clone())
-    //         .name(name.into())
-    //         .namespace(namespace.into())
-    //         .build()?)
-    // }
-
-    pub(crate) fn discovery_client(&self, namespace: impl Into<String>) -> DiscoveryClient {
-        DiscoveryClient::new(
-            namespace.into(),
-            self.etcd_client
-                .clone()
-                .expect("Attempt to get discovery_client on static DistributedRuntime"),
-        )
+    /// Returns the discovery interface for service registration and discovery
+    pub fn discovery(&self) -> Arc<dyn Discovery> {
+        self.discovery_client.clone()
     }
 
-    pub(crate) fn service_client(&self) -> ServiceClient {
-        ServiceClient::new(self.nats_client.clone())
+    pub(crate) fn service_client(&self) -> Option<ServiceClient> {
+        self.nats_client().map(|nc| ServiceClient::new(nc.clone()))
     }
 
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
@@ -248,14 +311,14 @@ impl DistributedRuntime {
             .get_or_try_init(async move {
                 let options = tcp::server::ServerOptions::default();
                 let server = tcp::server::TcpStreamServer::new(options).await?;
-                OK(server)
+                Ok::<_, PipelineError>(server)
             })
             .await?
             .clone())
     }
 
-    pub fn nats_client(&self) -> nats::Client {
-        self.nats_client.clone()
+    pub fn nats_client(&self) -> Option<&nats::Client> {
+        self.nats_client.as_ref()
     }
 
     /// Get system status server information if available
@@ -266,8 +329,17 @@ impl DistributedRuntime {
     }
 
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
+    //
+    // Try to use `store()` instead of this. Only use this if you have not been able to migrate
+    // yet, or if you require etcd-specific features like distributed locking (rare).
     pub fn etcd_client(&self) -> Option<etcd::Client> {
         self.etcd_client.clone()
+    }
+
+    /// An interface to store things. Will eventually replace `etcd_client`.
+    /// Currently does key-value, but will grow to include whatever we need to store.
+    pub fn store(&self) -> &KeyValueStoreManager {
+        &self.store
     }
 
     pub fn child_token(&self) -> CancellationToken {
@@ -281,62 +353,11 @@ impl DistributedRuntime {
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
     }
-
-    /// Add a Prometheus metric to a specific hierarchy's registry. Note that it is possible
-    /// to register the same metric name multiple times, as long as the labels are different.
-    pub fn add_prometheus_metric(
-        &self,
-        hierarchy: &str,
-        prometheus_metric: Box<dyn prometheus::core::Collector>,
-    ) -> anyhow::Result<()> {
-        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
-        let entry = registries.entry(hierarchy.to_string()).or_default();
-
-        // Try to register the metric
-        entry
-            .prometheus_registry
-            .register(prometheus_metric)
-            .map_err(|e| e.into())
-    }
-
-    /// Add a callback function to metrics registries for the given hierarchies
-    pub fn register_metrics_callback(&self, hierarchies: Vec<String>, callback: RuntimeCallback) {
-        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
-        for hierarchy in hierarchies {
-            registries
-                .entry(hierarchy)
-                .or_default()
-                .add_callback(callback.clone());
-        }
-    }
-
-    /// Execute all callbacks for a given hierarchy key and return their results
-    pub fn execute_metrics_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
-        // Clone callbacks while holding read lock (fast operation)
-        let callbacks = {
-            let registries = self.hierarchy_to_metricsregistry.read().unwrap();
-            registries
-                .get(hierarchy)
-                .map(|entry| entry.runtime_callbacks.clone())
-        }; // Read lock released here
-
-        // Execute callbacks without holding the lock
-        match callbacks {
-            Some(callbacks) => callbacks.iter().map(|callback| callback()).collect(),
-            None => Vec::new(),
-        }
-    }
-
-    /// Get all registered hierarchy keys. Private because it is only used for testing.
-    fn get_registered_hierarchies(&self) -> Vec<String> {
-        let registries = self.hierarchy_to_metricsregistry.read().unwrap();
-        registries.keys().cloned().collect()
-    }
 }
 
 #[derive(Dissolve)]
 pub struct DistributedConfig {
-    pub etcd_config: etcd::ClientOptions,
+    pub store_backend: KeyValueStoreSelect,
     pub nats_config: nats::ClientOptions,
     pub is_static: bool,
 }
@@ -344,22 +365,22 @@ pub struct DistributedConfig {
 impl DistributedConfig {
     pub fn from_settings(is_static: bool) -> DistributedConfig {
         DistributedConfig {
-            etcd_config: etcd::ClientOptions::default(),
+            store_backend: KeyValueStoreSelect::Etcd(Box::default()),
             nats_config: nats::ClientOptions::default(),
             is_static,
         }
     }
 
     pub fn for_cli() -> DistributedConfig {
-        let mut config = DistributedConfig {
-            etcd_config: etcd::ClientOptions::default(),
+        let etcd_config = etcd::ClientOptions {
+            attach_lease: false,
+            ..Default::default()
+        };
+        DistributedConfig {
+            store_backend: KeyValueStoreSelect::Etcd(Box::new(etcd_config)),
             nats_config: nats::ClientOptions::default(),
             is_static: false,
-        };
-
-        config.etcd_config.attach_lease = false;
-
-        config
+        }
     }
 }
 
@@ -394,7 +415,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             // Check that uptime is 50+ ms
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            let uptime = drt.system_health.lock().uptime();
             assert!(
                 uptime >= std::time::Duration::from_millis(50),
                 "Expected uptime to be at least 50ms, but got {:?}",
@@ -412,7 +433,7 @@ mod tests {
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_enabled() {
         // Test uptime with system status server enabled
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("true"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", Some("8081"))], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 
@@ -420,7 +441,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             // Check that uptime is 50+ ms
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            let uptime = drt.system_health.lock().uptime();
             assert!(
                 uptime >= std::time::Duration::from_millis(50),
                 "Expected uptime to be at least 50ms, but got {:?}",

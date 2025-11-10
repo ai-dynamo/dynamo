@@ -25,8 +25,27 @@ namespaceRestriction:
   enabled: false
   # The target namespace to restrict to. If empty, defaults to the release namespace
   targetNamespace: ""
+  # Namespace scope marker lease configuration (used to prevent conflicts when running both cluster-wide and namespace-restricted operators)
+  lease:
+    # Duration before the namespace scope marker lease expires if not renewed (namespace-restricted mode only). When a namespace-restricted operator is running, it creates a lease in its namespace. The cluster-wide operator detects this lease and excludes that namespace from processing. If the namespace operator stops renewing the lease (e.g., crashes), the lease expires and the cluster-wide operator automatically resumes processing that namespace.
+    duration: 30s
+    # Interval for renewing the namespace scope marker lease (namespace-restricted mode only). The namespace-restricted operator renews its lease at this interval to signal it's still running.
+    renewInterval: 10s
 controllerManager:
   tolerations: []
+
+  # Leader election configuration
+  leaderElection:
+    # Leader election ID for cluster-wide coordination
+    # WARNING: All cluster-wide operators must use the SAME ID to prevent split-brain
+    # Different IDs would allow multiple leaders simultaneously
+    id: ""  # If empty, defaults to: dynamo.nvidia.com (shared across all cluster-wide operators)
+
+    # Namespace for leader election leases (only used in cluster-wide mode)
+    # If empty, defaults to kube-system for cluster-wide coordination
+    # All cluster-wide operators should use the SAME namespace for proper leader election
+    namespace: ""
+
   kubeRbacProxy:
     args:
     - --secure-listen-address=0.0.0.0:8443
@@ -53,7 +72,7 @@ controllerManager:
     - --health-probe-bind-address=:8081
     - --metrics-bind-address=127.0.0.1:8080
     - --leader-elect
-    - --leader-election-id=dynamo.nko.nvidia.com
+    - --leader-election-id=dynamo.nvidia.com
     containerSecurityContext:
       allowPrivilegeEscalation: false
       capabilities:
@@ -98,6 +117,11 @@ dynamo:
 
   metrics:
     prometheusEndpoint: ""
+
+  mpiRun:
+    secretName: "mpi-run-ssh-secret"
+    sshKeygen:
+      enabled: true
 
 
 #imagePullSecrets: []

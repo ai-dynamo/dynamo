@@ -6,13 +6,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::*;
 use crate::SystemHealth;
 use crate::config::HealthStatus;
-use crate::logging::TraceParent;
+use crate::logging::make_handle_payload_span;
 use crate::protocols::LeaseId;
 use anyhow::Result;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -39,7 +39,7 @@ impl PushEndpoint {
         namespace: String,
         component_name: String,
         endpoint_name: String,
-        instance_id: i64,
+        instance_id: u64,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
         let mut endpoint = endpoint;
@@ -52,7 +52,6 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .unwrap()
             .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::Ready);
 
         loop {
@@ -94,33 +93,23 @@ impl PushEndpoint {
                 let notify_clone = notify.clone();
 
                 // Handle headers here for tracing
-
-                let mut traceparent = TraceParent::default();
-
-                if let Some(headers) = req.message.headers.as_ref() {
-                    traceparent = TraceParent::from_headers(headers);
-                }
+                let span = if let Some(headers) = req.message.headers.as_ref() {
+                    make_handle_payload_span(
+                        headers,
+                        component_name.as_ref(),
+                        endpoint_name.as_ref(),
+                        namespace.as_ref(),
+                        instance_id,
+                    )
+                } else {
+                    tracing::info_span!("handle_payload")
+                };
 
                 tokio::spawn(async move {
                     tracing::trace!(instance_id, "handling new request");
                     let result = ingress
                         .handle_payload(req.message.payload)
-                        .instrument(
-                            // Create span with trace ids as set
-                            // in headers.
-                            tracing::info_span!(
-                                "handle_payload",
-                                component = component_name.as_ref(),
-                                endpoint = endpoint_name.as_ref(),
-                                namespace = namespace.as_ref(),
-                                instance_id = instance_id,
-                                trace_id = traceparent.trace_id,
-                                parent_id = traceparent.parent_id,
-                                x_request_id = traceparent.x_request_id,
-                                x_dynamo_request_id = traceparent.x_dynamo_request_id,
-                                tracestate = traceparent.tracestate
-                            ),
-                        )
+                        .instrument(span)
                         .await;
                     match result {
                         Ok(_) => {
@@ -142,7 +131,6 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .unwrap()
             .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::NotReady);
 
         // await for all inflight requests to complete if graceful shutdown

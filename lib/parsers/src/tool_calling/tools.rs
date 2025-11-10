@@ -7,7 +7,7 @@ pub use super::parsers::detect_and_parse_tool_call;
 /// Try parsing a string as a structured tool call, for aggregation usage.
 ///
 /// If successful, returns a `ChatCompletionMessageToolCall`.
-pub fn try_tool_call_parse_aggregate(
+pub async fn try_tool_call_parse_aggregate(
     message: &str,
     parser_str: Option<&str>,
 ) -> anyhow::Result<(
@@ -19,7 +19,7 @@ pub fn try_tool_call_parse_aggregate(
     } else {
         tracing::info!("Using tool parser: {:?}", parser_str);
     }
-    let (parsed, content) = detect_and_parse_tool_call(message, parser_str)?;
+    let (parsed, content) = detect_and_parse_tool_call(message, parser_str).await?;
     if parsed.is_empty() {
         return Ok((vec![], content));
     }
@@ -44,14 +44,14 @@ pub fn try_tool_call_parse_aggregate(
 /// Try parsing a string as a structured tool call, for streaming (delta) usage.
 ///
 /// If successful, returns a `ChatCompletionMessageToolCallChunk`.
-pub fn try_tool_call_parse_stream(
+pub async fn try_tool_call_parse_stream(
     message: &str,
     parser_str: Option<&str>,
 ) -> anyhow::Result<(
     Vec<dynamo_async_openai::types::ChatCompletionMessageToolCallChunk>,
     Option<String>,
 )> {
-    let (parsed, content) = detect_and_parse_tool_call(message, parser_str)?;
+    let (parsed, content) = detect_and_parse_tool_call(message, parser_str).await?;
     if parsed.is_empty() {
         return Ok((vec![], content));
     }

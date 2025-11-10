@@ -17,6 +17,7 @@ default = []
 integration = []
 testing-etcd = [] # Tests that require an active ETCD server
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
+compute-validation = [] # Enable validation and timing for compute macros
 
 [dependencies]
 # Use workspace dependencies where available
@@ -35,6 +36,7 @@ either = { workspace = true }
 etcd-client = { workspace = true }
 futures = { workspace = true }
 humantime = { workspace = true }
+parking_lot = { workspace = true }
 prometheus = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
@@ -45,6 +47,10 @@ tokio-util = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
@@ -57,17 +63,21 @@ bincode = { version = "1" }
 console-subscriber = { version = "0.4", optional = true }
 educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
+inotify = { version = "0.11" }
 local-ip-address = { version = "0.6.3" }
 log = { version = "0.4" }
 nid = { version = "3.0.0", features = ["serde"] }
 nix = { version = "0.29", features = ["signal"] }
 nuid = { version = "0.5" }
 once_cell = { version = "1" }
+rayon = { version = "1.10" }
 regex = { version = "1" }
 socket2 = { version = "0.5.8" }
+tokio-rayon = { version = "2.1" }
 
 [dev-dependencies]
 assert_matches = { version = "1.5.0" }
+criterion = { version = "0.5", features = ["async_tokio"] }
 env_logger = { version = "0.11" }
 reqwest = { workspace = true }
 rstest = { version = "0.23.0" }
@@ -75,3 +85,7 @@ temp-env = { version = "0.3.6" , features=["async_closure"] }
 stdio-override = {version= "0.2.0"}
 jsonschema = {version = "0.17"}
 tempfile = { workspace = true }
+
+[[bench]]
+name = "compute_pool_overhead"
+harness = false

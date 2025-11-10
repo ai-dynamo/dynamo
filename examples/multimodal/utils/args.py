@@ -1,26 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import argparse
-import asyncio
-import json
 import logging
 import os
 import socket
 import sys
-import time
 from typing import Callable, List, Optional, Tuple
 
 from vllm.config import KVTransferConfig
@@ -41,7 +26,6 @@ class Config:
     component: str
     endpoint: str
     kv_port: Optional[int] = None
-    side_channel_port: Optional[int] = None
 
     # mirror vLLM
     model: str
@@ -126,101 +110,45 @@ def base_parse_args(
     return args, config
 
 
-async def allocate_and_reserve_port(
-    namespace,
-    etcd_client,
-    worker_id: str,
-    reason: str,
-    max_attempts: int = 100,
-) -> int:
-    """
-    Get an OS-assigned port and atomically reserve it in ETCD.
-    Retries until successful or max_attempts reached.
-
-    Args:
-        max_attempts: Maximum number of ports to try (default: 100)
-
-    Raises:
-        RuntimeError: If unable to reserve a port within max_attempts
-        OSError: If unable to create sockets (system resource issues)
-    """
-
-    node_name = socket.gethostname()
-
-    for attempt in range(1, max_attempts + 1):
-        # Hold socket open just long enough to reserve in ETCD
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("", 0))
-            port = sock.getsockname()[1]
-
-            # Reserve in ETCD while holding the socket
-            key = f"dyn://{namespace}/ports/{node_name}/{port}"
-            value = {
-                "worker_id": worker_id,
-                "reason": reason,
-                "reserved_at": time.time(),
-                "pid": os.getpid(),
-            }
-
-            try:
-                await etcd_client.kv_create(
-                    key=key,
-                    value=json.dumps(value).encode(),
-                    lease_id=etcd_client.primary_lease_id(),
-                )
-                logger.debug(f"Reserved OS-assigned port {port} for {worker_id}")
-                return port
-
-            except Exception as e:
-                logger.debug(
-                    f"Port {port} on {node_name} was already reserved (attempt {attempt}): {e}"
-                )
-
-        if attempt < max_attempts:
-            await asyncio.sleep(0.01)
-
-    raise RuntimeError(
-        f"Failed to allocate and reserve a port after {max_attempts} attempts"
-    )
+def get_kv_port() -> int:
+    """Get KV events port from environment or default."""
+    return int(os.getenv("DYN_VLLM_KV_EVENT_PORT", "20080"))
 
 
-async def configure_ports_with_etcd(config: Config, etcd_client):
-    """Configure all settings that require ETCD, including port allocation and vLLM overrides."""
+def ensure_side_channel_host():
+    """Ensure the NIXL side-channel host is available without overriding user settings."""
+    existing_host = os.getenv("VLLM_NIXL_SIDE_CHANNEL_HOST")
+    if existing_host:
+        logger.debug(
+            "Preserving existing VLLM_NIXL_SIDE_CHANNEL_HOST=%s", existing_host
+        )
+        return
 
-    # First, allocate ports
-    dp_rank = config.engine_args.data_parallel_rank or 0
-    worker_id = f"vllm-{config.component}-dp{dp_rank}"
+    try:
+        host_name = socket.gethostname()
+        host_ip = socket.gethostbyname(host_name)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
+            test_socket.bind((host_ip, 0))
+        os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_ip
+        logger.debug("Set VLLM_NIXL_SIDE_CHANNEL_HOST to %s", host_ip)
+    except (socket.error, socket.gaierror):
+        logger.warning("Failed to get hostname, falling back to 127.0.0.1")
+        os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = "127.0.0.1"
 
-    # Allocate KV events port
-    kv_port = await allocate_and_reserve_port(
-        namespace=config.namespace,
-        etcd_client=etcd_client,
-        worker_id=f"{worker_id}",
-        reason="zmq_kv_event_port",
-    )
 
-    # Allocate side channel port
-    side_channel_port = await allocate_and_reserve_port(
-        namespace=config.namespace,
-        etcd_client=etcd_client,
-        worker_id=f"{worker_id}",
-        reason="nixl_side_channel_port",
-    )
+def configure_ports(config: Config):
+    """Configure port settings from dedicated environment overrides."""
 
-    # Update config with allocated ports
-    config.kv_port = kv_port
-    config.side_channel_port = side_channel_port
+    # Always set kv_port as it's used by overwrite_args regardless of prefix caching
+    config.kv_port = get_kv_port()
+
+    ensure_side_channel_host()
 
 
 def overwrite_args(config):
     """Set vLLM defaults for Dynamo."""
-    assert (
-        config.kv_port is not None
-    ), "Must set the kv_port, use configure_ports_with_etcd"
-    assert (
-        config.side_channel_port is not None
-    ), "Must set the side_channel_port, use configure_ports_with_etcd"
+    if config.engine_args.enable_prefix_caching:
+        assert config.kv_port is not None, "Must set the kv_port, use configure_ports"
 
     dp_rank = config.engine_args.data_parallel_rank or 0
 
@@ -242,8 +170,6 @@ def overwrite_args(config):
         ),
     }
 
-    set_side_channel_host_and_port(config)
-
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():
         if hasattr(config.engine_args, key):
@@ -251,25 +177,3 @@ def overwrite_args(config):
             logger.debug(f" engine_args.{key} = {value}")
         else:
             raise ValueError(f"{key} not found in AsyncEngineArgs from vLLM.")
-
-
-def set_side_channel_host_and_port(config: Config, hostname: Optional[str] = None):
-    """vLLM V1 NixlConnector creates a side channel to exchange metadata with other NIXL connectors.
-    This sets the port number for the side channel.
-    """
-    if hostname is None:
-        hostname = socket.gethostname()
-        # Test if hostname is usable by attempting to bind to it
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
-                test_socket.bind((hostname, 0))
-        except (socket.error, socket.gaierror):
-            # If hostname is not usable, fall back to localhost
-            logger.warning(
-                f"Hostname '{hostname}' is not usable, falling back to '127.0.0.1'"
-            )
-            hostname = "127.0.0.1"
-
-    os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = hostname
-    os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(config.side_channel_port)
-    logger.debug(f"Set NIXL side channel to {hostname}:{config.side_channel_port}")

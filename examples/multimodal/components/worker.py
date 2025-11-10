@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import argparse
 import asyncio
@@ -40,7 +28,7 @@ from publisher import StatLoggerFactory
 from utils.args import (
     Config,
     base_parse_args,
-    configure_ports_with_etcd,
+    configure_ports,
     overwrite_args,
     parse_endpoint,
 )
@@ -175,7 +163,7 @@ class VllmBaseWorker:
         ).replace("*", "127.0.0.1")
 
         zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=endpoint.lease_id(),
+            worker_id=endpoint.connection_id(),
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
         )
@@ -278,21 +266,19 @@ class VllmPDWorker(VllmBaseWorker):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
-        embeddings, descriptor = None, None
-
-        # Process embeddings using the connector
-        # Create a descriptor based on the embedding shape.
-        embeddings = torch.empty(
-            request.embeddings_shape,
-            dtype=self.EMBEDDINGS_DTYPE,
-            device=self.EMBEDDINGS_DEVICE,
-        )
-        descriptor = connect.Descriptor(embeddings)
-
         if (
             request.multimodal_input.image_url is None
             and request.multimodal_input.video_url is None
         ):
+            # Process embeddings using the connector
+            # Create a descriptor based on the embedding shape.
+            embeddings = torch.empty(
+                request.embeddings_shape,
+                dtype=self.EMBEDDINGS_DTYPE,
+                device=self.EMBEDDINGS_DEVICE,
+            )
+            descriptor = connect.Descriptor(embeddings)
+
             if descriptor is None:
                 raise RuntimeError(
                     "Descriptor is None in PD worker - cannot process embeddings"
@@ -432,8 +418,7 @@ async def worker(runtime: DistributedRuntime):
     args, config = VllmBaseWorker.parse_args()
 
     # vLLM config overwrites
-    etcd_client = runtime.etcd_client()
-    await configure_ports_with_etcd(config, etcd_client)
+    configure_ports(config)
     overwrite_args(config)
     await init(runtime, args, config)
 
