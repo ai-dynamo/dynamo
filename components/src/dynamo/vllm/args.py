@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import add_config_dump_args, register_encoder
@@ -276,12 +276,8 @@ def parse_args() -> Config:
     )
     has_connector_flag = args.connector is not None
 
-    if has_kv_transfer_config and has_connector_flag:
-        raise ValueError(
-            "Cannot specify both --kv-transfer-config and --connector flags"
-        )
-
-    if has_connector_flag:
+    # if a specific --kv_transfer_config is passed, ignore the --connector handling
+    if has_connector_flag and not has_kv_transfer_config:
         normalized = [c.lower() for c in args.connector]
 
         invalid = [c for c in normalized if c not in VALID_CONNECTORS]

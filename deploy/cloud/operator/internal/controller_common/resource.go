@@ -415,16 +415,8 @@ func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequiremen
 			}
 			currentResources.Limits[corev1.ResourceMemory] = q
 		}
-		if resources.Limits.GPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.GPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits gpu quantity: %w", err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)] = q
-		}
+
+		hasCustomGPU := false
 		for k, v := range resources.Limits.Custom {
 			q, err := resource.ParseQuantity(v)
 			if err != nil {
@@ -433,7 +425,26 @@ func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequiremen
 			if currentResources.Limits == nil {
 				currentResources.Limits = make(corev1.ResourceList)
 			}
-			currentResources.Limits[corev1.ResourceName(k)] = q
+			if consts.IsCustomGPU(k) {
+				// Only first custom GPU is set
+				if !hasCustomGPU {
+					currentResources.Limits[corev1.ResourceName(k)] = q
+					hasCustomGPU = true
+				}
+			} else {
+				currentResources.Limits[corev1.ResourceName(k)] = q
+			}
+		}
+
+		if resources.Limits.GPU != "" && !hasCustomGPU {
+			q, err := resource.ParseQuantity(resources.Limits.GPU)
+			if err != nil {
+				return nil, fmt.Errorf("parse limits gpu quantity: %w", err)
+			}
+			if currentResources.Limits == nil {
+				currentResources.Limits = make(corev1.ResourceList)
+			}
+			currentResources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)] = q
 		}
 	}
 	if resources.Requests != nil {
