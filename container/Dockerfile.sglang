@@ -187,6 +187,17 @@ RUN git clone --depth 1 --branch ${GDRCOPY_COMMIT} https://github.com/NVIDIA/gdr
 # Fix DeepEP IBGDA symlink
 RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
 
+# Create dynamo user EARLY - before copying files, with group 0 for OpenShift compatibility
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -m -s /bin/bash -g 0 dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && mkdir -p /workspace /home/dynamo/.cache /opt/dynamo \
+    && chown -R dynamo: /sgl-workspace /workspace /home/dynamo /opt/dynamo \
+    && chmod -R g+w /sgl-workspace /workspace /home/dynamo/.cache /opt/dynamo
+
+USER dynamo
+ENV HOME=/home/dynamo
+
 # Install SGLang (requires CUDA 12.8.1 or 12.9.1)
 RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.3 setuptools==80.9.0 wheel==0.45.1 html5lib==1.1 six==1.17.0 \
     && git clone --depth 1 --branch v${SGLANG_COMMIT} https://github.com/sgl-project/sglang.git \
@@ -202,7 +213,7 @@ RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.3 setuptool
     && FLASHINFER_LOGGING_LEVEL=warning python3 -m flashinfer --download-cubin
 
 # Download and extract NVSHMEM source, clone DeepEP (use Tom's fork for GB200)
-RUN --mount=type=cache,target=/var/cache/curl \
+RUN --mount=type=cache,target=/var/cache/curl,uid=1000,gid=0 \
     curl --retry 3 --retry-delay 2 -fsSL -o /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz https://developer.download.nvidia.com/compute/redist/nvshmem/${NVSHMEM_VERSION}/source/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
     && tar -xf /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
     && mv nvshmem_src nvshmem \
@@ -345,40 +356,50 @@ COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
 COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
-ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:${HOME}/.local/bin:$PATH
 
 # Install Dynamo wheels from dynamo_base wheelhouse
-COPY benchmarks/ /opt/dynamo/benchmarks/
-COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-RUN pip install \
+COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
+COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+RUN python3 -m pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \
-    && pip install --no-cache . \
+    && python3 -m pip install --no-cache . \
     && cd - \
     && rm -rf /opt/dynamo/benchmarks
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    pip install \
+    python3 -m pip install \
         --no-cache \
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
-## Copy attribution files and launch banner
-COPY ATTRIBUTION* LICENSE /workspace/
-COPY container/launch_message.txt /workspace/launch_message.txt
-RUN sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc
+## Copy attribution files and launch banner with correct ownership
+COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
+COPY --chown=dynamo: container/launch_message.txt /workspace/launch_message.txt
 
-# Copy tests, benchmarks, deploy and components for CI
-COPY tests /workspace/tests
-COPY examples /workspace/examples
-COPY benchmarks /workspace/benchmarks
-COPY deploy /workspace/deploy
-COPY components/ /workspace/components/
+# Setup launch banner in common directory accessible to all users
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
+
+# Setup environment for all users
+USER root
+RUN chmod 755 /opt/dynamo/.launch_screen && \
+    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+USER dynamo
+
+# Copy tests, benchmarks, deploy and components for CI with correct ownership
+COPY --chown=dynamo: tests /workspace/tests
+COPY --chown=dynamo: examples /workspace/examples
+COPY --chown=dynamo: benchmarks /workspace/benchmarks
+COPY --chown=dynamo: deploy /workspace/deploy
+COPY --chown=dynamo: components/ /workspace/components/
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
@@ -412,6 +433,7 @@ RUN mkdir -p /opt/dynamo/venv && \
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
+USER root
 # Install development tools and utilities
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends  \
@@ -450,6 +472,8 @@ RUN apt-get update -y && \
     silversearcher-ag \
     cloc \
     locales \
+    # sudo for dev stage
+    sudo \
     # NVIDIA tools dependencies
     gnupg && \
     echo "deb https://developer.download.nvidia.com/devtools/repos/ubuntu2004/amd64 /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
@@ -469,10 +493,10 @@ RUN curl --retry 3 --retry-delay 2 -LSso /usr/local/bin/clang-format https://git
 
 # Editable install of dynamo
 COPY pyproject.toml README.md hatch_build.py /workspace/
-RUN pip install --no-deps -e .
+RUN python3 -m pip install --no-deps -e .
 
 # Install Python development packages
-RUN pip install --no-cache-dir \
+RUN python3 -m pip install --no-cache-dir \
     maturin[patchelf] \
     pytest \
     black \

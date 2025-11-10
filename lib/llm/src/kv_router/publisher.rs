@@ -1,31 +1,33 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use anyhow::Result;
+use rmp_serde as rmps;
+use serde::Deserialize;
+use serde::Serialize;
+use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use zeromq::{Socket, SocketRecv, SubSocket};
+
+use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
+use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
+use dynamo_runtime::{
+    component::{Component, Namespace},
+    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
+};
+
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT,
     indexer::{RouterEvent, compute_block_hash_for_seq},
     protocols::*,
     scoring::LoadEvent,
 };
-use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
-use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
-use dynamo_runtime::{
-    Result,
-    component::{Component, Namespace},
-    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
-};
-use std::sync::{Arc, OnceLock};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-
-use rmp_serde as rmps;
-use serde::Deserialize;
-use serde::Serialize;
-use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use std::fmt;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
-use zeromq::{Socket, SocketRecv, SubSocket};
 
 // -------------------------------------------------------------------------
 // KV Event Publishers -----------------------------------------------------
@@ -1025,7 +1027,7 @@ mod tests_startup_helpers {
             &self,
             event_name: impl AsRef<str> + Send + Sync,
             event: &(impl serde::Serialize + Send + Sync),
-        ) -> dynamo_runtime::Result<()> {
+        ) -> anyhow::Result<()> {
             let bytes = rmp_serde::to_vec(event).unwrap();
             self.published
                 .lock()
@@ -1038,7 +1040,7 @@ mod tests_startup_helpers {
             &self,
             event_name: impl AsRef<str> + Send + Sync,
             bytes: Vec<u8>,
-        ) -> dynamo_runtime::Result<()> {
+        ) -> anyhow::Result<()> {
             self.published
                 .lock()
                 .unwrap()

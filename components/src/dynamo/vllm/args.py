@@ -58,6 +58,7 @@ class Config:
     multimodal_processor: bool = False
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
+    multimodal_decode_worker: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
     # dump config to file
@@ -148,6 +149,11 @@ def parse_args() -> Config:
         help="Run as multimodal worker component for LLM inference with multimodal data",
     )
     parser.add_argument(
+        "--multimodal-decode-worker",
+        action="store_true",
+        help="Run as multimodal decode worker in disaggregated mode",
+    )
+    parser.add_argument(
         "--multimodal-encode-prefill-worker",
         action="store_true",
         help="Run as unified encode+prefill+decode worker for models requiring integrated image encoding (e.g., Llama 4)",
@@ -201,11 +207,12 @@ def parse_args() -> Config:
         int(bool(args.multimodal_processor))
         + int(bool(args.multimodal_encode_worker))
         + int(bool(args.multimodal_worker))
+        + int(bool(args.multimodal_decode_worker))
         + int(bool(args.multimodal_encode_prefill_worker))
     )
     if mm_flags > 1:
         raise ValueError(
-            "Use only one of --multimodal-processor, --multimodal-encode-worker, --multimodal-worker, or --multimodal-encode-prefill-worker"
+            "Use only one of --multimodal-processor, --multimodal-encode-worker, --multimodal-worker, --multimodal-decode-worker, or --multimodal-encode-prefill-worker"
         )
 
     # Set component and endpoint based on worker type
@@ -218,8 +225,14 @@ def parse_args() -> Config:
     elif args.multimodal_encode_prefill_worker:
         config.component = "encoder"
         config.endpoint = "generate"
+    elif args.multimodal_decode_worker:
+        # Uses "decoder" component name because prefill worker connects to "decoder"
+        # (prefill uses "backend" to receive from encoder)
+        config.component = "decoder"
+        config.endpoint = "generate"
     elif args.multimodal_worker and args.is_prefill_worker:
-        config.component = "prefill"
+        # Multimodal prefill worker stays as "backend" to maintain encoder connection
+        config.component = "backend"
         config.endpoint = "generate"
     elif args.is_prefill_worker:
         config.component = "prefill"
@@ -238,6 +251,7 @@ def parse_args() -> Config:
     config.multimodal_processor = args.multimodal_processor
     config.multimodal_encode_worker = args.multimodal_encode_worker
     config.multimodal_worker = args.multimodal_worker
+    config.multimodal_decode_worker = args.multimodal_decode_worker
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv

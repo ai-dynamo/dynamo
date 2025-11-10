@@ -39,6 +39,7 @@ use dynamo_llm::{self as llm_rs};
 use dynamo_llm::{entrypoint::RouterConfig, kv_router::KvRouterConfig};
 
 use crate::llm::local_model::ModelRuntimeConfig;
+use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 
 #[pyclass(eq, eq_int)]
 #[derive(Clone, Debug, PartialEq)]
@@ -158,6 +159,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
+    m.add_class::<llm::preprocessor::MediaDecoder>()?;
+    m.add_class::<llm::preprocessor::MediaFetcher>()?;
     m.add_class::<llm::backend::Backend>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
     m.add_class::<llm::kv::KvIndexer>()?;
@@ -214,7 +217,7 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
 /// This is the main way you create a Dynamo worker / backend.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -230,6 +233,8 @@ fn register_llm<'p>(
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
+    media_decoder: Option<MediaDecoder>,
+    media_fetcher: Option<MediaFetcher>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill {
@@ -302,7 +307,9 @@ fn register_llm<'p>(
             .migration_limit(Some(migration_limit))
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
-            .custom_template_path(custom_template_path_owned);
+            .custom_template_path(custom_template_path_owned)
+            .media_decoder(media_decoder.map(|m| m.inner))
+            .media_fetcher(media_fetcher.map(|m| m.inner));
         // Load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
         // Advertise ourself on etcd so ingress can find us
@@ -431,20 +438,20 @@ impl DistributedRuntime {
         // Try to get existing runtime first, create new Worker only if needed
         // This allows multiple DistributedRuntime instances to share the same tokio runtime
         let runtime = rs::Worker::runtime_from_existing()
-            .or_else(|_| {
+            .or_else(|_| -> anyhow::Result<rs::Runtime> {
                 // No existing Worker, create new one
                 let worker = rs::Worker::from_settings()?;
 
                 // Initialize pyo3 bridge (only happens once per process)
-                INIT.get_or_try_init(|| {
+                INIT.get_or_try_init(|| -> anyhow::Result<()> {
                     let primary = worker.tokio_runtime()?;
                     pyo3_async_runtimes::tokio::init_with_runtime(primary).map_err(|e| {
-                        rs::error!("failed to initialize pyo3 static runtime: {:?}", e)
+                        anyhow::anyhow!("failed to initialize pyo3 static runtime: {:?}", e)
                     })?;
-                    rs::OK(())
+                    Ok(())
                 })?;
 
-                rs::OK(worker.runtime().clone())
+                Ok(worker.runtime().clone())
             })
             .map_err(to_pyerr)?;
 

@@ -555,7 +555,7 @@ build_local_dev_with_header() {
     fi
 
     echo "Building new local-dev image from: $dev_base_image"
-    echo "User 'ubuntu' will have UID: $USER_UID, GID: $USER_GID"
+    echo "User 'dynamo' will have UID: $USER_UID, GID: $USER_GID"
 
     # Show the docker command being executed if not in dry-run mode
     if [ -z "$RUN_PREFIX" ]; then

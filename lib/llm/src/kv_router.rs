@@ -9,13 +9,13 @@ use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Component, InstanceSource},
+    discovery::{DiscoveryQuery, watch_and_extract_field},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
     },
-    prelude::*,
     protocols::annotated::Annotated,
-    utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction},
+    traits::DistributedRuntimeProvider,
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ use crate::{
         subscriber::start_kv_router_background,
     },
     local_model::runtime_config::ModelRuntimeConfig,
-    model_card::{self, ModelDeploymentCard},
+    model_card::ModelDeploymentCard,
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
 };
@@ -233,22 +233,20 @@ impl KvRouter {
             }
         };
 
-        // Create runtime config watcher using the generic etcd watcher
-        // TODO: Migrate to discovery_client() once it exposes kv_get_and_watch_prefix functionality
-        let etcd_client = component
-            .drt()
-            .etcd_client()
-            .expect("Cannot KV route without etcd client");
-
-        let runtime_configs_watcher = watch_prefix_with_extraction(
-            etcd_client,
-            &format!("{}/{}", model_card::ROOT_PATH, component.path()),
-            key_extractors::lease_id,
-            |card: ModelDeploymentCard| Some(card.runtime_config),
-            cancellation_token.clone(),
-        )
-        .await?;
-        let runtime_configs_rx = runtime_configs_watcher.receiver();
+        // Watch for runtime config updates via discovery interface
+        let discovery = component.drt().discovery();
+        let discovery_key = DiscoveryQuery::EndpointModels {
+            namespace: component.namespace().name().to_string(),
+            component: component.name().to_string(),
+            endpoint: "generate".to_string(),
+        };
+        let discovery_stream = discovery
+            .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+            .await?;
+        let runtime_configs_rx =
+            watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
+                card.runtime_config
+            });
 
         let indexer = if kv_router_config.overlap_score_weight == 0.0 {
             // When overlap_score_weight is zero, we don't need to track prefixes

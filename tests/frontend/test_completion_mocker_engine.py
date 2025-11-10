@@ -165,6 +165,24 @@ def test_completion_string_prompt() -> None:
 @pytest.mark.usefixtures("start_services")
 @pytest.mark.e2e
 @pytest.mark.model(TEST_MODEL)
+def test_completion_empty_array_prompt() -> None:
+    payload: Dict[str, Any] = {
+        "model": TEST_MODEL,
+        "prompt": [],
+        "max_tokens": 2000,
+    }
+
+    response = _send_completion_request(payload)
+
+    assert response.status_code == 400, (
+        f"Completion request should failed with status 400 but got"
+        f"{response.status_code}: {response.text}"
+    )
+
+
+@pytest.mark.usefixtures("start_services")
+@pytest.mark.e2e
+@pytest.mark.model(TEST_MODEL)
 def test_completion_single_element_array_prompt() -> None:
     payload: Dict[str, Any] = {
         "model": TEST_MODEL,
@@ -186,13 +204,25 @@ def test_completion_single_element_array_prompt() -> None:
 def test_completion_multi_element_array_prompt() -> None:
     payload: Dict[str, Any] = {
         "model": TEST_MODEL,
-        "prompt": ["Tell me about Mars", "Tell me about Ceres"],
-        "max_tokens": 2000,
+        "prompt": [
+            "Tell me about Mars",
+            "Tell me about Ceres",
+            "Tell me about Jupiter",
+        ],
+        "max_tokens": 300,
     }
 
     response = _send_completion_request(payload)
+    response_data = response.json()
 
-    # request should fail because we are sending multiple prompts
+    assert response.status_code == 200, (
+        f"Completion request failed with status "
+        f"{response.status_code}: {response.text}"
+    )
+
+    expected_choices = len(payload.get("prompt"))  # type: ignore
+    choices = len(response_data.get("choices", []))
+
     assert (
-        response.status_code == 500
-    ), f"Request should fail with code 500; response:{response.text}"
+        expected_choices == choices
+    ), f"Expected {expected_choices} choices, got {choices}"

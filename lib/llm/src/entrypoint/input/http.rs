@@ -10,7 +10,6 @@ use crate::{
     entrypoint::{self, EngineConfig, input::common},
     http::service::service_v2::{self, HttpService},
     kv_router::KvRouterConfig,
-    model_card,
     namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -19,7 +18,6 @@ use crate::{
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::pipeline::RouterMode;
-use dynamo_runtime::storage::key_value_store::KeyValueStoreManager;
 
 /// Build and run an HTTP service
 pub async fn run(
@@ -69,7 +67,6 @@ pub async fn run(
             // This allows the /health endpoint to query store for active instances
             http_service_builder = http_service_builder.store(distributed_runtime.store().clone());
             let http_service = http_service_builder.build()?;
-            let store = Arc::new(distributed_runtime.store().clone());
 
             let router_config = engine_config.local_model().router_config();
             // Listen for models registering themselves, add them to HTTP service
@@ -84,7 +81,6 @@ pub async fn run(
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
-                store,
                 router_config.router_mode,
                 Some(router_config.kv_router_config),
                 router_config.busy_threshold,
@@ -271,7 +267,6 @@ pub async fn run(
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
-    store: Arc<KeyValueStoreManager>,
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
     busy_threshold: Option<f64>,
@@ -279,16 +274,21 @@ async fn run_watcher(
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
 ) -> anyhow::Result<()> {
-    let cancellation_token = runtime.primary_token();
     let mut watch_obj = ModelWatcher::new(
-        runtime,
+        runtime.clone(),
         model_manager,
         router_mode,
         kv_router_config,
         busy_threshold,
     );
     tracing::debug!("Waiting for remote model");
-    let (_, receiver) = store.watch(model_card::ROOT_PATH, None, cancellation_token);
+    let discovery = runtime.discovery();
+    let discovery_stream = discovery
+        .list_and_watch(
+            dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+            Some(runtime.primary_token()),
+        )
+        .await?;
 
     // Create a channel to receive model type updates
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
@@ -302,9 +302,11 @@ async fn run_watcher(
         }
     });
 
-    // Pass the sender to the watcher
+    // Pass the discovery stream to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(receiver, target_namespace.as_deref()).await;
+        watch_obj
+            .watch(discovery_stream, target_namespace.as_deref())
+            .await;
     });
 
     Ok(())

@@ -60,6 +60,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/etcd"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
@@ -557,6 +558,15 @@ func main() {
 		RBACManager: rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeploymentRequest")
+		os.Exit(1)
+	}
+
+	if err = (&controller.DynamoModelReconciler{
+		Client:         mgr.GetClient(),
+		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
+		EndpointClient: modelendpoint.NewClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoModel")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder
