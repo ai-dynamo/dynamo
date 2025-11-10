@@ -110,7 +110,8 @@ RUN cd /opt/dynamo/wheelhouse/ && \
     # TRTLLM's NIXL installaion doesn't include NIXL python package, so install it from wheelhouse
     uv pip install --system --break-system-packages --no-cache \
         ai_dynamo_runtime-*.whl \
-        ai_dynamo-*.whl &&\
+        ai_dynamo-*.whl \
+        nixl/nixl*.whl &&\
     pip list
 
 # Install benchmarks
