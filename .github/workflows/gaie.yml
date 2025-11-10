@@ -250,6 +250,9 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           cd deploy/cloud/helm/platform/
           helm dep build .
+
+          echo "=== Installing dynamo-platform via Helm ==="
+          set +e
           helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
             --debug \
             --timeout 10m \
@@ -259,6 +262,44 @@ jobs:
             --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
             --set dynamo-operator.controllerManager.manager.image.tag=${{ env.OPERATOR_IMAGE_TAG }} \
             --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+          HELM_STATUS=$?
+          set -e
+
+          if [[ "${HELM_STATUS}" -ne 0 ]]; then
+            echo "Helm install/upgrade of dynamo-platform FAILED with status ${HELM_STATUS}"
+            echo
+            echo "=== Jobs in namespace ${NAMESPACE} ==="
+            kubectl get jobs -n ${NAMESPACE} || true
+
+            echo
+            echo "=== Describe Job dynamo-platform-dynamo-operator-ssh-keygen ==="
+            kubectl describe job dynamo-platform-dynamo-operator-ssh-keygen -n ${NAMESPACE} || true
+
+            echo
+            echo "=== Pods for Job dynamo-platform-dynamo-operator-ssh-keygen ==="
+            kubectl get pods -n ${NAMESPACE} -l job-name=dynamo-platform-dynamo-operator-ssh-keygen -o wide || true
+
+            SSH_POD=$(kubectl get pods -n ${NAMESPACE} -l job-name=dynamo-platform-dynamo-operator-ssh-keygen -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            if [[ -n "${SSH_POD}" ]]; then
+              echo
+              echo "=== describe pod ${SSH_POD} ==="
+              kubectl describe pod "${SSH_POD}" -n ${NAMESPACE} || true
+
+              echo
+              echo "=== logs from ${SSH_POD} (all containers) ==="
+              kubectl logs "${SSH_POD}" -n ${NAMESPACE} --all-containers=true --tail=200 || true
+            else
+              echo "No pods found for Job dynamo-platform-dynamo-operator-ssh-keygen"
+            fi
+
+            echo
+            echo "=== Recent events in namespace ${NAMESPACE} ==="
+            kubectl get events -n ${NAMESPACE} --sort-by=.lastTimestamp | tail -n 50 || true
+
+            exit "${HELM_STATUS}"
+          fi
+
+          echo "Helm install/upgrade of dynamo-platform succeeded."
 
       - name: Configure image pull secrets and deploy vllm graph
         shell: bash
