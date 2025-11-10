@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
-ARG BASE_IMAGE_TAG="25.06-py3"
+ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+ARG BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
+
+ARG PYTORCH_BASE_IMAGE="nvcr.io/nvidia/pytorch"
+ARG PYTORCH_BASE_IMAGE_TAG="25.06-py3"
 ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.9.1-runtime-ubuntu24.04"
@@ -34,33 +37,22 @@ ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
 FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 
 # Copy artifacts from NGC PyTorch image
+FROM ${PYTORCH_BASE_IMAGE}:${PYTORCH_BASE_IMAGE_TAG} AS pytorch_base
+
+##################################################
+########## Framework Builder Stage ##############
+##################################################
+#
+# PURPOSE: Build TensorRT-LLM with root privileges
+#
+# This stage handles TensorRT-LLM installation which requires:
+# - Root access for apt operations (CUDA repos, TensorRT installation)
+# - System-level modifications in install_tensorrt.sh
+# - Virtual environment population with PyTorch and TensorRT-LLM
+#
+# The completed venv is then copied to runtime stage with dynamo ownership
+
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
-
-
-
-##################################################
-########## Runtime Image ########################
-##################################################
-#
-# PURPOSE: Production runtime environment
-#
-# This stage creates a lightweight production-ready image containing:
-# - Pre-compiled TensorRT-LLM and framework dependencies
-# - Dynamo runtime libraries and Python packages
-# - Essential runtime dependencies and configurations
-# - Optimized for inference workloads and deployment
-#
-# Use this stage when you need:
-# - Production deployment of Dynamo with TensorRT-LLM
-# - Minimal runtime footprint without build tools
-# - Ready-to-run inference server environment
-# - Base for custom application containers
-#
-
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
-
-WORKDIR /workspace
-ENV VIRTUAL_ENV=/opt/dynamo/venv
 
 ARG ARCH_ALT
 ARG PYTHON_VERSION
@@ -68,92 +60,26 @@ ARG ENABLE_KVBM
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
-# Install Python, build-essential and python3-dev as apt dependencies
+# Install minimal dependencies needed for TensorRT-LLM installation
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # Build tools (required for JIT kernel compilation)
-        build-essential \
-        g++ \
-        ninja-build \
-        git \
-        git-lfs \
-        # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
         python3-pip \
-        # CUDA/ML libraries
-        libcudnn9-cuda-12 \
-        # Network and communication libraries
-        libzmq3-dev \
-        # RDMA/UCX libraries required to find RDMA devices
-        ibverbs-providers \
-        ibverbs-utils \
-        libibumad3 \
-        libibverbs1 \
-        libnuma1 \
-        librdmacm1 \
-        rdma-core \
-        # OpenMPI dependencies
-        openssh-client \
-        openssh-server \
-        # System utilities
-        ca-certificates \
         curl \
-        jq \
-        wget && \
+        git \
+        git-lfs \
+        ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from framework devel image
-COPY --from=framework /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
-COPY --from=framework /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
-COPY --from=framework /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
-COPY --from=framework /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
-COPY --from=framework /usr/local/cuda/include/ /usr/local/cuda/include/
-COPY --from=framework /usr/local/cuda/nvvm /usr/local/cuda/nvvm
-COPY --from=framework /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-COPY --from=framework /usr/local/cuda/lib64/libcupti* /usr/local/cuda/lib64/
-COPY --from=framework /usr/local/lib/lib* /usr/local/lib/
+# Copy uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-### COPY NATS & ETCD ###
-# Copy nats and etcd from dynamo_base image
-COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
-ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
-
-# Copy UCX from framework image as plugin for NIXL
-# Copy NIXL source from framework image
-# Copy dynamo wheels for gitlab artifacts
-COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
-COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
-ENV PATH=/usr/local/ucx/bin:$PATH
-
-# Copy OpenMPI from framework image
-COPY --from=framework /opt/hpcx/ompi /opt/hpcx/ompi
-# Copy NUMA library from framework image
-COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
-
-ENV DYNAMO_HOME=/workspace
-ENV LD_LIBRARY_PATH=\
-$NIXL_LIB_DIR:\
-$NIXL_PLUGIN_DIR:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-/opt/hpcx/ompi/lib:\
-$LD_LIBRARY_PATH
-ENV PATH="${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
-ENV OPAL_PREFIX=/opt/hpcx/ompi
-
-### VIRTUAL ENVIRONMENT SETUP ###
-
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
-
-# Activate virtual environment
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Copy pytorch installation from NGC PyTorch
 ARG TORCH_VER=2.8.0a0+5228986c39.nv25.6
@@ -167,25 +93,22 @@ ARG PACKAGING_VER=23.2
 ARG FLASH_ATTN_VER=2.7.4.post1
 ARG MPMATH_VER=1.3.0
 
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch-${TORCH_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch-${TORCH_VER}.dist-info
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchgen ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchgen
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision-${TORCHVISION_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision-${TORCHVISION_VER}.dist-info
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision.libs ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision.libs
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/functorch ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/functorch
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/jinja2 ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/jinja2
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/jinja2-${JINJA2_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/jinja2-${JINJA2_VER}.dist-info
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/sympy ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/sympy
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/sympy-${SYMPY_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/sympy-${SYMPY_VER}.dist-info
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn_2_cuda.cpython-*-*-linux-gnu.so ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/triton ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/triton
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
-
-
-ENV ENV=${ENV:-/etc/shinit_v2}
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch-${TORCH_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch-${TORCH_VER}.dist-info
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchgen ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchgen
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision-${TORCHVISION_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision-${TORCHVISION_VER}.dist-info
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision.libs ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision.libs
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/functorch ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/functorch
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/jinja2 ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/jinja2
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/jinja2-${JINJA2_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/jinja2-${JINJA2_VER}.dist-info
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/sympy ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/sympy
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/sympy-${SYMPY_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/sympy-${SYMPY_VER}.dist-info
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn_2_cuda.cpython-*-*-linux-gnu.so ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/triton ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/triton
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
 
 # Install TensorRT-LLM and related dependencies
 ARG HAS_TRTLLM_CONTEXT
@@ -235,12 +158,146 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}"; \
     fi
 
+##################################################
+########## Runtime Image ########################
+##################################################
+#
+# PURPOSE: Production runtime environment
+#
+# This stage creates a lightweight production-ready image containing:
+# - Pre-compiled TensorRT-LLM and framework dependencies
+# - Dynamo runtime libraries and Python packages
+# - Essential runtime dependencies and configurations
+# - Optimized for inference workloads and deployment
+#
+# Use this stage when you need:
+# - Production deployment of Dynamo with TensorRT-LLM
+# - Minimal runtime footprint without build tools
+# - Ready-to-run inference server environment
+# - Base for custom application containers
+#
+
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+
+ARG ARCH_ALT
+ARG PYTHON_VERSION
+
+WORKDIR /workspace
+
+ENV ENV=${ENV:-/etc/shinit_v2}
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
+# Install Python, build-essential and python3-dev as apt dependencies
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # Build tools
+        build-essential \
+        g++ \
+        ninja-build \
+        git \
+        git-lfs \
+        # Python runtime - CRITICAL for virtual environment to work
+        python${PYTHON_VERSION}-dev \
+        python3-pip \
+        # CUDA/ML libraries
+        libcudnn9-cuda-12 \
+        # Network and communication libraries
+        libzmq3-dev \
+        # RDMA/UCX libraries required to find RDMA devices
+        ibverbs-providers \
+        ibverbs-utils \
+        libibumad3 \
+        libibverbs1 \
+        libnuma1 \
+        librdmacm1 \
+        rdma-core \
+        # OpenMPI dependencies
+        openssh-client \
+        openssh-server \
+        # System utilities and dependencies
+        curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from PyTorch base image
+COPY --from=pytorch_base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
+COPY --from=pytorch_base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
+COPY --from=pytorch_base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
+COPY --from=pytorch_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
+COPY --from=pytorch_base /usr/local/cuda/include/ /usr/local/cuda/include/
+COPY --from=pytorch_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
+COPY --from=pytorch_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+COPY --from=pytorch_base /usr/local/cuda/lib64/libcupti* /usr/local/cuda/lib64/
+COPY --from=pytorch_base /usr/local/lib/lib* /usr/local/lib/
+
+# Copy nats and etcd from dynamo_base image
+COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
+
+# Copy OpenMPI from PyTorch base image
+COPY --from=pytorch_base /opt/hpcx/ompi /opt/hpcx/ompi
+# Copy NUMA library from PyTorch base image
+COPY --from=pytorch_base /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
+
+# Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
+COPY --from=pytorch_base /opt/hpcx /opt/hpcx
+# This is needed to make libucc.so visible so pytorch can use it.
+ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
+# Might not need to copy cusparseLt in the future once it's included in DLFW cuda container
+# networkx, packaging, setuptools get overridden by trtllm installation, so not copying them
+# pytorch-triton is copied after trtllm installation.
+COPY --from=pytorch_base /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
+
+# Copy uv to system /bin
+COPY --from=framework /bin/uv /bin/uvx /bin/
+
+# Copy libgomp.so from framework image
+COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
+COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH_ALT}-linux-gnu/
+
+# Create dynamo user with group 0 for OpenShift compatibility
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -m -s /bin/bash -g 0 dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && mkdir -p /home/dynamo/.cache /opt/dynamo \
+    && chown -R dynamo: /workspace /home/dynamo /opt/dynamo \
+    && chmod -R g+w /workspace /home/dynamo/.cache /opt/dynamo
+
+# Switch to dynamo user
+USER dynamo
+ENV HOME=/home/dynamo
+ENV DYNAMO_HOME=/workspace
+
+# Copy UCX from framework image as plugin for NIXL
+# Copy NIXL source from framework image
+# Copy dynamo wheels for gitlab artifacts
+COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo: --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+
+ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
+ENV LD_LIBRARY_PATH=\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+/opt/hpcx/ompi/lib:\
+$LD_LIBRARY_PATH
+ENV OPAL_PREFIX=/opt/hpcx/ompi
+
+# Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage
+COPY --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+
 ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
 ENV LD_LIBRARY_PATH=${TENSORRT_LIB_DIR}:${LD_LIBRARY_PATH}
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
-COPY benchmarks/ /opt/dynamo/benchmarks/
-COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
+COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -261,31 +318,28 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
-# Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
-COPY --from=framework /opt/hpcx /opt/hpcx
-# This is needed to make libucc.so visible so pytorch can use it.
-ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
-# Might not need to copy cusparseLt in the future once it's included in DLFW cuda container
-# networkx, packaging, setuptools get overridden by trtllm installation, so not copying them
-# pytorch-triton is copied after trtllm installation.
-COPY --from=framework /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
+# Copy tests, benchmarks, deploy and components for CI with correct ownership
+COPY --chown=dynamo: tests /workspace/tests
+COPY --chown=dynamo: examples /workspace/examples
+COPY --chown=dynamo: benchmarks /workspace/benchmarks
+COPY --chown=dynamo: deploy /workspace/deploy
+COPY --chown=dynamo: components/ /workspace/components/
+COPY --chown=dynamo: recipes/ /workspace/recipes/
 
-# Copy tests, benchmarks, deploy and components for CI
-COPY tests /workspace/tests
-COPY examples /workspace/examples
-COPY benchmarks /workspace/benchmarks
-COPY deploy /workspace/deploy
-COPY components/ /workspace/components/
-COPY recipes/ /workspace/recipes/
+# Copy attribution files with correct ownership
+COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 
-# Copy attribution files
-COPY ATTRIBUTION* LICENSE /workspace/
-# Copy launch banner
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
-    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc && \
-    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+# Setup launch banner in common directory accessible to all users
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
 
+# Setup environment for all users
+USER root
+RUN chmod 755 /opt/dynamo/.launch_screen && \
+    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+USER dynamo
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
@@ -307,6 +361,9 @@ FROM runtime AS dev
 
 # Don't want ubuntu to be editable, just change uid and gid.
 ARG WORKSPACE_DIR=/workspace
+
+# Switch to root for system package installation
+USER root
 
 # Install utilities as root
 RUN apt-get update -y && \

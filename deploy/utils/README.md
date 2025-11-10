@@ -17,7 +17,7 @@ This includes:
 
 - `setup_benchmarking_resources.sh` — Sets up benchmarking and profiling resources in your existing Dynamo namespace
 - `manifests/`
-  - `pvc.yaml` — PVC `dynamo-pvc` for storing profiler results and configurations
+  - `pvc.yaml` — PVC `dynamo-pvc`
   - `pvc-access-pod.yaml` — short‑lived pod for copying profiler results from the PVC
 - `kubernetes.py` — helper used by tooling to apply/read resources (e.g., access pod for PVC access)
 - `dynamo_deployment.py` — utilities for working with DynamoGraphDeployment resources
@@ -108,15 +108,21 @@ kubectl cp $NAMESPACE/pvc-access-pod:/data/results ./benchmarks/results
 kubectl cp $NAMESPACE/pvc-access-pod:/data/results/benchmark-name ./benchmarks/results/benchmark-name
 ```
 
-**Download profiling results (optional, for local inspection):**
+**Inspect profiling results (optional, for local inspection):**
 
 ```bash
-# Optional: Download profiling data for local analysis
-# The planner reads directly from the PVC, so this is only needed for inspection
-kubectl cp $NAMESPACE/pvc-access-pod:/data ./profiling_data
+# View the generated DGD configuration from profiling
+kubectl get configmap dgdr-output-<dgdr-name> -n $NAMESPACE -o yaml
+
+# View the planner profiling data (JSON format)
+kubectl get configmap planner-profile-data -n $NAMESPACE -o yaml
 ```
 
-> **Note on Profiling Results**: When using DGDR (DynamoGraphDeploymentRequest) for SLA-driven profiling, profiling data is stored in `/data/` on the PVC. The planner component reads this data directly from the PVC, so downloading is **optional** - only needed if you want to inspect the profiling results locally (e.g., view performance plots, check configurations).
+> **Note on Profiling Results**: When using DGDR (DynamoGraphDeploymentRequest) for SLA-driven profiling, profiling data is automatically stored in ConfigMaps:
+> - `dgdr-output-<dgdr-name>`: Contains the generated DynamoGraphDeployment YAML
+> - `planner-profile-data`: Contains profiling performance data in JSON format for the planner
+>
+> The planner component reads this data directly from the mounted ConfigMap, so no PVC is needed.
 
 #### Cleanup Access Pod
 
@@ -131,7 +137,6 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 **Common path patterns in the PVC:**
 - `/data/configs/` - Configuration files (DGD manifests)
 - `/data/results/` - Benchmark results (for download after benchmarking jobs)
-- `/data/` - Profiling data (used directly by planner, typically not downloaded)
 - `/data/benchmarking/` - Benchmarking artifacts
 
 #### Next Steps
