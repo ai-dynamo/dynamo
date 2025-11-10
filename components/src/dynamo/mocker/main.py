@@ -72,7 +72,7 @@ async def launch_workers(args, extra_engine_args_path):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
 
         # Create a separate DistributedRuntime for this worker (on same event loop)
-        runtime = DistributedRuntime(loop, False)
+        runtime = DistributedRuntime(loop, args.store_kv, False)
         runtimes.append(runtime)
 
         # Create EntrypointArgs for this worker

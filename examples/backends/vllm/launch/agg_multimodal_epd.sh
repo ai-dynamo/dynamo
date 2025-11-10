@@ -1,6 +1,17 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# EPD (Encode-Prefill-Decode) multimodal deployment
+#
+# Architecture: 3-component disaggregation
+# - Processor: Python-based preprocessor (bypasses Rust OpenAIPreprocessor)
+# - Encode Worker: Dedicated vision encoder that extracts image embeddings
+# - PD Worker: Standard prefill/decode worker that receives embeddings via NIXL
+#
+# Benefits: Decouples encoding from inference, enables independent scaling
+# For standard single-worker deployment, see agg_multimodal.sh
+
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
@@ -52,17 +63,21 @@ else
     exit 1
 fi
 
-# run ingress
+# Start frontend (HTTP endpoint)
 python -m dynamo.frontend --http-port=8000 &
 
+# To make Qwen2.5-VL fit in A100 40GB, set the following extra arguments
+EXTRA_ARGS=""
+if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
+    EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 2048"
+fi
 
-# run processor
-python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE" &
+# Start processor (Python-based preprocessing, handles prompt templating)
+python -m dynamo.vllm --multimodal-processor --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
 
 # run E/P/D workers
-CUDA_VISIBLE_DEVICES=0 python3 components/encode_worker.py --model $MODEL_NAME &
-CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill --enable-disagg &
-CUDA_VISIBLE_DEVICES=2 python3 components/worker.py --model $MODEL_NAME --worker-type decode --enable-disagg &
+CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --model $MODEL_NAME &
+CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-worker --model $MODEL_NAME $EXTRA_ARGS &
 
 # Wait for all background processes to complete
 wait

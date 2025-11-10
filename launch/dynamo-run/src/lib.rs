@@ -6,10 +6,11 @@ use dynamo_llm::entrypoint::EngineConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_runtime::distributed::DistributedConfig;
+use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
+use dynamo_runtime::transports::nats;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 mod flags;
-use either::Either;
 pub use flags::Flags;
 mod opt;
 pub use dynamo_llm::request_template::RequestTemplate;
@@ -73,14 +74,16 @@ pub async fn run(
     // TODO: old, address this later:
     // If `in=dyn` we want the trtllm/sglang/vllm subprocess to listen on that endpoint.
     // If not, then the endpoint isn't exposed so we let LocalModel invent one.
-    let mut rt = Either::Left(runtime.clone());
     if let Input::Endpoint(path) = &in_opt {
         builder.endpoint_id(Some(path.parse().with_context(|| path.clone())?));
-
-        let dst_config = DistributedConfig::from_settings(flags.static_worker);
-        let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
-        rt = Either::Right(distributed_runtime);
+    }
+    let selected_store: KeyValueStoreSelect = flags.store_kv.parse()?;
+    let dst_config = DistributedConfig {
+        store_backend: selected_store,
+        nats_config: nats::ClientOptions::default(),
+        is_static: flags.static_worker,
     };
+    let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
     if let Some(Output::Static(path)) = &out_opt {
         builder.endpoint_id(Some(path.parse().with_context(|| path.clone())?));
     }
@@ -98,10 +101,16 @@ pub async fn run(
     flags.validate(&in_opt, &out_opt)?;
 
     // Make an engine from the local_model, flags and output.
-    let engine_config = engine_for(out_opt, flags.clone(), local_model, rt.clone()).await?;
+    let engine_config = engine_for(
+        out_opt,
+        flags.clone(),
+        local_model,
+        distributed_runtime.clone(),
+    )
+    .await?;
 
     // Run it from an input
-    dynamo_llm::entrypoint::input::run_input(rt, in_opt, engine_config).await?;
+    dynamo_llm::entrypoint::input::run_input(distributed_runtime, in_opt, engine_config).await?;
 
     Ok(())
 }
@@ -112,7 +121,7 @@ async fn engine_for(
     out_opt: Output,
     flags: Flags,
     local_model: LocalModel,
-    rt: Either<Runtime, DistributedRuntime>,
+    drt: DistributedRuntime,
 ) -> anyhow::Result<EngineConfig> {
     match out_opt {
         Output::Auto => {
@@ -135,10 +144,6 @@ async fn engine_for(
             is_static: flags.static_worker,
         }),
         Output::Mocker => {
-            let Either::Right(drt) = rt else {
-                panic!("Mocker requires a distributed runtime to run.");
-            };
-
             let args = flags.mocker_config();
             let endpoint = local_model.endpoint_id().clone();
 

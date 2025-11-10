@@ -70,7 +70,7 @@ cd $DYNAMO_HOME/examples/backends/vllm
 >
 > # [Experimental] Option 3: Disk cache only (GPU -> Disk direct offloading, bypassing CPU)
 > # NOTE: this option is only experimental and it might not give out the best performance.
-> # NOTE: disk offload filtering is not support when using this option.
+> # NOTE: disk offload filtering is not supported when using this option.
 > export DYN_KVBM_DISK_CACHE_GB=8
 > ```
 >
@@ -102,6 +102,24 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 Alternatively, can use `vllm serve` directly to use KVBM for aggregated serving:
 ```bash
 vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}' Qwen/Qwen3-0.6B
+```
+
+## Troubleshooting
+
+1. Allocating large memory and disk storage can take some time and lead to KVBM worker initialization timeout.
+To avoid it, please set a longer timeout for leader–worker initialization.
+
+```bash
+# 1200 means 1200 seconds timeout
+export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=1200
+```
+
+2. When offloading to disk is enabled, KVBM could fail to start up if fallocate is not supported to create the files.
+To bypass the issue, please use disk zerofill fallback.
+
+```bash
+# Set to true to enable fallback behavior when disk operations fail (e.g. fallocate not available)
+export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true
 ```
 
 ## Enable and View KVBM Metrics

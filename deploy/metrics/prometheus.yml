@@ -41,7 +41,7 @@ scrape_configs:
     static_configs:
       - targets: ['host.docker.internal:8000']  # on the "monitoring" network
 
-  # Launch via: DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 dynamo.<backend> ...
+  # Launch via: DYN_SYSTEM_PORT=8081 dynamo.<backend> ...
   # If you want to update the scrape_interval, you may want to also update component.rs's MAX_DELAY
   - job_name: 'dynamo-backend'
     scrape_interval: 6s
