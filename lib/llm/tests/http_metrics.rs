@@ -295,10 +295,12 @@ mod integration_tests {
     use super::*;
     use dynamo_llm::{
         discovery::ModelWatcher, engines::make_echo_engine, entrypoint::EngineConfig,
-        local_model::LocalModelBuilder, model_card,
+        local_model::LocalModelBuilder,
     };
     use dynamo_runtime::DistributedRuntime;
+    use dynamo_runtime::discovery::DiscoveryQuery;
     use dynamo_runtime::pipeline::RouterMode;
+    use dynamo_runtime::traits::DistributedRuntimeProvider;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -333,7 +335,7 @@ mod integration_tests {
             .build()
             .unwrap();
 
-        // Set up model watcher to discover models from etcd (like production)
+        // Set up model watcher to discover models via discovery interface (like production)
         // This is crucial for the polling task to find model entries
 
         let model_watcher = ModelWatcher::new(
@@ -343,17 +345,19 @@ mod integration_tests {
             None,
             None,
         );
-        // Start watching etcd for model registrations
-        let store = Arc::new(distributed_runtime.store().clone());
-        let (_, receiver) = store.watch(
-            model_card::ROOT_PATH,
-            None,
-            distributed_runtime.primary_token(),
-        );
+        // Start watching for model registrations via discovery interface
+        let discovery = distributed_runtime.discovery();
+        let discovery_stream = discovery
+            .list_and_watch(
+                DiscoveryQuery::AllModels,
+                Some(distributed_runtime.primary_token()),
+            )
+            .await
+            .unwrap();
 
-        // Spawn watcher task to discover models from etcd
+        // Spawn watcher task to discover models
         let _watcher_task = tokio::spawn(async move {
-            model_watcher.watch(receiver, None).await;
+            model_watcher.watch(discovery_stream, None).await;
         });
 
         // Set up the engine following the StaticFull pattern from http.rs
