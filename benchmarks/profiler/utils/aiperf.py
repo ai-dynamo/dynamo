@@ -180,7 +180,7 @@ def benchmark_prefill(
         request_count=request_count,
         warmup_request_count=warmup_request_count,
     )
-    logger.info(f"aiperf cmd: {aiperf_cmd}")
+    logger.debug(f"aiperf cmd: {aiperf_cmd}")
 
     aiperf_process = subprocess.Popen(
         aiperf_cmd,
@@ -191,7 +191,7 @@ def benchmark_prefill(
     stdout, stderr = aiperf_process.communicate()
     if aiperf_process.returncode == 0:
         logger.info("AIperf profiling completed successfully")
-        logger.info(stdout)
+        logger.debug(stdout)
         aiperf_result = get_aiperf_result(aiperf_artifact_dir)
         return aiperf_result
     else:
@@ -344,7 +344,7 @@ def benchmark_decode(
     stdout, stderr = aiperf_process.communicate()
     if aiperf_process.returncode == 0:
         logger.info("AIperf profiling completed successfully")
-        logger.info(stdout)
+        logger.debug(stdout)
         aiperf_result = get_aiperf_result(aiperf_artifact_dir)
         return aiperf_result
     else:

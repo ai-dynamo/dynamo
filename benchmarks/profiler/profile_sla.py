@@ -138,7 +138,7 @@ async def run_profile(args):
         # Log MoE model support
         if args.model_info.is_moe:
             logger.info(
-                "MoE (Mixture of Experts) model profiling, sweeping TEP size for prefill and DEP size for decode"
+                "MoE (Mixture of Experts) model profiling, sweeping TEP/DEP size for prefill and decode"
             )
             assert args.backend in [
                 "sglang"
@@ -148,7 +148,7 @@ async def run_profile(args):
             ), "MoE model is not supported in ai-configurator"
         else:
             logger.info(
-                "Standard dense model profiling, sweeping TP size for both prefill and decode"
+                "Dense model profiling, sweeping TP size for prefill and decode"
             )
 
         config_modifier = CONFIG_MODIFIERS[args.backend]
@@ -158,7 +158,7 @@ async def run_profile(args):
 
         if args.dgd_image:
             config = config_modifier.update_image(config, args.dgd_image)
-            logger.info(f"Using DGD image: {args.dgd_image}")
+            logger.debug(f"Using DGD image: {args.dgd_image}")
 
         profile_num_gpus = [
             2**i
@@ -213,7 +213,7 @@ async def run_profile(args):
                     "Must provide --aic-backend-version when using --use-ai-configurator."
                 )
 
-            logger.info("Will use aiconfigurator to estimate perf.")
+            logger.info("Using aiconfigurator to estimate performance...")
             ai_configurator_perf_estimator = AIConfiguratorPerfEstimator(
                 args.aic_model_name,
                 args.aic_system.lower(),
@@ -223,7 +223,7 @@ async def run_profile(args):
         else:
             if args.aic_system or args.aic_model_name or args.aic_backend_version:
                 logger.warning(
-                    "Will ignore --aic-system, --aic-model-name, and/or --backend-version "
+                    "Ignoring --aic-system, --aic-model-name, and/or --backend-version "
                     "when not using --use-ai-configurator."
                 )
 
@@ -251,7 +251,7 @@ async def run_profile(args):
                     config_modifier,
                     args.num_gpus_per_node,
                 )
-                logger.info(f"Dynamo config: {prefill_config}")
+                logger.debug(f"Dynamo config: {prefill_config}")
 
                 # Work dir includes mapping label (safe chars only)
                 parallel_mapping_tag = (
@@ -270,7 +270,7 @@ async def run_profile(args):
                 if args.dry_run:
                     logger.info("Skipping deployment creation in dry run mode")
                 elif args.use_ai_configurator:
-                    logger.info("Using ai-configurator to estimate prefill latency.")
+                    logger.info("Using ai-configurator to estimate prefill latency")
                     perf_dict = ai_configurator_perf_estimator.estimate_prefill_perf(
                         args.isl,
                         tp_size=mapping.get_tp_size(),
@@ -356,7 +356,7 @@ async def run_profile(args):
                     config_modifier,
                     args.num_gpus_per_node,
                 )
-                logger.info(f"Dynamo config: {decode_config}")
+                logger.debug(f"Dynamo config: {decode_config}")
 
                 parallel_mapping_tag = (
                     mapping.label()
@@ -494,8 +494,8 @@ async def run_profile(args):
 
             # select best parallel mapping for prefill
             if min(prefill_data.ttft) > args.ttft:
-                logger.info(
-                    "No TP size satisfies the TTFT requirement, please try a smaller model or a more powerful GPU SKU"
+                logger.warning(
+                    "No engine configuration satisfies the TTFT requirement, please try a smaller model or more powerful hardware"
                 )
                 selected_prefill_idx = int(np.argmin(np.array(prefill_data.ttft)))
             else:
@@ -515,8 +515,8 @@ async def run_profile(args):
                 logger.error("No decode results produced; skipping recommendations.")
                 return
             if min(decode_data.itl) > args.itl:
-                logger.info(
-                    "No TP size satisfies the ITL requirement, please try a smaller model or a more powerful GPU SKU"
+                logger.warning(
+                    "No engine configuration satisfies the ITL requirement, please try a smaller model or more powerful hardware"
                 )
                 selected_decode_idx = int(np.argmin(np.array(decode_data.itl)))
             else:
@@ -560,7 +560,7 @@ async def run_profile(args):
             config_modifier,
             args.num_gpus_per_node,
         )
-        logger.info(f"Dynamo config: {prefill_config}")
+        logger.debug(f"Dynamo config: {prefill_config}")
 
         work_dir = f"{args.output_dir}/selected_prefill_interpolation"
         os.makedirs(work_dir, exist_ok=True)
@@ -644,7 +644,7 @@ async def run_profile(args):
             config_modifier,
             args.num_gpus_per_node,
         )
-        logger.info(f"Dynamo config: {decode_config}")
+        logger.debug(f"Dynamo config: {decode_config}")
 
         work_dir = f"{args.output_dir}/selected_decode_interpolation"
         os.makedirs(work_dir, exist_ok=True)
@@ -727,7 +727,7 @@ async def run_profile(args):
             is_moe_model=args.model_info.is_moe,
             num_gpus_per_node=args.num_gpus_per_node,
         )
-        logger.info(f"Final DGD config with planner: {config}")
+        logger.debug(f"Final DGD config with planner: {config}")
 
         # save DGD config with planner; support multi-document output when a ConfigMap is included
         with open(f"{args.output_dir}/config_with_planner.yaml", "w") as f:
