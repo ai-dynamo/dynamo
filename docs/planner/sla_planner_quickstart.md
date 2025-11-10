@@ -379,11 +379,16 @@ For advanced use cases, you can manually deploy using the standalone planner tem
 ```bash
 # After profiling completes, profiling data is stored on the PVC at /data
 
-# Optional: Download profiling results for local inspection
-python3 -m deploy.utils.download_pvc_results \
-  --namespace $NAMESPACE \
-  --output-dir ./profiling_data \
-  --folder /data
+# OPTIONAL: Download profiling results for local inspection
+# Create access pod (skip this step if access pod is already running)
+kubectl apply -f deploy/utils/manifests/pvc-access-pod.yaml -n $NAMESPACE
+kubectl wait --for=condition=Ready pod/pvc-access-pod -n $NAMESPACE --timeout=60s
+
+# Download the data
+kubectl cp $NAMESPACE/pvc-access-pod:/data ./profiling_data
+
+# Cleanup
+kubectl delete pod pvc-access-pod -n $NAMESPACE
 
 # Update backend planner manifest as needed, then deploy
 kubectl apply -f examples/backends/<backend>/deploy/disagg_planner.yaml -n $NAMESPACE
