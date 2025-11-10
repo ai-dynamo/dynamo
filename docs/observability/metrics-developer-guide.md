@@ -9,14 +9,13 @@ This guide explains how to create and use custom metrics in Dynamo components us
 
 ## Metrics Exposure
 
-All metrics created via the Dynamo metrics API are automatically exposed on the `/metrics` HTTP endpoint in Prometheus Exposition Format text when the following environment variables are set:
+All metrics created via the Dynamo metrics API are automatically exposed on the `/metrics` HTTP endpoint in Prometheus Exposition Format text when the following environment variable is set:
 
-- `DYN_SYSTEM_ENABLED=true` - Enable the system metrics server
-- `DYN_SYSTEM_PORT=<port>` - Port for the metrics endpoint (default: `8081`)
+- `DYN_SYSTEM_PORT=<port>` - Port for the metrics endpoint (set to positive value to enable, default: `-1` disabled)
 
 Example:
 ```bash
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model <model>
+DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model <model>
 ```
 
 Prometheus Exposition Format text metrics will be available at: `http://localhost:8081/metrics`
@@ -255,8 +254,8 @@ Example scripts: [lib/bindings/python/examples/metrics/](../../lib/bindings/pyth
 
 ```bash
 cd ~/dynamo/lib/bindings/python/examples/metrics
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 ./server_with_loop.py
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 ./server_with_callback.py
+DYN_SYSTEM_PORT=8081 ./server_with_loop.py
+DYN_SYSTEM_PORT=8081 ./server_with_callback.py
 ```
 
 ---

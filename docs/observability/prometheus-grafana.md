@@ -21,8 +21,7 @@ This guide shows how to set up Prometheus and Grafana for visualizing Dynamo met
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_SYSTEM_ENABLED` | Enable system metrics/health server | `false` | `true` |
-| `DYN_SYSTEM_PORT` | System metrics/health port | `8081` | `9090` |
+| `DYN_SYSTEM_PORT` | System metrics/health port | `-1` (disabled) | `8081` |
 
 ## Getting Started Quickly
 
@@ -40,9 +39,8 @@ Start frontend and worker (a simple single GPU example):
 # Start frontend in one process
 python -m dynamo.frontend --http-port 8000 &
 
-# Start vLLM worker with metrics enabled in another process
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
-  python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager
+# Start vLLM worker with metrics enabled on port 8081
+DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager
 ```
 
 After the workers are running, send a few test requests to populate metrics in the system:

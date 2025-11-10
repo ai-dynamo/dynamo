@@ -15,7 +15,6 @@ orchestration frameworks such as Kubernetes.
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_SYSTEM_ENABLED` | Enable system status server | `false` | `true` |
 | `DYN_SYSTEM_PORT` | System status server port | `8081` | `9090` |
 | `DYN_SYSTEM_STARTING_HEALTH_STATUS` | Initial health status | `notready` | `ready`, `notready` |
 | `DYN_SYSTEM_HEALTH_PATH` | Custom health endpoint path | `/health` | `/custom/health` |
@@ -27,13 +26,11 @@ orchestration frameworks such as Kubernetes.
 Enable health checks and query endpoints:
 
 ```bash
-# Enable system status server
-export DYN_SYSTEM_ENABLED=true
-export DYN_SYSTEM_PORT=8081
-
 # Start your Dynamo components
 python -m dynamo.frontend --http-port 8000 &
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
+
+# Enable system status server on port 8081
+DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
 ```
 
 Check health status:

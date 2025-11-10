@@ -17,8 +17,7 @@ Dynamo provides built-in metrics capabilities through the Dynamo metrics API, wh
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_SYSTEM_ENABLED` | Enable system metrics/health server | `false` | `true` |
-| `DYN_SYSTEM_PORT` | System metrics/health port | `8081` | `9090` |
+| `DYN_SYSTEM_PORT` | System metrics/health port | `-1` (disabled) | `8081` |
 
 ## Getting Started Quickly
 
@@ -36,11 +35,8 @@ Launch a frontend and vLLM backend to test metrics:
 ```bash
 $ python -m dynamo.frontend --http-port 8000
 
-# Enable system metrics server
-export DYN_SYSTEM_ENABLED=true
-export DYN_SYSTEM_PORT=8081
-
-$ python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
+# Enable system metrics server on port 8081
+$ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
    --enforce-eager --no-enable-prefix-caching --max-num-seqs 3
 ```
 
