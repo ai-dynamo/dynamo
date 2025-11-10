@@ -241,9 +241,7 @@ async fn register_model(mut config: ModelConfig) -> anyhow::Result<()> {
     // Check if this is a LoRA registration
     if let (Some(lora_name), Some(base_path)) = (&config.lora_name, &config.base_path) {
         // LoRA registration path
-        use dynamo_runtime::slug::Slug;
-        use dynamo_runtime::storage::key_value_store::Key;
-        use llm_rs::model_card::{ModelDeploymentCard, ROOT_PATH};
+        use llm_rs::model_card::ModelDeploymentCard;
 
         // Resolve base model path
         let base_model_path = resolve_model_path(base_path).await?;
@@ -264,20 +262,17 @@ async fn register_model(mut config: ModelConfig) -> anyhow::Result<()> {
             card.user_data = Some(data);
         }
 
-        // Construct hierarchical key: {namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
-        let card_store = config.endpoint.inner.drt().store();
-        let lora_slug = Slug::slugify(lora_name);
-        let key_path = format!(
-            "{}/{}/{}/{}/{}",
-            config.endpoint.inner.component().namespace().name(),
-            config.endpoint.inner.component().name(),
-            config.endpoint.inner.name(),
-            card_store.connection_id(),
-            lora_slug
-        );
-        let key = Key::from_raw(key_path);
+        // Register the LoRA model through the discovery client
+        let discovery = config.endpoint.inner.drt().discovery();
 
-        card_store.publish(ROOT_PATH, None, &key, &mut card).await?;
+        let discovery_spec = dynamo_runtime::discovery::DiscoverySpec::from_model(
+            config.endpoint.inner.component().namespace().name().to_string(),
+            config.endpoint.inner.component().name().to_string(),
+            config.endpoint.inner.name().to_string(),
+            &card,
+        )?;
+
+        discovery.register(discovery_spec).await?;
     } else {
         // Base model registration path
         let model_path = config
@@ -542,27 +537,7 @@ fn register_llm<'p>(
             }
         };
 
-        let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
-        builder
-            .model_path(model_path)
-            .model_name(model_name)
-            .context_length(context_length)
-            .kv_cache_block_size(kv_cache_block_size)
-            .router_config(Some(router_config))
-            .migration_limit(Some(migration_limit))
-            .runtime_config(runtime_config.unwrap_or_default().inner)
-            .user_data(user_data_json)
-            .custom_template_path(custom_template_path_owned)
-            .media_decoder(media_decoder.map(|m| m.inner))
-            .media_fetcher(media_fetcher.map(|m| m.inner));
-        // Load the ModelDeploymentCard
-        let mut local_model = builder.build().await.map_err(to_pyerr)?;
-        // Advertise ourself so ingress can find us
-        local_model
-            .attach(&endpoint.inner, model_type_obj, model_input)
-            .await
-            .map_err(to_pyerr)?;
-
+        result.map_err(to_pyerr)?;
         Ok(())
     })
 }

@@ -21,8 +21,8 @@ use dynamo_runtime::{
 use crate::{
     backend::Backend,
     entrypoint::{self, RouterConfig},
-    kv_router::PrefillRouter,
-    model_card::ModelDeploymentCard,
+    kv_router::{KvRouterConfig, PrefillRouter},
+    model_card::{ModelDeploymentCard, ROOT_PATH},
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
     protocols::{
@@ -650,7 +650,7 @@ impl ModelWatcher {
 ///
 /// Extract the EndpointId and instance_id (worker connection ID, always 4th part) from that.
 fn key_extract(s: &str) -> anyhow::Result<(EndpointId, String)> {
-    if !s.starts_with(model_card::ROOT_PATH) {
+    if !s.starts_with(ROOT_PATH) {
         anyhow::bail!("Invalid format: expected model card ROOT_PATH segment in {s}");
     }
     let parts: Vec<&str> = s.split('/').collect();
