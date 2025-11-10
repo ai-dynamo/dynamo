@@ -75,10 +75,14 @@ if [ "$mode" = "prefill" ]; then
     # we have to install pre-release cutedsl for a integer overflow fix
     python3 -m pip install --no-cache-dir --upgrade --pre nvidia-cutlass-dsl
 
+    # tmp working branch for pipecleaning
+    cd /sgl-workspace/sglang
+    git fetch --depth 1 origin ishan/fp4-fixes
+    git checkout -B ishan/fp4-fixes FETCH_HEAD 
+
     # set your own cache variables here
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
     export SGLANG_DG_CACHE_DIR="/configs/dg-10212025"
-    export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
 
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN=1 \
@@ -147,10 +151,14 @@ elif [ "$mode" = "decode" ]; then
     if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix=" "; fi
     if [[ -n "${DUMP_CONFIG_PATH}" ]]; then command_suffix="${command_suffix} --dump-config-to ${DUMP_CONFIG_PATH}"; fi
 
+    # tmp working branch for pipecleaning
+    cd /sgl-workspace/sglang
+    git fetch --depth 1 origin ishan/fp4-fixes
+    git checkout -B ishan/fp4-fixes FETCH_HEAD 
+
     # set your own cache variables here
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
     export SGLANG_DG_CACHE_DIR="/configs/dg-10212025"
-    export FLASHINFER_WORKSPACE_BASE="/configs/flashinfer-cache"
 
     # we have to install pre-release cutedsl for a integer overflow fix
     python3 -m pip install --no-cache-dir --upgrade --pre nvidia-cutlass-dsl
@@ -164,7 +172,7 @@ elif [ "$mode" = "decode" ]; then
     SGLANG_DISAGGREGATION_WAITING_TIMEOUT=100000 \
     SGLANG_HACK_SEQ_BOOTSTRAP_ROOM=1 \
     SGLANG_MOONCAKE_CUSTOM_MEM_POOL=True \
-    SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=384 \
+    SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=1024 \
     SGLANG_CUTEDSL_MOE_NVFP4_DISPATCH=1 \
     SGLANG_FP4_GEMM_BACKEND=cutlass \
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
@@ -191,7 +199,7 @@ elif [ "$mode" = "decode" ]; then
         --moe-a2a-backend deepep \
         --deepep-mode low_latency \
         --ep-dispatch-algorithm static \
-        --cuda-graph-bs 384 \
+        --cuda-graph-bs 1024 \
         --num-reserved-decode-tokens 112 \
         --ep-num-redundant-experts 32 \
         --eplb-algorithm deepseek \
