@@ -34,6 +34,9 @@ on:
     branches:
       - main
       - nealv/docs_build  # TEMPORARY: for testing only
+  push:
+    tags:
+      - '*'
   workflow_dispatch:
     inputs:
       version:
@@ -77,29 +80,100 @@ jobs:
             exit 1
           }
 
-      - name: Find latest generate-docs run (for manual trigger)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+      - name: Wait for generate-docs to complete (for tag pushes)
+        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            console.log(`Waiting for generate-docs workflow to complete for tag: ${tag}`);
+
+            // Poll for up to 10 minutes
+            const maxAttempts = 60;
+            const delayMs = 10000; // 10 seconds
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'generate-docs.yml',
+                event: 'push',
+                per_page: 10
+              });
+
+              // Find run for this tag
+              const tagRun = runs.data.workflow_runs.find(run => run.head_branch === tag);
+
+              if (tagRun) {
+                console.log(`Found generate-docs run ${tagRun.id}, status: ${tagRun.status}, conclusion: ${tagRun.conclusion}`);
+
+                if (tagRun.status === 'completed') {
+                  if (tagRun.conclusion === 'success') {
+                    console.log(`✓ Generate-docs completed successfully`);
+                    return;
+                  } else {
+                    throw new Error(`Generate-docs workflow failed with conclusion: ${tagRun.conclusion}`);
+                  }
+                }
+              }
+
+              console.log(`Attempt ${attempt}/${maxAttempts}: Waiting for generate-docs to complete...`);
+              await new Promise(resolve => setTimeout(resolve, delayMs));
+            }
+
+            throw new Error('Timeout waiting for generate-docs workflow to complete');
+
+      - name: Find latest generate-docs run (for tags and manual trigger)
+        if: ${{ github.event_name != 'workflow_run' }}
         id: find_run
         uses: actions/github-script@v7
         with:
           script: |
-            const runs = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'generate-docs.yml',
-              branch: context.ref.replace('refs/heads/', ''),
-              status: 'success',
-              per_page: 1
-            });
+            // For tag pushes, we need to find the generate-docs run for this specific tag
+            // For manual triggers, find the latest run on the current branch
+            let headBranch = context.ref.replace('refs/heads/', '').replace('refs/tags/', '');
 
-            if (runs.data.workflow_runs.length === 0) {
-              throw new Error('No successful generate-docs workflow runs found');
+            if (context.ref.startsWith('refs/tags/')) {
+              console.log(`Looking for generate-docs run for tag: ${headBranch}`);
+              // For tags, search by head_branch (which will be the tag name)
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'generate-docs.yml',
+                status: 'success',
+                per_page: 20  // Get more runs to search through
+              });
+
+              // Find the run that matches this tag
+              const tagRun = runs.data.workflow_runs.find(run => run.head_branch === headBranch);
+              if (!tagRun) {
+                throw new Error(`No successful generate-docs run found for tag ${headBranch}`);
+              }
+
+              console.log(`Found generate-docs run for tag: ${tagRun.id}`);
+              core.setOutput('run_id', tagRun.id);
+              return tagRun.id;
+            } else {
+              // For manual triggers, search by branch
+              console.log(`Looking for generate-docs run on branch: ${headBranch}`);
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'generate-docs.yml',
+                branch: headBranch,
+                status: 'success',
+                per_page: 1
+              });
+
+              if (runs.data.workflow_runs.length === 0) {
+                throw new Error(`No successful generate-docs workflow runs found on branch ${headBranch}`);
+              }
+
+              const runId = runs.data.workflow_runs[0].id;
+              console.log(`Found generate-docs run: ${runId}`);
+              core.setOutput('run_id', runId);
+              return runId;
             }
-
-            const runId = runs.data.workflow_runs[0].id;
-            console.log(`Found generate-docs run: ${runId}`);
-            core.setOutput('run_id', runId);
-            return runId;
 
       - name: Download documentation artifacts
         uses: actions/download-artifact@v4
@@ -154,15 +228,22 @@ jobs:
           # Determine version from various sources
           VERSION=""
 
-          # Option 1: Manual dispatch with version input
-          if [[ -n "${{ inputs.version || '' }}" ]]; then
+          # Option 1: Direct tag push
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+            if [[ "${TAG}" =~ ^v([0-9]+(\.[0-9]+){1,2}([._-](post|rc|dev)[0-9]+)?)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+              echo "Detected version from tag: ${VERSION}"
+            fi
+          # Option 2: Manual dispatch with version input
+          elif [[ -n "${{ inputs.version || '' }}" ]]; then
             VERSION="${{ inputs.version }}"
             echo "Using version from manual input: ${VERSION}"
-          # Option 2: Triggered by workflow_run - check if it was from a tag
+          # Option 3: Triggered by workflow_run - check if it was from a tag
           elif [[ "${{ github.event.workflow_run.head_branch || '' }}" =~ ^v([0-9]+(\.[0-9]+){1,2}([._-](post|rc|dev)[0-9]+)?)$ ]]; then
             VERSION="${BASH_REMATCH[1]}"
             echo "Detected version from workflow_run tag: ${VERSION}"
-          # Option 3: Check commit message for version tag (e.g., for main branch releases)
+          # Option 4: Check commit message for version tag (e.g., for main branch releases)
           elif [[ "${{ github.event.workflow_run.head_commit.message || '' }}" =~ version:\ *v?([0-9]+(\.[0-9]+){1,2}([._-](post|rc|dev)[0-9]+)?) ]]; then
             VERSION="${BASH_REMATCH[1]}"
             echo "Detected version from commit message: ${VERSION}"
@@ -200,7 +281,7 @@ jobs:
           S3_ROOT: ${{ steps.paths.outputs.s3_root }}
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
           VERSION: ${{ steps.vars.outputs.version }}
-          COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message || '' }}
+          COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message || github.event.head_commit.message || '' }}
         shell: bash
         run: |
           set -euo pipefail
