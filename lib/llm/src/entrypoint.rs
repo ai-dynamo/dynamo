@@ -44,21 +44,16 @@ pub enum EngineConfig {
     /// Remote networked engines that we discover via etcd
     Dynamic(Box<LocalModel>),
 
-    /// Remote networked engines that we know about at startup
-    StaticRemote(Box<LocalModel>),
-
     /// A Full service engine does it's own tokenization and prompt formatting.
     StaticFull {
         engine: Arc<dyn StreamingEngine>,
         model: Box<LocalModel>,
-        is_static: bool,
     },
 
     /// A core engine expects to be wrapped with pre/post processors that handle tokenization.
     StaticCore {
         engine: ExecutionContext,
         model: Box<LocalModel>,
-        is_static: bool,
         is_prefill: bool,
     },
 }
@@ -68,7 +63,6 @@ impl EngineConfig {
         use EngineConfig::*;
         match self {
             Dynamic(lm) => lm,
-            StaticRemote(lm) => lm,
             StaticFull { model, .. } => model,
             StaticCore { model, .. } => model,
         }

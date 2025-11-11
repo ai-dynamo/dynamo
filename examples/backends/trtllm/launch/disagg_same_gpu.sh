@@ -53,7 +53,7 @@ DYNAMO_PID=$!
 
 # run prefill worker (shares GPU with decode)
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=8081 \
 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
@@ -65,7 +65,7 @@ PREFILL_PID=$!
 
 # run decode worker (shares GPU with prefill)
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8082 \
+DYN_SYSTEM_PORT=8082 \
 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \

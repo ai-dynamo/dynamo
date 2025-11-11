@@ -44,6 +44,19 @@ help: ## Display this help.
 
 ##@ Development
 
+.PHONY: check
+check: generate manifests generate-api-docs
+	@echo "> Checking for uncommitted changes"
+	@if [ -n "$$(git status --porcelain)" ]; then \
+		echo "ERROR: Git tree is dirty after running validation steps."; \
+		echo "Please check the diff to identify the step that dirtied the tree."; \
+		git --no-pager status; \
+		git --no-pager diff; \
+		exit 1; \
+	fi
+	@echo "> Check complete"
+
+
 .PHONY: ensure-yq
 ensure-yq:
 	@if ! command -v yq &> /dev/null; then \
@@ -100,6 +113,29 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 	if [ -d "../helm/crds/templates/" ]; then \
 		cp config/crd/bases/*.yaml ../helm/crds/templates/; \
 	fi
+	echo "Adding NVIDIA header to RBAC files"
+	for file in config/rbac/*.yaml; do \
+		if [ -f "$$file" ] && ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
+			{ printf '%s\n' \
+				'# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.' \
+				'# SPDX-License-Identifier: Apache-2.0' \
+				'#' \
+				'# Licensed under the Apache License, Version 2.0 (the "License");' \
+				'# you may not use this file except in compliance with the License.' \
+				'# You may obtain a copy of the License at' \
+				'#' \
+				'# http://www.apache.org/licenses/LICENSE-2.0' \
+				'#' \
+				'# Unless required by applicable law or agreed to in writing, software' \
+				'# distributed under the License is distributed on an "AS IS" BASIS,' \
+				'# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.' \
+				'# See the License for the specific language governing permissions and' \
+				'# limitations under the License.' \
+				''; \
+			  cat "$$file"; \
+			} > "$$file.tmp" && mv "$$file.tmp" "$$file"; \
+		fi; \
+	done
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
