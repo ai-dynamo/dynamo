@@ -13,23 +13,20 @@ trap cleanup EXIT INT TERM
 
 # Parse command line arguments
 ENABLE_OTEL=false
-ENABLE_METRICS=false
+ENABLE_METRICS=true  # Enabled by default
 while [[ $# -gt 0 ]]; do
     case $1 in
         --enable-otel)
             ENABLE_OTEL=true
             shift
             ;;
-        --enable-metrics)
-            ENABLE_METRICS=true
-            shift
-            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
-            echo "  --enable-metrics     Enable system metrics server"
             echo "  -h, --help           Show this help message"
+            echo ""
+            echo "Note: System metrics are enabled by default on ports 8080 (frontend), 8081 (prefill), 8082 (decode)"
             exit 0
             ;;
         *)
