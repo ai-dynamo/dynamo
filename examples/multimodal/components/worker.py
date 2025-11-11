@@ -126,9 +126,9 @@ class VllmBaseWorker:
         self.config = config
         self.setup_vllm_engine(component, endpoint)
         # Track loaded LoRAs: lora_name -> lora_id (deterministic hash)
-        self.lora_name_to_id = {}
+        self.lora_name_to_id: dict[str, int] = {}
         # Track LoRA paths: lora_name -> lora_path
-        self.lora_name_to_path = {}
+        self.lora_name_to_path: dict[str, str] = {}
 
     async def async_init(self, runtime: DistributedRuntime):
         pass
