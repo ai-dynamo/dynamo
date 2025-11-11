@@ -11,10 +11,10 @@ use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
 use axum::{
     Router,
+    extract::{Json, Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, delete},
-    extract::{Path, State, Json},
+    routing::{delete, get, post},
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -189,7 +189,7 @@ pub async fn spawn_system_status_server(
             }),
         )
         .route(
-            "/v1/loras/:lora_name",
+            "/v1/loras/{lora_name}",
             delete({
                 let state = Arc::clone(&server_state);
                 move |path| unload_lora_handler(State(state), path)
@@ -531,26 +531,65 @@ async fn call_lora_endpoint(
             continue;
         }
 
-        // Create router with direct mode targeting this specific instance
-        let router = match PushRouter::<serde_json::Value, Annotated<serde_json::Value>>::from_client(
-            client,
-            RouterMode::Direct(instance.instance_id),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("Failed to create router: {}", e);
-                last_error = Some(e);
-                continue;
+        // Wait for instance_avail to be populated by the background monitor task
+        // This avoids a race condition where wait_for_instances() succeeds but
+        // instance_avail hasn't been updated yet
+        let mut retry_count = 0;
+        const MAX_RETRIES: u32 = 20;
+        const RETRY_DELAY_MS: u64 = 10;
+
+        while retry_count < MAX_RETRIES {
+            if client.instance_ids_avail().contains(&instance.instance_id) {
+                break;
             }
-        };
+            tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+            retry_count += 1;
+        }
+
+        if retry_count == MAX_RETRIES {
+            tracing::warn!(
+                "Instance {} not found in instance_avail after {} retries",
+                instance.instance_id,
+                MAX_RETRIES
+            );
+            last_error = Some(anyhow::anyhow!(
+                "Instance {} not available in router",
+                instance.instance_id
+            ));
+            continue;
+        }
+
+        tracing::debug!(
+            "Instance {} found in instance_avail after {} retries",
+            instance.instance_id,
+            retry_count
+        );
+
+        // Create router with direct mode targeting this specific instance
+        let router =
+            match PushRouter::<serde_json::Value, Annotated<serde_json::Value>>::from_client(
+                client,
+                RouterMode::Direct(instance.instance_id),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("Failed to create router: {}", e);
+                    last_error = Some(e);
+                    continue;
+                }
+            };
 
         // Send request using the direct router
         let mut stream = match router.generate(request_body.clone().into()).await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!("Failed to send request to instance {}: {}", instance.instance_id, e);
+                tracing::warn!(
+                    "Failed to send request to instance {}: {}",
+                    instance.instance_id,
+                    e
+                );
                 last_error = Some(e);
                 continue;
             }
@@ -561,8 +600,7 @@ async fn call_lora_endpoint(
             let response_data = response.data.unwrap_or_default();
 
             // Try to parse as LoraResponse
-            if let Ok(lora_response) =
-                serde_json::from_value::<LoraResponse>(response_data.clone())
+            if let Ok(lora_response) = serde_json::from_value::<LoraResponse>(response_data.clone())
             {
                 return Ok(lora_response);
             }
@@ -582,9 +620,7 @@ async fn call_lora_endpoint(
                     .get("lora_name")
                     .and_then(|n| n.as_str())
                     .map(|s| s.to_string()),
-                lora_id: response_data
-                    .get("lora_id")
-                    .and_then(|id| id.as_u64()),
+                lora_id: response_data.get("lora_id").and_then(|id| id.as_u64()),
                 loras: response_data.get("loras").cloned(),
                 count: response_data
                     .get("count")

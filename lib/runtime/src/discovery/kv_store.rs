@@ -154,17 +154,68 @@ impl Discovery for KVStoreDiscovery {
                 component,
                 endpoint,
                 instance_id,
-                ..
+                card_json,
             } => {
-                let key = Self::model_key(namespace, component, endpoint, *instance_id);
-                tracing::debug!(
-                    "KVStoreDiscovery::register: Registering model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
-                    instance_id,
-                    namespace,
-                    component,
-                    endpoint,
-                    key
-                );
+                let mut key = Self::model_key(namespace, component, endpoint, *instance_id);
+
+                // Check if this is a LoRA registration by looking at user_data in card_json
+                if let Some(user_data) = card_json.get("user_data") {
+                    if let Some(is_lora) = user_data.get("lora_adapter").and_then(|v| v.as_bool()) {
+                        if is_lora {
+                            // First try to use the pre-computed slug field from the card
+                            let lora_slug = if let Some(slug) =
+                                card_json.get("slug").and_then(|v| v.as_str())
+                            {
+                                slug.to_string()
+                            } else if let Some(name) =
+                                card_json.get("display_name").and_then(|v| v.as_str())
+                            {
+                                // Fallback: compute slug from display_name
+                                // Convert to slug format (lowercase, replace spaces/special chars with hyphens)
+                                name.to_lowercase()
+                                    .chars()
+                                    .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                                    .collect::<String>()
+                                    .split('-')
+                                    .filter(|s| !s.is_empty())
+                                    .collect::<Vec<_>>()
+                                    .join("-")
+                            } else {
+                                // No slug or name available, skip appending
+                                String::new()
+                            };
+
+                            if !lora_slug.is_empty() {
+                                // Append lora slug to key for LoRA registration
+                                key = format!("{}/{}", key, lora_slug);
+
+                                tracing::debug!(
+                                    "KVStoreDiscovery::register: Registering LoRA model with lora_slug={}, instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                                    lora_slug,
+                                    instance_id,
+                                    namespace,
+                                    component,
+                                    endpoint,
+                                    key
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Log if it's a base model (no LoRA slug appended)
+                let is_base_model = key.matches('/').count() == 3;
+                if is_base_model {
+                    tracing::debug!(
+                        "KVStoreDiscovery::register: Registering base model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                        instance_id,
+                        namespace,
+                        component,
+                        endpoint,
+                        key
+                    );
+                }
+
                 (MODELS_BUCKET, key)
             }
         };

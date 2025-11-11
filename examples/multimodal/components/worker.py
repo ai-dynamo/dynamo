@@ -8,9 +8,9 @@ import logging
 import os
 import signal
 import sys
-from collections import defaultdict
 from typing import Tuple
 
+import blake3
 import torch
 import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -40,6 +40,19 @@ from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+def lora_name_to_hash_id(lora_name: str) -> int:
+    """
+    Generate a deterministic integer ID from a LoRA name using blake3 hash.
+    Returns a signed int32 (range: 1 to 2,147,483,647).
+    """
+    hash_bytes = blake3.blake3(lora_name.encode()).digest()[:8]
+
+    # Convert first 8 bytes to signed int32 range (0x7FFFFFFF = 2,147,483,647)
+    # Use modulo to ensure non-zero (LoRA IDs should be non-zero)
+    lora_id = int.from_bytes(hash_bytes, byteorder="big") & 0x7FFFFFFF
+    return lora_id if lora_id != 0 else 1  # Ensure non-zero ID
 
 
 class VllmBaseWorker:
@@ -112,8 +125,10 @@ class VllmBaseWorker:
         self.engine_args = config.engine_args
         self.config = config
         self.setup_vllm_engine(component, endpoint)
-        # todo (bis): use globally unique id for lora name using blake3 hash of lora name
-        self.lora_name_to_id = defaultdict(lambda: len(self.lora_name_to_id) + 1)
+        # Track loaded LoRAs: lora_name -> lora_id (deterministic hash)
+        self.lora_name_to_id = {}
+        # Track LoRA paths: lora_name -> lora_path
+        self.lora_name_to_path = {}
 
     async def async_init(self, runtime: DistributedRuntime):
         pass
@@ -217,13 +232,25 @@ class VllmBaseWorker:
                     "message": "Both 'lora_name' and 'lora_path' are required in request",
                 }
                 return
+
             logger.info(f"Loading LoRA adapter: {lora_name} from {lora_path}")
-            lora_id = self.lora_name_to_id[lora_name]
+
+            # Generate deterministic ID from lora_name before using it
+            lora_id = lora_name_to_hash_id(lora_name)
+
+            # Add the LoRA to the engine
             await self.engine_client.add_lora(
                 LoRARequest(
                     lora_name=lora_name, lora_int_id=lora_id, lora_path=lora_path
                 )
             )
+
+            # Track the LoRA
+            self.lora_name_to_id[lora_name] = lora_id
+            if lora_name not in self.lora_name_to_path:
+                logger.info(f"Adding LoRA path: {lora_path} for {lora_name}")
+                self.lora_name_to_path[lora_name] = lora_path
+
             logger.info(
                 f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
             )

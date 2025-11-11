@@ -6,10 +6,10 @@ import logging
 import os
 import tempfile
 from abc import ABC, abstractmethod
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
 
+import blake3
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
@@ -29,6 +29,19 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+def lora_name_to_hash_id(lora_name: str) -> int:
+    """
+    Generate a deterministic integer ID from a LoRA name using blake3 hash.
+    Returns a signed int32 (range: 1 to 2,147,483,647).
+    """
+    hash_bytes = blake3.blake3(lora_name.encode()).digest()[:8]
+
+    # Convert first 8 bytes to signed int32 range (0x7FFFFFFF = 2,147,483,647)
+    # Use modulo to ensure non-zero (LoRA IDs should be non-zero)
+    lora_id = int.from_bytes(hash_bytes, byteorder="big") & 0x7FFFFFFF
+    return lora_id if lora_id != 0 else 1  # Ensure non-zero ID
 
 
 def build_sampling_params(
@@ -89,6 +102,8 @@ class BaseWorkerHandler(ABC):
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         # unique non-zero id for each lora name
         self.lora_name_to_id = defaultdict(lambda: len(self.lora_name_to_id) + 1)
+        # Track loaded LoRAs: lora_name -> lora_id (deterministic hash)
+        self.lora_name_to_id = {}
         self.lora_name_to_path = {}
 
     @abstractmethod
@@ -162,13 +177,20 @@ class BaseWorkerHandler(ABC):
                 }
                 return
             logger.info(f"Loading LoRA adapter: {lora_name} from {lora_path}")
-            lora_id = self.lora_name_to_id[lora_name]
-            self.lora_name_to_path[lora_name] = lora_path
+
+            # Generate deterministic ID from lora_name before using it
+            lora_id = lora_name_to_hash_id(lora_name)
+
+            # Add the LoRA to the engine
             await self.engine_client.add_lora(
                 LoRARequest(
                     lora_name=lora_name, lora_int_id=lora_id, lora_path=lora_path
                 )
             )
+
+            # Track the LoRA
+            self.lora_name_to_id[lora_name] = lora_id
+            self.lora_name_to_path[lora_name] = lora_path
             logger.info(
                 f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
             )
