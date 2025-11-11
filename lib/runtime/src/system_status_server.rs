@@ -498,7 +498,7 @@ async fn call_lora_endpoint(
             Ok(ns) => ns,
             Err(e) => {
                 tracing::warn!("Failed to get namespace {}: {}", instance.namespace, e);
-                last_error = Some(e.into());
+                last_error = Some(e);
                 continue;
             }
         };
@@ -507,7 +507,7 @@ async fn call_lora_endpoint(
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to get component {}: {}", instance.component, e);
-                last_error = Some(e.into());
+                last_error = Some(e);
                 continue;
             }
         };
@@ -519,7 +519,7 @@ async fn call_lora_endpoint(
             Ok(client) => client,
             Err(e) => {
                 tracing::warn!("Failed to create client for endpoint: {}", e);
-                last_error = Some(e.into());
+                last_error = Some(e);
                 continue;
             }
         };
@@ -527,7 +527,7 @@ async fn call_lora_endpoint(
         // Wait briefly for instances to be available
         if let Err(e) = client.wait_for_instances().await {
             tracing::warn!("No instances available for endpoint: {}", e);
-            last_error = Some(e.into());
+            last_error = Some(e);
             continue;
         }
 

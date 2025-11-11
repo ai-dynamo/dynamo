@@ -307,7 +307,9 @@ async fn register_model(mut config: ModelConfig) -> anyhow::Result<()> {
             .migration_limit(config.migration_limit)
             .runtime_config(config.runtime_config.unwrap_or_default().inner)
             .user_data(config.user_data)
-            .custom_template_path(config.custom_template_path);
+            .custom_template_path(config.custom_template_path)
+            .media_decoder(config.media_decoder)
+            .media_fetcher(config.media_fetcher);
 
         let mut local_model = builder.build().await?;
         local_model
@@ -339,6 +341,8 @@ struct ModelConfig {
     migration_limit: Option<u32>,
     runtime_config: Option<ModelRuntimeConfig>,
     custom_template_path: Option<PathBuf>,
+    media_decoder: Option<MediaDecoder>,
+    media_fetcher: Option<MediaFetcher>,
 
     // LoRA specific fields
     lora_name: Option<String>,
@@ -361,6 +365,8 @@ impl ModelConfig {
         runtime_config: Option<ModelRuntimeConfig>,
         user_data: Option<serde_json::Value>,
         custom_template_path: Option<PathBuf>,
+        media_decoder: Option<MediaDecoder>,
+        media_fetcher: Option<MediaFetcher>,
     ) -> Self {
         Self {
             endpoint,
@@ -375,6 +381,8 @@ impl ModelConfig {
             migration_limit: Some(migration_limit),
             runtime_config,
             custom_template_path,
+            media_decoder,
+            media_fetcher,
             lora_name: None,
             base_path: None,
         }
@@ -403,6 +411,8 @@ impl ModelConfig {
             migration_limit: None,
             runtime_config: None,
             custom_template_path: None,
+            media_decoder: None,
+            media_fetcher: None,
             lora_name: Some(lora_name),
             base_path: Some(base_path),
         }
@@ -538,6 +548,8 @@ fn register_llm<'p>(
                     runtime_config,
                     user_data_json,
                     custom_template_path_owned,
+                    media_decoder,
+                    media_fetcher,
                 ))
                 .await
             }
