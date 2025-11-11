@@ -124,6 +124,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         if self.serving_mode == DisaggregationMode.DECODE:
+            prefill_dp_rank = None
+
             # request the bootstrap info from the target prefill worker
             if (
                 self.prefill_router_client is not None
@@ -160,7 +162,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     prefill_request_dict["request"][
                         "data_parallel_rank"
                     ] = prefill_dp_rank
-                    logging.info(f"Routing to prefill dp_rank={prefill_dp_rank}")
 
                 prefill_stream = await self.prefill_client.direct(
                     prefill_request_dict,
@@ -194,7 +195,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             }
 
             # Use router-selected dp_rank (fallback to request-level if not provided)
-            if "prefill_dp_rank" in locals() and prefill_dp_rank is not None:
+            if prefill_dp_rank is not None:
                 effective_dp_rank = prefill_dp_rank
             elif data_parallel_rank is not None:
                 effective_dp_rank = data_parallel_rank
@@ -203,7 +204,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             if effective_dp_rank is not None:
                 generate_kwargs["data_parallel_rank"] = effective_dp_rank
-                logging.debug(f"Using dp_rank={effective_dp_rank} for decode")
 
             decode = await self.engine.async_generate(**generate_kwargs)
 
@@ -223,7 +223,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             if data_parallel_rank is not None:
                 generate_kwargs["data_parallel_rank"] = data_parallel_rank
-                logging.debug(f"Using dp_rank={data_parallel_rank} for aggregated mode")
 
             agg = await self.engine.async_generate(**generate_kwargs)
             if self.skip_tokenizer_init:

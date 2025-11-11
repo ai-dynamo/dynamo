@@ -74,13 +74,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         yield bootstrap_info
 
-        # Validate disaggregated request format
-        if "request" not in request or "sampling_params" not in request:
-            raise ValueError(
-                f"Expected disaggregated format with 'request' and 'sampling_params', "
-                f"got keys: {list(request.keys())}"
-            )
-
         inner_request = request["request"]
         sampling_params_dict = request["sampling_params"]
 
@@ -106,7 +99,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         if data_parallel_rank is not None:
             generate_kwargs["data_parallel_rank"] = data_parallel_rank
-            logging.info(f"Prefill using dp_rank={data_parallel_rank}")
 
         results = await self.engine.async_generate(**generate_kwargs)
 
