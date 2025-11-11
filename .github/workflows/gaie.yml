@@ -159,7 +159,7 @@ jobs:
         run: |
           cd deploy/cloud/operator
           docker buildx build --load \
-              --platform linux/${{ matrix.platform.arch }} \
+              --platform linux/amd64 \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
               -f Dockerfile \
               -t dynamo-operator:latest .
@@ -167,7 +167,7 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: dynamo-operator:latest
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
+          push_tag: ai-dynamo/dynamo:${{ github.sha }}-operator-amd64
           aws_push: "false"
           azure_push: "true"
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
