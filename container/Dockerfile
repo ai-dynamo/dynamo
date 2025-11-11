@@ -371,13 +371,11 @@ RUN uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
-# Install common and test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+# Install common and test dependencies from pyproject.toml
+RUN --mount=type=bind,source=./pyproject.toml,target=/tmp/pyproject.toml \
     UV_GIT_LFS=1 uv pip install \
         --no-cache \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
+        -e /tmp/[test,standard]
 
 # NIXL environment variables
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
