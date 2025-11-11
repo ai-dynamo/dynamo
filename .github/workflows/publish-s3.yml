@@ -380,15 +380,15 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Published To" >> $GITHUB_STEP_SUMMARY
           if [[ "${PUBLISHED_VERSION}" == "true" ]]; then
-            echo "- ✅ **Version:** \`${VERSION}\` → \`s3://brightspot-assets-prod/developer/docs/${S3_PATH}/archive/${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ **Version:** \`${VERSION}\` → \`s3://.../${S3_PATH}/archive/${VERSION}\`" >> $GITHUB_STEP_SUMMARY
             if [[ "${PUBLISHED_LATEST}" == "true" ]]; then
-              echo "- ✅ **Latest:** \`${VERSION}\` → \`s3://brightspot-assets-prod/developer/docs/${S3_PATH}/latest\` (updated to match release)" >> $GITHUB_STEP_SUMMARY
+              echo "- ✅ **Latest:** \`${VERSION}\` → \`s3://.../${S3_PATH}/latest\` (updated to match release)" >> $GITHUB_STEP_SUMMARY
             else
               echo "- ⏭️ **Latest:** not updated (version published with /not-latest flag)" >> $GITHUB_STEP_SUMMARY
             fi
           fi
           if [[ "${PUBLISHED_DEV}" == "true" ]]; then
-            echo "- ✅ **Dev:** \`s3://brightspot-assets-prod/developer/docs/${S3_PATH}/dev\` (main branch)" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ **Dev:** \`s3://.../${S3_PATH}/dev\` (main branch)" >> $GITHUB_STEP_SUMMARY
           fi
           if [[ "${PUBLISHED_VERSION}" != "true" ]] && [[ "${PUBLISHED_DEV}" != "true" ]]; then
             echo "- ⚠️ No documentation was published" >> $GITHUB_STEP_SUMMARY
