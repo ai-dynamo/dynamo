@@ -139,7 +139,7 @@ dynamo-base-docker:
 
     FROM ubuntu:24.04
     WORKDIR /workspace
-    COPY container/deps/requirements.txt /tmp/requirements.txt
+    COPY pyproject.toml /tmp/pyproject.toml
 
     # Install Python and other dependencies
     RUN apt-get update && \
@@ -159,7 +159,7 @@ dynamo-base-docker:
     ENV VIRTUAL_ENV=/opt/dynamo/venv
     ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
-    RUN UV_GIT_LFS=1 uv pip install -r /tmp/requirements.txt
+    RUN UV_GIT_LFS=1 uv pip install -e /tmp/[test,standard]
 
     # Copy and install wheels -- ai-dynamo-runtime first, then ai-dynamo
     COPY +dynamo-build/ai_dynamo_runtime*.whl /tmp/wheels/

@@ -371,13 +371,17 @@ RUN uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
-# Install common and test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+# Install runtime wheel first, then dependencies
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+
+RUN uv pip install \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl
+
+# Now install dependencies from pyproject.toml (runtime is now available)
+RUN --mount=type=bind,source=./pyproject.toml,target=/tmp/pyproject.toml \
     UV_GIT_LFS=1 uv pip install \
         --no-cache \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
+        -e /tmp/[test,standard]
 
 # NIXL environment variables
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
@@ -390,9 +394,8 @@ COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
 COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 
-# Copy built artifacts
+# Copy nixl artifacts (wheels already copied earlier)
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 COPY --chown=dynamo: --from=wheel_builder $CARGO_HOME $CARGO_HOME
 

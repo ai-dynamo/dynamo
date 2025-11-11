@@ -43,7 +43,7 @@ RUN if [ "$BRANCH_TYPE" = "local" ]; then \
     pip install --break-system-packages target/wheels/*.whl && \
     cd /sgl-workspace/dynamo && \
     pip install --break-system-packages -e . && \
-    pip install --break-system-packages --requirement /tmp/local_src/container/deps/requirements.txt ; \
+    pip install --break-system-packages -e /tmp/local_src[test,standard] ; \
   elif [ "$BRANCH_TYPE" = "remote" ]; then \
     cd dynamo/lib/bindings/python && \
     pip install --break-system-packages maturin && \
@@ -51,7 +51,7 @@ RUN if [ "$BRANCH_TYPE" = "local" ]; then \
     pip install --break-system-packages target/wheels/*.whl && \
     cd /sgl-workspace/dynamo && \
     pip install --break-system-packages -e . && \
-    pip install --break-system-packages --requirement /sgl-workspace/dynamo/container/deps/requirements.txt ; \
+    pip install --break-system-packages -e /sgl-workspace/dynamo[test,standard] ; \
   else \
     pip install --break-system-packages ai-dynamo ; \
   fi \
