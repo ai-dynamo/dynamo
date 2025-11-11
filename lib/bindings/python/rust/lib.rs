@@ -128,12 +128,9 @@ fn create_request_context(
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
-    if std::env::var("OTEL_EXPORT_ENABLED")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
+    if rs::config::env_is_truthy("OTEL_EXPORT_ENABLED") {
         eprintln!(
-            "Warning: OTEL_EXPORT_ENABLED=1 detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
+            "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
         );
     } else {
         rs::logging::init();
@@ -441,29 +438,26 @@ impl DistributedRuntime {
         // Try to get existing runtime first, create new Worker only if needed
         // This allows multiple DistributedRuntime instances to share the same tokio runtime
         let runtime = rs::Worker::runtime_from_existing()
-            .or_else(|_| {
+            .or_else(|_| -> anyhow::Result<rs::Runtime> {
                 // No existing Worker, create new one
                 let worker = rs::Worker::from_settings()?;
 
                 // Initialize pyo3 bridge (only happens once per process)
-                INIT.get_or_try_init(|| {
+                INIT.get_or_try_init(|| -> anyhow::Result<()> {
                     let primary = worker.tokio_runtime()?;
                     pyo3_async_runtimes::tokio::init_with_runtime(primary).map_err(|e| {
-                        rs::error!("failed to initialize pyo3 static runtime: {:?}", e)
+                        anyhow::anyhow!("failed to initialize pyo3 static runtime: {:?}", e)
                     })?;
-                    rs::OK(())
+                    Ok(())
                 })?;
 
-                rs::OK(worker.runtime().clone())
+                Ok(worker.runtime().clone())
             })
             .map_err(to_pyerr)?;
 
         // Initialize logging in context where tokio runtime is available
         // otel exporter requires it
-        if std::env::var("OTEL_EXPORT_ENABLED")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
+        if rs::config::env_is_truthy("OTEL_EXPORT_ENABLED") {
             runtime.secondary().block_on(async {
                 rs::logging::init();
             });

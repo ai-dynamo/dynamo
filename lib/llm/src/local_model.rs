@@ -5,14 +5,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
-use dynamo_runtime::storage::key_value_store::Key;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
 use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::MockEngineArgs;
-use crate::model_card::{self, ModelDeploymentCard};
+use crate::model_card::ModelDeploymentCard;
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::request_template::RequestTemplate;
@@ -434,13 +434,16 @@ impl LocalModel {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
 
-        // Publish the Model Deployment Card to KV store
-        let card_store = endpoint.drt().store();
-        let key = Key::from_raw(endpoint.unique_path(card_store.connection_id()));
+        // Register the Model Deployment Card via discovery interface
+        let discovery = endpoint.drt().discovery();
+        let spec = DiscoverySpec::from_model(
+            endpoint.component().namespace().name().to_string(),
+            endpoint.component().name().to_string(),
+            endpoint.name().to_string(),
+            &self.card,
+        )?;
+        let _instance = discovery.register(spec).await?;
 
-        let _outcome = card_store
-            .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
-            .await?;
         Ok(())
     }
 }

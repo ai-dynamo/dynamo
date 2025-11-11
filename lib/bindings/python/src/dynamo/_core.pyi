@@ -894,6 +894,7 @@ class KserveGrpcService:
         model: str,
         checksum: str,
         engine: PythonAsyncEngine,
+        runtime_config: Optional[ModelRuntimeConfig],
     ) -> None:
         """
         Register a tensor-based model with the service.
