@@ -156,32 +156,34 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         engine, config, component, generate_endpoint
     )
 
+    # Readiness gate: requests wait until model is registered
+    ready_event = asyncio.Event()
+
     handler = PrefillWorkerHandler(component, engine, config, publisher)
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
-    # Register Prefill to expose dp_size to Router
-    await register_llm_with_readiness_gate(
-        engine,
-        generate_endpoint,
-        server_args,
-        dynamo_args,
-        input_type=ModelInput.Tokens,
-        output_type=ModelType.Chat | ModelType.Completions,
-        readiness_gate=None,
-    )
-
-    tasks = [
-        generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=metrics_labels,
-            health_check_payload=health_check_payload,
-        )
-    ]
-
     try:
-        await asyncio.gather(*tasks)
+        # Start endpoint and register model concurrently
+        # Requests queue until ready_event is set
+        # Register Prefill to expose dp_size to Router
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+                health_check_payload=health_check_payload,
+            ),
+            register_llm_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                input_type=ModelInput.Tokens,
+                output_type=ModelType.Chat | ModelType.Completions,
+                readiness_gate=ready_event,
+            ),
+        )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise

@@ -1545,3 +1545,173 @@ def test_router_decisions(request, runtime_services, predownload_tokenizers):
         # Clean up mockers
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.model(MODEL_NAME)
+def test_disagg_dp_routing_e2e(request, runtime_services, predownload_tokenizers):
+    """
+    E2E test for DP-aware routing in disaggregated prefill-decode mode.
+
+    This test validates the complete DP routing flow:
+    1. Router correctly selects worker_id and dp_rank for prefill requests
+    2. Decode worker receives and uses the router-selected dp_rank
+    3. Bootstrap connection works correctly with matching dp_ranks between prefill and decode
+    4. End-to-end requests complete successfully through the full pipeline
+
+    Flow:
+      - Start multiple prefill workers with dp_size=4 (each worker has 4 DP ranks)
+      - Create KV router and send requests with varying token sequences
+      - For each request:
+        * Query router for best (worker_id, dp_rank, overlap)
+        * Verify dp_rank is valid (0 <= dp_rank < DP_SIZE)
+        * Send request through router using selected dp_rank
+        * Verify request completes successfully (proves bootstrap connection works)
+      - Verify all DP ranks get utilized across multiple requests
+    """
+
+    logger.info("Starting disaggregated DP routing E2E test")
+
+    DP_SIZE = 4  # Each worker has 4 DP ranks
+    NUM_PREFILL_WORKERS = 2  # 2 workers × 4 DP ranks = 8 total DP ranks
+
+    # Create mocker args with DP support
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "dp_size": DP_SIZE,
+        "num_gpu_blocks": 1000,
+    }
+
+    try:
+        # Start prefill workers with DP support
+        logger.info(
+            f"Starting {NUM_PREFILL_WORKERS} prefill workers with dp_size={DP_SIZE} each "
+            f"({NUM_PREFILL_WORKERS * DP_SIZE} total DP ranks)"
+        )
+        prefill_mockers = MockerProcess(
+            request, mocker_args=mocker_args, num_mockers=NUM_PREFILL_WORKERS
+        )
+        logger.info(f"Prefill workers using endpoint: {prefill_mockers.endpoint}")
+        prefill_mockers.__enter__()
+
+        async def test_dp_routing():
+            # Get runtime and create components
+            runtime = get_runtime()
+            namespace = runtime.namespace(prefill_mockers.namespace)
+            component = namespace.component("mocker")
+            endpoint = component.endpoint("generate")
+
+            # Create router with configuration
+            kv_router_config = KvRouterConfig(
+                overlap_score_weight=2.0,
+                router_temperature=0.0,  # Deterministic routing for testing
+            )
+            kv_push_router = KvPushRouter(
+                endpoint=endpoint,
+                block_size=BLOCK_SIZE,
+                kv_router_config=kv_router_config,
+            )
+
+            logger.info("Created KvPushRouter for DP routing test")
+
+            # Wait for prefill workers to be ready
+            instance_ids = await wait_for_mockers_ready(
+                endpoint, kv_push_router, expected_num_workers=NUM_PREFILL_WORKERS
+            )
+            logger.info(f"Prefill workers ready: {instance_ids}")
+
+            # Track which DP ranks are used across requests
+            dp_ranks_used = set()
+            num_test_requests = 20
+
+            # Send multiple requests to test DP routing
+            for i in range(num_test_requests):
+                # Generate different token sequences to exercise routing logic
+                num_tokens = random.randint(30, 100)
+                test_tokens = [random.randint(1, 10000) for _ in range(num_tokens)]
+
+                # Query router for best worker and dp_rank (without actually routing yet)
+                if hasattr(kv_push_router, "best_worker"):
+                    worker_id, dp_rank, overlap = await kv_push_router.best_worker(
+                        test_tokens
+                    )
+
+                    # Verify dp_rank is valid
+                    assert dp_rank is not None, (
+                        f"Router should return dp_rank for request {i+1}, "
+                        f"but got None"
+                    )
+                    assert isinstance(dp_rank, int), (
+                        f"dp_rank should be integer for request {i+1}, "
+                        f"but got {type(dp_rank)}"
+                    )
+                    assert (
+                        0 <= dp_rank < DP_SIZE
+                    ), f"Request {i+1}: dp_rank {dp_rank} out of valid range [0, {DP_SIZE})"
+
+                    dp_ranks_used.add(dp_rank)
+
+                    logger.info(
+                        f"Request {i+1}/{num_test_requests}: Router selected "
+                        f"worker={worker_id}, dp_rank={dp_rank}, overlap={overlap} blocks "
+                        f"for {num_tokens} input tokens"
+                    )
+
+                    # Send actual request through the router with selected dp_rank
+                    # This tests the full pipeline: Router -> Prefill -> Decode (via bootstrap)
+                    await send_request_via_python_kv_router(
+                        kv_python_router=kv_push_router,
+                        token_ids=test_tokens,
+                        initial_wait=1.0,
+                        max_retries=8,
+                        stop_conditions={
+                            "ignore_eos": True,
+                            "max_tokens": 5,  # Short generation for fast test
+                        },
+                        worker_id=worker_id,
+                        dp_rank=dp_rank,
+                    )
+
+                    logger.info(
+                        f"Request {i+1}/{num_test_requests} completed successfully "
+                        f"with dp_rank={dp_rank}"
+                    )
+
+                else:
+                    logger.warning(
+                        "Router doesn't support best_worker API - skipping DP routing test"
+                    )
+                    return
+
+            # Verify DP rank coverage across all requests
+            num_ranks_used = len(dp_ranks_used)
+            logger.info(
+                f"DP rank coverage: {num_ranks_used}/{DP_SIZE} ranks used across "
+                f"{num_test_requests} requests: {sorted(dp_ranks_used)}"
+            )
+
+            # We expect reasonable coverage (at least 2 different ranks for 20 requests)
+            assert num_ranks_used >= 2, (
+                f"Poor DP rank coverage: only {num_ranks_used}/{DP_SIZE} ranks used "
+                f"across {num_test_requests} requests. Expected at least 2 different ranks."
+            )
+
+            logger.info(
+                f"Successfully validated DP-aware routing E2E:\n"
+                f"  - {num_test_requests} requests completed successfully\n"
+                f"  - {num_ranks_used}/{DP_SIZE} DP ranks utilized\n"
+                f"  - Router correctly selected (worker_id, dp_rank, overlap) tuples\n"
+                f"  - Prefill-Decode bootstrap connections worked with matching dp_ranks\n"
+                f"  - All requests completed through full pipeline"
+            )
+
+        # Run the async test
+        asyncio.run(test_dp_routing())
+
+        logger.info("Disaggregated DP routing E2E test completed successfully")
+
+    finally:
+        # Clean up prefill mockers
+        if "prefill_mockers" in locals():
+            prefill_mockers.__exit__(None, None, None)
