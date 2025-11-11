@@ -79,10 +79,12 @@ if [ "$mode" = "prefill" ]; then
     # we have to install pre-release cutedsl for a integer overflow fix
     python3 -m pip install --no-cache-dir --upgrade --pre nvidia-cutlass-dsl
 
+    python3 -m pip install sgl-kernel --force-reinstall
+
     # tmp working branch for pipecleaning
     cd /sgl-workspace/sglang
     git fetch --depth 1 origin ishan/fp4-fixes
-    git checkout -B ishan/fp4-fixes FETCH_HEAD 
+    git checkout -B ishan/fp4-fixes FETCH_HEAD
 
     # set your own cache variables here
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
@@ -97,10 +99,10 @@ if [ "$mode" = "prefill" ]; then
     SGLANG_DISAGGREGATION_WAITING_TIMEOUT=100000 \
     SGLANG_HACK_SEQ_BOOTSTRAP_ROOM=1 \
     MC_TE_METRIC=true \
-    SGLANG_MOONCAKE_CUSTOM_MEM_POOL=True \
     MC_FORCE_MNNVL=1 \
     NCCL_MNNVL_ENABLE=1 \
     NCCL_CUMEM_ENABLE=1 \
+    SGLANG_MOONCAKE_CUSTOM_MEM_POOL=True \
     SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
     SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
     PYTHONUNBUFFERED=1 \
@@ -162,7 +164,7 @@ elif [ "$mode" = "decode" ]; then
     # tmp working branch for pipecleaning
     cd /sgl-workspace/sglang
     git fetch --depth 1 origin ishan/fp4-fixes
-    git checkout -B ishan/fp4-fixes FETCH_HEAD 
+    git checkout -B ishan/fp4-fixes FETCH_HEAD
 
     # set your own cache variables here
     export TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=1800
@@ -171,10 +173,15 @@ elif [ "$mode" = "decode" ]; then
     # we have to install pre-release cutedsl for a integer overflow fix
     python3 -m pip install --no-cache-dir --upgrade --pre nvidia-cutlass-dsl
 
+    python3 -m pip install sgl-kernel --force-reinstall
+
     SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN=1 \
     SGLANG_PER_TOKEN_GROUP_QUANT_8BIT_V2=1 \
     SGL_JIT_DEEPGEMM_PRECOMPILE=0 \
     MC_TE_METRIC=true \
+    MC_FORCE_MNNVL=1 \
+    NCCL_MNNVL_ENABLE=1 \
+    NCCL_CUMEM_ENABLE=1 \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
     SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
     SGLANG_DISAGGREGATION_WAITING_TIMEOUT=100000 \
