@@ -649,6 +649,7 @@ impl ModelWatcher {
 /// - LoRA model: "v1/mdc/dynamo/backend/generate/694d9981145a61ad/my-lora-slug"
 ///
 /// Extract the EndpointId and instance_id (worker connection ID, always 4th part) from that.
+#[allow(dead_code)]
 fn key_extract(s: &str) -> anyhow::Result<(EndpointId, String)> {
     if !s.starts_with(ROOT_PATH) {
         anyhow::bail!("Invalid format: expected model card ROOT_PATH segment in {s}");
@@ -681,7 +682,7 @@ mod tests {
     fn test_key_extract() {
         let input = format!(
             "{}/dynamo/backend/generate/694d9981145a61ad",
-            model_card::ROOT_PATH
+            crate::model_card::ROOT_PATH
         );
         let (endpoint_id, _) = key_extract(&input).unwrap();
         assert_eq!(endpoint_id.namespace, "dynamo");
