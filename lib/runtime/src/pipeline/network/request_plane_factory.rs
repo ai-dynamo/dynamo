@@ -19,25 +19,7 @@ use super::ingress::unified_server::RequestPlaneServer;
 pub struct RequestPlane;
 
 impl RequestPlane {
-    // ===== Client Creation Methods =====
-
-    /// Create a request plane client based on the mode
-    ///
-    /// # Arguments
-    ///
-    /// * `mode` - The request plane mode (Http, Tcp, Nats)
-    /// * `drt` - Distributed runtime provider for accessing transport infrastructure
-    ///
-    /// # Returns
-    ///
-    /// Returns a boxed client implementing `RequestPlaneClient`
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Required transport infrastructure is not available (e.g., NATS not running)
-    /// - Configuration is invalid
-    /// - Transport-specific initialization fails
+    // Create a request plane client based on the mode
     pub async fn create_client(
         mode: RequestPlaneMode,
         drt: &impl DistributedRuntimeProvider,
@@ -70,22 +52,7 @@ impl RequestPlane {
     }
 
 
-    // ===== Server Creation Methods =====
-
-    /// Create a request plane server based on the mode
-    ///
-    /// # Arguments
-    ///
-    /// * `mode` - The request plane mode (Http, Tcp, Nats)
-    /// * `cancellation_token` - Token for graceful shutdown coordination
-    ///
-    /// # Returns
-    ///
-    /// Returns a boxed server implementing `RequestPlaneServer`
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if server initialization fails
+    // Create a request plane server based on the mode
     pub async fn create_server(
         mode: RequestPlaneMode,
         cancellation_token: CancellationToken,
