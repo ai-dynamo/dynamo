@@ -13,8 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Generate Documentation
+# Dynamo docs build and publish workflow
+# Build:
+# - Builds documentation using Docker container
+# - Creates artifact for downstream use
+# - Runs on: main, release/*, tags, PRs (docs changes only)
+#
+# Publish:
+# - Main branch: publish to S3 under 'dev' (development docs)
+# - Tagged commits: publish to S3 under 'archive/vX.Y[.Z][suffix]' AND update 'latest' to match the release
+# - PRs: no S3 publish (only internal preview deployment if targeting release branch)
+# - Akamai: always flushes cache for the target path after publish
+#
+# Required Configuration:
+# - Repository variable: DOCS_PUBLISH_S3_TARGET_PATH (prefix under S3 bucket)
+# - Secrets: AWS credentials (DOCS_AWS_ACCESS_KEY_ID, DOCS_AWS_SECRET_ACCESS_KEY, DOCS_AWS_S3_BUCKET)
+# - Secrets (optional): AKAMAI_* EdgeGrid credentials for cache flush
+#
+# Commit message flags:
+# - '/skip-dev': skip publishing 'dev' on main branch
+# - '/not-latest': publish version to archive but don't update 'latest'
 
+name: Generate and Publish Documentation
 on:
   push:
     branches:
@@ -28,6 +48,12 @@ on:
       - 'docs/**'
       - 'container/Dockerfile.docs'
       - '.github/workflows/generate-docs.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Optional: Version to publish (e.g., 1.2.3). If not provided, publishes as dev.'
+        required: false
+        type: string
 
 jobs:
   build-docs:
@@ -254,10 +280,12 @@ jobs:
               VERSION="${BASH_REMATCH[1]}"
               echo "Detected version from tag: ${VERSION}"
             fi
+
           # Option 2: Manual dispatch with version input
           elif [[ -n "${{ inputs.version || '' }}" ]]; then
             VERSION="${{ inputs.version }}"
             echo "Using version from manual input: ${VERSION}"
+
           # Option 3: Check commit message for version tag (e.g., for main branch releases)
           elif [[ "${{ github.event.head_commit.message || '' }}" =~ version:\ *v?([0-9]+(\.[0-9]+){1,2}([._-](post|rc|dev)[0-9]+)?) ]]; then
             VERSION="${BASH_REMATCH[1]}"
@@ -327,9 +355,8 @@ jobs:
 
       - name: Publish dev (main branch)
         # Publish main branch to 'dev' directory for development docs
-        # Also publish for manual triggers on test branch (for testing)
         # Skip if commit message contains '/skip-dev' anywhere
-        if: ${{ (github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '/skip-dev')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/nealv/docs_build') }}
+        if: ${{ github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '/skip-dev') }}
         working-directory: ${{ env.DOCS_DIR }}
         id: publish_dev
         env:
@@ -471,15 +498,15 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Published To" >> $GITHUB_STEP_SUMMARY
           if [[ "${PUBLISHED_VERSION}" == "true" ]]; then
-            echo "- ✅ **Version:** \`${VERSION}\` → \`s3://brightspot-assets-prod/developer/docs/${S3_PATH}/archive/${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ **Version:** \`${VERSION}\` → \`s3://.../${S3_PATH}/archive/${VERSION}\`" >> $GITHUB_STEP_SUMMARY
             if [[ "${PUBLISHED_LATEST}" == "true" ]]; then
-              echo "- ✅ **Latest:** \`${VERSION}\` → \`s3://brightspot-assets-prod/developer/docs/${S3_PATH}/latest\` (updated to match release)" >> $GITHUB_STEP_SUMMARY
+              echo "- ✅ **Latest:** \`${VERSION}\` → \`s3://.../${S3_PATH}/latest\` (updated to match release)" >> $GITHUB_STEP_SUMMARY
             else
               echo "- ⏭️ **Latest:** not updated (version published with /not-latest flag)" >> $GITHUB_STEP_SUMMARY
             fi
           fi
           if [[ "${PUBLISHED_DEV}" == "true" ]]; then
-            echo "- ✅ **Dev:** \`s3://brightspot-assets-prod/developer/docs/${S3_PATH}/dev\` (main branch)" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ **Dev:** \`s3://.../${S3_PATH}/dev\` (main branch)" >> $GITHUB_STEP_SUMMARY
           fi
           if [[ "${PUBLISHED_VERSION}" != "true" ]] && [[ "${PUBLISHED_DEV}" != "true" ]]; then
             echo "- ⚠️ No documentation was published" >> $GITHUB_STEP_SUMMARY
