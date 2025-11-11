@@ -76,7 +76,9 @@ use super::server::dispatcher::{
     ActiveMessageDispatcher, ActiveMessageHandler, ControlMessage, HandlerContext,
     InlineDispatcher, SpawnedDispatcher,
 };
-use crate::am::common::responses::ResponseId;
+use crate::am::common::events::{EventType, Outcome, encode_event_header};
+use crate::am::common::messages::ResponseType;
+use crate::am::common::responses::{ResponseId, encode_response_header};
 use derive_getters::Dissolve;
 use dynamo_identity::WorkerId;
 use dynamo_nova_backend::{MessageType, NovaBackend};
@@ -432,24 +434,36 @@ where
         // Keep internal plumbing for response handling
         let backend = ctx.system.backend().clone();
         let response_id = ctx.message_id;
+        let response_type = ctx.response_type;
 
         Box::pin(async move {
             let result = executor.execute(unary_ctx).await;
 
-            // Send appropriate response using captured backend and response_id
-            let send_result = match result {
-                Ok(None) => {
-                    // ACK
+            // Send appropriate response based on response type
+            let send_result = match (response_type, result) {
+                // AckNack path (am_sync)
+                (ResponseType::AckNack, Ok(None)) => send_ack(backend, response_id).await,
+                (ResponseType::AckNack, Ok(Some(_))) => {
+                    // AckNack handlers shouldn't return payloads, just send ack
                     send_ack(backend, response_id).await
                 }
-                Ok(Some(bytes)) => {
-                    // Response with payload
+                (ResponseType::AckNack, Err(err)) => {
+                    let error_msg = err.to_string();
+                    send_nack(backend, response_id, error_msg).await
+                }
+                // Unary path
+                (ResponseType::Unary, Ok(None)) => send_response_ok(backend, response_id).await,
+                (ResponseType::Unary, Ok(Some(bytes))) => {
                     send_response(backend, response_id, bytes).await
                 }
-                Err(err) => {
-                    // Error/NACK
+                (ResponseType::Unary, Err(err)) => {
                     let error_msg = err.to_string();
-                    send_error(backend, response_id, error_msg).await
+                    send_response_error(backend, response_id, error_msg).await
+                }
+                // FireAndForget shouldn't call unary handlers
+                (ResponseType::FireAndForget, _) => {
+                    error!("FireAndForget message incorrectly routed to unary handler");
+                    Ok(())
                 }
             };
 
@@ -494,6 +508,7 @@ where
         // Keep internal plumbing for response handling
         let backend = ctx.system.backend().clone();
         let response_id = ctx.message_id;
+        let response_type = ctx.response_type;
         let executor = self.executor.clone();
 
         Box::pin(async move {
@@ -506,7 +521,14 @@ where
                 Ok(input) => input,
                 Err(e) => {
                     let error_msg = format!("Failed to deserialize input: {}", e);
-                    if let Err(send_err) = send_error(backend, response_id, error_msg).await {
+                    let send_result = match response_type {
+                        ResponseType::AckNack => send_nack(backend, response_id, error_msg).await,
+                        ResponseType::Unary => {
+                            send_response_error(backend, response_id, error_msg).await
+                        }
+                        ResponseType::FireAndForget => Ok(()),
+                    };
+                    if let Err(send_err) = send_result {
                         debug!("Failed to send deserialization error: {}", send_err);
                     }
                     return;
@@ -523,24 +545,33 @@ where
             // Execute handler
             let result = executor.execute(typed_ctx).await;
 
-            // Send appropriate response using captured backend and response_id
-            let send_result = match result {
-                Ok(output) => {
-                    // Serialize output
-                    match serde_json::to_vec(&output) {
-                        Ok(response_bytes) => {
-                            let bytes = Bytes::from(response_bytes);
-                            send_response(backend, response_id, bytes).await
-                        }
-                        Err(e) => {
-                            let error_msg = format!("Failed to serialize output: {}", e);
-                            send_error(backend, response_id, error_msg).await
-                        }
-                    }
-                }
-                Err(err) => {
+            // Send appropriate response based on response type
+            let send_result = match (response_type, result) {
+                // AckNack path - typed handlers always return data, send ack for success
+                (ResponseType::AckNack, Ok(_output)) => send_ack(backend, response_id).await,
+                (ResponseType::AckNack, Err(err)) => {
                     let error_msg = err.to_string();
-                    send_error(backend, response_id, error_msg).await
+                    send_nack(backend, response_id, error_msg).await
+                }
+                // Unary path - serialize and send output
+                (ResponseType::Unary, Ok(output)) => match serde_json::to_vec(&output) {
+                    Ok(response_bytes) => {
+                        let bytes = Bytes::from(response_bytes);
+                        send_response(backend, response_id, bytes).await
+                    }
+                    Err(e) => {
+                        let error_msg = format!("Failed to serialize output: {}", e);
+                        send_response_error(backend, response_id, error_msg).await
+                    }
+                },
+                (ResponseType::Unary, Err(err)) => {
+                    let error_msg = err.to_string();
+                    send_response_error(backend, response_id, error_msg).await
+                }
+                // FireAndForget shouldn't call typed unary handlers
+                (ResponseType::FireAndForget, _) => {
+                    error!("FireAndForget message incorrectly routed to typed unary handler");
+                    Ok(())
                 }
             };
 
@@ -559,86 +590,147 @@ where
 // Helper Functions for Sending Responses
 // ============================================================================
 
-/// Send an ACK response
-async fn send_ack(backend: Arc<NovaBackend>, response_id: ResponseId) -> Result<()> {
-    use bytes::BufMut;
-
-    let mut header = bytes::BytesMut::with_capacity(16);
-    header.put_u128_le(response_id.as_u128());
-
-    struct ErrorHandler;
-    impl dynamo_nova_backend::TransportErrorHandler for ErrorHandler {
-        fn on_error(&self, _header: Bytes, _payload: Bytes, error: String) {
-            error!("Failed to send ACK: {}", error);
-        }
+// Static error handlers (created once, reused for all messages)
+struct AckErrorHandler;
+impl dynamo_nova_backend::TransportErrorHandler for AckErrorHandler {
+    fn on_error(&self, _header: Bytes, _payload: Bytes, error: String) {
+        error!("Failed to send ACK: {}", error);
     }
+}
+
+struct NackErrorHandler;
+impl dynamo_nova_backend::TransportErrorHandler for NackErrorHandler {
+    fn on_error(&self, _header: Bytes, _payload: Bytes, error: String) {
+        error!("Failed to send NACK: {}", error);
+    }
+}
+
+struct ResponseErrorHandler;
+impl dynamo_nova_backend::TransportErrorHandler for ResponseErrorHandler {
+    fn on_error(&self, _header: Bytes, _payload: Bytes, error: String) {
+        error!("Failed to send response: {}", error);
+    }
+}
+
+// Lazy static error handlers
+static ACK_ERROR_HANDLER: std::sync::OnceLock<Arc<dyn dynamo_nova_backend::TransportErrorHandler>> =
+    std::sync::OnceLock::new();
+static NACK_ERROR_HANDLER: std::sync::OnceLock<
+    Arc<dyn dynamo_nova_backend::TransportErrorHandler>,
+> = std::sync::OnceLock::new();
+static RESPONSE_ERROR_HANDLER: std::sync::OnceLock<
+    Arc<dyn dynamo_nova_backend::TransportErrorHandler>,
+> = std::sync::OnceLock::new();
+
+#[inline(always)]
+fn get_ack_error_handler() -> Arc<dyn dynamo_nova_backend::TransportErrorHandler> {
+    ACK_ERROR_HANDLER
+        .get_or_init(|| Arc::new(AckErrorHandler))
+        .clone()
+}
+
+#[inline(always)]
+fn get_nack_error_handler() -> Arc<dyn dynamo_nova_backend::TransportErrorHandler> {
+    NACK_ERROR_HANDLER
+        .get_or_init(|| Arc::new(NackErrorHandler))
+        .clone()
+}
+
+#[inline(always)]
+fn get_response_error_handler() -> Arc<dyn dynamo_nova_backend::TransportErrorHandler> {
+    RESPONSE_ERROR_HANDLER
+        .get_or_init(|| Arc::new(ResponseErrorHandler))
+        .clone()
+}
+
+// --- AckNack path (am_sync) - uses Event channel with encode_event_header ---
+
+/// Send an ACK response for am_sync (uses Event channel)
+async fn send_ack(backend: Arc<NovaBackend>, response_id: ResponseId) -> Result<()> {
+    let header = encode_event_header(EventType::Ack(response_id, Outcome::Ok));
 
     backend.send_message_to_worker(
         WorkerId::from_u64(response_id.worker_id()),
         header.to_vec(),
         vec![],
         MessageType::Ack,
-        Arc::new(ErrorHandler),
+        get_ack_error_handler(),
     )?;
 
     Ok(())
 }
 
-/// Send a response with payload
-async fn send_response(
-    backend: Arc<NovaBackend>,
-    response_id: ResponseId,
-    payload: Bytes,
-) -> Result<()> {
-    use bytes::BufMut;
-
-    let mut header = bytes::BytesMut::with_capacity(16);
-    header.put_u128_le(response_id.as_u128());
-
-    struct ErrorHandler;
-    impl dynamo_nova_backend::TransportErrorHandler for ErrorHandler {
-        fn on_error(&self, _header: Bytes, _payload: Bytes, error: String) {
-            error!("Failed to send response: {}", error);
-        }
-    }
-
-    backend.send_message_to_worker(
-        WorkerId::from_u64(response_id.worker_id()),
-        header.to_vec(),
-        payload.to_vec(),
-        MessageType::Response,
-        Arc::new(ErrorHandler),
-    )?;
-
-    Ok(())
-}
-
-/// Send an error response
-async fn send_error(
+/// Send a NACK response for am_sync (uses Event channel)
+async fn send_nack(
     backend: Arc<NovaBackend>,
     response_id: ResponseId,
     error_message: String,
 ) -> Result<()> {
-    use bytes::BufMut;
-
-    let mut header = bytes::BytesMut::with_capacity(16);
-    header.put_u128_le(response_id.as_u128());
-
+    let header = encode_event_header(EventType::Ack(response_id, Outcome::Error));
     let payload = Bytes::from(error_message.into_bytes());
-
-    struct ErrorHandler;
-    impl dynamo_nova_backend::TransportErrorHandler for ErrorHandler {
-        fn on_error(&self, _header: Bytes, _payload: Bytes, error: String) {
-            error!("Failed to send error response: {}", error);
-        }
-    }
 
     backend.send_message_to_worker(
         WorkerId::from_u64(response_id.worker_id()),
         header.to_vec(),
         payload.to_vec(),
         MessageType::Ack,
-        Arc::new(ErrorHandler),
+        get_nack_error_handler(),
+    )?;
+
+    Ok(())
+}
+
+// --- Unary path (unary/typed_unary) - uses Response channel with encode_response_header ---
+
+/// Send an OK response with empty payload for unary (uses Response channel)
+async fn send_response_ok(backend: Arc<NovaBackend>, response_id: ResponseId) -> Result<()> {
+    let header = encode_response_header(response_id);
+
+    backend.send_message_to_worker(
+        WorkerId::from_u64(response_id.worker_id()),
+        header.to_vec(),
+        vec![],
+        MessageType::Response,
+        get_response_error_handler(),
+    )?;
+
+    Ok(())
+}
+
+/// Send a response with payload for unary (uses Response channel)
+async fn send_response(
+    backend: Arc<NovaBackend>,
+    response_id: ResponseId,
+    payload: Bytes,
+) -> Result<()> {
+    let header = encode_response_header(response_id);
+
+    backend.send_message_to_worker(
+        WorkerId::from_u64(response_id.worker_id()),
+        header.to_vec(),
+        payload.to_vec(),
+        MessageType::Response,
+        get_response_error_handler(),
+    )?;
+
+    Ok(())
+}
+
+/// Send an error response for unary (uses Response channel)
+async fn send_response_error(
+    backend: Arc<NovaBackend>,
+    response_id: ResponseId,
+    error_message: String,
+) -> Result<()> {
+    let header = encode_response_header(response_id);
+    let payload = Bytes::from(error_message.into_bytes());
+
+    backend.send_message_to_worker(
+        WorkerId::from_u64(response_id.worker_id()),
+        header.to_vec(),
+        payload.to_vec(),
+        MessageType::Response,
+        get_response_error_handler(),
     )?;
 
     Ok(())

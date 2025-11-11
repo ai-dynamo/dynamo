@@ -18,6 +18,7 @@ pub(crate) enum EventType {
     Event(EventHandle, Outcome),
 }
 
+#[inline]
 pub(crate) fn encode_event_header(event_type: EventType) -> Bytes {
     // Encode using two bits:
     // - Bit 0 (LSB): 0 = Ack, 1 = Event

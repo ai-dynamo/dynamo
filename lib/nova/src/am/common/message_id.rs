@@ -38,6 +38,7 @@ impl MessageId {
     }
 
     /// Get the underlying ResponseId
+    #[expect(dead_code)]
     pub(crate) fn response_id(&self) -> ResponseId {
         self.0
     }

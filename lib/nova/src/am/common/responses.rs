@@ -71,8 +71,8 @@ pub(crate) fn decode_response_header(header: Bytes) -> ResponseId {
     ResponseId::from_u128(value)
 }
 
-// TODO: implement this
-fn encode_response_header(response_id: ResponseId) -> Bytes {
+#[inline]
+pub(crate) fn encode_response_header(response_id: ResponseId) -> Bytes {
     let mut bytes = BytesMut::with_capacity(size_of::<u128>());
     bytes.extend_from_slice(&response_id.as_u128().to_le_bytes());
     bytes.freeze()
@@ -84,6 +84,7 @@ fn encode_response_header(response_id: ResponseId) -> Bytes {
 /// - Bits 0-63: worker_id (u64)
 /// - Bits 64-79: slot_index (u16)
 /// - Bits 80-127: generation (u64, capped at 48 bits)
+#[inline]
 fn encode_response_key(worker_id: WorkerId, slot_index: usize, generation: u64) -> u128 {
     let worker_bits = worker_id as u128;
     let slot_bits = ((slot_index as u16) as u128) << 64;
@@ -97,6 +98,7 @@ fn encode_response_key(worker_id: WorkerId, slot_index: usize, generation: u64) 
 /// - Bits 0-63: worker_id (u64)
 /// - Bits 64-79: slot_index (u16)
 /// - Bits 80-127: generation (u64, capped at 48 bits)
+#[inline]
 fn decode_response_key(raw: u128) -> (WorkerId, usize, u64) {
     let worker_id = (raw & 0xFFFF_FFFF_FFFF_FFFF) as u64;
     let slot_index = ((raw >> 64) & 0xFFFF) as u16;
@@ -114,10 +116,6 @@ impl ResponseId {
 
     pub(crate) fn as_u128(&self) -> u128 {
         self.0.as_u128()
-    }
-
-    pub(crate) fn as_uuid(&self) -> Uuid {
-        self.0
     }
 
     pub(crate) fn worker_id(&self) -> WorkerId {
@@ -149,7 +147,6 @@ pub struct ResponseAwaiter {
     slot: Arc<Slot<Option<Bytes>, String>>,
     index: usize,
     consumed: bool,
-    generation: u64,
 }
 
 impl ResponseAwaiter {
@@ -166,17 +163,12 @@ impl ResponseAwaiter {
             slot,
             index,
             consumed: false,
-            generation,
         }
     }
 
     /// Identifier to include in the outbound request (acts as message + response key).
     pub fn response_id(&self) -> ResponseId {
         self.response_id
-    }
-
-    pub fn encode_header(&self) -> Bytes {
-        encode_response_header(self.response_id)
     }
 
     /// Wait for the response payload, returning the outcome supplied by the responder.
@@ -561,7 +553,10 @@ impl<T, E> Slot<T, E> {
         }
     }
 
+    // TODO: add polling/query to public api waiters
     /// Non-blocking poll version.
+    #[expect(dead_code)]
+    #[doc(hidden)]
     pub fn try_take(&self) -> Option<Result<T, E>> {
         self.state.lock().take_value()
     }
@@ -606,6 +601,7 @@ impl<T, E> SlotArena<T, E> {
         self.slots.get(index).cloned()
     }
 
+    #[expect(dead_code)]
     pub fn complete(&self, index: usize, val: Result<T, E>, expected_generation: u64) -> bool {
         let slot = &self.slots[index];
         match val {

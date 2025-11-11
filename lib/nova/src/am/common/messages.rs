@@ -62,9 +62,24 @@ impl MessageMetadata {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResponseType {
-    FireAndForget = 0, // am_send, event_trigger - ack on send success
-    AckNack = 1,       // am_sync - ack/nack on handler completion
-    Unary = 2,         // unary - return Result<Bytes> from handler
+    /// Indicates an am_send or event_trigger messsage
+    /// These types of messages do not expect a response from the remote instance; however,
+    /// they do expect a response from the local instance when the message is successfully
+    /// sent. This allows for the awaiter to know that the message was successfully sent
+    /// or that an error occurred.
+    FireAndForget = 0,
+    /// Indicates an am_sync message
+    /// These types of messages expect a response from the remote instance; or if the transport
+    /// has a problem, a local sender side error could also trigger an error response.
+    /// This allows for the awaiter to know that the message was sent and processed successfully,
+    /// or that an error occurred either locally or remotely.
+    AckNack = 1,
+    /// Indicates a unary message
+    /// These types of messages expect a response from the remote instance; however,
+    /// they do not expect a response from the local instance when the message is successfully
+    /// sent. This allows for the awaiter to know that the message was successfully sent
+    /// and completed, or that an error occurred either locally or remotely.
+    Unary = 2,
 }
 
 impl TryFrom<u8> for ResponseType {
