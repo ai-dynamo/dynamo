@@ -164,27 +164,26 @@ impl Discovery for KVStoreDiscovery {
                     && is_lora
                 {
                     // First try to use the pre-computed slug field from the card
-                    let lora_slug = if let Some(slug) =
-                        card_json.get("slug").and_then(|v| v.as_str())
-                    {
-                        slug.to_string()
-                    } else if let Some(name) =
-                        card_json.get("display_name").and_then(|v| v.as_str())
-                    {
-                        // Fallback: compute slug from display_name
-                        // Convert to slug format (lowercase, replace spaces/special chars with hyphens)
-                        name.to_lowercase()
-                            .chars()
-                            .map(|c| if c.is_alphanumeric() { c } else { '-' })
-                            .collect::<String>()
-                            .split('-')
-                            .filter(|s| !s.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("-")
-                    } else {
-                        // No slug or name available, skip appending
-                        String::new()
-                    };
+                    let lora_slug =
+                        if let Some(slug) = card_json.get("slug").and_then(|v| v.as_str()) {
+                            slug.to_string()
+                        } else if let Some(name) =
+                            card_json.get("display_name").and_then(|v| v.as_str())
+                        {
+                            // Fallback: compute slug from display_name
+                            // Convert to slug format (lowercase, replace spaces/special chars with hyphens)
+                            name.to_lowercase()
+                                .chars()
+                                .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                                .collect::<String>()
+                                .split('-')
+                                .filter(|s| !s.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("-")
+                        } else {
+                            // No slug or name available, skip appending
+                            String::new()
+                        };
 
                     if !lora_slug.is_empty() {
                         // Append lora slug to key for LoRA registration
