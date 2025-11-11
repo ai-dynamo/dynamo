@@ -628,11 +628,57 @@ jobs:
 
           echo
           echo "=== Waiting for Deployment/qwen-epp rollout to complete ==="
-          # This will fail with the 'progress deadline exceeded' error if it never becomes Ready
+          # Run rollout in a non-fatal block so we can dump debug info on failure
+          set +e
           kubectl rollout status deploy/qwen-epp -n ${NS} --timeout=600s
+          ROLLOUT_STATUS=$?
+          set -e
+
           echo
           echo "=== Final qwen-epp Deployment status ==="
-          kubectl get deploy qwen-epp -n ${NS} -o wide
+          kubectl get deploy qwen-epp -n ${NS} -o wide || true
+
+          if [[ ${ROLLOUT_STATUS} -ne 0 ]]; then
+            echo
+            echo "!!! qwen-epp rollout FAILED with status ${ROLLOUT_STATUS} – collecting extra debug info..."
+
+            echo
+            echo "=== Describe Deployment qwen-epp ==="
+            kubectl describe deploy qwen-epp -n ${NS} || true
+
+            echo
+            echo "=== All pods for qwen-epp (wide) ==="
+            kubectl get pods -n ${NS} -l "${SELECTOR}" -o wide || true
+
+            POD=$(kubectl get pods -n ${NS} -l "${SELECTOR}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            if [[ -n "${POD}" ]]; then
+              echo
+              echo "=== Final describe pod ${POD} ==="
+              kubectl describe pod "${POD}" -n ${NS} || true
+
+              echo
+              echo "=== Events for pod ${POD} (sorted by time) ==="
+              kubectl get events -n ${NS} \
+                --field-selector involvedObject.name=${POD} \
+                --sort-by=.lastTimestamp || true
+
+              echo
+              echo "=== Pod status JSON (for Waiting reason/message) ==="
+              kubectl get pod "${POD}" -n ${NS} -o json | jq '.status.containerStatuses // []' || true
+
+              echo
+              echo "=== Logs for pod ${POD} (all containers, if any) ==="
+              kubectl logs "${POD}" -n ${NS} --all-containers=true --tail=200 || true
+            else
+              echo "No qwen-epp pod found when debugging rollout failure."
+            fi
+
+            echo
+            echo "=== epp ConfigMap (dynamo-gaie-epp-config) ==="
+            kubectl get configmap dynamo-gaie-epp-config -n ${NS} -o yaml || true
+
+            exit ${ROLLOUT_STATUS}
+          fi
 
       - name: Cleanup
         if: always()
