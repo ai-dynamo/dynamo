@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = [pytest.mark.unit, pytest.mark.ci, pytest.mark.cpu_only]
 
 @pytest.fixture
 def temp_wheel_dir():
