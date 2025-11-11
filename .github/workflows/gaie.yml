@@ -542,19 +542,19 @@ jobs:
 
           cd "${DYNAMO_DIR}/deploy/inference-gateway"
 
-          echo "Checking for existing ClusterRole pod-read before Helm install..."
+          echo "Checking for existing ClusterRole/ClusterRoleBinding before Helm install..."
           kubectl get clusterrole pod-read -o yaml || echo "ClusterRole pod-read does not exist"
+          kubectl get clusterrolebinding pod-read-binding -o yaml || echo "ClusterRoleBinding pod-read-binding does not exist"
 
-          echo "Deleting stale ClusterRole/ClusterRoleBinding pod-read (if any) to avoid Helm ownership conflicts..."
+          echo "Deleting stale ClusterRole/ClusterRoleBinding (if any) to avoid Helm ownership conflicts..."
           kubectl delete clusterrole pod-read --ignore-not-found
-          kubectl delete clusterrolebinding pod-read --ignore-not-found || true
+          kubectl delete clusterrolebinding pod-read-binding --ignore-not-found || true
 
           echo "Installing/Upgrading GAIE Helm chart (dynamo-gaie) into namespace ${NS}..."
           helm upgrade --install dynamo-gaie ./helm/dynamo-gaie \
             -n "${NS}" \
             -f ./vllm_agg_qwen.yaml \
             --set-string extension.image="${EPP_IMAGE}"
-
       - name: Verify qwen-epp deployment readiness
         shell: bash
         env:
@@ -661,9 +661,8 @@ jobs:
           fi
 
           echo "=== Cleaning up cluster-scoped GAIE RBAC (pod-read) ==="
-          # These are cluster-scoped, so no -n
           kubectl delete clusterrole pod-read --ignore-not-found
-          kubectl delete clusterrolebinding pod-read --ignore-not-found || true
+          kubectl delete clusterrolebinding pod-read-binding --ignore-not-found || true
 
       - name: Remove kubeconfig file
         if: always()
