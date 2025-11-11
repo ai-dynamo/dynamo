@@ -74,9 +74,10 @@ fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
 }
 
 fn may_be_fix_msg_content(messages: serde_json::Value) -> Value {
-    // If messages[content] is provided as a list containing ONLY text parts,
-    // concatenate them into a string to match chat template expectations.
-    // Mixed content types are left for chat templates to handle.
+    // Flatten content arrays into strings with placeholders for multimodal content.
+    // This mimics vLLM's preprocessing so templates receive simple strings.
+    // - Text-only arrays: concatenate text parts
+    // - Multimodal arrays: interleave text with <image>, <video>, <audio> placeholders
 
     let Some(arr) = messages.as_array() else {
         return Value::from_serialize(&messages);
@@ -87,32 +88,51 @@ fn may_be_fix_msg_content(messages: serde_json::Value) -> Value {
         .map(|msg| {
             match msg.get("content") {
                 Some(serde_json::Value::Array(content_array)) => {
-                    let is_text_only_array = !content_array.is_empty()
-                        && content_array.iter().all(|part| {
-                            part.get("type")
-                                .and_then(|type_field| type_field.as_str())
-                                .map(|type_str| type_str == "text")
-                                .unwrap_or(false)
-                        });
-
-                    if is_text_only_array {
-                        let mut modified_msg = msg.clone();
-                        if let Some(msg_object) = modified_msg.as_object_mut() {
-                            let text_parts: Vec<&str> = content_array
-                                .iter()
-                                .filter_map(|part| part.get("text")?.as_str())
-                                .collect();
-                            let concatenated_text = text_parts.join("\n");
-
-                            msg_object.insert(
-                                "content".to_string(),
-                                serde_json::Value::String(concatenated_text),
-                            );
-                        }
-                        modified_msg // Concatenated string content
-                    } else {
-                        msg.clone() // Mixed content or non-text only
+                    if content_array.is_empty() {
+                        return msg.clone();
                     }
+
+                    let mut modified_msg = msg.clone();
+                    if let Some(msg_object) = modified_msg.as_object_mut() {
+                        let mut content_string = String::new();
+
+                        for (idx, part) in content_array.iter().enumerate() {
+                            if idx > 0 {
+                                content_string.push(' ');
+                            }
+
+                            let part_type = part.get("type")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("");
+
+                            match part_type {
+                                "text" => {
+                                    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                        content_string.push_str(text);
+                                    }
+                                }
+                                "image_url" => {
+                                    content_string.push_str("<image>");
+                                }
+                                "video_url" => {
+                                    content_string.push_str("<video>");
+                                }
+                                "audio_url" => {
+                                    content_string.push_str("<audio>");
+                                }
+                                _ => {
+                                    // Unknown type - skip or add placeholder
+                                    tracing::warn!("Unknown content type in message: {}", part_type);
+                                }
+                            }
+                        }
+
+                        msg_object.insert(
+                            "content".to_string(),
+                            serde_json::Value::String(content_string),
+                        );
+                    }
+                    modified_msg
                 }
                 _ => msg.clone(), // String content or missing content - return unchanged
             }
@@ -292,8 +312,8 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         let has_tools = tools.as_ref().and_then(|v| v.len()).is_some_and(|l| l > 0);
         let add_generation_prompt = req.should_add_generation_prompt();
 
-        tracing::trace!(
-            "Rendering prompt with tools: {:?}, add_generation_prompt: {}",
+        tracing::debug!(
+            "Applying template with tools: {}, add_generation_prompt: {}",
             has_tools,
             add_generation_prompt
         );
@@ -321,9 +341,21 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             ctx
         };
 
+        // Select template based on whether tools are present
         let tmpl: minijinja::Template<'_, '_> = if has_tools {
-            self.env.get_template("tool_use")?
+            // For tools, try tool_use first (custom template), fall back to default
+            match self.env.get_template("tool_use") {
+                Ok(t) => {
+                    tracing::debug!("Using 'tool_use' template");
+                    t
+                },
+                Err(_) => {
+                    tracing::debug!("'tool_use' template not found, using 'default'");
+                    self.env.get_template("default")?
+                }
+            }
         } else {
+            tracing::debug!("Using 'default' template");
             self.env.get_template("default")?
         };
         Ok(tmpl.render(&ctx)?)
