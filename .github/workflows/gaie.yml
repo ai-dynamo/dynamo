@@ -424,18 +424,26 @@ jobs:
             # Frontend pods: name contains "-frontend-"
             FRONT_COUNT=$(echo "${POD_JSON}" | jq '
               [.items[]?
-               | select(type=="object" and (.metadata.name // "") | contains("-frontend-"))
-              ] | length
-            ')
-            # Decodeworker pods: name contains "vllmdecodeworker"
-            DECODE_COUNT=$(echo "${POD_JSON}" | jq '
-              [.items[]?
-               | select(type=="object" and (.metadata.name // "") | contains("vllmdecodeworker"))
+              | select(
+                  (type == "object") and
+                  ((.metadata.name // "") | contains("-frontend-"))
+                )
               ] | length
             ')
 
+            # Decodeworker pods: name contains "vllmdecodeworker"
+            DECODE_COUNT=$(echo "${POD_JSON}" | jq '
+              [.items[]?
+              | select(
+                  (type == "object") and
+                  ((.metadata.name // "") | contains("vllmdecodeworker"))
+                )
+              ] | length
+            ')
+
+
             echo "Frontend pods count: ${FRONT_COUNT}"
-            echo "Decodeworker pods count: ${DECODE_COUNT}"
+            echo "Backend pods count: ${DECODE_COUNT}"
 
             if [[ "${FRONT_COUNT}" -eq 0 || "${DECODE_COUNT}" -eq 0 ]]; then
               echo "Waiting for both frontend and decodeworker pods to be created..."
@@ -446,23 +454,29 @@ jobs:
             # Check: all frontend pods Ready == True
             FRONT_NOT_READY=$(echo "${POD_JSON}" | jq '
               [.items[]?
-                | select(type=="object" and (.metadata.name // "") | contains("-frontend-"))
+                | select(
+                    (type == "object") and
+                    ((.metadata.name // "") | contains("-frontend-"))
+                  )
                 | {conds: (.status.conditions // [])}
                 | select(
-                    ([.conds[]? | select(.type=="Ready") | .status]
-                      | first // "False") != "True"
+                    (([.conds[]? | select(.type=="Ready") | .status] | first) // "False") != "True"
                   )
               ] | length
             ')
 
+
             # Check: all decodeworker pods have phase == Running
             DECODE_NOT_RUNNING=$(echo "${POD_JSON}" | jq '
               [.items[]?
-                | select(type=="object"
-                         and (.metadata.name // "") | contains("vllmdecodeworker")
-                         and (.status.phase // "") != "Running")
+                | select(
+                    (type == "object") and
+                    ((.metadata.name // "") | contains("vllmdecodeworker")) and
+                    ((.status.phase // "") != "Running")
+                  )
               ] | length
             ')
+
 
             echo "Frontend not ready count: ${FRONT_NOT_READY}"
             echo "Decodeworker not running count: ${DECODE_NOT_RUNNING}"
