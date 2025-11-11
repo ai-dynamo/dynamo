@@ -213,6 +213,12 @@ def setup_vllm_engine(config, stat_logger=None):
 
     engine_args = config.engine_args
 
+    if engine_args.enable_lora:
+        if "VLLM_ALLOW_RUNTIME_LORA_UPDATING" not in os.environ:
+            os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"
+        if "VLLM_LORA_MODULES_LOADING_TIMEOUT" not in os.environ:
+            os.environ["VLLM_LORA_MODULES_LOADING_TIMEOUT"] = "600"
+
     # KV transfer config is now handled by args.py based on ENABLE_LMCACHE env var
     if ENABLE_LMCACHE:
         setup_lmcache_environment()
