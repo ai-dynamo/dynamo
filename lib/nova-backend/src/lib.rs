@@ -11,6 +11,9 @@ pub mod tcp;
 #[cfg(feature = "ucx")]
 pub mod ucx;
 
+#[cfg(feature = "http")]
+pub mod http;
+
 mod transport;
 
 use std::{collections::HashMap, sync::Arc};
@@ -36,6 +39,9 @@ pub enum NovaBackendError {
     #[error("Transport not found for instance: {0}")]
     InstanceNotRegistered(InstanceId),
 
+    #[error("Worker not found: {0}")]
+    WorkerNotRegistered(WorkerId),
+
     #[error("Transport not found: {0}")]
     TransportNotFound(TransportKey),
 
@@ -50,6 +56,7 @@ pub struct NovaBackend {
     transports: HashMap<TransportKey, Arc<dyn Transport>>,
     primary_transport: DashMap<InstanceId, Arc<dyn Transport>>,
     alternative_transports: DashMap<InstanceId, Vec<TransportKey>>,
+    workers: DashMap<WorkerId, InstanceId>,
 
     #[allow(dead_code)]
     runtime: tokio::runtime::Handle,
@@ -86,14 +93,31 @@ impl NovaBackend {
                 priorities: Mutex::new(priorities),
                 primary_transport: DashMap::new(),
                 alternative_transports: DashMap::new(),
+                workers: DashMap::new(),
                 runtime,
             },
             data_streams,
         ))
     }
 
+    pub fn instance_id(&self) -> InstanceId {
+        self.instance_id
+    }
+
     pub fn peer_info(&self) -> PeerInfo {
         PeerInfo::new(self.instance_id, self.address.clone())
+    }
+
+    pub fn is_registered(&self, instance_id: InstanceId) -> bool {
+        self.primary_transport.contains_key(&instance_id)
+    }
+
+    pub fn translate_worker_id(&self, worker_id: WorkerId) -> Result<InstanceId, NovaBackendError> {
+        let instance_id = self
+            .workers
+            .get(&worker_id)
+            .ok_or(NovaBackendError::WorkerNotRegistered(worker_id))?;
+        Ok(instance_id.clone())
     }
 
     pub fn send_message(
@@ -109,10 +133,66 @@ impl NovaBackend {
             .get(&target)
             .ok_or(NovaBackendError::InstanceNotRegistered(target))?;
 
-        // if the transport fails to send, it will call the error handler callback
         transport.send_message(target, header, payload, message_type, on_error);
 
         Ok(())
+    }
+
+    pub fn send_message_with_transport(
+        &self,
+        target: InstanceId,
+        header: Vec<u8>,
+        payload: Vec<u8>,
+        message_type: MessageType,
+        on_error: Arc<dyn TransportErrorHandler>,
+        transport_key: TransportKey,
+    ) -> anyhow::Result<()> {
+        let transport = self
+            .primary_transport
+            .get(&target)
+            .ok_or(NovaBackendError::InstanceNotRegistered(target))?;
+
+        if transport.value().key() == transport_key {
+            transport.send_message(target, header, payload, message_type, on_error);
+        } else {
+            // if we got here, we can unwrap because there is an entry in the alternative_transports map
+            let alternative_transports = self
+                .alternative_transports
+                .get(&target)
+                .ok_or(NovaBackendError::InstanceNotRegistered(target))?;
+
+            for alternative_transport in alternative_transports.iter() {
+                if *alternative_transport == transport_key {
+                    if let Some(transport) = self.transports.get(alternative_transport) {
+                        transport.send_message(target, header, payload, message_type, on_error);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        Err(NovaBackendError::NoCompatibleTransports)?
+    }
+
+    pub fn send_message_to_worker(
+        &self,
+        worker_id: WorkerId,
+        header: Vec<u8>,
+        payload: Vec<u8>,
+        message_type: MessageType,
+        on_error: Arc<dyn TransportErrorHandler>,
+    ) -> anyhow::Result<()> {
+        match self.translate_worker_id(worker_id) {
+            Ok(instance_id) => {
+                self.send_message(instance_id, header, payload, message_type, on_error)
+            }
+            Err(_) => {
+                // slow path
+                // need to try to look up the instance_id by worker_id via the discover plane
+                // this might neeed the full connect, handshake protocol before succeeding
+                unimplemented!("slow path");
+            }
+        }
     }
 
     pub fn register_peer(&self, peer: PeerInfo) -> Result<(), NovaBackendError> {
@@ -147,6 +227,7 @@ impl NovaBackend {
             .insert(instance_id, primary_transport.clone());
         self.alternative_transports
             .insert(instance_id, alternative_transport_keys);
+        self.workers.insert(instance_id.worker_id(), instance_id);
 
         Ok(())
     }

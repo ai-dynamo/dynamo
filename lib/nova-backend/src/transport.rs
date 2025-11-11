@@ -81,6 +81,18 @@ pub struct DataStreams {
     pub event_stream: flume::Receiver<(Bytes, Bytes)>,
 }
 
+type DataStreamTuple = (
+    flume::Receiver<(Bytes, Bytes)>,
+    flume::Receiver<(Bytes, Bytes)>,
+    flume::Receiver<(Bytes, Bytes)>,
+);
+
+impl DataStreams {
+    pub fn into_parts(self) -> DataStreamTuple {
+        (self.message_stream, self.response_stream, self.event_stream)
+    }
+}
+
 pub fn make_channels() -> (TransportAdapter, DataStreams) {
     let (message_tx, message_rx) = flume::unbounded();
     let (response_tx, response_rx) = flume::unbounded();

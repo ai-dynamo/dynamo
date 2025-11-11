@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{scenarios, TcpFactory};
+use common::{TcpFactory, scenarios};
 
 #[tokio::test]
 async fn test_single_message_round_trip() {

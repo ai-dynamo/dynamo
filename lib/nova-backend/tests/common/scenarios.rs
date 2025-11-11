@@ -70,7 +70,7 @@ pub async fn multiple_messages_same_connection<F: TransportFactory>() {
 
     transport_a.register_peer(&transport_b).unwrap();
 
-    // Send 10 messages with small delay to preserve ordering
+    // Send 10 messages
     for i in 0..10 {
         let (header, payload) = test_message(i);
         transport_a.send(
@@ -79,15 +79,20 @@ pub async fn multiple_messages_same_connection<F: TransportFactory>() {
             payload,
             MessageType::Message,
         );
-        // Small delay to prevent channel overflow which could reorder messages
-        tokio::time::sleep(Duration::from_micros(100)).await;
     }
 
-    // Receive and verify all messages
-    let messages = transport_b.collect_messages(10, TEST_TIMEOUT).await.unwrap();
+    // Receive and verify all messages (order-independent)
+    let messages = transport_b
+        .collect_messages_unordered(10, TEST_TIMEOUT)
+        .await
+        .unwrap();
+
+    // Generate expected messages and sort them the same way
+    let mut expected: Vec<_> = (0..10).map(|i| test_message(i)).collect();
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+
     for (i, msg) in messages.iter().enumerate() {
-        let (expected_header, expected_payload) = test_message(i as u32);
-        assert_message_eq(msg.clone(), &expected_header, &expected_payload);
+        assert_message_eq(msg.clone(), &expected[i].0, &expected[i].1);
     }
 
     transport_a.shutdown();
@@ -266,7 +271,11 @@ pub async fn cluster_mesh_communication<F: TransportFactory>() {
 
     // Each node should receive 2 messages
     for i in 0..3 {
-        let messages = cluster.get(i).collect_messages(2, TEST_TIMEOUT).await.unwrap();
+        let messages = cluster
+            .get(i)
+            .collect_messages(2, TEST_TIMEOUT)
+            .await
+            .unwrap();
         assert_eq!(messages.len(), 2);
     }
 
@@ -305,7 +314,10 @@ pub async fn concurrent_senders<F: TransportFactory>() {
     }
 
     // Receive all messages
-    let messages = transport_b.collect_messages(10, TEST_TIMEOUT).await.unwrap();
+    let messages = transport_b
+        .collect_messages(10, TEST_TIMEOUT)
+        .await
+        .unwrap();
     assert_eq!(messages.len(), 10);
 
     transport_a.shutdown();
@@ -410,7 +422,7 @@ pub async fn high_throughput<F: TransportFactory>() {
 
     let num_messages = 100;
 
-    // Send many messages with small delay to preserve ordering
+    // Send many messages
     for i in 0..num_messages {
         let (header, payload) = test_message(i);
         transport_a.send(
@@ -419,21 +431,22 @@ pub async fn high_throughput<F: TransportFactory>() {
             payload,
             MessageType::Message,
         );
-        // Small delay to prevent channel overflow which could reorder messages
-        tokio::time::sleep(Duration::from_micros(50)).await;
     }
 
-    // Receive all messages
+    // Receive all messages (order-independent)
     let messages = transport_b
-        .collect_messages(num_messages as usize, TEST_TIMEOUT)
+        .collect_messages_unordered(num_messages as usize, TEST_TIMEOUT)
         .await
         .unwrap();
     assert_eq!(messages.len(), num_messages as usize);
 
-    // Verify order is preserved
+    // Generate expected messages and sort them the same way
+    let mut expected: Vec<_> = (0..num_messages).map(|i| test_message(i)).collect();
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Verify all messages received correctly
     for (i, msg) in messages.iter().enumerate() {
-        let (expected_header, expected_payload) = test_message(i as u32);
-        assert_message_eq(msg.clone(), &expected_header, &expected_payload);
+        assert_message_eq(msg.clone(), &expected[i].0, &expected[i].1);
     }
 
     transport_a.shutdown();

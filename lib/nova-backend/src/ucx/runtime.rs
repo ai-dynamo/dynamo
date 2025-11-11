@@ -72,7 +72,6 @@ pub fn spawn_ucx_runtime(
 }
 
 /// Request to get the local worker address
-
 pub struct GetWorkerAddressRequest {
     pub reply: oneshot::Sender<Result<Bytes>>,
 }
@@ -89,7 +88,6 @@ pub struct SendTask {
 }
 
 /// Main runtime loop - runs in dedicated thread with LocalSet
-
 fn run_runtime(
     channels: TransportAdapter,
     msg_rx: flume::Receiver<SendTask>,
@@ -194,7 +192,6 @@ fn run_runtime(
 }
 
 /// Receiver task - receives messages on a specific lane and forwards to appropriate channel
-
 async fn receiver_task(
     lane_id: u16,
     worker: Rc<Worker>,
@@ -262,7 +259,6 @@ async fn receiver_task(
 }
 
 /// Sender task - receives send requests and sends via UCX
-
 async fn sender_task(
     lane_id: u16,
     rx: flume::Receiver<SendTask>,
@@ -347,7 +343,6 @@ async fn sender_task(
 }
 
 /// Endpoint manager task - handles lazy endpoint creation with deduplication
-
 async fn endpoint_manager_task(
     mut rx: mpsc::UnboundedReceiver<EndpointRequest>,
     worker: Rc<Worker>,
@@ -436,7 +431,6 @@ async fn endpoint_manager_task(
 }
 
 /// Create an endpoint (called from spawned task)
-
 async fn create_endpoint(
     worker: Rc<Worker>,
     instance_id: InstanceId,

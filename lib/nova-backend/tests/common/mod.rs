@@ -10,6 +10,8 @@
 
 use bytes::Bytes;
 use dynamo_identity::InstanceId;
+#[cfg(feature = "http")]
+use dynamo_nova_backend::http::{HttpTransport, HttpTransportBuilder};
 #[cfg(feature = "ucx")]
 use dynamo_nova_backend::ucx::{UcxTransport, UcxTransportBuilder};
 use dynamo_nova_backend::{
@@ -193,6 +195,21 @@ impl<T: Transport> TestTransportHandle<T> {
         Ok(messages)
     }
 
+    /// Collect multiple messages with timeout, sorted by header for order-independent comparison
+    ///
+    /// This is useful for testing transports that don't guarantee delivery order (e.g., HTTP).
+    /// Messages are sorted by header bytes to enable deterministic comparison regardless of
+    /// delivery order.
+    pub async fn collect_messages_unordered(
+        &self,
+        count: usize,
+        timeout_duration: Duration,
+    ) -> anyhow::Result<Vec<(Bytes, Bytes)>> {
+        let mut messages = self.collect_messages(count, timeout_duration).await?;
+        messages.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(messages)
+    }
+
     /// Collect multiple responses with timeout
     pub async fn collect_responses(
         &self,
@@ -243,6 +260,22 @@ impl TestTransportHandle<UcxTransport> {
     /// For other transport types, use `with_factory()`.
     pub async fn new_ucx() -> anyhow::Result<Self> {
         Self::with_factory(|| UcxTransportBuilder::new().build()).await
+    }
+}
+
+// HTTP-specific convenience constructors
+#[cfg(feature = "http")]
+impl TestTransportHandle<HttpTransport> {
+    /// Create a new HTTP transport with OS-provided port
+    ///
+    /// This is a convenience method for creating HTTP transports.
+    /// For other transport types, use `with_factory()`.
+    pub async fn new_http() -> anyhow::Result<Self> {
+        Self::with_factory(|| {
+            // Use default builder which binds to 0.0.0.0:0 (OS-provided port)
+            HttpTransportBuilder::new().build()
+        })
+        .await
     }
 }
 
@@ -335,6 +368,22 @@ impl TestCluster<UcxTransport> {
     }
 }
 
+// HTTP-specific convenience constructor
+#[cfg(feature = "http")]
+impl TestCluster<HttpTransport> {
+    /// Create a new HTTP test cluster with the specified number of transports
+    ///
+    /// This is a convenience method for creating HTTP clusters.
+    /// For other transport types, use `with_factory()`.
+    pub async fn new_http(size: usize) -> anyhow::Result<Self> {
+        Self::with_factory(size, || {
+            // Use default builder which binds to OS-provided ports
+            HttpTransportBuilder::new().build()
+        })
+        .await
+    }
+}
+
 // Helper utilities
 
 /// Get a random available port
@@ -405,5 +454,22 @@ impl TransportFactory for UcxFactory {
 
     async fn create_cluster(size: usize) -> anyhow::Result<TestCluster<Self::Transport>> {
         TestCluster::new_ucx(size).await
+    }
+}
+
+/// HTTP transport factory
+#[cfg(feature = "http")]
+pub struct HttpFactory;
+
+#[cfg(feature = "http")]
+impl TransportFactory for HttpFactory {
+    type Transport = HttpTransport;
+
+    async fn create() -> anyhow::Result<TestTransportHandle<Self::Transport>> {
+        TestTransportHandle::new_http().await
+    }
+
+    async fn create_cluster(size: usize) -> anyhow::Result<TestCluster<Self::Transport>> {
+        TestCluster::new_http(size).await
     }
 }

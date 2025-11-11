@@ -63,6 +63,7 @@ async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 async_zmq = { version = "0.4.0" }
 blake3 = { version = "1" }
+bs58 = { version = "0.5" }
 bytes = { version = "1" }
 chrono = { version = "0.4", default-features = false, features = [
     "alloc",

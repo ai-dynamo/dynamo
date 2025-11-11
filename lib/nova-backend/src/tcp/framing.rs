@@ -68,11 +68,7 @@ impl TcpFrameCodec {
     /// # Returns
     /// Pre-encoded frame as Bytes ready for sending
     #[inline]
-    pub fn encode_frame(
-        msg_type: MessageType,
-        header: Bytes,
-        payload: Bytes,
-    ) -> io::Result<Bytes> {
+    pub fn encode_frame(msg_type: MessageType, header: Bytes, payload: Bytes) -> io::Result<Bytes> {
         let header_len = header.len() as u32;
         let payload_len = payload.len() as u32;
 
@@ -446,14 +442,18 @@ mod tests {
         let header = Bytes::from(&b"test-header"[..]);
         let payload = Bytes::from(&b"test-payload"[..]);
 
-        let framed = TcpFrameCodec::encode_frame(MessageType::Message, header.clone(), payload.clone())
-            .unwrap();
+        let framed =
+            TcpFrameCodec::encode_frame(MessageType::Message, header.clone(), payload.clone())
+                .unwrap();
 
         // Verify frame structure
         assert_eq!(framed.len(), MIN_HEADER_SIZE + header.len() + payload.len());
 
         // Verify header fields
-        assert_eq!(u16::from_be_bytes([framed[0], framed[1]]), SCHEMA_VERSION_V1);
+        assert_eq!(
+            u16::from_be_bytes([framed[0], framed[1]]),
+            SCHEMA_VERSION_V1
+        );
         assert_eq!(framed[2], MessageType::Message.as_u8());
         assert_eq!(
             u32::from_be_bytes([framed[3], framed[4], framed[5], framed[6]]),
@@ -465,7 +465,10 @@ mod tests {
         );
 
         // Verify data
-        assert_eq!(&framed[MIN_HEADER_SIZE..MIN_HEADER_SIZE + header.len()], &header[..]);
+        assert_eq!(
+            &framed[MIN_HEADER_SIZE..MIN_HEADER_SIZE + header.len()],
+            &header[..]
+        );
         assert_eq!(&framed[MIN_HEADER_SIZE + header.len()..], &payload[..]);
     }
 
@@ -480,8 +483,8 @@ mod tests {
             MessageType::Ack,
             MessageType::Event,
         ] {
-            let framed = TcpFrameCodec::encode_frame(*msg_type, header.clone(), payload.clone())
-                .unwrap();
+            let framed =
+                TcpFrameCodec::encode_frame(*msg_type, header.clone(), payload.clone()).unwrap();
             assert_eq!(framed[2], msg_type.as_u8());
         }
     }
@@ -491,8 +494,8 @@ mod tests {
         let header = Bytes::from(&b"ack-header"[..]);
         let payload = Bytes::new();
 
-        let framed = TcpFrameCodec::encode_frame(MessageType::Ack, header.clone(), payload.clone())
-            .unwrap();
+        let framed =
+            TcpFrameCodec::encode_frame(MessageType::Ack, header.clone(), payload.clone()).unwrap();
 
         assert_eq!(framed.len(), MIN_HEADER_SIZE + header.len());
         assert_eq!(
@@ -518,8 +521,9 @@ mod tests {
         let payload = Bytes::from(&b"round-trip-payload-data"[..]);
 
         // Encode
-        let framed = TcpFrameCodec::encode_frame(MessageType::Response, header.clone(), payload.clone())
-            .unwrap();
+        let framed =
+            TcpFrameCodec::encode_frame(MessageType::Response, header.clone(), payload.clone())
+                .unwrap();
 
         // Decode
         let mut buf = BytesMut::from(&framed[..]);
@@ -546,8 +550,8 @@ mod tests {
             let header = Bytes::from(&b"header"[..]);
             let payload = Bytes::from(&b"payload"[..]);
 
-            let framed = TcpFrameCodec::encode_frame(*msg_type, header.clone(), payload.clone())
-                .unwrap();
+            let framed =
+                TcpFrameCodec::encode_frame(*msg_type, header.clone(), payload.clone()).unwrap();
 
             let mut buf = BytesMut::from(&framed[..]);
             let result = codec.decode(&mut buf).unwrap().unwrap();

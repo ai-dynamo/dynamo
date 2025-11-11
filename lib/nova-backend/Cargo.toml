@@ -10,8 +10,9 @@ repository.workspace = true
 keywords.workspace = true
 
 [features]
-default = ["ucx"]
+default = ["ucx", "http"]
 ucx = ["dep:async-ucx"]
+http = ["dep:axum", "dep:reqwest"]
 
 [dependencies]
 dynamo-identity = { workspace = true }
@@ -44,6 +45,8 @@ nix = { version = "0.30", features = ["sched"] }
 
 # optional dependencies
 async-ucx = { git = "https://github.com/ryanolson/async-ucx.git", branch = "ryan/ucx", optional = true, features = ["am", "event"] }
+axum = { version = "0.8", optional = true }
+reqwest = { workspace = true , optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
