@@ -15,7 +15,6 @@ trap cleanup EXIT INT TERM
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 CHAT_TEMPLATE="qwen2-vl"
 PROVIDED_CHAT_TEMPLATE=""
-ENABLE_OTEL=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -32,17 +31,12 @@ while [[ $# -gt 0 ]]; do
             PROVIDED_CHAT_TEMPLATE=$2
             shift 2
             ;;
-        --enable-otel)
-            ENABLE_OTEL=true
-            shift
-            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --model <model_name> Specify the model to use (default: $MODEL_NAME)"
             echo "  --served-model-name <served_model_name> Specify the served model name to use (default: empty)"
             echo "  --chat-template <template> Specify the SGLang chat template to use (default: $CHAT_TEMPLATE)"
-            echo "  --enable-otel        Enable OpenTelemetry tracing"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;
@@ -65,28 +59,20 @@ if [[ -n "$SERVED_MODEL_NAME" ]]; then
     SERVED_MODEL_ARG="--served-model-name $SERVED_MODEL_NAME"
 fi
 
-# Enable tracing if requested
-if [ "$ENABLE_OTEL" = true ]; then
-    export DYN_LOGGING_JSONL=true
-    export OTEL_EXPORT_ENABLED=1
-    export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
-    export DYN_SYSTEM_PORT=8081
-fi
-
 # run ingress
-OTEL_SERVICE_NAME=dynamo-frontend python3 -m dynamo.frontend --http-port=8000 &
+python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
 # run SGLang multimodal processor
-OTEL_SERVICE_NAME=dynamo-multimodal-processor python3 -m dynamo.sglang --multimodal-processor --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" &
+python3 -m dynamo.sglang --multimodal-processor --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" &
 
 # run SGLang multimodal encode worker
-OTEL_SERVICE_NAME=dynamo-multimodal-encode CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" &
 
 # run SGLang multimodal prefill worker
 # TODO: Remove disable-radix-cache once the issue is fixed.
 # See https://github.com/sgl-project/sglang/pull/11203.
-OTEL_SERVICE_NAME=dynamo-multimodal-worker-prefill CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --multimodal-worker \
   --model-path "$MODEL_NAME" \
   $SERVED_MODEL_ARG \
@@ -101,7 +87,7 @@ OTEL_SERVICE_NAME=dynamo-multimodal-worker-prefill CUDA_VISIBLE_DEVICES=1 python
   --disaggregation-transfer-backend nixl &
 
 # run SGLang multimodal decode worker
-OTEL_SERVICE_NAME=dynamo-multimodal-worker-decode CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
+CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --multimodal-worker \
   --model-path "$MODEL_NAME" \
   $SERVED_MODEL_ARG \

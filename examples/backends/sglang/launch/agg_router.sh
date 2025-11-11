@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --enable-otel        Enable OpenTelemetry tracing"
             echo "  -h, --help           Show this help message"
             echo ""
-            echo "Note: System metrics are enabled by default on ports 8080 (frontend), 8081 (worker-1), 8082 (worker-2)"
+            echo "Note: System metrics are enabled by default on ports 8081 (worker-1), 8082 (worker-2)"
             exit 0
             ;;
         *)
@@ -44,7 +44,7 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 
 # run ingress
-OTEL_SERVICE_NAME=dynamo-frontend DYN_SYSTEM_PORT=8080 \
+OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend --router-mode kv --http-port=8000 &
 DYNAMO_PID=$!
 

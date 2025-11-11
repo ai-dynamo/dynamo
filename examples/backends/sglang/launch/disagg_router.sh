@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Note: System metrics are enabled by default on ports:"
-            echo "  8080 (frontend), 8081 (router), 8082-8083 (prefill workers), 8084-8085 (decode workers)"
+            echo "  8081 (router), 8082-8083 (prefill workers), 8084-8085 (decode workers)"
             exit 0
             ;;
         *)
@@ -45,7 +45,7 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 
 # run ingress
-OTEL_SERVICE_NAME=dynamo-frontend DYN_SYSTEM_PORT=8080 \
+OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend \
  --http-port=8000 \
  --router-mode kv \

@@ -21,7 +21,7 @@ while [[ $# -gt 0 ]]; do
             echo "Arguments:"
             echo "  GPU_MEM_FRACTION     Fraction of GPU memory to use per worker (default: 0.45)"
             echo ""
-            echo "Note: System metrics are enabled by default on ports 8080 (frontend), 8081 (prefill), 8082 (decode)"
+            echo "Note: System metrics are enabled by default on ports 8081 (prefill), 8082 (decode)"
             exit 0
             ;;
         *)
@@ -66,7 +66,7 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 
 # run ingress with KV router mode for disaggregated setup
-OTEL_SERVICE_NAME=dynamo-frontend DYN_SYSTEM_PORT=8080 \
+OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend --router-mode kv --http-port=8000 &
 DYNAMO_PID=$!
 
