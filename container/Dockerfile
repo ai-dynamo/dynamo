@@ -323,10 +323,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
 ###################################################
-########## Dev entrypoint image ##############
+########## Frontend entrypoint image ##############
 ###################################################
 
-FROM base AS dev
+FROM nvcr.io/nvidia/base/ubuntu:noble-20250619 AS frontend
 
 ARG ENABLE_KVBM
 ARG ARCH_ALT
@@ -356,6 +356,7 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
         # required for AIC perf files
+        ca-certificates \
         git \
         git-lfs \
         # rust build packages
@@ -364,6 +365,9 @@ RUN apt-get update -y \
         protobuf-compiler \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Install uv package manager
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Create and activate virtual environment
 ARG PYTHON_VERSION
@@ -400,55 +404,5 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/l
     echo "cat ~/.launch_screen" >> ~/.bashrc && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []
-
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS frontend
-
-# Install uv package manager
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
-COPY --from=dev /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=dev /usr/local/bin/etcd/ /usr/local/bin/etcd/
-# Add ETCD to PATH
-ENV PATH=/usr/local/bin/etcd:$PATH
-
-# Create and activate virtual environment
-ARG PYTHON_VERSION
-RUN mkdir -p /opt/dynamo/venv && \
-    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
-
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
-
-COPY benchmarks/ /opt/dynamo/benchmarks/
-COPY --from=dev /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-RUN uv pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
-    fi \
-    && cd /opt/dynamo/benchmarks \
-    && UV_GIT_LFS=1 uv pip install --no-cache . \
-    && cd - \
-    && rm -rf /opt/dynamo/benchmarks
-
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
-        --no-cache \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
-
-COPY . /workspace/
-
-# Setup launch banner
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
-    sed '/^#\s/d' /opt/dynamo/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc && \
-    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
-
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+ENTRYPOINT ["/bin/bash", "-c"]
 CMD []
