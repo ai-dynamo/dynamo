@@ -18,29 +18,24 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 	type fields struct {
 		BaseComponentDefaults *BaseComponentDefaults
 	}
-	type args struct {
-		numberOfNodes                  int32
-		parentGraphDeploymentName      string
-		parentGraphDeploymentNamespace string
-		dynamoNamespace                string
-	}
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    corev1.Container
-		wantErr bool
+		name             string
+		fields           fields
+		componentContext ComponentContext
+		want             corev1.Container
+		wantErr          bool
 	}{
 		{
 			name: "test",
 			fields: fields{
 				BaseComponentDefaults: &BaseComponentDefaults{},
 			},
-			args: args{
+			componentContext: ComponentContext{
 				numberOfNodes:                  1,
-				parentGraphDeploymentName:      "name",
-				parentGraphDeploymentNamespace: "namespace",
-				dynamoNamespace:                "dynamo-namespace",
+				ParentGraphDeploymentName:      "name",
+				ParentGraphDeploymentNamespace: "namespace",
+				DynamoNamespace:                "dynamo-namespace",
+				ComponentType:                  commonconsts.ComponentTypePlanner,
 			},
 			want: corev1.Container{
 				Name: commonconsts.MainContainerName,
@@ -52,9 +47,23 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 					{Name: commonconsts.DynamoMetricsPortName, ContainerPort: commonconsts.DynamoPlannerMetricsPort, Protocol: corev1.ProtocolTCP},
 				},
 				Env: []corev1.EnvVar{
-					{Name: "DYN_NAMESPACE", Value: "dynamo-namespace"},
+					{Name: commonconsts.DynamoNamespaceEnvVar, Value: "dynamo-namespace"},
+					{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypePlanner},
 					{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "name"},
 					{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "namespace"},
+					{
+						Name: "POD_NAME",
+						ValueFrom: &corev1.EnvVarSource{
+							FieldRef: &corev1.ObjectFieldSelector{
+								FieldPath: "metadata.name",
+							},
+						},
+					},
+					{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.namespace",
+						},
+					}},
 					{Name: "PLANNER_PROMETHEUS_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort)},
 				},
 			},
@@ -65,12 +74,7 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 			p := &PlannerDefaults{
 				BaseComponentDefaults: tt.fields.BaseComponentDefaults,
 			}
-			got, err := p.GetBaseContainer(ComponentContext{
-				numberOfNodes:                  tt.args.numberOfNodes,
-				ParentGraphDeploymentName:      tt.args.parentGraphDeploymentName,
-				ParentGraphDeploymentNamespace: tt.args.parentGraphDeploymentNamespace,
-				DynamoNamespace:                tt.args.dynamoNamespace,
-			})
+			got, err := p.GetBaseContainer(tt.componentContext)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("PlannerDefaults.GetBaseContainer() error = %v, wantErr %v", err, tt.wantErr)
 				return

@@ -220,7 +220,7 @@ def parse_args():
     return parser.parse_args()
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     """Main worker function for the standalone router service."""
 

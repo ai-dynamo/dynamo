@@ -50,7 +50,7 @@ async def main():
             return
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "mem", True)
+    runtime = DistributedRuntime(loop, "file")
 
     # Connect to middle server or direct server based on argument
     if use_middle_server:

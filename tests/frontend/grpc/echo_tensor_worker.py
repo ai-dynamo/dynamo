@@ -13,7 +13,7 @@ from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def echo_tensor_worker(runtime: DistributedRuntime):
     component = runtime.namespace("tensor").component("echo")
     await component.create_service()

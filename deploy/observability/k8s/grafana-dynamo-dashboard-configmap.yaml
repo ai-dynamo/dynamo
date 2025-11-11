@@ -1002,7 +1002,7 @@ data:
       },
       "timepicker": {},
       "timezone": "browser",
-      "title": "Dynamo Dashboard",
+      "title": "Dynamo Dashboard (generic)",
       "uid": "dynamo-dashboard",
       "version": 1
     }

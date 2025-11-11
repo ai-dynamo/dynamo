@@ -143,9 +143,6 @@ async def run_profile(args):
             assert args.backend in [
                 "sglang"
             ], "MoE model support is only available for SGLang"
-            assert (
-                not args.use_ai_configurator
-            ), "MoE model is not supported in ai-configurator"
         else:
             logger.info(
                 "Dense model profiling, sweeping TP size for prefill and decode"
@@ -204,26 +201,30 @@ async def run_profile(args):
                 raise ValueError(
                     "Must provide --aic-system when using --use-ai-configurator."
                 )
-            if not args.aic_model_name:
-                raise ValueError(
-                    "Must provide --aic-model-name when using --use-ai-configurator."
-                )
-            if not args.aic_backend_version:
-                raise ValueError(
-                    "Must provide --aic-backend-version when using --use-ai-configurator."
-                )
+
+            # Fallback to args.model if aic_hf_id is not provided
+            if not args.aic_hf_id:
+                if args.model:
+                    logger.info(
+                        f"--aic-hf-id not provided, using --model ({args.model}) as HuggingFace ID for AI configurator"
+                    )
+                    args.aic_hf_id = args.model
+                else:
+                    raise ValueError(
+                        "Must provide --aic-hf-id or --model when using --use-ai-configurator."
+                    )
 
             logger.info("Using aiconfigurator to estimate performance...")
             ai_configurator_perf_estimator = AIConfiguratorPerfEstimator(
-                args.aic_model_name,
+                args.aic_hf_id,
                 args.aic_system.lower(),
                 args.aic_backend,
                 args.aic_backend_version,
             )
         else:
-            if args.aic_system or args.aic_model_name or args.aic_backend_version:
+            if args.aic_system or args.aic_hf_id or args.aic_backend_version:
                 logger.warning(
-                    "Ignoring --aic-system, --aic-model-name, and/or --backend-version "
+                    "Ignoring --aic-system, --aic-hf-id, and/or --backend-version "
                     "when not using --use-ai-configurator."
                 )
 

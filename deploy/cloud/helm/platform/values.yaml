@@ -42,6 +42,8 @@ dynamo-operator:
       # Interval for renewing the namespace scope marker lease (namespace-restricted mode only). The namespace-restricted operator renews its lease at this interval to signal it's still running.
       renewInterval: 10s
 
+  # -- The Dynamo discovery backend to use. By default, will rely on ETCD for discovery. Can be set to "kubernetes" to use Kubernetes API for service discovery. --
+  discoveryBackend: ""
 
   # Controller manager configuration
   controllerManager:

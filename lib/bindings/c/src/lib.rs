@@ -943,7 +943,7 @@ pub async fn create_worker_selection_pipeline_chat(
     >,
 > {
     let runtime = Runtime::from_settings()?;
-    let dst_config = DistributedConfig::from_settings(false);
+    let dst_config = DistributedConfig::from_settings();
     let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
     let distributed_runtime: &'static DistributedRuntime = Box::leak(Box::new(drt_owned));
 
