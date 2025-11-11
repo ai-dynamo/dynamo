@@ -11,13 +11,43 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Parse command line arguments
+ENABLE_OTEL=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --enable-otel)
+            ENABLE_OTEL=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "Options:"
+            echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  -h, --help           Show this help message"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+# Enable tracing if requested
+if [ "$ENABLE_OTEL" = true ]; then
+    export DYN_LOGGING_JSONL=true
+    export OTEL_EXPORT_ENABLED=1
+    export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
+    export DYN_SYSTEM_PORT=8081
+fi
 
 # run ingress
-python3 -m dynamo.frontend --http-port=8000 &
+OTEL_SERVICE_NAME=dynamo-frontend python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
 # run prefill worker
-python3 -m dynamo.sglang \
+OTEL_SERVICE_NAME=dynamo-worker-prefill python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
@@ -30,7 +60,7 @@ python3 -m dynamo.sglang \
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
+OTEL_SERVICE_NAME=dynamo-worker-decode CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
