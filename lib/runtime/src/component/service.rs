@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::*;
+use crate::component::Component;
+use crate::config::RequestPlaneMode;
 use async_nats::service::Service as NatsService;
 use async_nats::service::ServiceExt as _;
 use derive_builder::Builder;
@@ -8,8 +11,6 @@ use derive_getters::Dissolve;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-use crate::component::Component;
 
 pub use super::endpoint::EndpointStats;
 
@@ -21,6 +22,12 @@ pub type EndpointStatsHandler =
 
 pub const PROJECT_NAME: &str = "Dynamo";
 const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug, Clone, Builder)]
+#[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
+pub struct ServiceConfig {
+    component: Component,
+}
 
 pub async fn build_nats_service(
     nats_client: &crate::transports::nats::Client,
@@ -57,4 +64,10 @@ pub async fn build_nats_service(
         .map_err(|e| anyhow::anyhow!("Failed to start NATS service: {e}"))?;
 
     Ok((nats_service, stats_handler_registry_clone))
+}
+
+impl ServiceConfigBuilder {
+    pub(crate) fn from_component(component: Component) -> Self {
+        Self::default().component(component)
+    }
 }

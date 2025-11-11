@@ -32,7 +32,7 @@
 use std::fmt;
 
 use crate::{
-    config::HealthStatus,
+    config::{HealthStatus, RequestPlaneMode},
     metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
     service::ServiceSet,
     transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
@@ -79,6 +79,8 @@ pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
     NatsTcp(String),
+    Http(String),
+    Tcp(String),
 }
 
 #[derive(Default)]
@@ -407,8 +409,25 @@ impl Component {
         }
 
         // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
-        if let Err(err) = self.start_scraping_nats_service_component_metrics() {
-            tracing::debug!(service_name, error = %err, "Metrics registration failed");
+        // Only enable NATS service metrics collection when using NATS request plane mode
+        let request_plane_mode = RequestPlaneMode::from_env();
+        match request_plane_mode {
+            RequestPlaneMode::Nats => {
+                if let Err(err) = self.start_scraping_nats_service_component_metrics() {
+                    tracing::debug!(
+                        "Metrics registration failed for '{}': {}",
+                        self.service_name(),
+                        err
+                    );
+                }
+            }
+            _ => {
+                tracing::info!(
+                    "Skipping NATS service metrics collection for '{}' - request plane mode is '{}'",
+                    self.service_name(),
+                    request_plane_mode
+                );
+            }
         }
         Ok(())
     }
