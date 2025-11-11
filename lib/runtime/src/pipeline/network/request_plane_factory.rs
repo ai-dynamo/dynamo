@@ -69,16 +69,6 @@ impl RequestPlane {
         }
     }
 
-    /// Create a client from environment variable
-    ///
-    /// Reads `DYN_REQUEST_PLANE` and creates the appropriate client.
-    pub async fn create_client_from_env(
-        drt: &impl DistributedRuntimeProvider,
-    ) -> Result<Arc<dyn RequestPlaneClient>> {
-        let mode = RequestPlaneMode::from_env();
-        tracing::info!("Creating request plane client for mode: {}", mode);
-        Self::create_client(mode, drt).await
-    }
 
     // ===== Server Creation Methods =====
 
@@ -117,16 +107,5 @@ impl RequestPlane {
                 Ok(Arc::new(TcpRequestServer::new(cancellation_token)))
             }
         }
-    }
-
-    /// Create a server from environment variable
-    ///
-    /// Reads `DYN_REQUEST_PLANE` and creates the appropriate server.
-    pub async fn create_server_from_env(
-        cancellation_token: CancellationToken,
-    ) -> Result<Arc<dyn RequestPlaneServer>> {
-        let mode = RequestPlaneMode::from_env();
-        tracing::info!("Creating request plane server for mode: {}", mode);
-        Self::create_server(mode, cancellation_token).await
     }
 }
