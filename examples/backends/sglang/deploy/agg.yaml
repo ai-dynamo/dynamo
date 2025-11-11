@@ -4,19 +4,19 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: tusharma-sglang-agg
+  name: sglang-agg
 spec:
   services:
     Frontend:
-      dynamoNamespace: tusharma
+      dynamoNamespace: sglang-agg
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/tusharma-frontend:0.2.0
+          image: my-registry/sglang-runtime:my-tag
     decode:
       envFromSecret: hf-token-secret
-      dynamoNamespace: tusharma
+      dynamoNamespace: sglang-agg
       componentType: worker
       replicas: 1
       resources:
@@ -24,7 +24,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.0
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/examples/backends/sglang
           command:
           - python3
