@@ -270,6 +270,7 @@ jobs:
           if [[ "${HELM_STATUS}" -ne 0 ]]; then
             echo "Helm install/upgrade of dynamo-platform FAILED with status ${HELM_STATUS}"
             echo
+
             echo "=== Jobs in namespace ${NAMESPACE} ==="
             kubectl get jobs -n ${NAMESPACE} || true
 
@@ -292,6 +293,34 @@ jobs:
               kubectl logs "${SSH_POD}" -n ${NAMESPACE} --all-containers=true --tail=200 || true
             else
               echo "No pods found for Job dynamo-platform-dynamo-operator-ssh-keygen"
+            fi
+
+            echo
+            echo "=== Describe Deployment dynamo-platform-dynamo-operator-controller-manager ==="
+            kubectl describe deploy dynamo-platform-dynamo-operator-controller-manager -n ${NAMESPACE} || true
+
+            echo
+            echo "=== Pods for dynamo-platform-dynamo-operator-controller-manager ==="
+            kubectl get pods -n ${NAMESPACE} \
+              -l 'app.kubernetes.io/component=manager,app.kubernetes.io/name=dynamo-operator' -o wide || true
+
+            CM_POD=$(kubectl get pods -n ${NAMESPACE} \
+              -l 'app.kubernetes.io/component=manager,app.kubernetes.io/name=dynamo-operator' \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            if [[ -n "${CM_POD}" ]]; then
+              echo
+              echo "=== describe pod ${CM_POD} ==="
+              kubectl describe pod "${CM_POD}" -n ${NAMESPACE} || true
+
+              echo
+              echo "=== logs from ${CM_POD} container=manager ==="
+              kubectl logs "${CM_POD}" -n ${NAMESPACE} -c manager --tail=200 || true
+
+              echo
+              echo "=== logs from ${CM_POD} container=kube-rbac-proxy (if present) ==="
+              kubectl logs "${CM_POD}" -n ${NAMESPACE} -c kube-rbac-proxy --tail=100 || true
+            else
+              echo "No controller-manager pod found."
             fi
 
             echo
