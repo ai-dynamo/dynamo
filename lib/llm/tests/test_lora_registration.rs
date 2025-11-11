@@ -20,7 +20,7 @@ mod tests {
     #[test]
     fn test_lora_hash_id_different_names() {
         // Test that different names produce different IDs
-        let names = vec![
+        let names = [
             "lora-adapter-1",
             "lora-adapter-2",
             "lora-adapter-3",
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn test_lora_hash_collision_resistance() {
         // Test that similar names produce different IDs
-        let similar_names = vec![
+        let similar_names = [
             "lora-adapter",
             "lora-adapter-",
             "lora-adapter-1",
