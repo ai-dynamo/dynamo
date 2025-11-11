@@ -125,7 +125,10 @@ async def main():
     else:
         runtime = DistributedRuntime(loop, "etcd")
 
-    await worker(runtime)  # type: ignore[arg-type]
+    try:
+        await worker(runtime)  # type: ignore[arg-type]
+    finally:
+        runtime.shutdown()
 
 
 if __name__ == "__main__":

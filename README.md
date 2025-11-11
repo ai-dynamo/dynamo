@@ -106,7 +106,8 @@ To quickly setup etcd & NATS, you can also run:
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-To run locally without etcd pass `--store-kv file` to both the frontend and workers. To set the directory used for key-value data export environment variable `DYN_FILE_KV` (Example: `export DYN_FILE_KV=/data/kv/dynamo`). Defaults to `$TMPDIR/dynamo_store_kv` .
+To run locally without etcd, pass `--store-kv file` to both the frontend and workers. The directory used for key-value data can be configured via the `DYN_FILE_KV` environment variable (example: `export DYN_FILE_KV=/data/kv/dynamo`). Defaults to `$TMPDIR/dynamo_store_kv`.
+
 
 ## 2. Select an engine
 

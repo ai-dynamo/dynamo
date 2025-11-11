@@ -21,10 +21,7 @@ use crate::{
 
 use futures::Future;
 use once_cell::sync::OnceCell;
-use std::{
-    mem::ManuallyDrop,
-    sync::{Arc, atomic::Ordering},
-};
+use std::sync::{Arc, atomic::Ordering};
 use tokio::{signal, sync::Mutex, task::JoinHandle};
 
 pub use tokio_util::sync::CancellationToken;
@@ -32,7 +29,7 @@ pub use tokio_util::sync::CancellationToken;
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone)]
 enum RuntimeType {
-    Shared(Arc<ManuallyDrop<tokio::runtime::Runtime>>),
+    Shared(Arc<tokio::runtime::Runtime>),
     External(tokio::runtime::Handle),
 }
 
@@ -65,9 +62,7 @@ impl Runtime {
             Some(secondary) => secondary,
             None => {
                 tracing::debug!("Created secondary runtime with single thread");
-                RuntimeType::Shared(Arc::new(ManuallyDrop::new(
-                    RuntimeConfig::single_threaded().create_runtime()?,
-                )))
+                RuntimeType::Shared(Arc::new(RuntimeConfig::single_threaded().create_runtime()?))
             }
         };
 
@@ -248,7 +243,7 @@ impl Runtime {
     /// See [`config::RuntimeConfig::from_settings`]
     pub fn from_settings() -> anyhow::Result<Runtime> {
         let config = config::RuntimeConfig::from_settings()?;
-        let runtime = Arc::new(ManuallyDrop::new(config.create_runtime()?));
+        let runtime = Arc::new(config.create_runtime()?);
         let primary = RuntimeType::Shared(runtime.clone());
         let secondary = RuntimeType::External(runtime.handle().clone());
         Runtime::new_with_config(primary, Some(secondary), &config)
@@ -257,7 +252,7 @@ impl Runtime {
     /// Create a [`Runtime`] with two single-threaded async tokio runtime
     pub fn single_threaded() -> anyhow::Result<Runtime> {
         let config = config::RuntimeConfig::single_threaded();
-        let owned = RuntimeType::Shared(Arc::new(ManuallyDrop::new(config.create_runtime()?)));
+        let owned = RuntimeType::Shared(Arc::new(config.create_runtime()?));
         Runtime::new(owned, None)
     }
 

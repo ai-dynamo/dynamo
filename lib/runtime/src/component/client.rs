@@ -21,25 +21,6 @@ use crate::{
     transports::etcd::Client as EtcdClient,
 };
 
-/// Each state will be have a nonce associated with it
-/// The state will be emitted in a watch channel, so we can observe the
-/// critical state transitions.
-enum MapState {
-    /// The map is empty; value = nonce
-    Empty(u64),
-
-    /// The map is not-empty; values are (nonce, count)
-    NonEmpty(u64, u64),
-
-    /// The watcher has finished, no more events will be emitted
-    Finished,
-}
-
-enum EndpointEvent {
-    Put(String, u64),
-    Delete(String),
-}
-
 #[derive(Clone, Debug)]
 pub struct Client {
     // This is me
@@ -59,8 +40,6 @@ impl Client {
             "Client::new_dynamic: Creating dynamic client for endpoint: {}",
             endpoint.path()
         );
-        const INSTANCE_REFRESH_PERIOD: Duration = Duration::from_secs(1);
-
         let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
         tracing::debug!(
             "Client::new_dynamic: Got instance source for endpoint: {}",
