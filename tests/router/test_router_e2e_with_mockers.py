@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import string
+import tempfile
 from typing import Any, Dict, Optional
 
 import aiohttp
@@ -20,6 +21,26 @@ from tests.utils.managed_process import ManagedProcess
 pytestmark = pytest.mark.pre_merge
 
 logger = logging.getLogger(__name__)
+
+
+@pytest.fixture
+def file_storage_backend():
+    """Fixture that sets up and tears down file storage backend.
+
+    Creates a temporary directory for file-based KV storage and sets
+    the DYN_FILE_KV environment variable. Cleans up after the test.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        old_env = os.environ.get("DYN_FILE_KV")
+        os.environ["DYN_FILE_KV"] = tmpdir
+        logger.info(f"Set up file storage backend in: {tmpdir}")
+        yield tmpdir
+        # Cleanup
+        if old_env is not None:
+            os.environ["DYN_FILE_KV"] = old_env
+        else:
+            os.environ.pop("DYN_FILE_KV", None)
+
 
 MODEL_NAME = ROUTER_MODEL_NAME
 NUM_MOCKERS = 2
@@ -206,11 +227,14 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8)
     return False
 
 
-def get_runtime():
+def get_runtime(store_backend="etcd"):
     """Get or create a DistributedRuntime instance.
 
     This handles the case where a worker is already initialized (common in CI)
     by using the detached() method to reuse the existing runtime.
+
+    Args:
+        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
     """
     try:
         # Try to use existing runtime (common in CI where tests run in same process)
@@ -218,7 +242,9 @@ def get_runtime():
         logger.info("Using detached runtime (worker already initialized)")
     except Exception as e:
         # If no existing runtime, create a new one
-        logger.info(f"Creating new runtime (detached failed: {e})")
+        logger.info(
+            f"Creating new runtime with {store_backend} backend (detached failed: {e})"
+        )
         try:
             # Try to get running loop (works in async context)
             loop = asyncio.get_running_loop()
@@ -226,7 +252,7 @@ def get_runtime():
             # No running loop, create a new one (sync context)
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-        _runtime_instance = DistributedRuntime(loop, "etcd")
+        _runtime_instance = DistributedRuntime(loop, store_backend)
 
     return _runtime_instance
 
@@ -503,14 +529,24 @@ def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
 
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
-def test_mocker_two_kv_router(request, runtime_services, predownload_tokenizers):
+@pytest.mark.parametrize("store_backend", ["etcd", "file"])
+def test_mocker_two_kv_router(
+    request,
+    runtime_services,
+    predownload_tokenizers,
+    file_storage_backend,
+    store_backend,
+):
     """
     Test with two KV routers and multiple mocker engine instances.
     Alternates requests between the two routers to test load distribution.
+    Tests with both etcd and file storage backends.
     """
 
     # runtime_services starts etcd and nats
-    logger.info("Starting mocker two KV router test")
+    logger.info(
+        f"Starting mocker two KV router test with {store_backend} storage backend"
+    )
 
     # Create mocker args dictionary: FixtureRequest: tuple[NatsServer, EtcdServer]: NoneType
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
@@ -942,14 +978,22 @@ def test_kv_push_router_bindings(request, runtime_services, predownload_tokenize
 
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
-def test_indexers_sync(request, runtime_services, predownload_tokenizers):
+@pytest.mark.parametrize("store_backend", ["etcd", "file"])
+def test_indexers_sync(
+    request,
+    runtime_services,
+    predownload_tokenizers,
+    file_storage_backend,
+    store_backend,
+):
     """
     Test that two KV routers have synchronized indexer states after processing requests.
     This test verifies that both routers converge to the same internal state.
+    Tests with both etcd and file storage backends.
     """
 
     # runtime_services starts etcd and nats
-    logger.info("Starting indexers sync test")
+    logger.info(f"Starting indexers sync test with {store_backend} storage backend")
 
     # Create mocker args dicti: FixtureRequestonary: tuple[NatsServer, EtcdServer]: NoneType
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
@@ -967,7 +1011,7 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
         # Use async to manage the test flow
         async def test_sync():
             # Get runtime and create endpoint
-            runtime = get_runtime()
+            runtime = get_runtime(store_backend)
             # Use the namespace from the mockers
             namespace = runtime.namespace(mockers.namespace)
             component = namespace.component("mocker")
