@@ -290,14 +290,6 @@ RUN python3 -m pip install --no-cache-dir \
     scikit-build-core==0.11.6 \
     setuptools-rust==1.12.0
 
-# Build and install sgl-router
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} \
-    && cd /sgl-workspace/sglang/sgl-router \
-    && cargo build --release \
-    && python3 -m pip install --no-cache-dir .
-
 ##################################################
 ########## Runtime Image ########################
 ##################################################
