@@ -27,11 +27,7 @@ pub fn lora_name_to_hash_id(lora_name: &str) -> i32 {
     let lora_id = (hash_u64 & 0x7FFFFFFF) as i32;
 
     // Ensure non-zero ID
-    if lora_id == 0 {
-        1
-    } else {
-        lora_id
-    }
+    if lora_id == 0 { 1 } else { lora_id }
 }
 
 #[cfg(test)]
@@ -43,7 +39,6 @@ mod tests {
         // Test that function returns a valid ID
         let id = lora_name_to_hash_id("test_lora");
         assert!(id > 0);
-        assert!(id <= 0x7FFFFFFF);
 
         // Test determinism
         let id1 = lora_name_to_hash_id("test_lora");
@@ -61,8 +56,6 @@ mod tests {
             let name = format!("lora_{}", i);
             let id = lora_name_to_hash_id(&name);
             assert!(id > 0);
-            assert!(id <= 0x7FFFFFFF);
         }
     }
 }
-
