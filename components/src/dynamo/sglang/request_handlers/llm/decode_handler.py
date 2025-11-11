@@ -136,14 +136,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 result_data = result.data()
                 if len(result_data) == 3:
                     worker_id, prefill_dp_rank, overlap = result_data
-                    if not hasattr(self, "_dp_routing_active_logged"):
-                        logging.info(
-                            f"DP-aware routing active: dp_rank={prefill_dp_rank}"
-                        )
-                        self._dp_routing_active_logged = True
-                    logging.debug(
-                        f"Router selected: worker={worker_id}, dp_rank={prefill_dp_rank}, overlap={overlap}"
-                    )
                 else:
                     # Fallback for older router versions (2-tuple response)
                     worker_id, overlap = result_data
