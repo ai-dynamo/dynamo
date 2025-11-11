@@ -19,6 +19,7 @@ use crate::am::{
     InstanceId,
     common::{ActiveMessage, MessageMetadata},
 };
+use dynamo_identity::WorkerId;
 
 /// Fire-and-forget builder.
 pub struct AmSendBuilder {
@@ -44,6 +45,11 @@ impl AmSendBuilder {
 
     pub fn instance(mut self, instance_id: InstanceId) -> Self {
         self.inner = self.inner.instance(instance_id);
+        self
+    }
+
+    pub fn worker(mut self, worker_id: WorkerId) -> Self {
+        self.inner = self.inner.worker(worker_id);
         self
     }
 
@@ -83,6 +89,11 @@ impl AmSyncBuilder {
         self
     }
 
+    pub fn worker(mut self, worker_id: WorkerId) -> Self {
+        self.inner = self.inner.worker(worker_id);
+        self
+    }
+
     pub fn send(self) -> impl Future<Output = Result<()>> {
         self.inner.sync()
     }
@@ -116,6 +127,11 @@ impl UnaryBuilder {
 
     pub fn instance(mut self, instance_id: InstanceId) -> Self {
         self.inner = self.inner.instance(instance_id);
+        self
+    }
+
+    pub fn worker(mut self, worker_id: WorkerId) -> Self {
+        self.inner = self.inner.worker(worker_id);
         self
     }
 
@@ -160,6 +176,11 @@ where
         self
     }
 
+    pub fn worker(mut self, worker_id: WorkerId) -> Self {
+        self.inner = self.inner.worker(worker_id);
+        self
+    }
+
     pub fn send(self) -> impl Future<Output = Result<R>> {
         self.inner.typed()
     }
@@ -175,6 +196,7 @@ pub struct MessageBuilder {
     handler: String,
     payload: Option<Bytes>,
     target_instance: Option<InstanceId>,
+    target_worker: Option<WorkerId>,
 }
 
 impl MessageBuilder {
@@ -189,6 +211,7 @@ impl MessageBuilder {
             handler: handler.to_string(),
             payload: None,
             target_instance: None,
+            target_worker: None,
         }
     }
 
@@ -209,23 +232,86 @@ impl MessageBuilder {
         self
     }
 
+    pub fn worker(mut self, worker_id: WorkerId) -> Self {
+        self.target_worker = Some(worker_id);
+        self
+    }
+
     fn resolve_target(&self) -> anyhow::Result<InstanceId> {
-        self.target_instance.ok_or_else(|| {
-            anyhow::anyhow!("target instance not set; call `instance(...)` before sending")
-        })
+        match (self.target_instance, self.target_worker) {
+            (Some(instance), None) => Ok(instance),
+            (None, Some(worker)) => self
+                .client
+                .backend
+                .translate_worker_id(worker)
+                .map_err(|e| anyhow::anyhow!("{}", e)),
+            (Some(_), Some(_)) => {
+                anyhow::bail!(
+                    "Cannot set both .instance() and .worker() - they are mutually exclusive"
+                )
+            }
+            (None, None) => {
+                anyhow::bail!("Target not set. Call .instance() or .worker() before sending")
+            }
+        }
     }
 
     pub async fn fire(self) -> Result<()> {
         let target = self.resolve_target()?;
-        self.client
-            .evaluate_handler_availability(target, &self.handler)
-            .await?;
-        let outcome = self.client.register_outcome().await?;
-        let message = ActiveMessage {
-            metadata: MessageMetadata::new_fire(outcome.response_id(), self.handler),
-            payload: self.payload.unwrap_or_default(),
-        };
-        self.client.send_message(target, message).await
+
+        // Fast path: if we can send directly, do so immediately
+        if self.client.can_send_directly(target, &self.handler) {
+            let outcome = self.client.register_outcome().await?;
+            let message = ActiveMessage {
+                metadata: MessageMetadata::new_fire(outcome.response_id(), self.handler),
+                payload: self.payload.unwrap_or_default(),
+            };
+            return self.client.send_message(target, message).await;
+        }
+
+        // Slow path: spawn task to handle discovery, then send
+        // For fire-and-forget, we don't wait for the task to complete
+        let client = self.client.clone();
+        let handler = self.handler.clone();
+        let payload = self.payload.clone();
+
+        tokio::spawn(async move {
+            match client.ensure_peer_ready(target, &handler).await {
+                Ok(_) => match client.register_outcome().await {
+                    Ok(outcome) => {
+                        let message = ActiveMessage {
+                            metadata: MessageMetadata::new_fire(outcome.response_id(), handler),
+                            payload: payload.unwrap_or_default(),
+                        };
+                        if let Err(e) = client.send_message(target, message).await {
+                            tracing::error!(
+                                target: "dynamo_nova::client",
+                                error = %e,
+                                "Failed to send fire-and-forget message"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            target: "dynamo_nova::client",
+                            error = %e,
+                            "Failed to register outcome for fire-and-forget"
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::error!(
+                        target: "dynamo_nova::client",
+                        error = %e,
+                        handler = %handler,
+                        target = %target,
+                        "Failed to prepare peer for message"
+                    );
+                }
+            }
+        });
+
+        Ok(())
     }
 
     pub async fn sync(self) -> Result<()> {
@@ -270,9 +356,32 @@ impl MessageBuilder {
         F: FnOnce(Result<Option<Bytes>, String>) -> Result<R>,
     {
         let target = self.resolve_target()?;
-        self.client
-            .evaluate_handler_availability(target, &self.handler)
-            .await?;
+
+        // Fast path: if we can send directly, do so immediately
+        if self.client.can_send_directly(target, &self.handler) {
+            let mut outcome = self.client.register_outcome().await?;
+            let response_id = outcome.response_id();
+
+            // Determine response type based on expectation
+            let metadata = match expectation {
+                Some(_) => MessageMetadata::new_unary(response_id, self.handler), // unary or typed unary
+                None => MessageMetadata::new_sync(response_id, self.handler),     // sync
+            };
+
+            let message = ActiveMessage {
+                metadata,
+                payload: self.payload.unwrap_or_default(),
+            };
+            self.client.send_message(target, message).await?;
+
+            let result = outcome.recv().await;
+            return map(result);
+        }
+
+        // Slow path: ensure peer is ready, then send
+        // For sync/unary, we must wait since caller needs the response
+        self.client.ensure_peer_ready(target, &self.handler).await?;
+
         let mut outcome = self.client.register_outcome().await?;
         let response_id = outcome.response_id();
 
@@ -297,10 +406,6 @@ impl MessageBuilder {
 pub(crate) struct ClientExpectation;
 
 impl ClientExpectation {
-    pub fn active_message() -> Self {
-        Self
-    }
-
     pub fn unary_bytes() -> Self {
         Self
     }

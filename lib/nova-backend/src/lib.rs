@@ -117,7 +117,7 @@ impl NovaBackend {
             .workers
             .get(&worker_id)
             .ok_or(NovaBackendError::WorkerNotRegistered(worker_id))?;
-        Ok(instance_id.clone())
+        Ok(*instance_id)
     }
 
     pub fn send_message(
@@ -162,11 +162,11 @@ impl NovaBackend {
                 .ok_or(NovaBackendError::InstanceNotRegistered(target))?;
 
             for alternative_transport in alternative_transports.iter() {
-                if *alternative_transport == transport_key {
-                    if let Some(transport) = self.transports.get(alternative_transport) {
-                        transport.send_message(target, header, payload, message_type, on_error);
-                        return Ok(());
-                    }
+                if *alternative_transport == transport_key
+                    && let Some(transport) = self.transports.get(alternative_transport)
+                {
+                    transport.send_message(target, header, payload, message_type, on_error);
+                    return Ok(());
                 }
             }
         }

@@ -5,9 +5,11 @@
 
 mod client;
 mod common;
+mod handlers;
 mod server;
 
 use client::ActiveMessageClient;
+use handlers::HandlerManager;
 use server::ActiveMessageServer;
 
 use std::sync::Arc;
@@ -15,6 +17,7 @@ use std::sync::Arc;
 // Re-export shared identity types
 pub use dynamo_identity::{InstanceId, WorkerId};
 pub use dynamo_nova_backend::{PeerInfo, WorkerAddress};
+pub use handlers::NovaHandler;
 
 use dynamo_nova_backend::{NovaBackend, Transport};
 
@@ -24,6 +27,7 @@ pub struct Nova {
     backend: Arc<NovaBackend>,
     client: Arc<ActiveMessageClient>,
     server: Arc<ActiveMessageServer>,
+    handlers: HandlerManager,
 }
 
 impl Nova {
@@ -56,25 +60,29 @@ impl Nova {
         }
 
         let client = Arc::new(ActiveMessageClient::new(
-            instance_id,
             response_manager,
             backend.clone(),
             Arc::new(DefaultErrorHandler),
         ));
 
-        // 4. Wrap everything in Arc<Nova>
+        // 4. Create handler manager
+        let control_tx = server.control_tx();
+        let handlers = HandlerManager::new(control_tx);
+
+        // 5. Wrap everything in Arc<Nova>
         let system = Arc::new(Self {
             instance_id,
             backend: backend.clone(),
             client,
             server: server.clone(),
+            handlers,
         });
 
         // 5. Initialize hub's system reference (OnceLock)
         server.hub().set_system(system.clone())?;
 
-        // 6. TODO: Register internal handlers here
-        // system.register_internal_handlers()?;
+        // 6. Register system handlers
+        server::register_system_handlers(&system.handlers)?;
 
         Ok(system)
     }
@@ -82,6 +90,14 @@ impl Nova {
     /// Get the instance ID of this system
     pub fn instance_id(&self) -> InstanceId {
         self.instance_id
+    }
+
+    /// Get the peer information for this Nova instance.
+    ///
+    /// Returns a `PeerInfo` containing the instance ID and worker address,
+    /// which can be used to register this instance as a peer on other Nova instances.
+    pub fn peer_info(&self) -> PeerInfo {
+        self.backend.peer_info()
     }
 
     /// Get the backend (internal use for sending responses)
@@ -112,22 +128,84 @@ impl Nova {
         client::builders::TypedUnaryBuilder::new(self.client.clone(), handler)
     }
 
-    pub async fn connect_to_peer(&self, _peer_info: PeerInfo) -> anyhow::Result<()> {
-        unimplemented!()
+    pub fn register_handler(&self, handler: NovaHandler) -> anyhow::Result<()> {
+        self.handlers.register_handler(handler)
     }
 
-    pub async fn available_handlers(
-        &self,
-        _instance_id: InstanceId,
-    ) -> anyhow::Result<Vec<String>> {
-        unimplemented!()
+    /// Connect to a peer by registering their peer information.
+    ///
+    /// This registers the peer with both the backend (for transport) and the client
+    /// (for handler discovery). The first message sent to this peer will trigger
+    /// an automatic handshake to exchange handler lists.
+    pub fn register_peer(&self, peer_info: PeerInfo) -> anyhow::Result<()> {
+        let instance_id = peer_info.instance_id();
+
+        // Register with backend (registers with transports)
+        self.backend.register_peer(peer_info)?;
+
+        // Register in client peer registry
+        self.client.register_peer(instance_id);
+
+        Ok(())
     }
 
+    /// Get the list of handlers available on a remote instance.
+    ///
+    /// This may trigger a handshake if handler information hasn't been queried yet.
+    pub async fn available_handlers(&self, instance_id: InstanceId) -> anyhow::Result<Vec<String>> {
+        self.client.get_peer_handlers(instance_id).await
+    }
+
+    /// Refresh the handler list for a remote instance.
+    ///
+    /// This forces a new query to the remote instance, updating the cached handler list.
+    pub async fn refresh_handlers(&self, instance_id: InstanceId) -> anyhow::Result<()> {
+        self.client.refresh_handler_list(instance_id).await
+    }
+
+    /// Wait for a specific handler to become available on a remote instance.
+    ///
+    /// This polls the remote instance periodically until the handler appears or a timeout occurs.
     pub async fn wait_for_handler(
         &self,
-        _instance_id: InstanceId,
-        _handler_name: &str,
+        instance_id: InstanceId,
+        handler_name: &str,
     ) -> anyhow::Result<()> {
-        unimplemented!()
+        const MAX_ATTEMPTS: u32 = 10;
+        const DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+        for _ in 0..MAX_ATTEMPTS {
+            self.refresh_handlers(instance_id).await?;
+
+            let handlers = self.available_handlers(instance_id).await?;
+            if handlers.contains(&handler_name.to_string()) {
+                return Ok(());
+            }
+
+            tokio::time::sleep(DELAY).await;
+        }
+
+        anyhow::bail!(
+            "Timeout waiting for handler '{}' on instance {}",
+            handler_name,
+            instance_id
+        )
     }
+
+    /// Get the list of handlers registered on this local instance.
+    pub fn list_local_handlers(&self) -> Vec<String> {
+        self.server.hub().list_handlers()
+    }
+
+    // /// Register a peer internally (used by system handlers)
+    // pub(crate) fn register_peer_internal(&self, instance_id: InstanceId) {
+    //     self.client.register_peer(instance_id);
+    // }
+
+    // /// Get a handler manager for registering message handlers.
+    // ///
+    // /// Use this to register your custom handlers for processing incoming active messages.
+    // pub fn handler_manager(&self) -> HandlerManager {
+    //     self.server.handler_manager()
+    // }
 }

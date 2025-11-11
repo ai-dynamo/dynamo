@@ -13,8 +13,9 @@ repository.workspace = true
 keywords.workspace = true
 
 [features]
-default = ["ucx"]
+default = ["ucx", "http"]
 ucx = []
+http = ["dynamo-nova-backend/http"]
 
 [dependencies]
 dynamo-identity = { workspace = true }
@@ -23,6 +24,7 @@ dynamo-nova-backend = { workspace = true }
 anyhow = { workspace = true }
 bs58 = { workspace = true }
 bytes = { workspace = true }
+clap = { version = "4.5", features = ["derive"] }
 derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 futures = { workspace = true }
@@ -41,3 +43,7 @@ flume = "0.11.1"
 lru = "0.16"
 
 async-ucx = { git = "https://github.com/ryanolson/async-ucx.git", branch = "ryan/ucx", optional = true}
+
+[[example]]
+name = "ping_pong"
+path = "examples/ping_pong.rs"

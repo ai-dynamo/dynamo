@@ -130,8 +130,7 @@ impl WorkerAddress {
     // ========================================================================
 
     /// Create a new builder for constructing a WorkerAddress from scratch.
-    #[allow(dead_code)] // Internal API for future use
-    pub(crate) fn builder() -> WorkerAddressBuilder {
+    pub fn builder() -> WorkerAddressBuilder {
         WorkerAddressBuilder::new()
     }
 
@@ -213,8 +212,7 @@ impl fmt::Display for WorkerAddress {
 /// let address = builder.build().unwrap();
 /// ```
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Internal API for future use
-pub(crate) struct WorkerAddressBuilder {
+pub struct WorkerAddressBuilder {
     entries: HashMap<String, Bytes>,
 }
 
