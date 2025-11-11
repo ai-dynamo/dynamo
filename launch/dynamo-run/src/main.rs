@@ -138,5 +138,5 @@ fn is_in_dynamic(in_opt: &Input) -> bool {
 }
 
 fn is_out_dynamic(out_opt: &Option<Output>) -> bool {
-    matches!(out_opt, Some(Output::Auto) | Some(Output::Static(_)))
+    matches!(out_opt, Some(Output::Auto))
 }

@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use clap::ValueEnum;
 use dynamo_llm::entrypoint::RouterConfig;
-use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::mocker::protocols::MockEngineArgs;
 use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
