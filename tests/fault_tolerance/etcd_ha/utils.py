@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 from typing import List, Optional
@@ -62,6 +64,7 @@ class EtcdReplicaServer(ManagedProcess):
         data_dir: str,
         log_dir: str,
         timeout: int = 30,
+        cluster_state: str = "new",
     ):
         self.name = name
         self.client_port = client_port
@@ -81,15 +84,15 @@ class EtcdReplicaServer(ManagedProcess):
             "--listen-client-urls",
             f"http://0.0.0.0:{client_port}",
             "--advertise-client-urls",
-            f"http://localhost:{client_port}",
+            f"http://127.0.0.1:{client_port}",
             "--listen-peer-urls",
             f"http://0.0.0.0:{peer_port}",
             "--initial-advertise-peer-urls",
-            f"http://localhost:{peer_port}",
+            f"http://127.0.0.1:{peer_port}",
             "--initial-cluster",
             initial_cluster,
             "--initial-cluster-state",
-            "new",
+            cluster_state,
             "--initial-cluster-token",
             "etcd-cluster",
         ]
@@ -108,7 +111,7 @@ class EtcdReplicaServer(ManagedProcess):
         """Get the status of this ETCD node"""
         try:
             response = requests.post(
-                f"http://localhost:{self.client_port}/v3/maintenance/status",
+                f"http://127.0.0.1:{self.client_port}/v3/maintenance/status",
                 json={},
                 timeout=2,
             )
@@ -118,16 +121,6 @@ class EtcdReplicaServer(ManagedProcess):
             logger.warning(f"Failed to get status for {self.name}: {e}")
         return {}
 
-    def is_leader(self) -> bool:
-        """Check if this node is the current leader"""
-        status = self.get_status()
-        # In etcd v3 API, we check if this member ID matches the leader ID
-        if status:
-            member_id = status.get("header", {}).get("member_id", "")
-            leader_id = status.get("leader", "")
-            return member_id == leader_id
-        return False
-
 
 class EtcdCluster:
     """Manager for an ETCD cluster with configurable number of replicas"""
@@ -136,13 +129,11 @@ class EtcdCluster:
         self,
         request,
         num_replicas: int = 3,
-        base_client_port: int = 2379,
-        base_peer_port: int = 12380,
+        base_port: int = 2379,
     ):
         self.request = request
         self.num_replicas = num_replicas
-        self.base_client_port = base_client_port
-        self.base_peer_port = base_peer_port
+        self.base_port = base_port
         self.replicas: List[Optional[EtcdReplicaServer]] = []
         self.data_dirs: List[str] = []
         self.log_base_dir = f"{request.node.name}_etcd_cluster"
@@ -156,78 +147,156 @@ class EtcdCluster:
 
         os.makedirs(self.log_base_dir, exist_ok=True)
 
+    def _get_initial_cluster(self) -> str:
+        """Build the initial cluster configuration string"""
+        initial_cluster_parts = []
+        for i in range(self.num_replicas):
+            name = f"etcd-{i}"
+            peer_port = self.base_port + (2 * i) + 1
+            initial_cluster_parts.append(f"{name}=http://127.0.0.1:{peer_port}")
+        return ",".join(initial_cluster_parts)
+
+    def _start_replica(self, idx: int, cluster_state: str = "new") -> EtcdReplicaServer:
+        """Start a single ETCD replica"""
+        name = f"etcd-{idx}"
+        # e.g. base_port = 2379 -> client_port = 2379, 2381, 2383
+        # e.g. base_port = 2379 -> peer_port = 2380, 2382, 2384
+        client_port = self.base_port + (2 * idx)
+        peer_port = self.base_port + (2 * idx) + 1
+
+        # Create data dir for the node
+        data_dir = tempfile.mkdtemp(prefix=f"etcd_{idx}_")
+        if idx < len(self.data_dirs):
+            self.data_dirs[idx] = data_dir
+        else:
+            self.data_dirs.append(data_dir)
+
+        log_dir = os.path.join(self.log_base_dir, name)
+        os.makedirs(log_dir, exist_ok=True)
+
+        logger.info(
+            f"Starting {name} on client port {client_port}, peer port {peer_port}"
+        )
+
+        replica = EtcdReplicaServer(
+            request=self.request,
+            name=name,
+            client_port=client_port,
+            peer_port=peer_port,
+            initial_cluster=self._get_initial_cluster(),
+            data_dir=data_dir,
+            log_dir=log_dir,
+            cluster_state=cluster_state,
+        )
+
+        replica.__enter__()
+        return replica
+
+    def _replace_member(self, idx: int) -> bool:
+        """Remove old member and add new member to the cluster using etcdctl"""
+        # Find a healthy replica to perform member operations
+        healthy_replica = None
+        for i, r in enumerate(self.replicas):
+            if r and i != idx:
+                healthy_replica = r
+                break
+
+        if not healthy_replica:
+            logger.error("No healthy replica found to perform member operations")
+            return False
+
+        name = f"etcd-{idx}"
+        peer_port = self.base_port + (2 * idx) + 1
+        peer_url = f"http://127.0.0.1:{peer_port}"
+
+        # Set ETCDCTL_ENDPOINTS for etcdctl commands
+        etcdctl_env = os.environ.copy()
+        etcdctl_env[
+            "ETCDCTL_ENDPOINTS"
+        ] = f"http://127.0.0.1:{healthy_replica.client_port}"
+        etcdctl_env["ETCDCTL_API"] = "3"
+
+        # First, get member list to find the old member's ID
+        logger.info(f"Getting member list to find {name}")
+        try:
+            result = subprocess.run(
+                ["etcdctl", "member", "list", "--write-out=json"],
+                env=etcdctl_env,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                members = json.loads(result.stdout).get("members", [])
+                old_member_id = None
+                for member in members:
+                    if member.get("name") == name:
+                        old_member_id = member.get("ID")
+                        break
+
+                if old_member_id:
+                    # Convert member ID to hex format (etcdctl expects hex)
+                    hex_member_id = format(int(old_member_id), "x")
+                    logger.info(
+                        f"Removing member with ID {old_member_id} (hex: {hex_member_id})"
+                    )
+                    remove_result = subprocess.run(
+                        ["etcdctl", "member", "remove", hex_member_id],
+                        env=etcdctl_env,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if remove_result.returncode != 0:
+                        logger.error(
+                            f"Failed to remove old member: {remove_result.stderr}"
+                        )
+                        return False
+                    logger.info(f"Successfully removed old member {name}")
+        except Exception as e:
+            logger.error(f"Error during member removal: {e}")
+            # Continue anyway - member might already be removed
+
+        # Add the new member to the cluster
+        logger.info(f"Adding new member {name} to cluster with peer URL {peer_url}")
+        try:
+            add_result = subprocess.run(
+                ["etcdctl", "member", "add", name, f"--peer-urls={peer_url}"],
+                env=etcdctl_env,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if add_result.returncode != 0:
+                logger.error(f"Failed to add new member: {add_result.stderr}")
+                return False
+            logger.info(f"Successfully added new member {name}")
+        except Exception as e:
+            logger.error(f"Error adding new member: {e}")
+            return False
+
+        return True
+
     def start(self):
         """Start ETCD cluster with configured number of replicas"""
         logger.info(f"Starting {self.num_replicas}-node ETCD cluster")
 
-        # Build initial cluster configuration
-        initial_cluster_parts = []
-        for i in range(self.num_replicas):
-            name = f"etcd-{i}"
-            peer_port = self.base_peer_port + i
-            initial_cluster_parts.append(f"{name}=http://localhost:{peer_port}")
-
-        initial_cluster = ",".join(initial_cluster_parts)
-
         # Start each replica
         for i in range(self.num_replicas):
-            name = f"etcd-{i}"
-            client_port = self.base_client_port + i
-            peer_port = self.base_peer_port + i
-            data_dir = tempfile.mkdtemp(prefix=f"etcd_{i}_")
-            log_dir = os.path.join(self.log_base_dir, name)
-
-            self.data_dirs.append(data_dir)
-            os.makedirs(log_dir, exist_ok=True)
-
-            logger.info(
-                f"Starting {name} on client port {client_port}, peer port {peer_port}"
-            )
-
-            replica = EtcdReplicaServer(
-                request=self.request,
-                name=name,
-                client_port=client_port,
-                peer_port=peer_port,
-                initial_cluster=initial_cluster,
-                data_dir=data_dir,
-                log_dir=log_dir,
-            )
-
-            replica.__enter__()
+            replica = self._start_replica(i, cluster_state="new")
             self.replicas.append(replica)
 
         logger.info(f"All {self.num_replicas} ETCD replicas started successfully")
 
-        # Wait for cluster to stabilize and elect a leader
-        self._wait_for_healthy_cluster(timeout=30)
-
-        leader_idx = self.find_leader()
-        if leader_idx is not None:
-            logger.info(f"Initial leader elected: etcd-{leader_idx}")
-        else:
-            logger.warning("No leader elected yet")
-
-    def _wait_for_healthy_cluster(self, timeout: int = 30):
-        """Wait for all replicas to be healthy and responsive.
-
-        Args:
-            timeout: Maximum time to wait in seconds
-
-        Raises:
-            RuntimeError: If cluster doesn't become healthy within timeout
-        """
+        # Wait for cluster to stabilize
         logger.info("Waiting for all replicas to be healthy...")
+
         start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            time.sleep(1)
-
-            # Check if all replicas are responding
+        while time.time() - start_time < 30:  # 30s timeout
             all_healthy = True
-            for i, replica in enumerate(self.replicas):
-                if replica:
-                    status = replica.get_status()
+            for i, r in enumerate(self.replicas):
+                if r:
+                    status = r.get_status()
                     if not status:
                         logger.debug(f"etcd-{i} not yet responsive")
                         all_healthy = False
@@ -237,40 +306,71 @@ class EtcdCluster:
                 logger.info("All replicas are healthy")
                 return
 
-        raise RuntimeError(f"ETCD cluster failed to become healthy within {timeout}s")
+            time.sleep(1)
 
-    def find_leader(self) -> Optional[int]:
-        """Find which replica is currently the leader"""
-        for i, replica in enumerate(self.replicas):
-            if replica and replica.is_leader():
-                return i
-        return None
+        raise RuntimeError("ETCD cluster failed to become healthy within 30s")
 
-    def terminate_leader(self) -> Optional[int]:
-        """Terminate the current leader and return its index"""
-        leader_idx = self.find_leader()
+    def terminate_replica(self, idx: int) -> Optional[int]:
+        """Terminate a specific replica by index.
 
-        if leader_idx is None:
-            logger.warning("No leader found to terminate")
+        Args:
+            idx: Index of replica to terminate.
+
+        Returns:
+            Index of terminated replica, or None if termination failed
+        """
+        # Use modulo to wrap around
+        actual_idx = idx % self.num_replicas
+        logger.info(f"Terminating replica: etcd-{actual_idx}")
+
+        replica = self.replicas[actual_idx]
+        if not replica:
+            logger.error(f"Replica etcd-{actual_idx} is already terminated")
             return None
 
-        logger.info(f"Terminating current leader: etcd-{leader_idx}")
-        replica = self.replicas[leader_idx]
+        replica.__exit__(None, None, None)
+        self.replicas[actual_idx] = None
+        logger.info(f"Replica etcd-{actual_idx} has been terminated")
+        return actual_idx
 
-        if replica:
-            replica.__exit__(None, None, None)
-            self.replicas[leader_idx] = None
-            logger.info(f"Leader etcd-{leader_idx} has been terminated")
+    def restart_replica(self, idx: int) -> bool:
+        """Restart a terminated replica"""
+        if idx < 0 or idx >= self.num_replicas:
+            logger.error(f"Invalid replica index: {idx}")
+            return False
 
-        return leader_idx
+        if self.replicas[idx] is not None:
+            logger.error(f"Replica etcd-{idx} is already running")
+            return False
+
+        # Remove old member and add new member
+        if not self._replace_member(idx):
+            logger.error(f"Failed to replace member etcd-{idx}")
+            return False
+
+        # Start the replica with existing cluster state
+        replica = self._start_replica(idx, cluster_state="existing")
+        self.replicas[idx] = replica
+
+        # Wait for the replica to become healthy
+        name = f"etcd-{idx}"
+        logger.info(f"Waiting for {name} to become healthy...")
+        for _ in range(30):
+            time.sleep(1)
+            if replica.get_status():
+                logger.info(f"{name} is now healthy")
+                return True
+
+        logger.error(f"{name} failed to become healthy")
+        return False
 
     def get_client_endpoints(self) -> List[str]:
         """Get list of active client endpoints"""
         endpoints = []
         for i, replica in enumerate(self.replicas):
             if replica:  # Only include active replicas
-                client_port = self.base_client_port + i
-                endpoints.append(f"http://localhost:{client_port}")
+                client_port = self.base_port + (2 * i)
+                endpoints.append(f"http://127.0.0.1:{client_port}")
         return endpoints
 
     def stop(self):
