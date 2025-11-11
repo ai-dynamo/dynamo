@@ -57,13 +57,8 @@ async def _handle_non_leader_node(
         "Setting up metrics-only mode."
     )
 
-    # Setup metrics publishing for Dynamo's internal metrics
-    # Note: publisher object must stay alive to maintain metrics endpoints
-    _publisher, metrics_task, _metrics_labels = await setup_sgl_metrics(
-        engine, config, component, generate_endpoint
-    )
-
-    # Register Prometheus metrics callback if enabled to expose SGLang metrics
+    # Only setup Prometheus registry to expose SGLang metrics from shared memory
+    # Non-leader nodes don't need Dynamo metrics publishing or KV events
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
         logging.info("Prometheus metrics registry configured for non-leader node")
@@ -71,17 +66,8 @@ async def _handle_non_leader_node(
     # Keep the process alive to serve metrics
     # The component's metrics endpoint is already exposed via the runtime
     logging.info("Non-leader node ready. Serving metrics only.")
-    try:
-        # Wait indefinitely - the process will be terminated via signal handlers
-        await asyncio.Event().wait()
-    finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled on non-leader node")
-        # Keep reference to prevent premature garbage collection
-        del _publisher, _metrics_labels
+    # Wait indefinitely - the process will be terminated via signal handlers
+    await asyncio.Event().wait()
 
 
 async def worker():
