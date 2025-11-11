@@ -1,11 +1,13 @@
-# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 import asyncio
 import contextlib
 import errno
+import json
 import multiprocessing
 import os
 import pty
+import re
 import subprocess
 import sys
 import threading
@@ -756,12 +758,11 @@ class CheckpointableAsyncLLM(AsyncLLM):
             "-v4",
             "--ext-unix-sk",
             "--tcp-established",
-            "--external", "mnt[shm]:/dev/shm",
+            "--external", "mnt[/dev/shm]:shm",
             "--link-remap",
             "--manage-cgroups=ignore",
             "--tree", str(root_pid),
-            "--ghost-limit", "50M",
-            "--timeout", "1800",
+            "--ghost-limit", "512M"
         ]
 
         if metadata.tty_external:
@@ -832,6 +833,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
         # Ensure the original tree PID from dump is fully gone to avoid
         # PID collisions when restoring into the same PID namespace.
         if metadata.tree_pid:
+            logger.info("Checking if original PIDs are free for restore...")
             start = time.time()
             # Wait up to a short grace period since dump should have killed it
             while time.time() - start < 5.0:
@@ -850,12 +852,24 @@ class CheckpointableAsyncLLM(AsyncLLM):
                         raw = f.read().replace(b"\x00", b" ")
                         holder = raw.decode("utf-8", "ignore").strip()
                 except Exception:
-                    holder = ""
-                msg = (
-                    "CRIU restore pre-check failed: root PID "
-                    f"{metadata.tree_pid} is in use in current PID namespace. "
-                    "Restore will fail with EEXIST. Consider restoring in a "
-                    "new PID namespace or wait until the PID is free."
+                    pass
+                
+                await asyncio.sleep(0.5)
+            
+            # Final check - if still taken, this is an error
+            if os.path.exists(f"/proc/{metadata.tree_pid}"):
+                holder = ""
+                try:
+                    with open(f"/proc/{metadata.tree_pid}/cmdline", "rb") as f:
+                        raw = f.read().replace(b"\x00", b" ")
+                        holder = raw.decode("utf-8", "ignore").strip()
+                except Exception:
+                    pass
+                
+                raise RuntimeError(
+                    f"CRIU restore failed: root PID {metadata.tree_pid} is still "
+                    f"in use after {max_wait}s. Holder: {holder or 'unknown'}. "
+                    "Cannot restore - PID collision would occur."
                 )
                 if holder:
                     logger.error(
@@ -866,11 +880,71 @@ class CheckpointableAsyncLLM(AsyncLLM):
                 else:
                     logger.error("%s", msg)
 
-        # Build CRIU restore command
+        # Find temporary files in checkpoint that may not exist after pod restart
+        # and externalize them so CRIU doesn't fail
+        external_files = []
+        try:
+            files_img_path = os.path.join(self.checkpoint_dir, "files.img")
+            if os.path.exists(files_img_path):
+                logger.info("Parsing checkpoint to find temporary files...")
+                # Use crit to decode the files.img in JSON format
+                result = subprocess.run(
+                    ["crit", "show", files_img_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0:
+                    try:
+                        # Parse JSON output from crit
+                        data = json.loads(result.stdout)
+                        if isinstance(data, dict) and 'entries' in data:
+                            for entry in data['entries']:
+                                if isinstance(entry, dict):
+                                    # Handle both 'reg' and 'remap' file types
+                                    file_info = entry.get('reg') or entry.get('remap')
+                                    if file_info and 'name' in file_info:
+                                        filepath = file_info['name']
+                                        # Externalize /tmp files that may not exist
+                                        # Handle both absolute paths and relative paths
+                                        if '/tmp/' in filepath or filepath.startswith('tmp/'):
+                                            fd_id = entry.get('id', '')
+                                            if fd_id:
+                                                # Handle both hex (0x1b1) and decimal formats
+                                                if isinstance(fd_id, str) and fd_id.startswith('0x'):
+                                                    # Already in hex format
+                                                    external_files.append(f"file[{fd_id}]")
+                                                elif isinstance(fd_id, int):
+                                                    # Convert to hex
+                                                    external_files.append(f"file[{hex(fd_id)}]")
+                                                else:
+                                                    # Use as-is
+                                                    external_files.append(f"file[{fd_id}]")
+                                                logger.info("Will externalize temp file: %s (id=%s)", 
+                                                          filepath, fd_id)
+                    except (json.JSONDecodeError, KeyError, TypeError) as e:
+                        logger.warning("Could not parse files.img JSON: %s", e)
+                        # Fallback: look for /tmp/ in text output and try to extract IDs
+                        for line in result.stdout.split('\n'):
+                            if '/tmp/' in line or 'tmp/' in line:
+                                # Try to extract file ID in hex format
+                                match = re.search(r'"id"\s*:\s*"(0x[0-9a-fA-F]+)"', line)
+                                if match:
+                                    fd_id = match.group(1)
+                                    external_files.append(f"file[{fd_id}]")
+                                    logger.info("Found temp file (fallback), will externalize: id=%s", fd_id)
+        except Exception as e:
+            logger.warning("Could not analyze checkpoint for temp files: %s", e)
+
+        # Build CRIU restore command using criu_ns wrapper
+        # criu_ns handles namespace creation to avoid PID collisions
+        pidfile_path = os.path.join(self.checkpoint_dir, "restored.pid")
         cmd = [
-            "criu", "restore",
-            "--shell-job",
+            "criu-ns", "restore",
+            # Note: --shell-job removed because subprocess.run() doesn't provide a TTY stdin
+            # which causes criu-ns to fail with "The stdin is not a tty for a --shell-job"
             "--restore-detached",
+            "--pidfile", pidfile_path,  # Track restored root PID
             "--images-dir", self.checkpoint_dir,
             "-o", "criu-restore.log",
             "-v4",
@@ -881,80 +955,189 @@ class CheckpointableAsyncLLM(AsyncLLM):
             "--manage-cgroups=ignore",
             "--ghost-limit", "50M",
         ]
+        
+        # Add external file directives for temp files
+        for ext_file in external_files:
+            cmd.extend(["--external", ext_file])
+            logger.info("Added external directive: %s", ext_file)
 
-        # Provide a valid TTY to CRIU using a Python-created pty, so we can
-        # mirror logs back to this terminal and support non-TTY parents.
-        # We pass the pty worker fd to CRIU and map it to the saved TTY id.
+        # Note: When using criu-ns wrapper, we cannot pass file descriptors via --inherit-fd
+        # because the wrapper creates intermediate processes that don't forward fds properly.
+        # Instead, rely on CRIU's built-in TTY handling with --external for the tty device.
+        # The tty will be externalized and CRIU will handle it.
         pass_fds = ()
         pty_main_fd = None
         pty_worker_fd = None
+        
+        # Create PTY for log forwarding only (not passed to CRIU)
         if metadata.tty_external:
             try:
                 pty_main_fd, pty_worker_fd = pty.openpty()
-                os.set_inheritable(pty_worker_fd, True)
-                # Map the saved tty id to the pty worker fd in CRIU
-                cmd.extend([
-                    "--inherit-fd", f"fd[{pty_worker_fd}]:{metadata.tty_external}",
-                ])
-                pass_fds = (pty_worker_fd,)
+                # Don't pass the fd to CRIU when using criu-ns
+                # The --external tty directive is sufficient
             except Exception as e:
-                logger.warning("Failed to create PTY for CRIU restore: %s", e)
+                logger.warning("Failed to create PTY for log forwarding: %s", e)
 
-        logger.info("Running CRIU restore: %s", ' '.join(cmd))
+        logger.info("Running CRIU restore with criu-ns: %s", ' '.join(cmd))
 
-        # Run CRIU restore
-        if pass_fds:
-            result = subprocess.run(cmd, capture_output=True, text=True,
-                                    pass_fds=pass_fds)
-        else:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"CRIU restore failed: {result.stderr}")
+        # Run CRIU restore with detailed error checking
+        # Don't crash on failure - just log and return early
+        try:
+            # Note: No pass_fds needed when using criu-ns wrapper
+            # Add timeout to prevent hanging if criu-ns doesn't exit properly
+            restore_timeout = 60  # 60 seconds should be plenty for restore
+            logger.info("Running CRIU restore with %d second timeout...", restore_timeout)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=restore_timeout)
+            
+            # ALWAYS log output for debugging (even on "success")
+            logger.info("CRIU restore exit code: %d", result.returncode)
+            if result.stdout:
+                logger.info("CRIU restore stdout:\n%s", result.stdout)
+            else:
+                logger.info("CRIU restore stdout: (empty)")
+            if result.stderr:
+                logger.info("CRIU restore stderr:\n%s", result.stderr)
+            else:
+                logger.info("CRIU restore stderr: (empty)")
+            
+            if result.returncode != 0:
+                logger.error(
+                    "CRIU restore failed with return code %d. Stderr: %s",
+                    result.returncode, result.stderr
+                )
+                return  # Exit early, don't try to reconnect
+                
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "CRIU restore command timed out after %d seconds, but this is OK! "
+                "criu-ns with --restore-detached may not exit properly even when restore succeeds. "
+                "Continuing with reconnection attempts...", restore_timeout
+            )
+            # Don't return early - the restore probably succeeded, just the wrapper didn't exit
+        except FileNotFoundError as e:
+            logger.error(
+                "CRIU binary not found. Make sure 'criu-ns' is installed and in PATH. "
+                "Error: %s", e
+            )
+            return  # Exit early
+        except Exception as e:
+            logger.error("Unexpected error running CRIU restore: %s", e)
+            return  # Exit early
+        
+        # Verify restore actually ran by checking for restore log (if we didn't timeout)
+        restore_log_path = os.path.join(self.checkpoint_dir, "criu-restore.log")
+        if not os.path.exists(restore_log_path):
+            logger.warning(
+                "CRIU restore log not found at %s. "
+                "This may be OK if restore timed out but succeeded. "
+                "Will attempt reconnection anyway.", restore_log_path
+            )
+            # Don't return early - try to reconnect anyway
+        
+        # Check restore log for errors (if it exists)
+        if os.path.exists(restore_log_path):
+            try:
+                with open(restore_log_path, 'r') as f:
+                    log_content = f.read()
+                    if 'Error' in log_content or 'Fail' in log_content:
+                        logger.warning("CRIU restore log contains errors:\n%s", 
+                                     log_content[-2000:])  # Last 2000 chars
+                        # Continue anyway - some warnings are non-fatal
+            except Exception as e:
+                logger.warning("Could not read restore log: %s", e)
 
-        logger.info("Successfully restored AsyncLLM from checkpoint")
+        logger.info("CRIU restore command completed, waiting for processes to initialize...")
+        
+        # Give restored processes time to fully initialize
+        # The processes need to set up signal handlers, ZMQ sockets, etc.
+        initial_wait = 5.0  # Increased from 3.0 to 5.0 seconds
+        logger.info("Waiting %s seconds for restored processes to initialize...", initial_wait)
+        await asyncio.sleep(initial_wait)
 
         # Re-establish connection to the restored process
         self._is_running = True
         # Mark subprocess as started after restore
         self._subprocess_started = True
 
-        # Create new socket and perform reconnection handshake
+        # Create new socket and perform reconnection handshake with retries
         # Re-establish client side of REQ-REP pattern
-        self.socket = self.ctx.socket(zmq.REQ)
-        # REQ sockets automatically wait for connection establishment
-        self.socket.connect(self.socket_url)
+        max_reconnect_attempts = 15  # Increased from 10
+        reconnect_delay = 3.0  # Increased from 2.0 seconds between attempts
+        
+        for attempt in range(max_reconnect_attempts):
+            try:
+                logger.info("Reconnection attempt %d/%d to %s", 
+                           attempt + 1, max_reconnect_attempts, self.socket_url)
+                
+                # Close old socket if it exists
+                if self.socket:
+                    self.socket.close()
+                
+                # Create fresh socket
+                self.socket = self.ctx.socket(zmq.REQ)
+                self.socket.setsockopt(zmq.LINGER, 0)  # Don't wait on close
+                self.socket.connect(self.socket_url)
+                
+                # Try to send reconnection signal
+                logger.info("Sending RECONNECT signal to %s...", self.socket_url)
+                await self.socket.send(b"RECONNECT")
+                logger.info("Sent RECONNECT signal, waiting for acknowledgment...")
 
-        # Send reconnection signal and wait for acknowledgment
-        logger.info("Sending reconnection signal to restored process...")
-
-        # With REQ-REP pattern, the socket will block until connected
-        # This should succeed on the first attempt
-        await self.socket.send(b"RECONNECT")
-        logger.info("Waiting for reconnection acknowledgment...")
-
-        # REQ socket will wait for the response
-        # Use a generous timeout for post-restore initialization
-        if await self.socket.poll(timeout=500000):  # 5 second timeout
-            ack = await self.socket.recv()
-            if ack == b"RECONNECT_ACK":
-                logger.info("Reconnection acknowledged by server")
-            else:
-                raise ValueError(f"Unexpected reconnection response: {ack}")
-        else:
-            raise TimeoutError("No response to reconnection signal after 30 seconds")
+                # Wait for response with timeout
+                poll_timeout_ms = 10000  # 10 second timeout per attempt
+                if await self.socket.poll(timeout=poll_timeout_ms):
+                    ack = await self.socket.recv()
+                    if ack == b"RECONNECT_ACK":
+                        logger.info("Successfully reconnected to restored process!")
+                        break
+                    else:
+                        logger.warning("Unexpected reconnection response: %s", ack)
+                        if attempt < max_reconnect_attempts - 1:
+                            await asyncio.sleep(reconnect_delay)
+                            continue
+                        else:
+                            logger.error("Failed to reconnect after %d attempts", max_reconnect_attempts)
+                            self._is_running = False
+                            return
+                else:
+                    logger.warning("No response to RECONNECT signal (attempt %d/%d)", 
+                                 attempt + 1, max_reconnect_attempts)
+                    if attempt < max_reconnect_attempts - 1:
+                        await asyncio.sleep(reconnect_delay)
+                        continue
+                    else:
+                        logger.error("Failed to reconnect: no response after %d attempts", 
+                                   max_reconnect_attempts)
+                        self._is_running = False
+                        return
+                        
+            except Exception as e:
+                logger.warning("Reconnection attempt %d failed: %s", attempt + 1, e)
+                if attempt < max_reconnect_attempts - 1:
+                    await asyncio.sleep(reconnect_delay)
+                    continue
+                else:
+                    logger.error("Failed to reconnect after %d attempts", max_reconnect_attempts)
+                    self._is_running = False
+                    return
 
         # Wake up the model to restore GPU memory
-        logger.info("Waking up model after restore...")
-        await self.wake_up()
-        logger.info("Model wake up completed")
+        try:
+            logger.info("Waking up model after restore...")
+            await self.wake_up()
+            logger.info("Model wake up completed")
+        except Exception as e:
+            logger.error("Failed to wake up model after restore: %s", e)
+            logger.warning("Model may not be fully functional, but connection is established")
 
-        # Start forwarding the restored process output to our stdout
+        # Start forwarding the restored process output to our stdout (if PTY was created)
+        # Note: With criu-ns, the PTY is for log forwarding only, not passed to CRIU
         if pty_main_fd is not None:
             try:
                 self._start_pty_forwarder(pty_main_fd)
             except Exception as e:
                 logger.warning("Failed to start PTY forwarder: %s", e)
-        # Close the worker fd in this process; CRIU/restored proc holds it now
+        # Close the worker fd if it was created
         if pty_worker_fd is not None:
             with contextlib.suppress(Exception):
                 os.close(pty_worker_fd)

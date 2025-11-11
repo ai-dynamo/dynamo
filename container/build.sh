@@ -519,7 +519,7 @@ fi
 
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm-checkpoint
 elif [[ $FRAMEWORK == "TRTLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm
 elif [[ $FRAMEWORK == "NONE" ]]; then
