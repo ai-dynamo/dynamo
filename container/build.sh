@@ -637,22 +637,29 @@ check_wheel_file() {
 }
 
 function determine_user_intention_trtllm() {
-    # The following options are grouped to be mutually exclusive.
-    # This function determines if the flags set are can be interpreted
-    # without ambiguity.
+    # The tensorrt llm installation flags are not quite mutually exclusive
+    # since the user should be able to point at a directory of their choosing
+    # for storing a trtllm wheel built from source.
+    #
+    # This function attempts to discern the intention of the user by
+    # applying checks, or rules, for each of the scenarios.
     #
     # /return: Calculated intention. One of "download", "install", "build".
     #
     # The three different methods of installing TRTLLM with build.sh are:
     # 1. Download
-    # --tensorrtllm-index-url
-    # --tensorrtllm-pip-wheel
+    # required: --tensorrtllm-pip-wheel
+    # optional: --tensorrtllm-index-url
+    # optional: --tensorrtllm-commit
     #
     # 2. Install from pre-built
-    # --tensorrtllm-pip-wheel-dir
+    # required: --tensorrtllm-pip-wheel-dir
+    # optional: --tensorrtllm-commit
     #
     # 3. Build from source
-    # --tensorrtllm-git-url
+    # required: --tensorrtllm-git-url
+    # optional: --tensorrtllm-commit
+    # optional: --tensorrtllm-pip-wheel-dir
     local intention_download="false"
     local intention_install="false"
     local intention_build="false"
@@ -660,7 +667,7 @@ function determine_user_intention_trtllm() {
     TRTLLM_INTENTION=${TRTLLM_INTENTION}
 
     # Install from pre-built
-    if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR" ]]; then
+    if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR"  && ! -n "$TRTLLM_GIT_URL" ]]; then
         intention_install="true";
         intention_count=$((intention_count+1))
         TRTLLM_INTENTION="install"
@@ -747,6 +754,9 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
             if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
                 error "ERROR: Failed to build TensorRT-LLM wheel"
             fi
+            BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
+            BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
+            PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
         fi
     else
         echo 'No intention was set. This error should have been detected in "determine_user_intention_trtllm()". Exiting...'
