@@ -4,7 +4,7 @@
 //! Unified Request Plane Server Interface
 //!
 //! This module defines a transport-agnostic interface for receiving requests
-//! in the request plane. All transport implementations (TCP, HTTP, NATS, ZMQ, UDS)
+//! in the request plane. All transport implementations (TCP, HTTP, NATS)
 //! implement this trait to provide a consistent interface for the ingress endpoint.
 
 use super::*;
@@ -25,7 +25,7 @@ pub struct InstanceInfo {
 
 /// Unified interface for request plane servers
 ///
-/// This trait abstracts over different transport mechanisms (TCP, HTTP, NATS, ZMQ, UDS)
+/// This trait abstracts over different transport mechanisms (TCP, HTTP, NATS)
 /// providing a consistent interface for receiving and handling requests.
 ///
 /// # Design Principles
@@ -55,7 +55,7 @@ pub trait RequestPlaneServer: Send + Sync {
     /// Start the server on the specified address
     ///
     /// This method starts the server and blocks until it's shut down via the cancellation token.
-    /// For single-endpoint transports (TCP, ZMQ, UDS), this binds to the address and handles
+    /// For single-endpoint transports (TCP,), this binds to the address and handles
     /// all requests with the provided handler.
     ///
     /// For multiplexed transports (HTTP), this starts the shared server that can handle
@@ -89,7 +89,7 @@ pub trait RequestPlaneServer: Send + Sync {
     /// For transports that support handling multiple endpoints on a single port
     /// (like HTTP), this registers a handler for a specific subject/path.
     ///
-    /// For single-endpoint transports (TCP, ZMQ, UDS), this method may:
+    /// For single-endpoint transports (TCP,), this method may:
     /// - Return an error (not supported)
     /// - Be a no-op (already registered via `start`)
     ///
@@ -170,7 +170,7 @@ pub trait RequestPlaneServer: Send + Sync {
     ///
     /// Returns `true` if the transport supports handling multiple endpoints
     /// on a single port (like HTTP). Returns `false` for single-endpoint
-    /// transports (like TCP, ZMQ, UDS).
+    /// transports (like TCP,).
     fn supports_multiplexing(&self) -> bool {
         false
     }
