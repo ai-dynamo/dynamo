@@ -261,7 +261,9 @@ jobs:
             --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
             --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
             --set dynamo-operator.controllerManager.manager.image.tag=${{ env.OPERATOR_IMAGE_TAG }} \
-            --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+            --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
+            --set dynamo-operator.dynamo.mpiRun.sshKeygen.enabled=false \
+            --set dynamo-operator.dynamo.mpiRun.secretName=""
           HELM_STATUS=$?
           set -e
 
