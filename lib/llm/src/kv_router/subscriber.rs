@@ -478,8 +478,8 @@ async fn cleanup_orphaned_consumers(
         return;
     };
 
-    // Filter to only routers for this component (keys are "namespace/component/uuid")
-    let component_prefix = format!("{}/", component.path());
+    // Filter to only routers for this component (keys are "v1/kv_routers/namespace/component/uuid")
+    let component_prefix = format!("{}/{}/", KV_ROUTERS_ROOT_PATH, component.path());
     let active_uuids: HashSet<String> = entries
         .iter()
         .filter_map(|(key, _)| {
