@@ -13,7 +13,6 @@ trap cleanup EXIT INT TERM
 
 # Parse command line arguments
 ENABLE_OTEL=false
-ENABLE_METRICS=true  # Enabled by default
 while [[ $# -gt 0 ]]; do
     case $1 in
         --enable-otel)
@@ -44,28 +43,13 @@ if [ "$ENABLE_OTEL" = true ]; then
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
 fi
 
-# Set up metrics ports if requested
-METRICS_ARGS=""
-FRONTEND_METRICS_PORT=""
-WORKER_METRICS_PORT=""
-if [ "$ENABLE_METRICS" = true ]; then
-    FRONTEND_METRICS_PORT="8080"
-    WORKER_METRICS_PORT="8081"
-    METRICS_ARGS="--enable-metrics"
-fi
-
-# Enable metrics for OTEL (uses same port as metrics flag)
-if [ "$ENABLE_OTEL" = true ]; then
-    WORKER_METRICS_PORT="${WORKER_METRICS_PORT:-8081}"
-fi
-
 # run ingress
-OTEL_SERVICE_NAME=dynamo-frontend DYN_SYSTEM_PORT=$FRONTEND_METRICS_PORT \
+OTEL_SERVICE_NAME=dynamo-frontend DYN_SYSTEM_PORT=8080 \
 python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
 # run worker
-OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=$WORKER_METRICS_PORT \
+OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=8081 \
 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
@@ -73,4 +57,4 @@ python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   --skip-tokenizer-init \
-  $METRICS_ARGS
+  --enable-metrics
