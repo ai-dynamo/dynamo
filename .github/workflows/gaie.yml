@@ -151,30 +151,67 @@ jobs:
           echo "Latest Operator image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${LATEST_OPERATOR_TAG}"
           # echo "OPERATOR_IMAGE_TAG=${LATEST_OPERATOR_TAG}" >> $GITHUB_ENV
 
+      - name: Check if Operator image already exists in ACR
+        id: check-operator-image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REGISTRY_NAME=$(echo "${{ secrets.AZURE_ACR_HOSTNAME }}" | cut -d'.' -f1)
+          OP_TAG="${OPERATOR_IMAGE_TAG}"
+
+          echo "Checking for ai-dynamo/dynamo:${OP_TAG} in ACR registry ${REGISTRY_NAME}..."
+
+          # Login to ACR (safe even if you logged in earlier)
+          az acr login \
+            --name "${REGISTRY_NAME}" \
+            --username "${{ secrets.AZURE_ACR_USER }}" \
+            --password "${{ secrets.AZURE_ACR_PASSWORD }}"
+
+          # Look for the exact tag in the repo
+          if az acr repository show-tags \
+              --name "${REGISTRY_NAME}" \
+              --repository ai-dynamo/dynamo \
+              --output tsv | awk -v t="${OP_TAG}" '$0 == t { found=1 } END { exit (found ? 0 : 1) }'
+          then
+            echo "Operator image already exists: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${OP_TAG}"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Operator image does NOT exist yet for tag: ${OP_TAG}"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Login to ECR
+        if: steps.check-operator-image.outputs.exists != 'true'
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+          set -euo pipefail
+          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} \
+            | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
 
       - name: Build Operator Image
+        if: steps.check-operator-image.outputs.exists != 'true'
         id: build-image
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
+          set -euo pipefail
           cd deploy/cloud/operator
           docker buildx build --load \
               --platform linux/amd64 \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
               -f Dockerfile \
               -t dynamo-operator:latest .
+
       - name: Docker Tag and Push Operator Image
+        if: steps.check-operator-image.outputs.exists != 'true'
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: dynamo-operator:latest
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-operator-amd64
+          push_tag: ai-dynamo/dynamo:${{ env.OPERATOR_IMAGE_TAG }}
           aws_push: "false"
           azure_push: "true"
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -246,7 +283,6 @@ jobs:
             --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} \
             --namespace=${NAMESPACE} || true
 
-            # --set dynamo-operator.controllerManager.manager.image.tag=${{ env.OPERATOR_IMAGE_TAG }} \
       - name: Install Dynamo Operator Helm chart
         shell: bash
         env:
@@ -260,16 +296,15 @@ jobs:
           echo "=== Installing dynamo-platform via Helm ==="
           set +e
           helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
-            --debug \
-            --timeout 10m \
-            --wait \
             --set dynamo-operator.namespaceRestriction.enabled=true \
             --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
             --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
             --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
             --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
-            --set dynamo-operator.dynamo.mpiRun.sshKeygen.enabled=false \
-            --set dynamo-operator.dynamo.mpiRun.secretName=""
+            --timeout 10m --wait
+
+            # --set dynamo-operator.dynamo.mpiRun.sshKeygen.enabled=false \
+            # --set dynamo-operator.dynamo.mpiRun.secretName=""
           HELM_STATUS=$?
           set -e
 
@@ -319,46 +354,6 @@ jobs:
 
           # Optional: simple rollout wait after Helm succeeds
           timeout 300s kubectl rollout status deployment -n ${NAMESPACE} --watch || true
-
-      - name: Install Dynamo Operator Helm chart
-        shell: bash
-        env:
-          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
-        run: |
-          set -euo pipefail
-          helm repo add bitnami https://charts.bitnami.com/bitnami
-          cd deploy/cloud/helm/platform/
-          helm dep build .
-
-          echo "=== Installing dynamo-platform via Helm ==="
-          set +e
-          helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
-            --debug \
-            --timeout 10m \
-            --wait \
-            --set dynamo-operator.namespaceRestriction.enabled=true \
-            --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
-            --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-            --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
-            --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
-            --set dynamo-operator.dynamo.mpiRun.sshKeygen.enabled=false \
-            --set dynamo-operator.dynamo.mpiRun.secretName=""
-          HELM_STATUS=$?
-          set -e
-
-          if [[ "${HELM_STATUS}" -ne 0 ]]; then
-            echo "Helm install/upgrade of dynamo-platform FAILED with status ${HELM_STATUS}"
-            # (Optional: add debugging here again, describe pods, etc.)
-            exit "${HELM_STATUS}"
-          fi
-
-          echo "Helm install/upgrade of dynamo-platform succeeded."
-
-          # Now wait for the operator controller manager only (more precise than 'deployment -n ns --watch')
-          timeout 300s kubectl rollout status \
-            deployment/dynamo-platform-dynamo-operator-controller-manager \
-            -n "${NAMESPACE}" \
-            --timeout=300s
 
       - name: Configure image pull secrets and deploy vllm graph
         shell: bash
