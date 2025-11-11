@@ -89,13 +89,25 @@ impl RouterMode {
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
-    let Some(nats_client) = endpoint.drt().nats_client() else {
-        anyhow::bail!("Missing NATS. Please ensure it is running and accessible.");
-    };
-    AddressedPushRouter::new(
-        nats_client.client().clone(),
-        endpoint.drt().tcp_server().await?,
-    )
+    use crate::config::RequestPlaneMode;
+
+    let mode = RequestPlaneMode::from_env();
+    let tcp_server = endpoint.drt().tcp_server().await?;
+
+    match mode {
+        RequestPlaneMode::Nats => {
+            let Some(nats_client) = endpoint.drt().nats_client() else {
+                anyhow::bail!("Missing NATS. Please ensure it is running and accessible.");
+            };
+            AddressedPushRouter::new(
+                nats_client.client().clone(),
+                endpoint.drt().tcp_server().await?,
+            )
+        }
+        RequestPlaneMode::Http | RequestPlaneMode::Tcp => {
+            AddressedPushRouter::from_mode(mode, None, tcp_server)
+        }
+    }
 }
 
 impl<T, U> PushRouter<T, U>
@@ -224,8 +236,48 @@ where
             }
         }
 
-        let subject = self.client.endpoint.subject_to(instance_id);
-        let request = request.map(|req| AddressedRequest::new(req, subject));
+        // Get the address based on discovered transport type
+        let address = {
+            use crate::component::TransportType;
+
+            // Get the instance and use its actual transport type
+            let instances = self.client.instances();
+            let instance = instances
+                .iter()
+                .find(|i| i.instance_id == instance_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Instance {} not found in available instances", instance_id)
+                })?;
+
+            match &instance.transport {
+                TransportType::Http(http_endpoint) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        http_endpoint = %http_endpoint,
+                        "Using HTTP transport for instance"
+                    );
+                    http_endpoint.clone()
+                }
+                TransportType::Tcp(tcp_endpoint) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        tcp_endpoint = %tcp_endpoint,
+                        "Using TCP transport for instance"
+                    );
+                    tcp_endpoint.clone()
+                }
+                TransportType::NatsTcp(subject) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        subject = %subject,
+                        "Using NATS transport for instance"
+                    );
+                    subject.clone()
+                }
+            }
+        };
+
+        let request = request.map(|req| AddressedRequest::new(req, address));
 
         let stream: anyhow::Result<ManyOut<U>> = self.addressed.generate(request).await;
         match stream {

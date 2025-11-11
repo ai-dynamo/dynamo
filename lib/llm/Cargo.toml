@@ -106,6 +106,8 @@ unicode-segmentation = "1.12"
 # http-service
 axum = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+hyper = { version = "1.5", features = ["http2", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
 tower-http = { workspace = true }
 rustls = { version = "0.23" }
 utoipa = { version = "5.3", features = ["axum_extras"] }

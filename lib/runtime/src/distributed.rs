@@ -44,6 +44,13 @@ pub struct DistributedRuntime {
     nats_client: Option<transports::nats::Client>,
     store: KeyValueStoreManager,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    http_server:
+        Arc<OnceCell<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>>>,
+    tcp_request_server: Arc<
+        OnceCell<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>>,
+    >,
+    shared_tcp_server:
+        Arc<OnceCell<Arc<crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
 
     // Service discovery client
@@ -149,6 +156,9 @@ impl DistributedRuntime {
             store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            http_server: Arc::new(OnceCell::new()),
+            tcp_request_server: Arc::new(OnceCell::new()),
+            shared_tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             component_registry: component::Registry::new(),
@@ -315,6 +325,126 @@ impl DistributedRuntime {
             })
             .await?
             .clone())
+    }
+
+    pub async fn http_server(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>> {
+        use crate::pipeline::network::ingress::http_endpoint::SharedHttpServer;
+
+        let http_host = crate::utils::get_http_rpc_host_from_env();
+        let http_port = std::env::var("DYN_HTTP_RPC_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(8081);
+        let bind_addr: std::net::SocketAddr = format!("{}:{}", http_host, http_port)
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid HTTP bind address: {}", e))?;
+
+        let cancel_token = self.child_token();
+
+        let server = self
+            .http_server
+            .get_or_try_init(async move {
+                let server = SharedHttpServer::new(bind_addr, cancel_token.clone());
+
+                // Spawn the server in the background
+                let server_clone = server.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = server_clone.start().await {
+                        tracing::error!("Shared HTTP server error: {}", e);
+                    }
+                });
+
+                anyhow::Ok(server)
+            })
+            .await?;
+
+        Ok(server.clone())
+    }
+
+    pub async fn tcp_request_server(
+        &self,
+    ) -> Result<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>>
+    {
+        use crate::config::RequestPlaneMode;
+        use crate::pipeline::network::request_plane_factory::RequestPlane;
+
+        let cancel_token = self.child_token();
+
+        let server = self
+            .tcp_request_server
+            .get_or_try_init(async move {
+                let server =
+                    RequestPlane::create_server(RequestPlaneMode::Tcp, cancel_token.clone())
+                        .await?;
+
+                anyhow::Ok(server)
+            })
+            .await?;
+
+        Ok(server.clone())
+    }
+
+    pub async fn shared_tcp_server(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer>> {
+        use crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer;
+
+        let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(9090);
+
+        // Bind to 0.0.0.0 to accept connections from any interface
+        let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{}", tcp_port)
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid TCP bind address: {}", e))?;
+
+        tracing::info!(
+            "Initializing shared TCP server on 0.0.0.0:{} (all interfaces)",
+            tcp_port
+        );
+
+        let cancel_token = self.child_token();
+
+        let server = self
+            .shared_tcp_server
+            .get_or_try_init(async move {
+                tracing::info!("Creating shared TCP server instance on {}", bind_addr);
+                let server = SharedTcpServer::new(bind_addr, cancel_token.clone());
+
+                // Spawn the server in the background
+                let server_clone = server.clone();
+                let bind_addr_for_log = bind_addr;
+                tokio::spawn(async move {
+                    tracing::info!("About to start shared TCP server on {}", bind_addr_for_log);
+                    match server_clone.start().await {
+                        Ok(_) => {
+                            tracing::info!(
+                                "Shared TCP server on {} stopped gracefully",
+                                bind_addr_for_log
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Shared TCP server on {} failed: {}",
+                                bind_addr_for_log,
+                                e
+                            );
+                        }
+                    }
+                });
+
+                anyhow::Ok(server)
+            })
+            .await?;
+
+        tracing::info!(
+            "Shared TCP server initialized successfully on {}",
+            bind_addr
+        );
+        Ok(server.clone())
     }
 
     pub fn nats_client(&self) -> Option<&nats::Client> {
