@@ -1,36 +1,13 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Usage: ./disagg_same_gpu.sh [GPU_MEM_FRACTION]
+#   GPU_MEM_FRACTION: Fraction of GPU memory to use per worker (default: 0.45)
+#   Example: ./disagg_same_gpu.sh 0.45
 
-# Parse command line arguments
-GPU_MEM_FRACTION="0.45"
-ENABLE_OTEL=false
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --enable-otel)
-            ENABLE_OTEL=true
-            shift
-            ;;
-        -h|--help)
-            echo "Usage: $0 [OPTIONS] [GPU_MEM_FRACTION]"
-            echo "Options:"
-            echo "  --enable-otel        Enable OpenTelemetry tracing"
-            echo "  -h, --help           Show this help message"
-            echo ""
-            echo "Arguments:"
-            echo "  GPU_MEM_FRACTION     Fraction of GPU memory to use per worker (default: 0.45)"
-            echo ""
-            echo "Note: System metrics are enabled by default on ports 8081 (prefill), 8082 (decode)"
-            exit 0
-            ;;
-        *)
-            # Treat any other argument as GPU_MEM_FRACTION
-            GPU_MEM_FRACTION="$1"
-            shift
-            ;;
-    esac
-done
+# GPU memory fraction to use per worker (default: 0.45 = 45% each = 90% total for both workers)
+GPU_MEM_FRACTION="${1:-0.45}"
 
 # Check GPU memory before starting disaggregated mode on single GPU
 FREE_GPU_GB=$(python3 -c "import torch; print(torch.cuda.mem_get_info()[0]/1024**3)" 2>/dev/null)
@@ -58,20 +35,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Enable tracing if requested
-if [ "$ENABLE_OTEL" = true ]; then
-    export DYN_LOGGING_JSONL=true
-    export OTEL_EXPORT_ENABLED=1
-    export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
-fi
 
 # run ingress with KV router mode for disaggregated setup
-OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend --router-mode kv --http-port=8000 &
 DYNAMO_PID=$!
 
 # run prefill worker with metrics on port 8081
-OTEL_SERVICE_NAME=dynamo-worker-prefill DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=8081 \
 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
@@ -101,7 +71,7 @@ echo "Waiting for prefill worker to initialize..."
 sleep 5
 
 # run decode worker with metrics on port 8082 (foreground)
-OTEL_SERVICE_NAME=dynamo-worker-decode DYN_SYSTEM_PORT=8082 \
+DYN_SYSTEM_PORT=8082 \
 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
