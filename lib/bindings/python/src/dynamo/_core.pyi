@@ -45,13 +45,6 @@ class DistributedRuntime:
         """
         ...
 
-    def allocate_port_block(self, namespace, port_min, port_max, block_size, context=None) -> List[int]:
-        """
-        Allocate a contiguous block of ports from the specified range and atomically reserve them.
-        Returns a list of all allocated ports in order.
-        """
-        ...
-
     def shutdown(self) -> None:
         """
         Shutdown the runtime by triggering the cancellation token
