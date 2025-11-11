@@ -308,8 +308,8 @@ async fn register_model(mut config: ModelConfig) -> anyhow::Result<()> {
             .runtime_config(config.runtime_config.unwrap_or_default().inner)
             .user_data(config.user_data)
             .custom_template_path(config.custom_template_path)
-            .media_decoder(config.media_decoder)
-            .media_fetcher(config.media_fetcher);
+            .media_decoder(config.media_decoder.map(|d| d.inner))
+            .media_fetcher(config.media_fetcher.map(|f| f.inner));
 
         let mut local_model = builder.build().await?;
         local_model
