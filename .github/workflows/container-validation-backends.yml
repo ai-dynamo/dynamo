@@ -39,7 +39,8 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing
+    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -115,7 +116,8 @@ jobs:
 
   vllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing
+    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -180,7 +182,8 @@ jobs:
 
   sglang:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing
+    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -243,7 +246,8 @@ jobs:
 
   trtllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing
+    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
