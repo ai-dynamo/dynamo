@@ -23,11 +23,6 @@ pub type EndpointStatsHandler =
 pub const PROJECT_NAME: &str = "Dynamo";
 const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Debug, Clone, Builder)]
-#[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
-pub struct ServiceConfig {
-    component: Component,
-}
 
 pub async fn build_nats_service(
     nats_client: &crate::transports::nats::Client,
@@ -64,10 +59,4 @@ pub async fn build_nats_service(
         .map_err(|e| anyhow::anyhow!("Failed to start NATS service: {e}"))?;
 
     Ok((nats_service, stats_handler_registry_clone))
-}
-
-impl ServiceConfigBuilder {
-    pub(crate) fn from_component(component: Component) -> Self {
-        Self::default().component(component)
-    }
 }
