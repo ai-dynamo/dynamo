@@ -110,9 +110,7 @@ fn may_be_fix_msg_content(messages: serde_json::Value) -> Value {
                                 content_string.push(if is_text_only { '\n' } else { ' ' });
                             }
 
-                            let part_type = part.get("type")
-                                .and_then(|t| t.as_str())
-                                .unwrap_or("");
+                            let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
                             match part_type {
                                 "text" => {
@@ -131,7 +129,10 @@ fn may_be_fix_msg_content(messages: serde_json::Value) -> Value {
                                 }
                                 _ => {
                                     // Unknown type - skip or add placeholder
-                                    tracing::warn!("Unknown content type in message: {}", part_type);
+                                    tracing::warn!(
+                                        "Unknown content type in message: {}",
+                                        part_type
+                                    );
                                 }
                             }
                         }
@@ -357,7 +358,7 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
                 Ok(t) => {
                     tracing::debug!("Using 'tool_use' template");
                     t
-                },
+                }
                 Err(_) => {
                     tracing::debug!("'tool_use' template not found, using 'default'");
                     self.env.get_template("default")?
