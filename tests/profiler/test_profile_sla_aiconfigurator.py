@@ -60,9 +60,9 @@ class TestProfileSlaAiconfigurator:
                 self.dry_run = False
                 self.use_ai_configurator = True
                 self.aic_system = "h200_sxm"
-                self.aic_model_name = "QWEN3_32B"
+                self.aic_hf_id = "Qwen/Qwen3-32B"
                 self.aic_backend = ""
-                self.aic_backend_version = "0.20.0"
+                self.aic_backend_version = None
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
                 # Provide minimal model_info to avoid HF queries
@@ -77,11 +77,10 @@ class TestProfileSlaAiconfigurator:
 
     @pytest.mark.pre_merge
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "missing_arg", ["aic_system", "aic_model_name", "aic_backend_version"]
-    )
+    @pytest.mark.parametrize("missing_arg", ["aic_system", "aic_hf_id"])
     async def test_aiconfigurator_missing_args(self, trtllm_args, missing_arg):
         # Check that validation error happens when a required arg is missing.
+        # Note: aic_backend_version is optional - when None, auto-detects latest version
         setattr(trtllm_args, missing_arg, None)
         with pytest.raises(ValueError):
             await run_profile(trtllm_args)
@@ -113,16 +112,23 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.parametrize(
         "backend, aic_backend_version",
         [
+            ("trtllm", None),
             ("trtllm", "0.20.0"),
             ("trtllm", "1.0.0rc3"),
         ],
     )
-    @pytest.mark.parametrize("model_name", ["QWEN3_32B", "LLAMA3.1_405B"])
+    @pytest.mark.parametrize(
+        "hf_model_id",
+        [
+            "Qwen/Qwen3-32B",
+            "meta-llama/Llama-3.1-405B",
+        ],
+    )
     async def test_trtllm_aiconfigurator_many(
-        self, trtllm_args, model_name, backend, aic_backend_version
+        self, trtllm_args, hf_model_id, backend, aic_backend_version
     ):
         # Test that profile_sla works with a variety of backend versions and model names.
-        trtllm_args.aic_model_name = model_name
+        trtllm_args.aic_hf_id = hf_model_id
         trtllm_args.backend = backend
         trtllm_args.aic_backend_version = aic_backend_version
         await run_profile(trtllm_args)
