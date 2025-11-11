@@ -5,71 +5,30 @@ SPDX-License-Identifier: Apache-2.0
 
 # Distributed Tracing with Tempo
 
-This guide explains how to set up and view distributed traces in Grafana Tempo for Dynamo workloads.
-
 ## Overview
 
-Dynamo supports OpenTelemetry-based distributed tracing, allowing you to visualize request flows across Frontend and Worker components. Traces are exported to Tempo via OTLP (OpenTelemetry Protocol) and visualized in Grafana.
+Dynamo supports OpenTelemetry-based distributed tracing for visualizing request flows across Frontend and Worker components. Traces are exported to Tempo via OTLP (OpenTelemetry Protocol) and visualized in Grafana.
 
-## Prerequisites
+**Requirements:** Set `DYN_LOGGING_JSONL=true` and `OTEL_EXPORT_ENABLED=true` to export traces to Tempo.
 
-- Docker and Docker Compose (for local deployment)
-- Kubernetes cluster with kubectl access (for Kubernetes deployment)
-- Dynamo runtime with tracing support
+This guide covers single GPU demo setup using Docker Compose. For Kubernetes deployments, see [Kubernetes Deployment](#kubernetes-deployment).
+
+**Note:** This section has overlap with [Logging of OpenTelemetry Tracing](logging.md) since OpenTelemetry has aspects of both logging and tracing. The tracing approach documented here is for persistent trace visualization and analysis. For short debugging sessions examining trace context directly in logs, see the [Logging](logging.md) guide.
 
 ## Environment Variables
 
-Dynamo's tracing is configured via environment variables. For complete logging documentation, see [docs/observability/logging.md](../../docs/observability/logging.md).
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `DYN_LOGGING_JSONL` | Enable JSONL logging format (required for tracing) | `false` | `true` |
+| `OTEL_EXPORT_ENABLED` | Enable OTLP trace export | `false` | `true` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for Tempo | `http://localhost:4317` | `http://tempo:4317` |
+| `OTEL_SERVICE_NAME` | Service name for identifying components | `dynamo` | `dynamo-frontend` |
 
-### Required Environment Variables
+## Getting Started Quickly
 
-| Variable | Description | Example Value |
-|----------|-------------|---------------|
-| `DYN_LOGGING_JSONL` | Enable JSONL logging format (required for tracing) | `true` |
-| `OTEL_EXPORT_ENABLED` | Enable OTLP trace export | `1` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for Tempo | `http://localhost:4317` (local) or `http://tempo:4317` (docker) |
-| `OTEL_SERVICE_NAME` | Service name for identifying components | `dynamo-frontend`, `dynamo-worker-prefill`, `dynamo-worker-decode` |
+### 1. Start Observability Stack
 
-**Note:** When `OTEL_EXPORT_ENABLED=1`, logging initialization is deferred until the runtime is available (required by the OTEL exporter). This means some early logs will be dropped. This will be fixed in a future release.
-
-### Example Configuration
-
-```bash
-# Enable JSONL logging and tracing
-export DYN_LOGGING_JSONL=true
-
-# Enable trace export to Tempo
-export OTEL_EXPORT_ENABLED=1
-
-# Set the Tempo endpoint (docker-compose network)
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4317
-
-# Set service name to identify this component
-export OTEL_SERVICE_NAME=dynamo-frontend
-```
-
----
-
-## Local Deployment with Docker Compose
-
-### 1. Start Tempo and Grafana
-
-From the `deploy/tracing` directory, start the observability stack:
-
-```bash
-cd deploy/tracing
-docker-compose up -d
-```
-
-This will start:
-- **Tempo** on `http://localhost:3200` (HTTP API) and `localhost:4317` (OTLP gRPC)
-- **Grafana** on `http://localhost:3000` (username: `admin`, password: `admin`)
-
-Verify services are running:
-
-```bash
-docker-compose ps
-```
+Start the observability stack (Prometheus, Grafana, Tempo, exporters). See [Observability Getting Started](README.md#getting-started-quickly) for instructions.
 
 ### 2. Set Environment Variables
 
@@ -78,14 +37,29 @@ Configure Dynamo components to export traces:
 ```bash
 # Enable JSONL logging and tracing
 export DYN_LOGGING_JSONL=true
-export OTEL_EXPORT_ENABLED=1
+export OTEL_EXPORT_ENABLED=true
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
-
-# Set service names for each component
-export OTEL_SERVICE_NAME=dynamo-frontend
 ```
 
-### 3. Run vLLM Disaggregated Deployment
+### 3. Start Dynamo Components (Single GPU)
+
+For a simple single-GPU deployment, start the frontend and a single vLLM worker:
+
+```bash
+# Start the frontend with tracing enabled
+export OTEL_SERVICE_NAME=dynamo-frontend
+python -m dynamo.frontend --router-mode kv --http-port=8000 &
+
+# Start a single vLLM worker (aggregated prefill and decode)
+export OTEL_SERVICE_NAME=dynamo-worker-vllm
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
+
+wait
+```
+
+This runs both prefill and decode on the same GPU, providing a simpler setup for testing tracing.
+
+### Alternative: Disaggregated Deployment (2 GPUs)
 
 Run the vLLM disaggregated script with tracing enabled:
 
@@ -106,70 +80,66 @@ trap 'echo Cleaning up...; kill 0' EXIT
 
 # Enable tracing
 export DYN_LOGGING_JSONL=true
-export OTEL_EXPORT_ENABLED=1
+export OTEL_EXPORT_ENABLED=true
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
 
 # Run frontend
 export OTEL_SERVICE_NAME=dynamo-frontend
 python -m dynamo.frontend --router-mode kv --http-port=8000 &
 
-# Run decode worker
+# Run decode worker, make sure to wait for start up
 export OTEL_SERVICE_NAME=dynamo-worker-decode
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
 
-# Run prefill worker
+# Run prefill worker, make sure to wait for start up
 export OTEL_SERVICE_NAME=dynamo-worker-prefill
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
     --is-prefill-worker &
-
-wait
 ```
+
+For disaggregated deployments, this separates prefill and decode onto different GPUs for better resource utilization.
 
 ### 4. Generate Traces
 
-Send requests to the frontend to generate traces:
+Send requests to the frontend to generate traces (works for both aggregated and disaggregated deployments). **Note the `x-request-id` header**, which allows you to easily search for and correlate this specific trace in Grafana:
 
 ```bash
-curl -d '{
+curl -H 'Content-Type: application/json' \
+-H 'x-request-id: test-trace-001' \
+-d '{
   "model": "Qwen/Qwen3-0.6B",
   "max_completion_tokens": 100,
   "messages": [
     {"role": "user", "content": "What is the capital of France?"}
   ]
 }' \
--H 'Content-Type: application/json' \
--H 'x-request-id: test-trace-001' \
 http://localhost:8000/v1/chat/completions
 ```
 
 ### 5. View Traces in Grafana Tempo
 
 1. Open Grafana at `http://localhost:3000`
-2. Login with username `admin` and password `admin`
+2. Login with username `dynamo` and password `dynamo`
 3. Navigate to **Explore** (compass icon in the left sidebar)
 4. Select **Tempo** as the data source (should be selected by default)
-5. Use the **Search** tab to find traces:
+5. In the query type, select **"Search"** (not TraceQL, not Service Graph)
+6. Use the **Search** tab to find traces:
    - Search by **Service Name** (e.g., `dynamo-frontend`)
    - Search by **Span Name** (e.g., `http-request`, `handle_payload`)
    - Search by **Tags** (e.g., `x_request_id=test-trace-001`)
-6. Click on a trace to view the detailed flame graph
+7. Click on a trace to view the detailed flame graph
 
 #### Example Trace View
 
 Below is an example of what a trace looks like in Grafana Tempo:
 
-![Trace Example](./trace.png)
+![Trace Example](trace.png)
 
 ### 6. Stop Services
 
-When done, stop the Tempo and Grafana stack:
-
-```bash
-cd deploy/tracing
-docker-compose down
-```
+When done, stop the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for Docker Compose commands.
 
 ---
 
@@ -192,7 +162,7 @@ spec:
     - name: DYN_LOGGING_JSONL
       value: "true"
     - name: OTEL_EXPORT_ENABLED
-      value: "1"
+      value: "true"
     - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
       value: "http://tempo.observability.svc.cluster.local:4317"
 

@@ -8,10 +8,17 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 
+mod metadata;
+pub use metadata::{DiscoveryMetadata, MetadataSnapshot};
+
 mod mock;
 pub use mock::{MockDiscovery, SharedMockRegistry};
 mod kv_store;
 pub use kv_store::KVStoreDiscovery;
+
+mod kube;
+pub use kube::{KubeDiscoveryClient, hash_pod_name};
+
 pub mod utils;
 use crate::component::TransportType;
 pub use utils::watch_and_extract_field;

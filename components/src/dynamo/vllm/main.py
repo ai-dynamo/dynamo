@@ -153,6 +153,9 @@ def setup_kv_event_publisher(
         logger.info("Skipping KV event publisher setup for decode worker")
         return None
 
+    if config.engine_args.kv_events_config is None:
+        return None
+
     # Get data_parallel_size to create publishers for all dp_ranks
     data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
     kv_publishers = []
