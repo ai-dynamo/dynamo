@@ -9,13 +9,18 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
 
-import blake3
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from dynamo.llm import ModelInput, ModelType, ZmqKvEventPublisher, register_llm
+from dynamo.llm import (
+    ModelInput,
+    ModelType,
+    ZmqKvEventPublisher,
+    lora_name_to_hash_id,
+    register_llm,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
@@ -29,19 +34,6 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-def lora_name_to_hash_id(lora_name: str) -> int:
-    """
-    Generate a deterministic integer ID from a LoRA name using blake3 hash.
-    Returns a signed int32 (range: 1 to 2,147,483,647).
-    """
-    hash_bytes = blake3.blake3(lora_name.encode()).digest()[:8]
-
-    # Convert first 8 bytes to signed int32 range (0x7FFFFFFF = 2,147,483,647)
-    # Use modulo to ensure non-zero (LoRA IDs should be non-zero)
-    lora_id = int.from_bytes(hash_bytes, byteorder="big") & 0x7FFFFFFF
-    return lora_id if lora_id != 0 else 1  # Ensure non-zero ID
 
 
 def build_sampling_params(

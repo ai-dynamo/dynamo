@@ -10,7 +10,6 @@ import signal
 import sys
 from typing import Tuple
 
-import blake3
 import torch
 import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -21,7 +20,11 @@ from vllm.utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
-from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
+from dynamo.llm import (
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
+    lora_name_to_hash_id,
+)
 from dynamo.runtime import Component, DistributedRuntime, Endpoint, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -40,19 +43,6 @@ from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-def lora_name_to_hash_id(lora_name: str) -> int:
-    """
-    Generate a deterministic integer ID from a LoRA name using blake3 hash.
-    Returns a signed int32 (range: 1 to 2,147,483,647).
-    """
-    hash_bytes = blake3.blake3(lora_name.encode()).digest()[:8]
-
-    # Convert first 8 bytes to signed int32 range (0x7FFFFFFF = 2,147,483,647)
-    # Use modulo to ensure non-zero (LoRA IDs should be non-zero)
-    lora_id = int.from_bytes(hash_bytes, byteorder="big") & 0x7FFFFFFF
-    return lora_id if lora_id != 0 else 1  # Ensure non-zero ID
 
 
 class VllmBaseWorker:
