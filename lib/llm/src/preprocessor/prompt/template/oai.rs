@@ -76,7 +76,7 @@ fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
 fn may_be_fix_msg_content(messages: serde_json::Value) -> Value {
     // Flatten content arrays into strings with placeholders for multimodal content.
     // This mimics vLLM's preprocessing so templates receive simple strings.
-    // - Text-only arrays: concatenate text parts
+    // - Text-only arrays: concatenate text parts with newlines
     // - Multimodal arrays: interleave text with <image>, <video>, <audio> placeholders
 
     let Some(arr) = messages.as_array() else {
@@ -92,13 +92,22 @@ fn may_be_fix_msg_content(messages: serde_json::Value) -> Value {
                         return msg.clone();
                     }
 
+                    // Check if this is a text-only array
+                    let is_text_only = content_array.iter().all(|part| {
+                        part.get("type")
+                            .and_then(|t| t.as_str())
+                            .map(|t| t == "text")
+                            .unwrap_or(false)
+                    });
+
                     let mut modified_msg = msg.clone();
                     if let Some(msg_object) = modified_msg.as_object_mut() {
                         let mut content_string = String::new();
 
                         for (idx, part) in content_array.iter().enumerate() {
                             if idx > 0 {
-                                content_string.push(' ');
+                                // Use newline for text-only, space for multimodal
+                                content_string.push(if is_text_only { '\n' } else { ' ' });
                             }
 
                             let part_type = part.get("type")
@@ -603,7 +612,7 @@ mod tests {
         );
     }
 
-    /// Tests that content arrays with mixed types (text + non-text) remain as arrays.
+    /// Tests that content arrays with mixed types (text + non-text) are flattened with placeholders.
     #[test]
     fn test_may_be_fix_msg_content_mixed_types() {
         let json_str = r#"{
@@ -623,16 +632,14 @@ mod tests {
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages = serde_json::to_value(request.messages()).unwrap();
 
-        // Verify: Mixed content types are preserved as array for template handling
-        assert!(messages[0]["content"].is_array());
-        let content_array = messages[0]["content"].as_array().unwrap();
-        assert_eq!(content_array.len(), 3);
-        assert_eq!(content_array[0]["type"], "text");
-        assert_eq!(content_array[1]["type"], "image_url");
-        assert_eq!(content_array[2]["type"], "text");
+        // Verify: Mixed content types are flattened into a single string with placeholders
+        assert_eq!(
+            messages[0]["content"],
+            serde_json::Value::String("Check this image: <image> What do you see?".to_string())
+        );
     }
 
-    /// Tests that content arrays containing only non-text types remain as arrays.
+    /// Tests that content arrays containing only non-text types are flattened with placeholders.
     #[test]
     fn test_may_be_fix_msg_content_non_text_only() {
         let json_str = r#"{
@@ -651,12 +658,11 @@ mod tests {
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages = serde_json::to_value(request.messages()).unwrap();
 
-        // Verify: Non-text content arrays are preserved for template handling
-        assert!(messages[0]["content"].is_array());
-        let content_array = messages[0]["content"].as_array().unwrap();
-        assert_eq!(content_array.len(), 2);
-        assert_eq!(content_array[0]["type"], "image_url");
-        assert_eq!(content_array[1]["type"], "image_url");
+        // Verify: Non-text content arrays are flattened with placeholders
+        assert_eq!(
+            messages[0]["content"],
+            serde_json::Value::String("<image> <image>".to_string())
+        );
     }
 
     #[test]
@@ -724,7 +730,7 @@ NORMAL MODE
         assert!(result2.unwrap().contains("NORMAL MODE"));
     }
 
-    /// Tests mixed content type scenarios.
+    /// Tests mixed content type scenarios are flattened with appropriate placeholders.
     #[test]
     fn test_may_be_fix_msg_content_multiple_content_types() {
         // Scenario 1: Multiple different content types (text + image + audio)
@@ -747,11 +753,15 @@ NORMAL MODE
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages = serde_json::to_value(request.messages()).unwrap();
 
-        // Mixed types should preserve array structure
-        assert!(messages[0]["content"].is_array());
-        assert_eq!(messages[0]["content"].as_array().unwrap().len(), 5);
+        // Mixed types should be flattened with placeholders
+        assert_eq!(
+            messages[0]["content"],
+            serde_json::Value::String(
+                "Listen to this: <audio> And look at: <image> What do you think?".to_string()
+            )
+        );
 
-        // Scenario 2: Unknown/future content types mixed with text
+        // Scenario 2: Video content type mixed with text
         let json_str = r#"{
             "model": "gpt-4o",
             "messages": [
@@ -769,9 +779,11 @@ NORMAL MODE
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages = serde_json::to_value(request.messages()).unwrap();
 
-        // Unknown types mixed with text should preserve array
-        assert!(messages[0]["content"].is_array());
-        assert_eq!(messages[0]["content"].as_array().unwrap().len(), 3);
+        // Video types mixed with text should be flattened with placeholders
+        assert_eq!(
+            messages[0]["content"],
+            serde_json::Value::String("Check this: <video> Interesting?".to_string())
+        );
     }
 
     #[test]
