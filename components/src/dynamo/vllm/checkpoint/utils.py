@@ -5,7 +5,12 @@
 import os
 import subprocess
 import time
-from typing import Optional
+import shutil
+import socket
+import struct
+import fcntl
+from pathlib import Path
+from typing import Optional, Tuple
 
 from vllm.logger import init_logger
 
@@ -621,3 +626,287 @@ def create_gpu_device_map(old_uuids: list[str],
                        i, old_uuid, new_uuid)
 
     return ",".join(pairs)
+
+
+# Cache directory utilities
+
+def get_cache_directories() -> Tuple[str, str]:
+    """Get vLLM and FlashInfer cache directories.
+    
+    Returns:
+        Tuple of (vllm_cache_dir, flashinfer_cache_dir)
+    """
+    # Check environment variables first
+    vllm_cache = os.environ.get("VLLM_CACHE_ROOT")
+    if not vllm_cache:
+        # Check for XDG_CACHE_HOME
+        xdg_cache = os.environ.get("XDG_CACHE_HOME")
+        if xdg_cache:
+            vllm_cache = os.path.join(xdg_cache, "vllm")
+        else:
+            vllm_cache = os.path.expanduser("~/.cache/vllm")
+    
+    flashinfer_cache = os.environ.get("FLASHINFER_CACHE_DIR")
+    if not flashinfer_cache:
+        # Check for XDG_CACHE_HOME
+        xdg_cache = os.environ.get("XDG_CACHE_HOME")
+        if xdg_cache:
+            flashinfer_cache = os.path.join(xdg_cache, "flashinfer")
+        else:
+            flashinfer_cache = os.path.expanduser("~/.cache/flashinfer")
+    
+    return vllm_cache, flashinfer_cache
+
+
+def save_cache_directories(checkpoint_dir: str, vllm_cache: str, flashinfer_cache: str) -> None:
+    """Copy cache directories to checkpoint directory.
+    
+    Args:
+        checkpoint_dir: Directory where checkpoint is being saved
+        vllm_cache: Path to vLLM cache directory
+        flashinfer_cache: Path to FlashInfer cache directory
+    """
+    cache_backup_dir = os.path.join(checkpoint_dir, "cache_backup")
+    os.makedirs(cache_backup_dir, exist_ok=True)
+    
+    # Copy vLLM cache if it exists
+    if os.path.exists(vllm_cache):
+        vllm_dest = os.path.join(cache_backup_dir, "vllm")
+        try:
+            if os.path.exists(vllm_dest):
+                shutil.rmtree(vllm_dest)
+            shutil.copytree(vllm_cache, vllm_dest)
+            logger.info("Saved vLLM cache from %s to checkpoint", vllm_cache)
+        except Exception as e:
+            logger.warning("Failed to save vLLM cache: %s", e)
+    else:
+        logger.info("vLLM cache directory %s does not exist, skipping", vllm_cache)
+    
+    # Copy FlashInfer cache if it exists  
+    if os.path.exists(flashinfer_cache):
+        flashinfer_dest = os.path.join(cache_backup_dir, "flashinfer")
+        try:
+            if os.path.exists(flashinfer_dest):
+                shutil.rmtree(flashinfer_dest)
+            shutil.copytree(flashinfer_cache, flashinfer_dest)
+            logger.info("Saved FlashInfer cache from %s to checkpoint", flashinfer_cache)
+        except Exception as e:
+            logger.warning("Failed to save FlashInfer cache: %s", e)
+    else:
+        logger.info("FlashInfer cache directory %s does not exist, skipping", flashinfer_cache)
+
+
+def restore_cache_directories(checkpoint_dir: str, vllm_cache: str, flashinfer_cache: str) -> None:
+    """Restore cache directories from checkpoint, overwriting existing caches.
+    
+    Args:
+        checkpoint_dir: Directory where checkpoint was saved
+        vllm_cache: Path to restore vLLM cache to
+        flashinfer_cache: Path to restore FlashInfer cache to
+    """
+    cache_backup_dir = os.path.join(checkpoint_dir, "cache_backup")
+    
+    # Restore vLLM cache
+    vllm_src = os.path.join(cache_backup_dir, "vllm")
+    if os.path.exists(vllm_src):
+        try:
+            # Ensure parent directory exists
+            os.makedirs(os.path.dirname(vllm_cache), exist_ok=True)
+            # Remove existing cache
+            if os.path.exists(vllm_cache):
+                shutil.rmtree(vllm_cache)
+            # Copy from checkpoint
+            shutil.copytree(vllm_src, vllm_cache)
+            logger.info("Restored vLLM cache to %s", vllm_cache)
+        except Exception as e:
+            logger.warning("Failed to restore vLLM cache: %s", e)
+    else:
+        logger.info("No vLLM cache found in checkpoint")
+    
+    # Restore FlashInfer cache
+    flashinfer_src = os.path.join(cache_backup_dir, "flashinfer")
+    if os.path.exists(flashinfer_src):
+        try:
+            # Ensure parent directory exists
+            os.makedirs(os.path.dirname(flashinfer_cache), exist_ok=True)
+            # Remove existing cache
+            if os.path.exists(flashinfer_cache):
+                shutil.rmtree(flashinfer_cache)
+            # Copy from checkpoint
+            shutil.copytree(flashinfer_src, flashinfer_cache)
+            logger.info("Restored FlashInfer cache to %s", flashinfer_cache)
+        except Exception as e:
+            logger.warning("Failed to restore FlashInfer cache: %s", e)
+    else:
+        logger.info("No FlashInfer cache found in checkpoint")
+
+
+# Network utilities
+
+def get_primary_ip_address() -> Optional[str]:
+    """Get the primary IP address from the default network interface.
+    
+    This attempts to find the IP address of the interface used for external
+    connectivity (typically eth0 or similar).
+    
+    Returns:
+        IP address as string, or None if not found
+    """
+    try:
+        # Method 1: Use socket to connect to a public DNS and see which interface is used
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            # Connect to a public DNS server (doesn't actually send data)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip and ip != "127.0.0.1":
+                logger.info("Found primary IP address: %s", ip)
+                return ip
+    except Exception as e:
+        logger.debug("Socket method failed: %s", e)
+    
+    try:
+        # Method 2: Parse /proc/net/fib_trie to find non-loopback IPs
+        with open("/proc/net/fib_trie", "r") as f:
+            lines = f.readlines()
+        
+        ips = []
+        for i, line in enumerate(lines):
+            if "/32 host LOCAL" in line and i > 0:
+                # Look at previous line for the IP
+                prev_line = lines[i-1].strip()
+                if prev_line.startswith("|--"):
+                    ip = prev_line.split()[-1]
+                    if ip and not ip.startswith("127."):
+                        ips.append(ip)
+        
+        # Return the first non-loopback IP found
+        if ips:
+            ip = ips[0]
+            logger.info("Found primary IP address from fib_trie: %s", ip)
+            return ip
+    except Exception as e:
+        logger.debug("fib_trie method failed: %s", e)
+    
+    try:
+        # Method 3: Use ioctl to enumerate interfaces (more complex but reliable)
+        # This is similar to what ifconfig does
+        import array
+        
+        # Constants for ioctl
+        SIOCGIFCONF = 0x8912
+        SIOCGIFADDR = 0x8915
+        
+        # Create socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        
+        # Query interface list
+        max_possible = 128  # Maximum number of interfaces
+        bytes_needed = max_possible * 32
+        names = array.array('B', b'\0' * bytes_needed)
+        outbytes = struct.unpack('iL', fcntl.ioctl(
+            sock.fileno(),
+            SIOCGIFCONF,
+            struct.pack('iL', bytes_needed, names.buffer_info()[0])
+        ))[0]
+        
+        namestr = names.tobytes()
+        
+        # Parse interface names
+        interfaces = []
+        for i in range(0, outbytes, 40):
+            name = namestr[i:i+16].split(b'\0', 1)[0].decode('utf-8')
+            if name and name != 'lo':
+                interfaces.append(name)
+        
+        # Get IP for each interface
+        for iface in interfaces:
+            try:
+                ip = socket.inet_ntoa(fcntl.ioctl(
+                    sock.fileno(),
+                    SIOCGIFADDR,
+                    struct.pack('256s', iface.encode('utf-8'))
+                )[20:24])
+                if ip and not ip.startswith('127.'):
+                    logger.info("Found IP address %s on interface %s", ip, iface)
+                    sock.close()
+                    return ip
+            except Exception:
+                continue
+        
+        sock.close()
+    except Exception as e:
+        logger.debug("ioctl method failed: %s", e)
+    
+    logger.warning("Could not determine primary IP address")
+    return None
+
+
+def set_ip_nonlocal_bind(enable: bool = True) -> bool:
+    """Set net.ipv4.ip_nonlocal_bind sysctl parameter.
+    
+    Args:
+        enable: True to set to 1, False to set to 0
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    value = "1" if enable else "0"
+    sysctl_path = "/proc/sys/net/ipv4/ip_nonlocal_bind"
+    
+    try:
+        with open(sysctl_path, "w") as f:
+            f.write(value)
+        logger.info("Set net.ipv4.ip_nonlocal_bind = %s", value)
+        return True
+    except Exception as e:
+        logger.error("Failed to set ip_nonlocal_bind: %s", e)
+        # Fall back to sysctl command
+        try:
+            result = subprocess.run(
+                ["sysctl", "-w", f"net.ipv4.ip_nonlocal_bind={value}"],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                logger.info("Set net.ipv4.ip_nonlocal_bind = %s via sysctl command", value)
+                return True
+        except Exception as e2:
+            logger.error("Failed to set ip_nonlocal_bind via sysctl command: %s", e2)
+    
+    return False
+
+
+def add_ip_to_loopback(ip_address: str) -> bool:
+    """Add an IP address to the loopback interface.
+    
+    Args:
+        ip_address: IP address to add (e.g., "10.244.7.185")
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    if not ip_address:
+        logger.warning("No IP address provided to add to loopback")
+        return False
+    
+    try:
+        # Use ip command to add address
+        # Format: ip addr add <IP>/32 dev lo
+        result = subprocess.run(
+            ["ip", "addr", "add", f"{ip_address}/32", "dev", "lo"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            logger.info("Added IP %s to loopback interface", ip_address)
+            return True
+        elif "File exists" in result.stderr:
+            # IP already exists on interface, that's OK
+            logger.info("IP %s already exists on loopback interface", ip_address)
+            return True
+        else:
+            logger.error("Failed to add IP to loopback: %s", result.stderr)
+    except Exception as e:
+        logger.error("Exception adding IP to loopback: %s", e)
+    
+    return False

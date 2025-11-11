@@ -50,6 +50,8 @@ from .utils import (
     read_comm, read_cmdline, collect_process_tree_pids,
     verify_processes_exited, get_tty_info,
     get_gpu_uuids, create_gpu_device_map,
+    get_cache_directories, save_cache_directories, restore_cache_directories,
+    get_primary_ip_address, set_ip_nonlocal_bind, add_ip_to_loopback,
 )
 from .metadata import CheckpointMetadata
 from .zmq_async_llm_server import (
@@ -802,6 +804,23 @@ class CheckpointableAsyncLLM(EngineClient):
         # (captured earlier before CUDA checkpoint)
         metadata.gpu_uuids = gpu_uuids
 
+        # Save primary IP address
+        primary_ip = get_primary_ip_address()
+        if primary_ip:
+            metadata.primary_ip = primary_ip
+            logger.info("Captured primary IP address: %s", primary_ip)
+        else:
+            logger.warning("Could not capture primary IP address")
+        
+        # Save cache directory paths and backup the cache contents
+        vllm_cache, flashinfer_cache = get_cache_directories()
+        metadata.vllm_cache_path = vllm_cache
+        metadata.flashinfer_cache_path = flashinfer_cache
+        logger.info("Cache directories: vLLM=%s, FlashInfer=%s", vllm_cache, flashinfer_cache)
+        
+        # Copy cache directories to checkpoint
+        save_cache_directories(checkpoint_dir, vllm_cache, flashinfer_cache)
+
         # Snapshot of open /dev/shm files across the process tree so we can
         # pre-create them before CRIU restore. Some libraries (e.g., NCCL/Gloo
         # or other IPC backends) use POSIX shm segments under /dev/shm, which
@@ -826,6 +845,7 @@ class CheckpointableAsyncLLM(EngineClient):
             "--link-remap",
             "--ghost-limit", "512M",
             "--manage-cgroups=ignore",
+            "--allow-uprobes",
             "--tree", str(root_pid)
         ]
 
@@ -939,6 +959,27 @@ class CheckpointableAsyncLLM(EngineClient):
                     logger.error("%s", msg)
                 raise RuntimeError(msg)
 
+        # Configure network for restore
+        logger.info("Configuring network for restore...")
+        
+        # Enable ip_nonlocal_bind to allow binding to non-local IPs
+        if not set_ip_nonlocal_bind(True):
+            logger.warning("Failed to enable ip_nonlocal_bind, restore may fail")
+        
+        # Add the checkpointed IP address to loopback interface
+        if metadata.primary_ip:
+            logger.info("Adding checkpointed IP %s to loopback interface", metadata.primary_ip)
+            if not add_ip_to_loopback(metadata.primary_ip):
+                logger.warning("Failed to add IP %s to loopback, restore may fail", metadata.primary_ip)
+        else:
+            logger.warning("No primary IP found in checkpoint metadata")
+        
+        # Restore cache directories before process restore
+        logger.info("Restoring cache directories...")
+        vllm_cache = metadata.vllm_cache_path or get_cache_directories()[0]
+        flashinfer_cache = metadata.flashinfer_cache_path or get_cache_directories()[1]
+        restore_cache_directories(self.checkpoint_dir, vllm_cache, flashinfer_cache)
+
         # Build CRIU restore command
         cmd = [
             "criu", "restore",
@@ -952,6 +993,8 @@ class CheckpointableAsyncLLM(EngineClient):
             "--external", "mnt[shm]:/dev/shm",
             "--link-remap",
             "--manage-cgroups=ignore",
+            "--allow-uprobes",
+            "--skip-file-rwx-check"
         ]
 
         # Force CRIU to skip CUDA plugin discovery by using an empty libdir
