@@ -116,7 +116,7 @@ jobs:
           echo "Full image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${LATEST_VLLM_TAG}"
           echo "VLLM_IMAGE_TAG=${LATEST_VLLM_TAG}" >> $GITHUB_ENV
 
-      - name: Find latest Operator image in ACR
+      - name: Find latest Operator image in ACR FYI
         shell: bash
         run: |
           set -euo pipefail
@@ -148,35 +148,33 @@ jobs:
           fi
 
           echo "Found latest Operator image tag: ${LATEST_OPERATOR_TAG}"
-          echo "Full image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${LATEST_OPERATOR_TAG}"
-          echo "OPERATOR_IMAGE_TAG=${LATEST_OPERATOR_TAG}" >> $GITHUB_ENV
+          echo "Latest Operator image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${LATEST_OPERATOR_TAG}"
+          # echo "OPERATOR_IMAGE_TAG=${LATEST_OPERATOR_TAG}" >> $GITHUB_ENV
 
-      # - name: Build Operator image (amd64)
-      #   id: build-operator
-      #   shell: bash
-      #   env:
-      #     ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-      #   run: |
-      #     set -euo pipefail
-      #     cd deploy/cloud/operator
-      #     docker buildx build --load \
-      #       --platform linux/amd64 \
-      #       --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-      #       -f Dockerfile \
-      #       -t dynamo-operator:latest .
-
-      # - name: Tag and Push Operator image to ACR
-      #   uses: ./.github/actions/docker-tag-push
-      #   with:
-      #     local_image: dynamo-operator:latest
-      #     push_tag: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ env.OPERATOR_IMAGE_TAG }}
-      #     aws_push: "false"
-      #     azure_push: "true"
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build Operator Image
+        id: build-image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          cd deploy/cloud/operator
+          docker buildx build --load \
+              --platform linux/${{ matrix.platform.arch }} \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              -f Dockerfile \
+              -t dynamo-operator:latest .
+      - name: Docker Tag and Push Operator Image
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: dynamo-operator:latest
+          push_tag: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
+          aws_push: "false"
+          azure_push: "true"
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
       # TODO get this to finish.
       # - name: Build vllm runtime image (amd64)
@@ -241,6 +239,7 @@ jobs:
             --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} \
             --namespace=${NAMESPACE} || true
 
+            # --set dynamo-operator.controllerManager.manager.image.tag=${{ env.OPERATOR_IMAGE_TAG }} \
       - name: Install Dynamo Operator Helm chart
         shell: bash
         env:
@@ -260,77 +259,12 @@ jobs:
             --set dynamo-operator.namespaceRestriction.enabled=true \
             --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
             --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-            --set dynamo-operator.controllerManager.manager.image.tag=${{ env.OPERATOR_IMAGE_TAG }} \
+            --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
             --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
             --set dynamo-operator.dynamo.mpiRun.sshKeygen.enabled=false \
             --set dynamo-operator.dynamo.mpiRun.secretName=""
-          HELM_STATUS=$?
-          set -e
 
-          if [[ "${HELM_STATUS}" -ne 0 ]]; then
-            echo "Helm install/upgrade of dynamo-platform FAILED with status ${HELM_STATUS}"
-            echo
-
-            echo "=== Jobs in namespace ${NAMESPACE} ==="
-            kubectl get jobs -n ${NAMESPACE} || true
-
-            echo
-            echo "=== Describe Job dynamo-platform-dynamo-operator-ssh-keygen ==="
-            kubectl describe job dynamo-platform-dynamo-operator-ssh-keygen -n ${NAMESPACE} || true
-
-            echo
-            echo "=== Pods for Job dynamo-platform-dynamo-operator-ssh-keygen ==="
-            kubectl get pods -n ${NAMESPACE} -l job-name=dynamo-platform-dynamo-operator-ssh-keygen -o wide || true
-
-            SSH_POD=$(kubectl get pods -n ${NAMESPACE} -l job-name=dynamo-platform-dynamo-operator-ssh-keygen -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-            if [[ -n "${SSH_POD}" ]]; then
-              echo
-              echo "=== describe pod ${SSH_POD} ==="
-              kubectl describe pod "${SSH_POD}" -n ${NAMESPACE} || true
-
-              echo
-              echo "=== logs from ${SSH_POD} (all containers) ==="
-              kubectl logs "${SSH_POD}" -n ${NAMESPACE} --all-containers=true --tail=200 || true
-            else
-              echo "No pods found for Job dynamo-platform-dynamo-operator-ssh-keygen"
-            fi
-
-            echo
-            echo "=== Describe Deployment dynamo-platform-dynamo-operator-controller-manager ==="
-            kubectl describe deploy dynamo-platform-dynamo-operator-controller-manager -n ${NAMESPACE} || true
-
-            echo
-            echo "=== Pods for dynamo-platform-dynamo-operator-controller-manager ==="
-            kubectl get pods -n ${NAMESPACE} \
-              -l 'app.kubernetes.io/component=manager,app.kubernetes.io/name=dynamo-operator' -o wide || true
-
-            CM_POD=$(kubectl get pods -n ${NAMESPACE} \
-              -l 'app.kubernetes.io/component=manager,app.kubernetes.io/name=dynamo-operator' \
-              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-            if [[ -n "${CM_POD}" ]]; then
-              echo
-              echo "=== describe pod ${CM_POD} ==="
-              kubectl describe pod "${CM_POD}" -n ${NAMESPACE} || true
-
-              echo
-              echo "=== logs from ${CM_POD} container=manager ==="
-              kubectl logs "${CM_POD}" -n ${NAMESPACE} -c manager --tail=200 || true
-
-              echo
-              echo "=== logs from ${CM_POD} container=kube-rbac-proxy (if present) ==="
-              kubectl logs "${CM_POD}" -n ${NAMESPACE} -c kube-rbac-proxy --tail=100 || true
-            else
-              echo "No controller-manager pod found."
-            fi
-
-            echo
-            echo "=== Recent events in namespace ${NAMESPACE} ==="
-            kubectl get events -n ${NAMESPACE} --sort-by=.lastTimestamp | tail -n 50 || true
-
-            exit "${HELM_STATUS}"
-          fi
-
-          echo "Helm install/upgrade of dynamo-platform succeeded."
+          timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 
       - name: Configure image pull secrets and deploy vllm graph
         shell: bash
