@@ -322,9 +322,14 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
+
 ###################################################
 ########## Frontend entrypoint image ##############
 ###################################################
+# This is the main frontend image that includes:
+#   - Python environment with Dynamo packages
+#   - Rust toolchain for development
+#   - NATS and ETCD servers
 
 FROM nvcr.io/nvidia/base/ubuntu:noble-20250619 AS frontend
 
@@ -334,7 +339,9 @@ ARG ARCH_ALT
 # Application environment variables
 ENV DYNAMO_HOME=/opt/dynamo \
     CARGO_TARGET_DIR=/opt/dynamo/target \
-    CARGO_HOME=/usr/local/cargo
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
 
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
@@ -342,23 +349,24 @@ RUN apt-get update -y \
         ca-certificates \
         git \
         git-lfs \
+        # curl for downloading files
+        curl \
         # rust build packages
+        build-essential \
+        gcc \
+        g++ \
         clang \
         libclang-dev \
         protobuf-compiler \
-        # sudo for dev stage
-        sudo \
+        # libstdc++6 is needed for EPP runtime (included with g++)
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* \
-    # Add sudo privileges to dynamo user
-    && echo "dynamo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dynamo \
-    && chmod 0440 /etc/sudoers.d/dynamo
+    && rm -rf /var/lib/apt/lists/*
 
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /home/dynamo/.cache \
+    && mkdir -p /home/dynamo/.cache /opt/dynamo /workspace \
     && chown -R dynamo: /opt/dynamo /home/dynamo /workspace \
     && chmod -R g+w /opt/dynamo /home/dynamo/.cache /workspace
 
@@ -390,6 +398,11 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
 
+# Copy NATS and ETCD from base stage
+COPY --chown=dynamo: --from=base /usr/bin/nats-server /usr/bin/nats-server
+COPY --chown=dynamo: --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+ENV PATH=/usr/local/bin/etcd/:$PATH
+
 # Copy ucx and nixl libs
 COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
 COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
@@ -399,6 +412,7 @@ COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_L
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
+COPY --chown=dynamo: --from=wheel_builder $RUSTUP_HOME $RUSTUP_HOME
 COPY --chown=dynamo: --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
 COPY --chown=dynamo: ./ /workspace/
@@ -425,5 +439,4 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 
 USER dynamo
 
-ENTRYPOINT ["/bin/bash", "-c"]
-CMD []
+CMD ["/bin/bash"]
