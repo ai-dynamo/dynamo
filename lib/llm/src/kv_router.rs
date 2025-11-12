@@ -36,6 +36,7 @@ pub use prefill_router::PrefillRouter;
 use crate::{
     kv_router::{
         approx::ApproxKvIndexer,
+        approx::PruneConfig,
         indexer::{
             KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent,
             compute_block_hash_for_seq, compute_seq_hash_for_block,
@@ -259,6 +260,10 @@ impl KvRouter {
                 cancellation_token.clone(),
                 block_size,
                 Duration::from_secs(120),
+                Some(PruneConfig {
+                    max_tree_size: 2usize.pow(14), // 2** 14 = 16384
+                    prune_target_ratio: 0.8,
+                }),
             ))
         };
 

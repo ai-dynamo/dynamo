@@ -18,6 +18,12 @@ use crate::block_manager::{
     layout::LayoutType,
     offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
     storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
+    v2::memory::DeviceStorage as DeviceStorageV2,
+    v2::physical::{
+        layout::{BlockDimension, LayoutConfig as LayoutConfigV2, builder::PhysicalLayoutBuilder},
+        manager::TransportManager,
+        transfer::{NixlAgent as NixlAgentV2, TransferCapabilities},
+    },
 };
 
 use derive_builder::Builder;
@@ -111,70 +117,162 @@ async fn perform_allocation_and_build_handler(
     worker_id: usize,
     device_id: usize,
     scheduler_client: Option<TransferSchedulerClient>,
-) -> anyhow::Result<BlockTransferHandler> {
-    let agent = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
-    let pool_config = PoolConfig {
-        enable_pool: true,
-        max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
-        max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
-        num_outer_components: device_layout.config().outer_dim,
-        num_layers: device_layout.config().num_layers,
-    };
-    let transfer_context = Arc::new(TransferContext::new(
-        Arc::new(Some(agent)),
-        DeviceAllocator::new(device_id)?.ctx().new_stream()?,
-        Handle::current(),
-        Some(pool_config),
-    ));
+) -> anyhow::Result<Arc<dyn BlockTransferHandler>> {
+    let use_v2_transfer = std::env::var("DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL")
+        .unwrap_or("0".to_string())
+        .parse::<usize>()
+        .map(|v| v > 0)
+        .unwrap_or(false);
 
-    // device
-    let device_blocks = Some(KvbmWorker::make_layout::<_, BasicMetadata>(
-        device_layout,
-        transfer_context.nixl_agent().as_ref(),
-        0,
-        worker_id,
-    )?);
-    // host
-    let host_blocks = if leader_meta.num_host_blocks > 0 {
-        let host_allocator = Arc::new(PinnedAllocator::default());
-        let host_layout = layout_builder
-            .num_blocks(leader_meta.num_host_blocks)
-            .build()?
-            .allocate_layout(worker_config.host_layout_type, host_allocator)?;
-        Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+    if use_v2_transfer {
+        tracing::warn!("Using V2 transfer handler. This is experimental. Use at your own risk.");
+        let backends = if leader_meta.num_disk_blocks > 0 {
+            vec!["POSIX", "GDS_MT"]
+        } else {
+            vec!["POSIX"]
+        };
+
+        let agent = NixlAgentV2::new_with_backends(worker_id.to_string().as_str(), &backends)?;
+
+        let mut layout_config = LayoutConfigV2::builder()
+            .num_blocks(device_layout.config().num_blocks)
+            .num_layers(device_layout.config().num_layers)
+            .outer_dim(device_layout.config().outer_dim)
+            .inner_dim(device_layout.config().inner_dim)
+            .page_size(device_layout.config().page_size)
+            .alignment(device_layout.config().alignment)
+            .dtype_width_bytes(device_layout.config().dtype_width_bytes)
+            .build()?;
+
+        let v2_device_layout =
+            PhysicalLayoutBuilder::new(agent.clone()).with_config(layout_config.clone());
+
+        let v2_device_layout =
+            if let LayoutType::LayerSeparate { outer_contiguous } = device_layout.layout_type() {
+                v2_device_layout.layer_separate(if outer_contiguous {
+                    BlockDimension::BlockIsSecondDim
+                } else {
+                    BlockDimension::BlockIsFirstDim
+                })
+            } else {
+                v2_device_layout.fully_contiguous()
+            };
+
+        let regions = device_layout
+            .storage()
+            .iter()
+            .map(|s| DeviceStorageV2::from_v1(s).unwrap())
+            .collect::<Vec<_>>();
+        let v2_device_layout = v2_device_layout.with_memory_regions(regions)?.build()?;
+
+        let host_layout = if leader_meta.num_host_blocks > 0 {
+            layout_config.num_blocks = leader_meta.num_host_blocks;
+            Some(
+                PhysicalLayoutBuilder::new(agent.clone())
+                    .with_config(layout_config.clone())
+                    .fully_contiguous()
+                    .allocate_pinned(true)
+                    .build()?,
+            )
+        } else {
+            None
+        };
+
+        let disk_layout = if leader_meta.num_disk_blocks > 0 {
+            layout_config.num_blocks = leader_meta.num_disk_blocks;
+            Some(
+                PhysicalLayoutBuilder::new(agent.clone())
+                    .with_config(layout_config)
+                    .fully_contiguous()
+                    .allocate_disk(None)
+                    .build()?,
+            )
+        } else {
+            None
+        };
+
+        let transport_manager = TransportManager::builder()
+            .capabilities(TransferCapabilities::default().with_gds(true))
+            .worker_id(worker_id as u64)
+            .nixl_agent(agent)
+            .cuda_device_id(device_id)
+            .build()?;
+
+        let handler = BlockTransferHandlerV2::new(
+            Some(v2_device_layout),
             host_layout,
-            transfer_context.nixl_agent().as_ref(),
-            1,
-            worker_id,
-        )?)
-    } else {
-        None
-    };
-    // disk
-    let disk_blocks = if leader_meta.num_disk_blocks > 0 {
-        let disk_allocator = Arc::new(DiskAllocator);
-        let disk_layout = layout_builder
-            .num_blocks(leader_meta.num_disk_blocks)
-            .build()?
-            .allocate_layout(worker_config.disk_layout_type, disk_allocator)?;
-        Some(KvbmWorker::make_layout::<_, BasicMetadata>(
             disk_layout,
-            transfer_context.nixl_agent().as_ref(),
-            2,
-            worker_id,
-        )?)
-    } else {
-        None
-    };
+            transport_manager,
+            scheduler_client,
+        )?;
 
-    let handler = BlockTransferHandler::new(
-        device_blocks,
-        host_blocks,
-        disk_blocks,
-        transfer_context,
-        scheduler_client,
-    )?;
-    Ok(handler)
+        Ok(Arc::new(handler) as Arc<dyn BlockTransferHandler>)
+    } else {
+        let agent = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
+        let pool_config = PoolConfig {
+            enable_pool: true,
+            max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
+            max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
+            num_outer_components: device_layout.config().outer_dim,
+            num_layers: device_layout.config().num_layers,
+        };
+        let transfer_context = Arc::new(TransferContext::new(
+            Arc::new(Some(agent)),
+            DeviceAllocator::new(device_id)?.ctx().new_stream()?,
+            Handle::current(),
+            Some(pool_config),
+        ));
+
+        // device
+        let device_blocks = Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+            device_layout,
+            transfer_context.nixl_agent().as_ref(),
+            0,
+            worker_id,
+        )?);
+        // host
+        let host_blocks = if leader_meta.num_host_blocks > 0 {
+            let host_allocator = Arc::new(PinnedAllocator::default());
+            let host_layout = layout_builder
+                .num_blocks(leader_meta.num_host_blocks)
+                .build()?
+                .allocate_layout(worker_config.host_layout_type, host_allocator)?;
+            Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+                host_layout,
+                transfer_context.nixl_agent().as_ref(),
+                1,
+                worker_id,
+            )?)
+        } else {
+            None
+        };
+        // disk
+        let disk_blocks = if leader_meta.num_disk_blocks > 0 {
+            let disk_allocator = Arc::new(DiskAllocator);
+            let disk_layout = layout_builder
+                .num_blocks(leader_meta.num_disk_blocks)
+                .build()?
+                .allocate_layout(worker_config.disk_layout_type, disk_allocator)?;
+            Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+                disk_layout,
+                transfer_context.nixl_agent().as_ref(),
+                2,
+                worker_id,
+            )?)
+        } else {
+            None
+        };
+
+        let handler = BlockTransferHandlerV1::new(
+            device_blocks,
+            host_blocks,
+            disk_blocks,
+            transfer_context,
+            scheduler_client,
+        )?;
+
+        Ok(Arc::new(handler) as Arc<dyn BlockTransferHandler>)
+    }
 }
 
 struct WorkerMetadataHandler {
@@ -199,6 +297,8 @@ impl Handler for WorkerMetadataHandler {
     }
 }
 
+type TransferHandlerSender = Mutex<Option<oneshot::Sender<Arc<dyn BlockTransferHandler>>>>;
+
 // Leader sends allocation config -> allocate -> publish handler -> mark ready -> ACK
 struct LeaderMetadataHandler {
     state: Arc<WorkerState>,
@@ -208,8 +308,8 @@ struct LeaderMetadataHandler {
     worker_id: usize,
     device_id: usize,
     scheduler_client: Option<TransferSchedulerClient>,
-    handler_cell: Arc<RwLock<Option<BlockTransferHandler>>>,
-    handler_tx: Arc<Mutex<Option<oneshot::Sender<BlockTransferHandler>>>>,
+    handler_cell: Arc<RwLock<Option<Arc<dyn BlockTransferHandler>>>>,
+    handler_tx: Arc<TransferHandlerSender>,
     started: AtomicBool,
 }
 
@@ -344,7 +444,7 @@ impl Handler for GatedPing {
 
 // Transfer dispatcher that waits until block transfer handler exists
 struct BlockTransferDispatch {
-    cell: Arc<RwLock<Option<BlockTransferHandler>>>,
+    cell: Arc<RwLock<Option<Arc<dyn BlockTransferHandler>>>>,
 }
 
 #[async_trait]
@@ -405,7 +505,7 @@ impl KvbmWorkerConfig {
 
 pub struct KvbmWorker {
     task: Option<CriticalTaskExecutionHandle>,
-    block_transfer_handler_rx: Option<oneshot::Receiver<transfer::BlockTransferHandler>>,
+    block_transfer_handler_rx: Option<oneshot::Receiver<Arc<dyn BlockTransferHandler>>>,
 }
 
 impl KvbmWorker {
@@ -529,7 +629,7 @@ impl KvbmWorker {
         layout_type: LayoutType,
     ) -> anyhow::Result<(
         CriticalTaskExecutionHandle,
-        oneshot::Receiver<transfer::BlockTransferHandler>,
+        oneshot::Receiver<Arc<dyn BlockTransferHandler>>,
     )> {
         let cancel_token = config.cancel_token.clone();
 
@@ -580,13 +680,13 @@ impl KvbmWorker {
         layout_type: LayoutType,
     ) -> anyhow::Result<(
         CriticalTaskExecutionHandle,
-        oneshot::Receiver<transfer::BlockTransferHandler>,
+        oneshot::Receiver<Arc<dyn BlockTransferHandler>>,
     )> {
         let cancel_token = config.cancel_token.clone();
         let scheduler_client = config.scheduler_client.clone();
 
         // channel to get BlockTransferHandler back to the caller
-        let (handler_tx, handler_rx) = oneshot::channel::<transfer::BlockTransferHandler>();
+        let (handler_tx, handler_rx) = oneshot::channel::<Arc<dyn BlockTransferHandler>>();
         let handler_tx_cell = Arc::new(Mutex::new(Some(handler_tx)));
 
         // channel that the worker will use to signal layout readiness
@@ -649,7 +749,7 @@ impl KvbmWorker {
     /// This is a bit of a hack. Improve the API design around this in the future.
     pub fn block_transfer_handler_rx(
         &mut self,
-    ) -> Option<tokio::sync::oneshot::Receiver<BlockTransferHandler>> {
+    ) -> Option<tokio::sync::oneshot::Receiver<Arc<dyn BlockTransferHandler>>> {
         self.block_transfer_handler_rx.take()
     }
 
@@ -677,7 +777,7 @@ impl KvbmWorker {
         _device_layout_type: LayoutType,
         config: KvbmWorkerConfig,
         cancel_token: CancellationToken,
-        handler_tx: Arc<Mutex<Option<oneshot::Sender<BlockTransferHandler>>>>,
+        handler_tx: Arc<TransferHandlerSender>,
         layout_ready_tx: tokio::sync::Mutex<Option<oneshot::Sender<String>>>,
         scheduler_client: Option<TransferSchedulerClient>,
         bytes_per_block: usize,
@@ -687,7 +787,7 @@ impl KvbmWorker {
         let state = Arc::new(WorkerState::new());
 
         // Cell to publish the transfer handler
-        let transfer_handler_cell: Arc<RwLock<Option<BlockTransferHandler>>> =
+        let transfer_handler_cell: Arc<RwLock<Option<Arc<dyn BlockTransferHandler>>>> =
             Arc::new(RwLock::new(None));
 
         // Build handlers map
