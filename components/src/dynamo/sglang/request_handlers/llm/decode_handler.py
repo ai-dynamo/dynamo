@@ -98,38 +98,48 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         return {k: v for k, v in param_mapping.items() if v is not None}
 
-    def _propagate_trace_context_to_sglang(self, rid: str):
-        """Propagate current OTEL trace context to SGLang.
+    def _propagate_trace_context_to_sglang(self, rid: str, context: Context):
+        """Propagate Dynamo's trace context to SGLang.
 
-        Lightweight: Returns immediately if tracing is disabled or no valid span exists.
+        Lightweight: Returns immediately if tracing is disabled or no trace context exists.
 
         Args:
             rid: Request ID to associate with the trace context.
+            context: Dynamo Context object containing trace information from Rust.
         """
         # CRITICAL PATH OPTIMIZATION: Early exit if tracing is disabled
         if not sglang_trace.tracing_enabled or not rid:
             return
 
-        # Fast path: Check if we have a valid span before doing any work
-        current_span = trace.get_current_span()
-        span_context = current_span.get_span_context() if current_span else None
-        if not span_context or not span_context.is_valid:
+        # Get trace context from Dynamo (Rust side)
+        trace_id = context.trace_id
+        span_id = context.span_id
+
+        if not trace_id or not span_id:
             return
 
-        # Only do expensive operations if tracing is enabled and span is valid
-        carrier: dict[str, str] = {}
-        propagate.inject(carrier)
+        # Build W3C traceparent: version-trace_id-parent_span_id-flags
+        # Use Dynamo's current span as the parent for SGLang
+        traceparent = f"00-{trace_id}-{span_id}-01"
 
         # Build trace context in SGLang's expected format
+        carrier = {"traceparent": traceparent}
+
+        # Extract OTEL context from the carrier
+        otel_context = propagate.extract(carrier)
+
+        # Get the span context from the extracted context
+        span_context = trace.get_current_span(otel_context).get_span_context()
+
         trace_context = {
             "root_span": carrier,
             "prev_span": {
-                "span_id": span_context.span_id,
-                "trace_id": span_context.trace_id,
+                "span_id": int(span_id, 16),  # Convert hex to int
+                "trace_id": int(trace_id, 16),
             }
         }
 
-        # Propagate to SGLang (has internal guard but we've already checked)
+        # Propagate to SGLang
         sglang_trace.trace_set_proc_propagate_context(rid, trace_context)
 
     async def generate(
@@ -192,7 +202,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 raise RuntimeError("No bootstrap info received from prefill worker")
 
             # Propagate trace context to SGLang
-            self._propagate_trace_context_to_sglang(trace_id)
+            self._propagate_trace_context_to_sglang(trace_id, context)
 
             decode = await self.engine.async_generate(
                 **input_param,
@@ -212,7 +222,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     yield out
         else:
             # Propagate trace context to SGLang
-            self._propagate_trace_context_to_sglang(trace_id)
+            self._propagate_trace_context_to_sglang(trace_id, context)
 
             agg = await self.engine.async_generate(
                 **input_param,
