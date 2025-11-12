@@ -107,20 +107,27 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             rid: Request ID to associate with the trace context.
             context: Dynamo Context object containing trace information from Rust.
         """
+        logging.info(f"[TRACE PROPAGATION] Called for rid={rid}, sglang_tracing_enabled={sglang_trace.tracing_enabled}")
+
         # CRITICAL PATH OPTIMIZATION: Early exit if tracing is disabled
         if not sglang_trace.tracing_enabled or not rid:
+            logging.info(f"[TRACE PROPAGATION] Skipping - tracing_enabled={sglang_trace.tracing_enabled}, rid={rid}")
             return
 
         # Get trace context from Dynamo (Rust side)
         trace_id = context.trace_id
         span_id = context.span_id
 
+        logging.info(f"[TRACE PROPAGATION] Dynamo context: trace_id={trace_id}, span_id={span_id}, parent_span_id={context.parent_span_id}")
+
         if not trace_id or not span_id:
+            logging.warning(f"[TRACE PROPAGATION] Missing trace context - trace_id={trace_id}, span_id={span_id}")
             return
 
         # Build W3C traceparent: version-trace_id-parent_span_id-flags
         # Use Dynamo's current span as the parent for SGLang
         traceparent = f"00-{trace_id}-{span_id}-01"
+        logging.info(f"[TRACE PROPAGATION] Built traceparent: {traceparent}")
 
         # Build trace context in SGLang's expected format
         carrier = {"traceparent": traceparent}
@@ -139,8 +146,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             }
         }
 
+        logging.info(f"[TRACE PROPAGATION] Calling trace_set_proc_propagate_context with rid={rid}")
         # Propagate to SGLang
         sglang_trace.trace_set_proc_propagate_context(rid, trace_context)
+        logging.info(f"[TRACE PROPAGATION] Successfully propagated trace context for rid={rid}")
 
     async def generate(
         self, request: Dict[str, Any], context: Context
