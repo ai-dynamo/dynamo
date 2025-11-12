@@ -182,6 +182,7 @@ impl Indexer {
             Indexer::None => Ok(OverlapScores {
                 scores: HashMap::new(),
                 frequencies: Vec::new(),
+                tree_sizes: HashMap::new(),
             }),
         }
     }
