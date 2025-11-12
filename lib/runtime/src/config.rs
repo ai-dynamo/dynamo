@@ -9,6 +9,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::OnceLock;
 use validator::Validate;
 
 /// Default system host for health and metrics endpoints
@@ -517,27 +518,23 @@ impl std::str::FromStr for RequestPlaneMode {
     }
 }
 
+/// Global cached request plane mode
+static REQUEST_PLANE_MODE: OnceLock<RequestPlaneMode> = OnceLock::new();
+
 impl RequestPlaneMode {
-    /// Get the request plane mode from environment variable
-    ///
+    /// The cached request plane mode, initialized from `DYN_REQUEST_PLANE` environment variable
+    /// or defaulting to NATS if not set or invalid.
+    pub fn get() -> Self {
+        *REQUEST_PLANE_MODE.get_or_init(|| Self::from_env())
+    }
+
+    /// Get the request plane mode from environment variable (uncached)
     /// Reads from `DYN_REQUEST_PLANE` environment variable.
-    /// Falls back to default (NATS) if not set or invalid.
     pub fn from_env() -> Self {
         std::env::var("DYN_REQUEST_PLANE")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_default()
-    }
-
-    /// Get the request plane mode from environment variable or default
-    ///
-    /// Reads from `DYN_REQUEST_PLANE` environment variable.
-    /// If not set, uses the provided default.
-    pub fn from_env_or(default: Self) -> Self {
-        std::env::var("DYN_REQUEST_PLANE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(default)
     }
 }
 
@@ -784,5 +781,22 @@ mod tests {
     #[test]
     fn test_request_plane_mode_default() {
         assert_eq!(RequestPlaneMode::default(), RequestPlaneMode::Nats);
+    }
+
+    #[test]
+    fn test_request_plane_mode_get_cached() {
+        // Test that get() returns a consistent value
+        let mode1 = RequestPlaneMode::get();
+        let mode2 = RequestPlaneMode::get();
+        assert_eq!(mode1, mode2, "Cached mode should be consistent");
+
+        // Verify it's one of the valid modes
+        assert!(
+            matches!(
+                mode1,
+                RequestPlaneMode::Nats | RequestPlaneMode::Http | RequestPlaneMode::Tcp
+            ),
+            "Mode should be a valid variant"
+        );
     }
 }

@@ -418,7 +418,7 @@ impl Component {
 
         // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
         // Only enable NATS service metrics collection when using NATS request plane mode
-        let request_plane_mode = RequestPlaneMode::from_env();
+        let request_plane_mode = RequestPlaneMode::get();
         match request_plane_mode {
             RequestPlaneMode::Nats => {
                 if let Err(err) = self.start_scraping_nats_service_component_metrics() {

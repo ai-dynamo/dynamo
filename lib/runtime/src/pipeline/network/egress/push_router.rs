@@ -91,7 +91,7 @@ impl RouterMode {
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     use crate::config::RequestPlaneMode;
 
-    let mode = RequestPlaneMode::from_env();
+    let mode = RequestPlaneMode::get();
     let tcp_server = endpoint.drt().tcp_server().await?;
 
     match mode {
