@@ -27,7 +27,7 @@ Here are quick steps to launch Llama-4 Maverick BF16 in aggregated mode
 ```bash
 cd $DYNAMO_HOME
 
-export AGG_ENGINE_ARGS=./recipes/llama4/trtllm/multimodal/agg.yaml
+export AGG_ENGINE_ARGS=./examples/backends/trtllm/engine_configs/llama4/multimodal/agg.yaml
 export SERVED_MODEL_NAME="meta-llama/Llama-4-Maverick-17B-128E-Instruct"
 export MODEL_PATH="meta-llama/Llama-4-Maverick-17B-128E-Instruct"
 ./launch/agg.sh
@@ -79,8 +79,8 @@ cd $DYNAMO_HOME
 
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2-VL-7B-Instruct"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen2-VL-7B-Instruct"}
-export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"recipes/qwen2-vl-7b-instruct/trtllm/prefill.yaml"}
-export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"recipes/qwen2-vl-7b-instruct/trtllm/decode.yaml"}
+export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"examples/backends/trtllm/engine_configs/qwen2-vl-7b-instruct/prefill.yaml"}
+export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"examples/backends/trtllm/engine_configs/qwen2-vl-7b-instruct/decode.yaml"}
 export MODALITY=${MODALITY:-"multimodal"}
 
 ./launch/disagg.sh

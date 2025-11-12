@@ -17,6 +17,8 @@ limitations under the License.
 
 # Example: Multi-node TRTLLM Workers with Dynamo on Slurm
 
+> **Note:** The scripts referenced in this example (such as `srun_aggregated.sh` and `srun_disaggregated.sh`) can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
+
 To run a single Dynamo+TRTLLM Worker that spans multiple nodes (ex: TP16),
 the set of nodes need to be launched together in the same MPI world, such as
 via `mpirun` or `srun`. This is true regardless of whether the worker is
@@ -106,8 +108,8 @@ export IMAGE="<dynamo_trtllm_image>"
 # For example, assuming your cluster had a `/lustre` directory on the host, you
 # could add that as a mount like so:
 #
-# export MOUNTS="${PWD}/../:/mnt,/lustre:/lustre"
-export MOUNTS="${PWD}/../:/mnt"
+# export MOUNTS="${PWD}/../../../../:/mnt,/lustre:/lustre"
+export MOUNTS="${PWD}/../../../../:/mnt"
 
 # NOTE: In general, Deepseek R1 is very large, so it is recommended to
 # pre-download the model weights and save them in some shared location,
@@ -136,7 +138,7 @@ follow these steps below to launch an **aggregated** deployment across 4 nodes:
 
 ```bash
 # Default set in srun_aggregated.sh, but can customize here.
-# export ENGINE_CONFIG="/mnt/recipes/deepseek-r1/trtllm/agg/wide_ep/wide_ep_agg.yaml"
+# export ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/agg/wide_ep/wide_ep_agg.yaml"
 
 # Customize NUM_NODES to match the desired parallelism in ENGINE_CONFIG
 # The product of NUM_NODES*NUM_GPUS_PER_NODE should match the number of
@@ -165,8 +167,8 @@ deployment across 8 nodes:
 
 ```bash
 # Defaults set in srun_disaggregated.sh, but can customize here.
-# export PREFILL_ENGINE_CONFIG="/mnt/recipes/deepseek-r1/trtllm/disagg/wide_ep/wide_ep_prefill.yaml"
-# export DECODE_ENGINE_CONFIG="/mnt/recipes/deepseek-r1/trtllm/disagg/wide_ep/wide_ep_decode.yaml"
+# export PREFILL_ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/disagg/wide_ep/wide_ep_prefill.yaml"
+# export DECODE_ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/disagg/wide_ep/wide_ep_decode.yaml"
 
 # Customize NUM_PREFILL_NODES to match the desired parallelism in PREFILL_ENGINE_CONFIG
 # Customize NUM_DECODE_NODES to match the desired parallelism in DECODE_ENGINE_CONFIG
