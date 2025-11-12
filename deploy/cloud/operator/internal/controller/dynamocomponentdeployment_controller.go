@@ -63,14 +63,7 @@ const (
 	KubeAnnotationEnableStealingTrafficDebugMode         = "nvidia.com/enable-stealing-traffic-debug-mode"
 	KubeAnnotationEnableDebugMode                        = "nvidia.com/enable-debug-mode"
 	KubeAnnotationEnableDebugPodReceiveProductionTraffic = "nvidia.com/enable-debug-pod-receive-production-traffic"
-	DeploymentTargetTypeProduction                       = "production"
 	DeploymentTargetTypeDebug                            = "debug"
-	HeaderNameDebug                                      = "X-Nvidia-Debug"
-	KubernetesDeploymentStrategy                         = "kubernetes"
-
-	DeploymentTypeStandard       = "standard"
-	DeploymentTypeMultinodeGrove = "multinode-grove"
-	ComponentTypePlanner         = "Planner"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
@@ -1276,40 +1269,56 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		},
 	}
 
-	if !opt.dynamoComponentDeployment.IsFrontendComponent() || (!opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled) {
+	isK8sDiscovery := r.Config.IsK8sDiscoveryEnabled(opt.dynamoComponentDeployment.Spec.Annotations)
+
+	// if discovery backend is k8s we want to create a service for each component
+	// else, only create for the frontend component
+	if !opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled && !(isK8sDiscovery || opt.dynamoComponentDeployment.IsFrontendComponent()) {
 		// if it's not the main component or if it's not a generic service and not contains stealing traffic debug mode enabled, we don't need to create the service
 		return kubeService, true, nil
 	}
 
 	labels := r.getKubeLabels(opt.dynamoComponentDeployment)
 
-	selector := make(map[string]string)
-
-	for k, v := range labels {
-		selector[k] = v
+	if opt.dynamoComponentDeployment.Spec.DynamoNamespace == nil {
+		return nil, false, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", opt.dynamoComponentDeployment.Name)
 	}
 
-	// If using LeaderWorkerSet, modify selector to only target leaders
+	selector := map[string]string{
+		commonconsts.KubeLabelDynamoComponentType: opt.dynamoComponentDeployment.Spec.ComponentType,
+		commonconsts.KubeLabelDynamoNamespace:     *opt.dynamoComponentDeployment.Spec.DynamoNamespace,
+	}
+	// // If using LeaderWorkerSet, modify selector to only target leaders
 	if opt.dynamoComponentDeployment.IsMultinode() {
 		selector["role"] = "leader"
 	}
-
 	if opt.isStealingTrafficDebugModeEnabled {
 		selector[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
 	}
+	if isK8sDiscovery {
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+	}
 
-	targetPort := intstr.FromString(commonconsts.DynamoContainerPortName)
+	var servicePort corev1.ServicePort
+	if opt.dynamoComponentDeployment.IsFrontendComponent() {
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.DynamoServicePortName,
+			Port:       commonconsts.DynamoServicePort,
+			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	} else { // TODO: only for worker components
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.DynamoSystemPortName,
+			Port:       commonconsts.DynamoSystemPort,
+			TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	}
 
 	spec := corev1.ServiceSpec{
 		Selector: selector,
-		Ports: []corev1.ServicePort{
-			{
-				Name:       commonconsts.DynamoServicePortName,
-				Port:       commonconsts.DynamoServicePort,
-				TargetPort: targetPort,
-				Protocol:   corev1.ProtocolTCP,
-			},
-		},
+		Ports:    []corev1.ServicePort{servicePort},
 	}
 
 	annotations := r.getKubeAnnotations(opt.dynamoComponentDeployment)
