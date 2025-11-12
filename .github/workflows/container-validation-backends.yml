@@ -511,7 +511,10 @@ jobs:
         set -x
 
         # Set namespace
-        NAMESPACE="gh-id-${{ github.run_id }}-deploy-tests"
+        BRANCH_SANITIZED="${BRANCH//\//-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+        NAMESPACE="gh-id-${{ github.run_id }}-dt"
         echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
         # Setup kubeconfig
