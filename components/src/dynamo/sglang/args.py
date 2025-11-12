@@ -212,6 +212,71 @@ def _set_parser(
         return dynamo_str
 
 
+def _extract_config_section(
+    args: List[str], config_path: str, config_key: str
+) -> tuple[List[str], str]:
+    """
+    Extract a section from nested YAML and create temp flat file.
+
+    Args:
+        args: CLI arguments list
+        config_path: Path to the YAML config file
+        config_key: Key to extract from nested YAML
+
+    Returns:
+        tuple: (modified args with temp file path, temp file path for cleanup)
+
+    Raises:
+        ValueError: If config file not found, key missing, or invalid format
+    """
+    import tempfile
+    import yaml
+    from pathlib import Path
+
+    path = Path(config_path)
+    if not path.exists():
+        raise ValueError(f"Config file not found: {config_path}")
+
+    with open(config_path, "r") as f:
+        config_data = yaml.safe_load(f)
+
+    # Check if config has the requested key
+    if not isinstance(config_data, dict):
+        raise ValueError(
+            f"Config file must contain a dictionary, got {type(config_data).__name__}"
+        )
+
+    if config_key not in config_data:
+        available_keys = list(config_data.keys())
+        raise ValueError(
+            f"Config key '{config_key}' not found in {config_path}. "
+            f"Available keys: {available_keys}"
+        )
+
+    section_data = config_data[config_key]
+
+    if not isinstance(section_data, dict):
+        raise ValueError(
+            f"Config section '{config_key}' must be a dictionary, got {type(section_data).__name__}"
+        )
+
+    # Create temporary flat YAML file
+    temp_fd, temp_path = tempfile.mkstemp(suffix=".yaml", prefix="dynamo_config_")
+    try:
+        with os.fdopen(temp_fd, "w") as f:
+            yaml.dump(section_data, f)
+    except Exception:
+        os.unlink(temp_path)
+        raise
+
+    # Replace config path in args
+    config_index = args.index("--config")
+    args = list(args)  # Make a copy to avoid modifying original
+    args[config_index + 1] = temp_path
+
+    return args, temp_path
+
+
 async def parse_args(args: list[str]) -> Config:
     """Parse CLI arguments and return combined configuration.
     Download the model if necessary.
@@ -246,12 +311,36 @@ async def parse_args(args: list[str]) -> Config:
 
         parser.add_argument(*info["flags"], **kwargs)
 
+    # Config key argument (for nested configs)
+    parser.add_argument(
+        "--config-key",
+        type=str,
+        default=None,
+        help="Key to select from nested config file (e.g., 'prefill', 'decode')",
+    )
+
     # SGLang args
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
     ServerArgs.add_cli_args(parser)
 
     # Handle config file if present
+    temp_config_file = None  # Track temp file for cleanup
     if "--config" in args:
+        # Check if --config-key is also present
+        if "--config-key" in args:
+            key_index = args.index("--config-key")
+            config_key = args[key_index + 1]
+            config_index = args.index("--config")
+            config_path = args[config_index + 1]
+
+            # Extract nested section to temp file
+            args, temp_config_file = _extract_config_section(
+                args, config_path, config_key
+            )
+
+            # Remove --config-key from args (not recognized by SGLang)
+            args = args[:key_index] + args[key_index + 2 :]
+
         # Extract boolean actions from the parser to handle them correctly in YAML
         boolean_actions = []
         for action in parser._actions:
@@ -264,6 +353,13 @@ async def parse_args(args: list[str]) -> Config:
         args = config_merger.merge_config_with_args(args)
 
     parsed_args = parser.parse_args(args)
+
+    # Clean up temp file if created
+    if temp_config_file and os.path.exists(temp_config_file):
+        try:
+            os.unlink(temp_config_file)
+        except Exception:
+            logging.warning(f"Failed to clean up temp config file: {temp_config_file}")
 
     # Auto-set bootstrap port if not provided
     if not any(arg.startswith("--disaggregation-bootstrap-port") for arg in args):
