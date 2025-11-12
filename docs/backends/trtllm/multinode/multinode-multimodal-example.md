@@ -17,6 +17,8 @@ limitations under the License.
 
 # Example: Multi-node TRTLLM Workers with Dynamo on Slurm for multimodal models
 
+> **Note:** The scripts referenced in this example (such as `srun_aggregated.sh` and `srun_disaggregated.sh`) can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
+
 > [!IMPORTANT]
 > There are some known issues in tensorrt_llm==1.1.0rc5 version for multinode multimodal support. It is important to rebuild the dynamo container with a specific version of tensorrt_llm commit to use multimodal feature.
 >
@@ -123,7 +125,7 @@ deployment across 4 nodes:
 
 ## Understanding the Output
 
-1. The `srun_disaggregated.sh` launches three srun jobs instead of two. One for frontend, one for prefill   worker, and one for decode worker.
+1. The `srun_disaggregated.sh` launches three srun jobs instead of two. One for frontend, one for prefill worker, and one for decode worker.
 
 2. The OpenAI frontend will listen for and dynamically discover workers as
    they register themselves with Dynamo's distributed runtime:
