@@ -313,7 +313,7 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
             return;
         }
 
-        if bounce_buffer_spec.block_ids().len() == 0 {
+        if bounce_buffer_spec.block_ids().is_empty() {
             tx.send(Err(anyhow::anyhow!(
                 "Bounce buffer must have at least one block."
             )))
