@@ -511,7 +511,8 @@ jobs:
         # Use LogAI to extract errors from logs
         if [ -f "deploy-operator.log" ]; then
           echo "Analyzing deploy-operator.log with LogAI..."
-          LOGAI_ERROR=$(python3 .github/scripts/extract_log_errors.py deploy-operator.log 2>&1 || echo "Log analysis failed")
+          # Don't capture stderr (2>&1) to avoid LogAI warnings in annotations
+          LOGAI_ERROR=$(python3 .github/scripts/extract_log_errors.py deploy-operator.log 2>/dev/null || echo "Log analysis failed")
           echo "LOGAI_EXTRACTED_ERROR<<EOF" >> $GITHUB_ENV
           echo "$LOGAI_ERROR" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
@@ -765,7 +766,8 @@ jobs:
         # Use LogAI to extract errors from logs
         if [ -f "test-output.log" ]; then
           echo "Analyzing test-output.log with LogAI..."
-          LOGAI_ERROR=$(python3 .github/scripts/extract_log_errors.py test-output.log 2>&1 || echo "Log analysis failed")
+          # Don't capture stderr (2>&1) to avoid LogAI warnings in annotations
+          LOGAI_ERROR=$(python3 .github/scripts/extract_log_errors.py test-output.log 2>/dev/null || echo "Log analysis failed")
           echo "LOGAI_EXTRACTED_ERROR<<EOF" >> $GITHUB_ENV
           echo "$LOGAI_ERROR" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV

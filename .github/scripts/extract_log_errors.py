@@ -77,28 +77,32 @@ class LogErrorExtractor:
                 from logai.preprocess.preprocessor import Preprocessor
                 from logai.information_extraction.log_parser import LogParser
                 from logai.dataloader.data_loader import FileDataLoader
-            except ImportError as e:
-                print(f"LogAI components not fully available: {e}", file=sys.stderr)
+                from logai.dataloader.openset_data_loader import OpenSetDataLoaderConfig
+                from logai.preprocess.openset_preprocessor import PreprocessorConfig
+                from logai.information_extraction.log_parser import LogParserConfig
+            except (ImportError, AttributeError) as e:
+                print(f"LogAI components not fully available: {e}, using fallback", file=sys.stderr)
                 return []
             
             # Write log content to a temporary file for LogAI processing
             temp_log = Path("/tmp/analysis.log")
             temp_log.write_text(self.log_content)
             
-            # Configure LogAI preprocessor
-            preprocessor = Preprocessor()
-            
-            # Parse logs
-            log_parser = LogParser()
+            # Configure LogAI components with default configs
+            dataloader_config = OpenSetDataLoaderConfig()
+            preprocessor_config = PreprocessorConfig()
+            parser_config = LogParserConfig()
             
             # Load data
-            dataloader = FileDataLoader()
+            dataloader = FileDataLoader(dataloader_config)
             logrecord = dataloader.load_data(str(temp_log))
             
             # Preprocess
+            preprocessor = Preprocessor(preprocessor_config)
             logrecord = preprocessor.clean_log(logrecord)
             
             # Parse log patterns
+            log_parser = LogParser(parser_config)
             parsed_result = log_parser.parse(logrecord)
             
             # Extract anomalies (errors)
@@ -116,7 +120,8 @@ class LogErrorExtractor:
             return errors[:10]  # Return top 10 errors
             
         except Exception as e:
-            print(f"LogAI extraction failed: {e}", file=sys.stderr)
+            # Log to stderr but don't let it pollute the main output
+            print(f"LogAI extraction failed: {e}, falling back to regex extraction", file=sys.stderr)
             return []
     
     def extract_with_fallback(self) -> List[Dict[str, Any]]:
