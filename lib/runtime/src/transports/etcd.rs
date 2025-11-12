@@ -751,7 +751,7 @@ mod tests {
     fn test_ectd_client() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings(false);
+        let config = DistributedConfig::from_settings();
 
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();
@@ -794,7 +794,7 @@ mod tests {
     fn test_kv_cache() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings(false);
+        let config = DistributedConfig::from_settings();
 
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();

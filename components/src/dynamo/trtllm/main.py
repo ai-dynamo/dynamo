@@ -106,7 +106,7 @@ async def worker():
     config = cmd_line_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv, False)
+    runtime = DistributedRuntime(loop, config.store_kv)
 
     # Set up signal handler for graceful shutdown
     def signal_handler():

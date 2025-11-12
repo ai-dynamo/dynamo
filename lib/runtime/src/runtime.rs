@@ -324,6 +324,8 @@ impl Runtime {
                 "Phase 3: All endpoints ended gracefully. Connections to NATS/ETCD will now be disconnected"
             );
             main_token.cancel();
+
+            // TODO: We should likely call shutdown_background on tokio rt to stop it cleanly.
         });
     }
 }

@@ -80,7 +80,7 @@ impl HealthCheckManager {
         }
 
         // Create a client that discovers instances dynamically for this endpoint
-        let client = Client::new_dynamic(endpoint).await?;
+        let client = Client::new(endpoint).await?;
 
         // Create PushRouter - it will use direct routing when we call direct()
         let router: Arc<PushRouter<serde_json::Value, Annotated<serde_json::Value>>> = Arc::new(
