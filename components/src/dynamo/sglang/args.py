@@ -1,17 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
 import argparse
 import contextlib
 import logging
 import os
 import socket
 import sys
+import tempfile
 from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
+import yaml
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
@@ -229,9 +231,7 @@ def _extract_config_section(
     Raises:
         ValueError: If config file not found, key missing, or invalid format
     """
-    import tempfile
-    import yaml
-    from pathlib import Path
+    logging.info(f"Extracting config section '{config_key}' from {config_path}")
 
     path = Path(config_path)
     if not path.exists():
@@ -246,8 +246,10 @@ def _extract_config_section(
             f"Config file must contain a dictionary, got {type(config_data).__name__}"
         )
 
+    available_keys = list(config_data.keys())
+    logging.info(f"Available config keys in {config_path}: {available_keys}")
+
     if config_key not in config_data:
-        available_keys = list(config_data.keys())
         raise ValueError(
             f"Config key '{config_key}' not found in {config_path}. "
             f"Available keys: {available_keys}"
@@ -262,9 +264,11 @@ def _extract_config_section(
 
     # Create temporary flat YAML file
     temp_fd, temp_path = tempfile.mkstemp(suffix=".yaml", prefix="dynamo_config_")
+
     try:
         with os.fdopen(temp_fd, "w") as f:
             yaml.dump(section_data, f)
+        logging.info(f"Successfully wrote config section '{config_key}' to temp file")
     except Exception:
         os.unlink(temp_path)
         raise
