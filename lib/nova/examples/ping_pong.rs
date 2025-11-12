@@ -20,6 +20,8 @@ use dynamo_nova_backend::http::HttpTransportBuilder;
 #[cfg(feature = "ucx")]
 use dynamo_nova_backend::ucx::UcxTransportBuilder;
 
+#[cfg(feature = "nats")]
+use dynamo_nova_backend::nats::NatsTransportBuilder;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,6 +45,9 @@ enum TransportType {
     /// UCX transport
     #[cfg(feature = "ucx")]
     Ucx,
+    /// NATS transport
+    #[cfg(feature = "nats")]
+    Nats,
 }
 
 /// CLI arguments for ping-pong benchmark
@@ -57,28 +62,42 @@ struct Args {
     /// Transport type to use
     #[arg(long, default_value = "tcp")]
     transport: TransportType,
+
+    /// NATS server URL (only used when transport=nats)
+    #[cfg(feature = "nats")]
+    #[arg(long, default_value = "nats://127.0.0.1:4222")]
+    nats_url: String,
 }
 
 /// Create a transport based on the selected type
-fn create_transport(transport_type: TransportType) -> Result<Arc<dyn Transport>> {
+fn create_transport(
+    transport_type: TransportType,
+    #[cfg(feature = "nats")] nats_url: &str,
+) -> Result<Arc<dyn Transport>> {
     match transport_type {
         TransportType::Tcp => {
             let addr = format!("127.0.0.1:{}", get_random_port())
                 .parse::<SocketAddr>()
                 .unwrap();
-            Ok(Arc::new(TcpTransportBuilder::new().bind_addr(addr).build()?))
+            Ok(Arc::new(
+                TcpTransportBuilder::new().bind_addr(addr).build()?,
+            ))
         }
         #[cfg(feature = "http")]
         TransportType::Http => {
             let addr = format!("127.0.0.1:{}", get_random_port())
                 .parse::<SocketAddr>()
                 .unwrap();
-            Ok(Arc::new(HttpTransportBuilder::new().bind_addr(addr).build()?))
+            Ok(Arc::new(
+                HttpTransportBuilder::new().bind_addr(addr).build()?,
+            ))
         }
         #[cfg(feature = "ucx")]
-        TransportType::Ucx => {
-            Ok(Arc::new(UcxTransportBuilder::new().build()?))
-        }
+        TransportType::Ucx => Ok(Arc::new(UcxTransportBuilder::new().build()?)),
+        #[cfg(feature = "nats")]
+        TransportType::Nats => Ok(Arc::new(
+            NatsTransportBuilder::new().nats_url(nats_url).build()?,
+        )),
     }
 }
 
@@ -101,11 +120,22 @@ fn main() -> Result<()> {
 
     let transport_type = args.transport;
 
+    #[cfg(feature = "nats")]
+    let nats_url_server = args.nats_url.clone();
+
+    #[cfg(feature = "nats")]
+    let nats_url_client = args.nats_url.clone();
+
     // Spawn server thread
     let server_handle = std::thread::spawn(move || {
         runtime_server.block_on(async {
             // Create server Nova instance with selected transport
-            let transport = create_transport(transport_type).unwrap();
+            let transport = create_transport(
+                transport_type,
+                #[cfg(feature = "nats")]
+                &nats_url_server,
+            )
+            .unwrap();
             let nova = Nova::new(vec![transport]).await.unwrap();
 
             // Give transport a moment to bind and start accepting connections
@@ -136,7 +166,12 @@ fn main() -> Result<()> {
     let client_handle = std::thread::spawn(move || {
         runtime_client.block_on(async {
             // Create client Nova instance with selected transport
-            let transport = create_transport(transport_type).unwrap();
+            let transport = create_transport(
+                transport_type,
+                #[cfg(feature = "nats")]
+                &nats_url_client,
+            )
+            .unwrap();
             let nova = Nova::new(vec![transport]).await.unwrap();
 
             // Give transport a moment to bind

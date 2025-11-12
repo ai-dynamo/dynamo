@@ -14,11 +14,12 @@ use base64::Engine;
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
-use crate::transport::{TransportError, TransportErrorHandler};
+use crate::transport::{HealthCheckError, TransportError, TransportErrorHandler};
 use crate::{MessageType, PeerInfo, Transport, TransportAdapter, TransportKey, WorkerAddress};
 
 use super::server::HttpServer;
@@ -31,13 +32,16 @@ pub struct HttpTransport {
     // Identity
     key: TransportKey,
     bind_addr: SocketAddr,
-    local_address: Arc<parking_lot::RwLock<WorkerAddress>>,
+    local_address: OnceLock<WorkerAddress>,
 
     // Peer registry (instance_id → base URL)
     peers: Arc<DashMap<dynamo_identity::InstanceId, String>>,
 
     // HTTP client for sending requests
     client: reqwest::Client,
+
+    // Runtime handle for spawning tasks
+    runtime: OnceLock<tokio::runtime::Handle>,
 
     // Server handle (set during start)
     server_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>>,
@@ -56,15 +60,13 @@ impl HttpTransport {
             .build()
             .expect("Failed to create HTTP client");
 
-        // Create placeholder WorkerAddress (will be updated in start())
-        let local_address = WorkerAddress::builder().build().unwrap();
-
         Self {
             key,
             bind_addr,
-            local_address: Arc::new(parking_lot::RwLock::new(local_address)),
+            local_address: OnceLock::new(),
             peers: Arc::new(DashMap::new()),
             client,
+            runtime: OnceLock::new(),
             server_handle: Arc::new(parking_lot::Mutex::new(None)),
             cancel_token: CancellationToken::new(),
         }
@@ -114,7 +116,10 @@ impl Transport for HttpTransport {
     }
 
     fn address(&self) -> WorkerAddress {
-        self.local_address.read().clone()
+        self.local_address
+            .get()
+            .cloned()
+            .unwrap_or_else(|| WorkerAddress::builder().build().unwrap())
     }
 
     fn register(&self, peer_info: PeerInfo) -> Result<(), TransportError> {
@@ -185,56 +190,75 @@ impl Transport for HttpTransport {
 
         let url = format!("{}{}", base_url, path);
 
-        // Spawn async task to send HTTP request
+        // Spawn async task to send HTTP request using stored runtime handle
         let client = self.client.clone();
-        tokio::spawn(async move {
-            Self::send_http_request(client, url, header, payload, on_error).await;
-        });
+        if let Some(rt) = self.runtime.get() {
+            rt.spawn(async move {
+                Self::send_http_request(client, url, header, payload, on_error).await;
+            });
+        } else {
+            // Fallback if runtime not set (shouldn't happen)
+            tokio::spawn(async move {
+                Self::send_http_request(client, url, header, payload, on_error).await;
+            });
+        }
     }
 
-    fn start(&self, channels: TransportAdapter, _rt: tokio::runtime::Handle) -> anyhow::Result<()> {
-        info!("Starting HTTP transport on {}", self.bind_addr);
-
-        // Use std TcpListener to bind synchronously
-        let std_listener = std::net::TcpListener::bind(self.bind_addr)?;
-
-        // Get actual bound address (important for port 0)
-        let actual_addr = std_listener.local_addr()?;
-
-        // Set non-blocking for tokio
-        std_listener.set_nonblocking(true)?;
-
-        info!("HTTP server bound to {}", actual_addr);
-
-        // Build WorkerAddress with actual address
-        let local_url = format!("http://{}", actual_addr);
-        let mut addr_builder = WorkerAddress::builder();
-        addr_builder.add_entry(self.key.clone(), local_url.as_bytes().to_vec())?;
-        let local_address = addr_builder.build()?;
-
-        // Update local address
-        *self.local_address.write() = local_address;
-
-        // Convert to tokio listener and start server
+    fn start(
+        &self,
+        _instance_id: dynamo_identity::InstanceId,
+        channels: TransportAdapter,
+        rt: tokio::runtime::Handle,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        let bind_addr = self.bind_addr;
+        let key = self.key.clone();
         let cancel_token = self.cancel_token.clone();
-        let server_handle = tokio::spawn(async move {
-            // Convert std listener to tokio listener
-            let tokio_listener = tokio::net::TcpListener::from_std(std_listener)
-                .map_err(|e| anyhow::anyhow!("Failed to convert listener: {}", e))?;
+        let server_handle_arc = self.server_handle.clone();
 
-            let server = HttpServer::new(tokio_listener, channels, cancel_token);
+        Box::pin(async move {
+            info!("Starting HTTP transport on {}", bind_addr);
 
-            if let Err(e) = server.run().await {
-                error!("HTTP server error: {}", e);
-            }
+            // Use std TcpListener to bind synchronously
+            let std_listener = std::net::TcpListener::bind(bind_addr)?;
+
+            // Get actual bound address (important for port 0)
+            let actual_addr = std_listener.local_addr()?;
+
+            // Set non-blocking for tokio
+            std_listener.set_nonblocking(true)?;
+
+            info!("HTTP server bound to {}", actual_addr);
+
+            // Build WorkerAddress with actual address
+            let local_url = format!("http://{}", actual_addr);
+            let mut addr_builder = WorkerAddress::builder();
+            addr_builder.add_entry(key, local_url.as_bytes().to_vec())?;
+            let local_address = addr_builder.build()?;
+
+            // Store runtime handle and local address
+            self.runtime.set(rt.clone()).ok();
+            self.local_address.set(local_address).ok();
+
+            // Convert to tokio listener and start server using provided runtime
+            let server_handle = rt.spawn(async move {
+                // Convert std listener to tokio listener
+                let tokio_listener = tokio::net::TcpListener::from_std(std_listener)
+                    .map_err(|e| anyhow::anyhow!("Failed to convert listener: {}", e))?;
+
+                let server = HttpServer::new(tokio_listener, channels, cancel_token);
+
+                if let Err(e) = server.run().await {
+                    error!("HTTP server error: {}", e);
+                }
+                Ok(())
+            });
+
+            *server_handle_arc.lock() = Some(server_handle);
+
+            info!("HTTP transport started");
+
             Ok(())
-        });
-
-        *self.server_handle.lock() = Some(server_handle);
-
-        info!("HTTP transport started");
-
-        Ok(())
+        })
     }
 
     fn shutdown(&self) {
@@ -254,6 +278,30 @@ impl Transport for HttpTransport {
         self.peers.clear();
 
         info!("HTTP transport shut down");
+    }
+
+    fn check_health(
+        &self,
+        instance_id: dynamo_identity::InstanceId,
+        timeout: Duration,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), HealthCheckError>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            let url = self
+                .peers
+                .get(&instance_id)
+                .ok_or(HealthCheckError::PeerNotRegistered)?
+                .clone();
+
+            let health_url = format!("{}/health", url);
+
+            match tokio::time::timeout(timeout, self.client.head(&health_url).send()).await {
+                Ok(Ok(resp)) if resp.status().is_success() => Ok(()),
+                Ok(Ok(_)) | Ok(Err(_)) => Err(HealthCheckError::ConnectionFailed),
+                Err(_) => Err(HealthCheckError::Timeout),
+            }
+        })
     }
 }
 

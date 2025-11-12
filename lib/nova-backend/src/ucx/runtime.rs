@@ -33,6 +33,25 @@ pub enum EndpointRequest {
     },
 }
 
+/// Health status for an endpoint
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointHealthStatus {
+    /// Endpoint exists in cache and is healthy
+    Healthy,
+    /// Endpoint exists in cache but get_status() returned an error
+    Unhealthy,
+    /// Endpoint not in cache (never connected)
+    NotConnected,
+}
+
+/// Control message for endpoint manager
+pub enum EndpointControlMessage {
+    CheckHealth {
+        instance_id: InstanceId,
+        reply: oneshot::Sender<EndpointHealthStatus>,
+    },
+}
+
 /// Spawn the UCX runtime with LocalSet
 ///
 /// This creates a dedicated thread running a LocalSet where all UCX operations happen.
@@ -48,10 +67,14 @@ pub fn spawn_ucx_runtime(
     cancel_token: CancellationToken,
 ) -> Result<(
     mpsc::UnboundedSender<GetWorkerAddressRequest>,
+    mpsc::UnboundedSender<EndpointControlMessage>,
     std::thread::JoinHandle<()>,
 )> {
     // Channel for requesting worker address
     let (worker_addr_tx, worker_addr_rx) = mpsc::unbounded_channel();
+
+    // Create control channel for endpoint manager
+    let (ep_control_tx, ep_control_rx) = mpsc::unbounded_channel();
 
     let thread = std::thread::Builder::new()
         .name("ucx-runtime".into())
@@ -62,13 +85,14 @@ pub fn spawn_ucx_runtime(
                 resp_rx,
                 event_rx,
                 worker_addr_rx,
+                ep_control_rx,
                 cancel_token,
             ) {
                 error!("UCX runtime thread exited with error: {:?}", err);
             }
         })?;
 
-    Ok((worker_addr_tx, thread))
+    Ok((worker_addr_tx, ep_control_tx, thread))
 }
 
 /// Request to get the local worker address
@@ -94,8 +118,11 @@ fn run_runtime(
     resp_rx: flume::Receiver<SendTask>,
     event_rx: flume::Receiver<SendTask>,
     mut worker_addr_rx: mpsc::UnboundedReceiver<GetWorkerAddressRequest>,
+    ep_control_rx: mpsc::UnboundedReceiver<EndpointControlMessage>,
     cancel_token: CancellationToken,
 ) -> Result<()> {
+    // Create endpoint request channel for internal use by sender tasks
+    let (ep_tx, ep_rx) = mpsc::unbounded_channel();
     // Create single-threaded tokio runtime
     let rt = Builder::new_current_thread()
         .enable_time()
@@ -119,13 +146,15 @@ fn run_runtime(
 
     local.spawn_local(worker.clone().polling());
 
-    // Create endpoint manager channel
-    let (ep_tx, ep_rx) = mpsc::unbounded_channel();
-
     // Spawn endpoint manager task
     let ep_worker = worker.clone();
     let ep_cancel = cancel_token.clone();
-    local.spawn_local(endpoint_manager_task(ep_rx, ep_worker, ep_cancel));
+    local.spawn_local(endpoint_manager_task(
+        ep_rx,
+        ep_control_rx,
+        ep_worker,
+        ep_cancel,
+    ));
 
     // Active message recveiver task is tied to the primary cancel token
     local.spawn_local(receiver_task(
@@ -345,6 +374,7 @@ async fn sender_task(
 /// Endpoint manager task - handles lazy endpoint creation with deduplication
 async fn endpoint_manager_task(
     mut rx: mpsc::UnboundedReceiver<EndpointRequest>,
+    mut control_rx: mpsc::UnboundedReceiver<EndpointControlMessage>,
     worker: Rc<Worker>,
     cancel_token: CancellationToken,
 ) {
@@ -394,6 +424,24 @@ async fn endpoint_manager_task(
                             let result = create_endpoint(worker_clone, id, blob).await;
                             let _ = tx.send(result);
                         });
+                    }
+                }
+            }
+            Some(msg) = control_rx.recv() => {
+                match msg {
+                    EndpointControlMessage::CheckHealth { instance_id, reply } => {
+                        // Check if endpoint exists in cache and its status
+                        let status = if let Some(ep) = cache.get(&instance_id) {
+                            // Check endpoint status - if get_status() returns error, it's unhealthy
+                            if ep.get_status().is_ok() {
+                                EndpointHealthStatus::Healthy
+                            } else {
+                                EndpointHealthStatus::Unhealthy
+                            }
+                        } else {
+                            EndpointHealthStatus::NotConnected
+                        };
+                        let _ = reply.send(status);
                     }
                 }
             }

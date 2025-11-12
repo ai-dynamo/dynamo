@@ -8,11 +8,12 @@ use base64::Engine;
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
-use crate::transport::{TransportError, TransportErrorHandler};
+use crate::transport::{HealthCheckError, TransportError, TransportErrorHandler};
 use crate::{MessageType, PeerInfo, Transport, TransportAdapter, TransportKey, WorkerAddress};
 
 use super::runtime::{GetWorkerAddressRequest, SendTask, spawn_ucx_runtime};
@@ -41,6 +42,11 @@ pub struct UcxTransport {
 
     // Channel to request worker address from runtime (set during start)
     worker_addr_tx: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<GetWorkerAddressRequest>>>>,
+
+    // Channel to send control messages to endpoint manager (set during start)
+    endpoint_control_tx: Arc<
+        std::sync::Mutex<Option<mpsc::UnboundedSender<super::runtime::EndpointControlMessage>>>,
+    >,
 
     // Shutdown coordination
     cancel_token: CancellationToken,
@@ -72,6 +78,7 @@ impl UcxTransport {
             resp_rx: Arc::new(std::sync::Mutex::new(Some(resp_rx))),
             event_rx: Arc::new(std::sync::Mutex::new(Some(event_rx))),
             worker_addr_tx: Arc::new(std::sync::Mutex::new(None)),
+            endpoint_control_tx: Arc::new(std::sync::Mutex::new(None)),
             cancel_token: CancellationToken::new(),
             runtime_thread: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -181,65 +188,63 @@ impl Transport for UcxTransport {
         Self::send_slow_path(tx.clone(), task);
     }
 
-    fn start(&self, channels: TransportAdapter, _rt: tokio::runtime::Handle) -> anyhow::Result<()> {
-        // Take receiver sides from storage (they can only be used once)
-        let msg_rx = self
-            .msg_rx
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Transport already started"))?;
-        let resp_rx = self
-            .resp_rx
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Transport already started"))?;
-        let event_rx = self
-            .event_rx
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Transport already started"))?;
+    fn start(
+        &self,
+        _instance_id: dynamo_identity::InstanceId,
+        channels: TransportAdapter,
+        _rt: tokio::runtime::Handle,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        let msg_rx = self.msg_rx.lock().unwrap().take();
+        let resp_rx = self.resp_rx.lock().unwrap().take();
+        let event_rx = self.event_rx.lock().unwrap().take();
 
-        // Spawn UCX runtime
-        let (worker_addr_tx, thread) = spawn_ucx_runtime(
-            channels,
-            msg_rx,
-            resp_rx,
-            event_rx,
-            self.cancel_token.clone(),
-        )?;
+        let cancel_token = self.cancel_token.clone();
+        let runtime_thread = self.runtime_thread.clone();
+        let worker_addr_tx_arc = self.worker_addr_tx.clone();
+        let endpoint_control_tx_arc = self.endpoint_control_tx.clone();
+        let local_address_arc = self.local_address.clone();
+        let key = self.key.clone();
 
-        // Store thread handle and worker address channel
-        *self.runtime_thread.lock().unwrap() = Some(thread);
-        *self.worker_addr_tx.lock().unwrap() = Some(worker_addr_tx.clone());
+        Box::pin(async move {
+            // Take receiver sides from storage (they can only be used once)
+            let msg_rx = msg_rx.ok_or_else(|| anyhow::anyhow!("Transport already started"))?;
+            let resp_rx = resp_rx.ok_or_else(|| anyhow::anyhow!("Transport already started"))?;
+            let event_rx = event_rx.ok_or_else(|| anyhow::anyhow!("Transport already started"))?;
 
-        // Get worker address from runtime
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        worker_addr_tx.send(GetWorkerAddressRequest { reply: reply_tx })?;
+            // Spawn UCX runtime (requires dedicated thread for LocalSet)
+            let (worker_addr_tx, endpoint_control_tx, thread) =
+                spawn_ucx_runtime(channels, msg_rx, resp_rx, event_rx, cancel_token)?;
 
-        // Wait for worker address - spawn a thread to avoid blocking the runtime
-        // (since start() might be called from async context in tests)
-        let ucx_blob = std::thread::spawn(move || reply_rx.blocking_recv())
-            .join()
-            .map_err(|_| anyhow::anyhow!("Worker address wait thread panicked"))?
-            .map_err(|_| anyhow::anyhow!("UCX runtime died before sending worker address"))??;
+            // Store thread handle and channels
+            *runtime_thread.lock().unwrap() = Some(thread);
+            *worker_addr_tx_arc.lock().unwrap() = Some(worker_addr_tx.clone());
+            *endpoint_control_tx_arc.lock().unwrap() = Some(endpoint_control_tx);
 
-        // Build local address with base64 encoded UCX blob
-        let base64_blob = base64::engine::general_purpose::STANDARD.encode(&ucx_blob);
-        let mut addr_builder = WorkerAddress::builder();
-        addr_builder.add_entry(self.key.clone(), base64_blob.as_bytes().to_vec())?;
-        let local_address = addr_builder.build()?;
+            // Get worker address from runtime
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            worker_addr_tx.send(GetWorkerAddressRequest { reply: reply_tx })?;
 
-        *self.local_address.lock().unwrap() = local_address;
+            // Wait for worker address - spawn a thread to avoid blocking the runtime
+            let ucx_blob = std::thread::spawn(move || reply_rx.blocking_recv())
+                .join()
+                .map_err(|_| anyhow::anyhow!("Worker address wait thread panicked"))?
+                .map_err(|_| anyhow::anyhow!("UCX runtime died before sending worker address"))??;
 
-        info!(
-            "UCX transport started with worker address ({} bytes)",
-            ucx_blob.len()
-        );
+            // Build local address with base64 encoded UCX blob
+            let base64_blob = base64::engine::general_purpose::STANDARD.encode(&ucx_blob);
+            let mut addr_builder = WorkerAddress::builder();
+            addr_builder.add_entry(key, base64_blob.as_bytes().to_vec())?;
+            let local_address = addr_builder.build()?;
 
-        Ok(())
+            *local_address_arc.lock().unwrap() = local_address;
+
+            info!(
+                "UCX transport started with worker address ({} bytes)",
+                ucx_blob.len()
+            );
+
+            Ok(())
+        })
     }
 
     fn shutdown(&self) {
@@ -255,6 +260,55 @@ impl Transport for UcxTransport {
 
         // Clear peers
         self.peers.clear();
+    }
+
+    fn check_health(
+        &self,
+        instance_id: dynamo_identity::InstanceId,
+        timeout: Duration,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), HealthCheckError>> + Send + '_>,
+    > {
+        // First verify peer is registered
+        if !self.peers.contains_key(&instance_id) {
+            return Box::pin(async move { Err(HealthCheckError::PeerNotRegistered) });
+        }
+
+        // Send health check control message to endpoint manager (before async block)
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let send_result = self
+            .endpoint_control_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or(HealthCheckError::TransportNotStarted)
+            .and_then(|tx| {
+                tx.send(super::runtime::EndpointControlMessage::CheckHealth {
+                    instance_id,
+                    reply: reply_tx,
+                })
+                .map_err(|_| HealthCheckError::TransportNotStarted)
+            });
+
+        if let Err(e) = send_result {
+            return Box::pin(async move { Err(e) });
+        }
+
+        Box::pin(async move {
+            // Wait for reply with timeout
+            match tokio::time::timeout(timeout, reply_rx).await {
+                Ok(Ok(status)) => {
+                    use super::runtime::EndpointHealthStatus;
+                    match status {
+                        EndpointHealthStatus::Healthy => Ok(()),
+                        EndpointHealthStatus::Unhealthy => Err(HealthCheckError::ConnectionFailed),
+                        EndpointHealthStatus::NotConnected => Err(HealthCheckError::NeverConnected),
+                    }
+                }
+                Ok(Err(_)) => Err(HealthCheckError::ConnectionFailed),
+                Err(_) => Err(HealthCheckError::Timeout),
+            }
+        })
     }
 }
 

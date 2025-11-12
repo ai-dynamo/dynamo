@@ -13,9 +13,10 @@ repository.workspace = true
 keywords.workspace = true
 
 [features]
-default = ["ucx", "http"]
+default = ["ucx", "http", "nats"]
 ucx = []
 http = ["dynamo-nova-backend/http"]
+nats = ["dynamo-nova-backend/nats"]
 
 [dependencies]
 dynamo-identity = { workspace = true }

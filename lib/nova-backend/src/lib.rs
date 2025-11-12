@@ -14,6 +14,9 @@ pub mod ucx;
 #[cfg(feature = "http")]
 pub mod http;
 
+#[cfg(feature = "nats")]
+pub mod nats;
+
 mod transport;
 
 use std::{collections::HashMap, sync::Arc};
@@ -27,8 +30,8 @@ pub use dynamo_identity::{InstanceId, WorkerId};
 // Re-export identity types
 pub use address::{PeerInfo, WorkerAddress};
 pub use transport::{
-    DataStreams, MessageType, Transport, TransportAdapter, TransportErrorHandler, TransportKey,
-    make_channels,
+    DataStreams, HealthCheckError, MessageType, Transport, TransportAdapter, TransportError,
+    TransportErrorHandler, TransportKey, make_channels,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -78,7 +81,9 @@ impl NovaBackend {
         let runtime = tokio::runtime::Handle::current();
 
         for transport in backend_transports {
-            transport.start(adapter.clone(), runtime.clone())?;
+            transport
+                .start(instance_id, adapter.clone(), runtime.clone())
+                .await?;
             builder.merge(&transport.address())?;
             priorities.push(transport.key());
             transports.insert(transport.key(), transport);

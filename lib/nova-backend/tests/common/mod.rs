@@ -12,6 +12,8 @@ use bytes::Bytes;
 use dynamo_identity::InstanceId;
 #[cfg(feature = "http")]
 use dynamo_nova_backend::http::{HttpTransport, HttpTransportBuilder};
+#[cfg(feature = "nats")]
+use dynamo_nova_backend::nats::{NatsTransport, NatsTransportBuilder};
 #[cfg(feature = "ucx")]
 use dynamo_nova_backend::ucx::{UcxTransport, UcxTransportBuilder};
 use dynamo_nova_backend::{
@@ -112,7 +114,9 @@ impl<T: Transport> TestTransportHandle<T> {
         let runtime = tokio::runtime::Handle::current();
 
         // Start the transport
-        transport.start(adapter, runtime.clone())?;
+        transport
+            .start(instance_id, adapter, runtime.clone())
+            .await?;
 
         // Give the listener a moment to bind and start accepting connections
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -279,6 +283,51 @@ impl TestTransportHandle<HttpTransport> {
     }
 }
 
+// NATS-specific convenience constructor
+#[cfg(feature = "nats")]
+impl TestTransportHandle<NatsTransport> {
+    /// Create a new NATS transport
+    ///
+    /// This is a convenience method for creating NATS transports.
+    /// For other transport types, use `with_factory()`.
+    ///
+    /// Note: NATS transport requires special handling because it needs the instance_id
+    /// at construction time to set up subject subscriptions. We can't use the generic
+    /// with_factory() because it creates the instance_id AFTER calling the factory.
+    pub async fn new_nats() -> anyhow::Result<Self> {
+        // Create instance_id
+        let instance_id = InstanceId::new_v4();
+        let error_handler = Arc::new(TestErrorHandler::new());
+
+        // Build transport
+        let transport = NatsTransportBuilder::new()
+            .nats_url("nats://127.0.0.1:4222")
+            .build()?;
+
+        // Create channels for this transport
+        let (adapter, streams) = dynamo_nova_backend::make_channels();
+
+        // Get runtime handle
+        let runtime = tokio::runtime::Handle::current();
+
+        // Start the transport
+        transport
+            .start(instance_id, adapter, runtime.clone())
+            .await?;
+
+        // Give NATS a moment to establish subscriptions
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        Ok(Self {
+            transport,
+            streams,
+            instance_id,
+            error_handler,
+            runtime,
+        })
+    }
+}
+
 /// Multi-transport test cluster
 ///
 /// A generic cluster that works with any transport implementation.
@@ -384,6 +433,37 @@ impl TestCluster<HttpTransport> {
     }
 }
 
+// NATS-specific convenience constructor
+#[cfg(feature = "nats")]
+impl TestCluster<NatsTransport> {
+    /// Create a new NATS test cluster with the specified number of transports
+    ///
+    /// This is a convenience method for creating NATS clusters.
+    /// For other transport types, use `with_factory()`.
+    ///
+    /// Note: NATS transport requires special handling because it needs the instance_id
+    /// at construction time. We can't use the generic with_factory() which creates
+    /// instance_id after calling the factory function.
+    pub async fn new_nats(size: usize) -> anyhow::Result<Self> {
+        let mut transports = Vec::new();
+
+        for _ in 0..size {
+            transports.push(TestTransportHandle::new_nats().await?);
+        }
+
+        // Register all peers with each other (full mesh)
+        for i in 0..transports.len() {
+            for j in 0..transports.len() {
+                if i != j {
+                    transports[i].register_peer(&transports[j])?;
+                }
+            }
+        }
+
+        Ok(Self { transports })
+    }
+}
+
 // Helper utilities
 
 /// Get a random available port
@@ -471,5 +551,22 @@ impl TransportFactory for HttpFactory {
 
     async fn create_cluster(size: usize) -> anyhow::Result<TestCluster<Self::Transport>> {
         TestCluster::new_http(size).await
+    }
+}
+
+/// NATS transport factory
+#[cfg(feature = "nats")]
+pub struct NatsFactory;
+
+#[cfg(feature = "nats")]
+impl TransportFactory for NatsFactory {
+    type Transport = NatsTransport;
+
+    async fn create() -> anyhow::Result<TestTransportHandle<Self::Transport>> {
+        TestTransportHandle::new_nats().await
+    }
+
+    async fn create_cluster(size: usize) -> anyhow::Result<TestCluster<Self::Transport>> {
+        TestCluster::new_nats(size).await
     }
 }

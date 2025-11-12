@@ -11,14 +11,14 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use futures::SinkExt;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::transport::{TransportError, TransportErrorHandler};
+use crate::transport::{HealthCheckError, TransportError, TransportErrorHandler};
 use crate::{MessageType, PeerInfo, Transport, TransportAdapter, TransportKey, WorkerAddress};
 
 use super::framing::TcpFrameCodec;
@@ -38,6 +38,9 @@ pub struct TcpTransport {
     // Shared mutable state with DashMap (lock-free)
     peers: Arc<DashMap<dynamo_identity::InstanceId, SocketAddr>>,
     connections: Arc<DashMap<dynamo_identity::InstanceId, ConnectionHandle>>,
+
+    // Runtime handle for spawning tasks
+    runtime: OnceLock<tokio::runtime::Handle>,
 
     // Shutdown coordination
     cancel_token: CancellationToken,
@@ -66,6 +69,7 @@ impl TcpTransport {
             local_address,
             peers: Arc::new(DashMap::new()),
             connections: Arc::new(DashMap::new()),
+            runtime: OnceLock::new(),
             cancel_token: CancellationToken::new(),
         }
     }
@@ -104,9 +108,14 @@ impl TcpTransport {
         // Insert into connection map
         self.connections.insert(instance_id, handle.clone());
 
-        // Spawn writer task
+        // Spawn writer task using stored runtime handle
         let cancel = self.cancel_token.clone();
-        tokio::spawn(connection_writer_task(addr, rx, cancel));
+        if let Some(rt) = self.runtime.get() {
+            rt.spawn(connection_writer_task(addr, rx, cancel));
+        } else {
+            // Fallback to tokio::spawn if runtime not yet set (shouldn't happen)
+            tokio::spawn(connection_writer_task(addr, rx, cancel));
+        }
 
         debug!("Created new connection to {} ({})", instance_id, addr);
 
@@ -140,21 +149,41 @@ impl TcpTransport {
             payload: payload.clone(),
         };
 
-        // Spawn task to send (avoid blocking current task)
-        tokio::spawn(async move {
-            match tokio::time::timeout(Duration::from_millis(100), handle.tx.send_async(task)).await
-            {
-                Ok(Ok(())) => { /* Success */ }
-                Ok(Err(_)) => {
-                    // Channel closed - writer task exited
-                    error!("Connection channel closed for {}", instance_id);
+        // Spawn task to send (avoid blocking current task) using stored runtime handle
+        if let Some(rt) = self.runtime.get() {
+            rt.spawn(async move {
+                match tokio::time::timeout(Duration::from_millis(100), handle.tx.send_async(task))
+                    .await
+                {
+                    Ok(Ok(())) => { /* Success */ }
+                    Ok(Err(_)) => {
+                        // Channel closed - writer task exited
+                        error!("Connection channel closed for {}", instance_id);
+                    }
+                    Err(_) => {
+                        // Timeout - backpressure
+                        warn!("Send timeout for {}", instance_id);
+                    }
                 }
-                Err(_) => {
-                    // Timeout - backpressure
-                    warn!("Send timeout for {}", instance_id);
+            });
+        } else {
+            // Fallback to tokio::spawn if runtime not yet set (shouldn't happen)
+            tokio::spawn(async move {
+                match tokio::time::timeout(Duration::from_millis(100), handle.tx.send_async(task))
+                    .await
+                {
+                    Ok(Ok(())) => { /* Success */ }
+                    Ok(Err(_)) => {
+                        // Channel closed - writer task exited
+                        error!("Connection channel closed for {}", instance_id);
+                    }
+                    Err(_) => {
+                        // Timeout - backpressure
+                        warn!("Send timeout for {}", instance_id);
+                    }
                 }
-            }
-        });
+            });
+        }
     }
 }
 
@@ -235,32 +264,45 @@ impl Transport for TcpTransport {
         self.send_slow_path(instance_id, framed, header, payload, on_error);
     }
 
-    fn start(&self, channels: TransportAdapter, rt: tokio::runtime::Handle) -> anyhow::Result<()> {
-        // Create error handler that routes to the transport error handler
-        struct DefaultErrorHandler;
-        impl TransportErrorHandler for DefaultErrorHandler {
-            fn on_error(&self, _header: Bytes, _payload: Bytes, error: String) {
-                warn!("Transport error: {}", error);
+    fn start(
+        &self,
+        _instance_id: dynamo_identity::InstanceId,
+        channels: TransportAdapter,
+        rt: tokio::runtime::Handle,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+        // Store runtime handle for use in send_message
+        self.runtime.set(rt.clone()).ok();
+
+        let bind_addr = self.bind_addr;
+        let cancel_token = self.cancel_token.clone();
+
+        Box::pin(async move {
+            // Create error handler that routes to the transport error handler
+            struct DefaultErrorHandler;
+            impl TransportErrorHandler for DefaultErrorHandler {
+                fn on_error(&self, _header: Bytes, _payload: Bytes, error: String) {
+                    warn!("Transport error: {}", error);
+                }
             }
-        }
 
-        // Start TCP listener
-        let listener = TcpListener::builder()
-            .bind_addr(self.bind_addr)
-            .adapter(channels)
-            .error_handler(std::sync::Arc::new(DefaultErrorHandler))
-            .cancel_token(self.cancel_token.clone())
-            .build()?;
+            // Start TCP listener
+            let listener = TcpListener::builder()
+                .bind_addr(bind_addr)
+                .adapter(channels)
+                .error_handler(std::sync::Arc::new(DefaultErrorHandler))
+                .cancel_token(cancel_token)
+                .build()?;
 
-        rt.spawn(async move {
-            if let Err(e) = listener.serve().await {
-                error!("TCP listener error: {}", e);
-            }
-        });
+            rt.spawn(async move {
+                if let Err(e) = listener.serve().await {
+                    error!("TCP listener error: {}", e);
+                }
+            });
 
-        info!("TCP transport started on {}", self.bind_addr);
+            info!("TCP transport started on {}", bind_addr);
 
-        Ok(())
+            Ok(())
+        })
     }
 
     fn shutdown(&self) {
@@ -269,6 +311,51 @@ impl Transport for TcpTransport {
 
         // Clear connections
         self.connections.clear();
+    }
+
+    fn check_health(
+        &self,
+        instance_id: dynamo_identity::InstanceId,
+        timeout: Duration,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), HealthCheckError>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            // Check if we have an existing connection
+            let connection_exists = self.connections.contains_key(&instance_id);
+
+            if let Some(handle) = self.connections.get(&instance_id) {
+                // Check if the channel is still connected (socket is still live)
+                // If the writer task has exited (socket closed), the channel will be disconnected
+                if !handle.tx.is_disconnected() {
+                    return Ok(()); // Connection is alive and healthy
+                }
+                // Channel is disconnected, connection is dead - fall through to connect check
+            }
+
+            // No existing connection or connection is dead - verify peer is reachable
+            let addr = *self
+                .peers
+                .get(&instance_id)
+                .ok_or(HealthCheckError::PeerNotRegistered)?
+                .value();
+
+            // Try to connect (and immediately drop) to verify peer is reachable
+            match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
+                Ok(Ok(_stream)) => {
+                    // Connection successful, drop immediately
+                    // If we never had a connection before, report NeverConnected
+                    // If we had one before that failed, report Ok (peer is reachable now)
+                    if connection_exists {
+                        Ok(())
+                    } else {
+                        Err(HealthCheckError::NeverConnected)
+                    }
+                }
+                Ok(Err(_)) => Err(HealthCheckError::ConnectionFailed),
+                Err(_) => Err(HealthCheckError::Timeout),
+            }
+        })
     }
 }
 

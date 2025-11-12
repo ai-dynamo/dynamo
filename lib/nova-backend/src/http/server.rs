@@ -3,17 +3,18 @@
 
 //! HTTP server using Axum
 //!
-//! Provides three POST routes:
+//! Provides three POST routes and one GET route:
 //! - POST /message → forwards to message_stream
 //! - POST /response → forwards to response_stream
 //! - POST /event → forwards to event_stream
+//! - GET /health → health check endpoint (returns 200 OK)
 
 use axum::{
     Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
 use base64::Engine;
 use bytes::Bytes;
@@ -55,11 +56,12 @@ impl HttpServer {
             channels: self.channels,
         };
 
-        // Build router with three routes
+        // Build router with three message routes and one health route
         let app = Router::new()
             .route("/message", post(handle_message))
             .route("/response", post(handle_response))
             .route("/event", post(handle_event))
+            .route("/health", get(handle_health))
             .with_state(state);
 
         // Run server with graceful shutdown
@@ -148,4 +150,10 @@ async fn handle_request(
 
     // Return 202 Accepted
     (StatusCode::ACCEPTED, "").into_response()
+}
+
+/// Handle GET /health
+async fn handle_health() -> Response {
+    // Simple health check - just return 200 OK
+    (StatusCode::OK, "").into_response()
 }

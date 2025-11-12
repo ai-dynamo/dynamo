@@ -3,10 +3,11 @@
 
 use bytes::Bytes;
 use dynamo_identity::InstanceId;
+use futures::future::BoxFuture;
 
 use super::{PeerInfo, WorkerAddress};
 
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 
 #[derive(thiserror::Error, Debug)]
 pub enum TransportError {
@@ -15,6 +16,34 @@ pub enum TransportError {
 
     #[error("Invalid endpoint format")]
     InvalidEndpoint,
+
+    #[error("Peer not registered")]
+    PeerNotRegistered,
+
+    #[error("Transport not started")]
+    NotStarted,
+
+    #[error("No responders for peer")]
+    NoResponders,
+}
+
+/// Error type specific to health check operations
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
+pub enum HealthCheckError {
+    #[error("Peer not registered with transport")]
+    PeerNotRegistered,
+
+    #[error("Transport not started")]
+    TransportNotStarted,
+
+    #[error("Connection never established to peer")]
+    NeverConnected,
+
+    #[error("Connection failed or peer unreachable")]
+    ConnectionFailed,
+
+    #[error("Health check timed out")]
+    Timeout,
 }
 
 pub trait Transport: Send + Sync {
@@ -32,8 +61,37 @@ pub trait Transport: Send + Sync {
         on_error: Arc<dyn TransportErrorHandler>,
     );
 
-    fn start(&self, channels: TransportAdapter, rt: tokio::runtime::Handle) -> anyhow::Result<()>;
+    fn start(
+        &self,
+        instance_id: InstanceId,
+        channels: TransportAdapter,
+        rt: tokio::runtime::Handle,
+    ) -> BoxFuture<'_, anyhow::Result<()>>;
+
     fn shutdown(&self);
+
+    /// Check if a registered peer is reachable and healthy
+    ///
+    /// Returns Ok(()) if peer responds to health check within timeout.
+    /// Different transports implement this differently:
+    /// - NATS: request/reply to health subject
+    /// - TCP: check existing connection or attempt new connection
+    /// - HTTP: HEAD request to health endpoint
+    /// - UCX: endpoint status check
+    ///
+    /// # Errors
+    /// - `PeerNotRegistered`: Peer was never registered with this transport
+    /// - `TransportNotStarted`: Transport hasn't been started yet
+    /// - `NeverConnected`: Peer is registered but no connection has been established
+    /// - `ConnectionFailed`: Connection exists/existed but is currently unhealthy or unreachable
+    /// - `Timeout`: Health check took longer than the specified timeout
+    fn check_health(
+        &self,
+        instance_id: InstanceId,
+        timeout: Duration,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), HealthCheckError>> + Send + '_>,
+    >;
 }
 
 pub trait TransportErrorHandler: Send + Sync {
