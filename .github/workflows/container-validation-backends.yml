@@ -511,6 +511,7 @@ jobs:
         set -x
 
         # Set namespace
+        # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
         BRANCH_SANITIZED="${BRANCH//\//-}"
         BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
         BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
