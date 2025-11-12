@@ -240,7 +240,6 @@ def _extract_config_section(
     with open(config_path, "r") as f:
         config_data = yaml.safe_load(f)
 
-    # Check if config has the requested key
     if not isinstance(config_data, dict):
         raise ValueError(
             f"Config file must contain a dictionary, got {type(config_data).__name__}"
@@ -262,7 +261,6 @@ def _extract_config_section(
             f"Config section '{config_key}' must be a dictionary, got {type(section_data).__name__}"
         )
 
-    # Create temporary flat YAML file
     temp_fd, temp_path = tempfile.mkstemp(suffix=".yaml", prefix="dynamo_config_")
 
     try:
@@ -273,9 +271,8 @@ def _extract_config_section(
         os.unlink(temp_path)
         raise
 
-    # Replace config path in args
     config_index = args.index("--config")
-    args = list(args)  # Make a copy to avoid modifying original
+    args = list(args)  
     args[config_index + 1] = temp_path
 
     return args, temp_path
