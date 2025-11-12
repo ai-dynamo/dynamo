@@ -317,7 +317,7 @@ mod integration_tests {
     #[tokio::test]
     async fn test_uptime_from_system_health() {
         // Test that uptime is available from SystemHealth
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
             let drt = create_test_drt_async().await;
 
             // Get uptime from SystemHealth
@@ -336,9 +336,9 @@ mod integration_tests {
     #[tokio::test]
     async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
             let drt = create_test_drt_async().await;
-            // SystemStatusState is already created in distributed.rs when DYN_SYSTEM_ENABLED=false
+            // SystemStatusState is already created in distributed.rs
             // so we don't need to create it again here
 
             // The uptime_seconds metric should already be registered and available
@@ -374,7 +374,7 @@ mod integration_tests {
     #[tokio::test]
     async fn test_uptime_gauge_updates() {
         // Test that the uptime gauge is properly updated and increases over time
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
             let drt = create_test_drt_async().await;
 
             // Get initial uptime
@@ -406,17 +406,17 @@ mod integration_tests {
     #[tokio::test]
     async fn test_http_requests_fail_when_system_disabled() {
         // Test that system status server is not running when disabled
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
             let drt = create_test_drt_async().await;
 
             // Verify that system status server info is None when disabled
             let system_info = drt.system_status_server_info();
             assert!(
                 system_info.is_none(),
-                "System status server should not be running when DYN_SYSTEM_ENABLED=false"
+                "System status server should not be running when disabled"
             );
 
-            println!("✓ System status server correctly disabled when DYN_SYSTEM_ENABLED=false");
+            println!("✓ System status server correctly disabled when not enabled");
         })
         .await;
     }
@@ -460,7 +460,6 @@ mod integration_tests {
         #[allow(clippy::redundant_closure_call)]
         temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 (
                     "DYN_SYSTEM_STARTING_HEALTH_STATUS",
@@ -543,7 +542,6 @@ mod integration_tests {
         #[allow(clippy::redundant_closure_call)]
         let _ = temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready")),
                 ("DYN_LOGGING_JSONL", Some("1")),
@@ -598,7 +596,6 @@ mod integration_tests {
         const ENDPOINT_HEALTH_CONFIG: &str = "[\"generate\"]";
         temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
                 ("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Some(ENDPOINT_HEALTH_CONFIG)),
@@ -707,7 +704,6 @@ mod integration_tests {
         // use reqwest for HTTP requests
         temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready")),
             ],
@@ -760,7 +756,6 @@ mod integration_tests {
 
         temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
                 (

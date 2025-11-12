@@ -437,7 +437,7 @@ mod tests {
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_disabled() {
         // Test uptime with system status server disabled
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 
