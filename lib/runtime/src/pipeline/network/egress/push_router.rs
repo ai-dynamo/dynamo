@@ -89,25 +89,17 @@ impl RouterMode {
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
-    use crate::config::RequestPlaneMode;
+    // Get network manager and create client (no mode checks!)
+    let manager = endpoint.drt().network_manager().await?;
+    let req_client = manager.create_client()?;
+    let resp_transport = endpoint.drt().tcp_server().await?;
 
-    let mode = RequestPlaneMode::get();
-    let tcp_server = endpoint.drt().tcp_server().await?;
+    tracing::debug!(
+        transport = req_client.transport_name(),
+        "Creating AddressedPushRouter with request plane client"
+    );
 
-    match mode {
-        RequestPlaneMode::Nats => {
-            let Some(nats_client) = endpoint.drt().nats_client() else {
-                anyhow::bail!("Missing NATS. Please ensure it is running and accessible.");
-            };
-            AddressedPushRouter::new(
-                nats_client.client().clone(),
-                endpoint.drt().tcp_server().await?,
-            )
-        }
-        RequestPlaneMode::Http | RequestPlaneMode::Tcp => {
-            AddressedPushRouter::from_mode(mode, None, tcp_server)
-        }
-    }
+    AddressedPushRouter::new(req_client, resp_transport)
 }
 
 impl<T, U> PushRouter<T, U>

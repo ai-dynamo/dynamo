@@ -78,6 +78,7 @@ pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
+    #[serde(rename = "nats_tcp")]
     Nats(String),
     Http(String),
     Tcp(String),
@@ -85,13 +86,13 @@ pub enum TransportType {
 
 #[derive(Default)]
 pub struct RegistryInner {
-    services: HashMap<String, Service>,
-    stats_handlers: HashMap<String, Arc<parking_lot::Mutex<HashMap<String, EndpointStatsHandler>>>>,
+    pub(crate) services: HashMap<String, Service>,
+    pub(crate) stats_handlers: HashMap<String, Arc<parking_lot::Mutex<HashMap<String, EndpointStatsHandler>>>>,
 }
 
 #[derive(Clone)]
 pub struct Registry {
-    inner: Arc<tokio::sync::Mutex<RegistryInner>>,
+    pub(crate) inner: Arc<tokio::sync::Mutex<RegistryInner>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

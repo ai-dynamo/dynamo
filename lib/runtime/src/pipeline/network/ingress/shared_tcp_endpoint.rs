@@ -316,3 +316,48 @@ impl SharedTcpServer {
         Ok(())
     }
 }
+
+// Implement RequestPlaneServer trait for SharedTcpServer
+#[async_trait::async_trait]
+impl super::unified_server::RequestPlaneServer for SharedTcpServer {
+    async fn register_endpoint(
+        &self,
+        endpoint_name: String,
+        service_handler: Arc<dyn PushWorkHandler>,
+        instance_id: u64,
+        namespace: String,
+        component_name: String,
+        system_health: Arc<Mutex<SystemHealth>>,
+    ) -> Result<()> {
+        // For TCP, we use endpoint_name as both the endpoint_path (routing key) and endpoint_name
+        self.register_endpoint(
+            endpoint_name.clone(),
+            service_handler,
+            instance_id,
+            namespace,
+            component_name,
+            endpoint_name,
+            system_health,
+        )
+        .await
+    }
+
+    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
+        self.unregister_endpoint(endpoint_name, endpoint_name).await;
+        Ok(())
+    }
+
+    fn address(&self) -> String {
+        format!("tcp://{}:{}", self.bind_addr.ip(), self.bind_addr.port())
+    }
+
+    fn transport_name(&self) -> &'static str {
+        "tcp"
+    }
+
+    fn is_healthy(&self) -> bool {
+        // Server is healthy if it has been created
+        // TODO: Add more sophisticated health checks (e.g., check if listener is active)
+        true
+    }
+}
