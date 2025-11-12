@@ -117,8 +117,10 @@ pub struct Directory {
 
 impl Directory {
     fn new(root: PathBuf, p: PathBuf) -> Self {
+        // Canonicalize root to handle symlinks (e.g., /var -> /private/var on macOS)
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
         Directory {
-            root,
+            root: canonical_root,
             p,
             owned_files: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -236,14 +238,23 @@ impl KeyValueBucket for Directory {
                         continue;
                     }
 
-                    let key = match item_path.strip_prefix(&root) {
+                    // Canonicalize paths to handle symlinks (e.g., /var -> /private/var on macOS)
+                    let canonical_item_path = match item_path.canonicalize() {
+                        Ok(p) => p,
+                        Err(err) => {
+                            tracing::warn!(error = %err, item = %item_path.display(), "Failed to canonicalize path. Using original path.");
+                            item_path.clone()
+                        }
+                    };
+
+                    let key = match canonical_item_path.strip_prefix(&root) {
                         Ok(stripped) => stripped.display().to_string().replace("_", "/"),
                         Err(err) => {
                             // Possibly this should be a panic.
                             // A key cannot be outside the file store root.
                             tracing::error!(
                                 error = %err,
-                                item_path = %item_path.display(),
+                                item_path = %canonical_item_path.display(),
                                 root = %root.display(),
                                 "Item in file store is not prefixed with file store root. Should be impossible. Ignoring invalid key.");
                             continue;
