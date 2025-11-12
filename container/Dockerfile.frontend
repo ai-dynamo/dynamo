@@ -30,9 +30,9 @@ RUN apt-get update -y \
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /home/dynamo/.cache /opt/dynamo \
-    && chown -R dynamo: /opt/dynamo /home/dynamo/.cache \
-    && chmod -R g+w /opt/dynamo /home/dynamo/.cache
+    && mkdir -p /home/dynamo/.cache /opt/dynamo /workspace \
+    && chown -R dynamo: /opt/dynamo /home/dynamo/.cache /workspace \
+    && chmod -R g+w /opt/dynamo /home/dynamo/.cache /workspace
 
 # Set HOME so ModelExpress can find the cache directory
 ENV HOME=/home/dynamo
@@ -59,10 +59,10 @@ RUN uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
-# Copy built artifacts and workspace from dynamo_base (dev image)
-COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-COPY --chown=dynamo: --from=dynamo_base /workspace/ /workspace/
 ARG ENABLE_KVBM
+# Copy built artifacts and workspace from dynamo_base (dev image)
+COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
+COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -70,7 +70,7 @@ RUN uv pip install \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
     fi && \
-    cd /workspace/benchmarks && \
+    cd /opt/dynamo/benchmarks && \
     UV_GIT_LFS=1 uv pip install --no-cache .
     
 # Install common and test dependencies
@@ -81,6 +81,15 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
+# Copy tests, benchmarks, deploy and components for CI with correct ownership
+COPY --chown=dynamo: tests /workspace/tests
+COPY --chown=dynamo: examples /workspace/examples
+COPY --chown=dynamo: benchmarks /workspace/benchmarks
+COPY --chown=dynamo: deploy /workspace/deploy
+COPY --chown=dynamo: components/ /workspace/components/
+COPY --chown=dynamo: recipes/ /workspace/recipes/
+# Copy attribution files with correct ownership
+COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
