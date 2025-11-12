@@ -98,7 +98,7 @@ services:
 
   # Jaeger - Distributed tracing UI (better trace viewing)
   jaeger:
-    image: jaegertracing/all-in-one:1.62
+    image: jaegertracing/all-in-one:latest
     container_name: jaeger
     environment:
       - COLLECTOR_OTLP_ENABLED=true
