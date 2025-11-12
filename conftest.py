@@ -2,21 +2,33 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Root conftest that applies to all tests in the repository.
-Auto-applies the following marker hierarchy:
-- pre_merge ⇒ post_merge + nightly
-- post_merge ⇒ nightly
+
+Behavior:
+- Auto-applies hierarchical markers before marker filtering:
+  - tests marked as pre_merge will additionally get marked as post_merge and nightly
+- Markers are declared in pyproject.toml (tool.pytest.ini_options.markers).
+- Allows opting out by setting the env var DYNAMO_DISABLE_MARKER_IMPLICATIONS=1.
 """
+
+import os
+from typing import Sequence
 
 import pytest
 
 
 @pytest.hookimpl(tryfirst=True)
-def pytest_collection_modifyitems(session, config, items):
+def pytest_collection_modifyitems(
+    session: pytest.Session, config: pytest.Config, items: Sequence[pytest.Item]
+) -> None:
     """
     Enforce hierarchical marker relationships before marker filtering.
-    - pre_merge implies post_merge and nightly
-    - post_merge implies nightly
+    - pre_merge implies pre_merge, post_merge and nightly
+    - post_merge implies post_merge and nightly
     """
+    # Provide an escape hatch if any external runner needs to disable implications.
+    if os.getenv("DYNAMO_DISABLE_MARKER_IMPLICATIONS") == "1":
+        return
+
     for item in items:
         marker_names = {m.name for m in item.iter_markers()}
 
