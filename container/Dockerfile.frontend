@@ -72,7 +72,7 @@ RUN uv pip install \
     fi && \
     cd /opt/dynamo/benchmarks && \
     UV_GIT_LFS=1 uv pip install --no-cache .
-    
+
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
