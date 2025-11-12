@@ -564,7 +564,7 @@ impl WorkerSelector for DefaultWorkerSelector {
                         .tree_sizes
                         .get(worker)
                         .copied()
-                        .unwrap_or(usize::MAX)
+                        .unwrap_or(0)
                 })
                 .expect("candidates should not be empty")
         } else {
