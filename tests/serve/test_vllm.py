@@ -200,11 +200,11 @@ try:
     image_data = urllib.request.urlopen(COCO_IMAGE_URL, timeout=5.0).read()
     coco_image_b64 = base64.b64encode(image_data).decode("utf-8")
     coco_expected_response = ["bus"]
-    logger.info(f"Successfully fetched COCO image from {COCO_IMAGE_URL}")
+    logger.info(f"Successfully fetched image from {COCO_IMAGE_URL}")
 except Exception as e:
     coco_image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
     logger.warning(
-        f"Failed to fetch COCO image ({type(e).__name__}: {e}), using 1x1 fallback"
+        f"Failed to fetch COCO image ({type(e).__name__}: {e}), using 1x1 image fallback"
     )
 
 vllm_configs["multimodal_agg_qwen"] = VLLMConfig(
