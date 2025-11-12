@@ -266,7 +266,7 @@ where
                     );
                     tcp_endpoint.clone()
                 }
-                TransportType::NatsTcp(subject) => {
+                TransportType::Nats(subject) => {
                     tracing::debug!(
                         instance_id = instance_id,
                         subject = %subject,
