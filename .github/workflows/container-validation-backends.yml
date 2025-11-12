@@ -331,7 +331,7 @@ jobs:
         run: |
           # Set namespace using test scenario
           export FRAMEWORK=${{ matrix.framework.name }}
-          echo "NAMESPACE=gh-job-id-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
+          echo "NAMESPACE=gh-id-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
           set -x
 
           # Setup kubeconfig
@@ -511,8 +511,9 @@ jobs:
         set -x
 
         # Set namespace using branch
-        BRANCH_SANITIZED="${BRANCH/\//-}"
-        NAMESPACE="gh-job-id-${{ github.run_id }}-${BRANCH_SANITIZED}-deploy-tests"
+        BRANCH_SANITIZED="${BRANCH//\//-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+        NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
         echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
         # Setup kubeconfig
