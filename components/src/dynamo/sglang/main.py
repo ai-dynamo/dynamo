@@ -36,8 +36,6 @@ configure_dynamo_logging()
 
 async def _handle_non_leader_node(
     engine: sgl.Engine,
-    config: Config,
-    component,
     generate_endpoint,
 ) -> None:
     """
