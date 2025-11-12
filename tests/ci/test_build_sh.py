@@ -38,9 +38,9 @@ def dynamo_repo_dir():
     repo_root = Path(__file__).parent.parent.parent
 
     # Get commit hash from environment variable or git
-    commit_hash = os.environ.get("DYNAMO_GIT_COMMIT")
+    commit_hash = os.environ.get("DYNAMO_COMMIT_SHA")
     if commit_hash:
-        print(f"Using commit from DYNAMO_GIT_COMMIT: {commit_hash}")
+        print(f"Using commit from DYNAMO_COMMIT_SHA: {commit_hash}")
     else:
         try:
             result = subprocess.run(
