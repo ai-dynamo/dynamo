@@ -11,6 +11,7 @@ use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use crate::logging::DistributedTraceContext;
 use crate::logging::get_distributed_tracing_context;
 use crate::logging::inject_otel_context_into_nats_headers;
+use crate::logging::inject_trace_headers_into_map;
 use crate::pipeline::network::ConnectionInfo;
 use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
@@ -238,46 +239,18 @@ where
             RequestTransport::Http(http_client) => {
                 tracing::trace!(request_id, "sending HTTP request to {}", address);
 
-                // Insert Trace Context into Headers
+                // Insert Trace Context into Headers using shared helper
                 let mut headers = std::collections::HashMap::new();
-                if let Some(trace_context) = get_distributed_tracing_context() {
-                    headers.insert(
-                        "traceparent".to_string(),
-                        trace_context.create_traceparent(),
-                    );
-                    if let Some(tracestate) = trace_context.tracestate {
-                        headers.insert("tracestate".to_string(), tracestate);
-                    }
-                    if let Some(x_request_id) = trace_context.x_request_id {
-                        headers.insert("x-request-id".to_string(), x_request_id);
-                    }
-                    if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
-                        headers.insert("x-dynamo-request-id".to_string(), x_dynamo_request_id);
-                    }
-                }
+                inject_trace_headers_into_map(&mut headers);
 
                 let _response = http_client.send_request(address, buffer, headers).await?;
             }
             RequestTransport::Tcp(tcp_client) => {
                 tracing::trace!(request_id, "sending TCP request to {}", address);
 
-                // Insert Trace Context into Headers
+                // Insert Trace Context into Headers using shared helper
                 let mut headers = std::collections::HashMap::new();
-                if let Some(trace_context) = get_distributed_tracing_context() {
-                    headers.insert(
-                        "traceparent".to_string(),
-                        trace_context.create_traceparent(),
-                    );
-                    if let Some(tracestate) = trace_context.tracestate {
-                        headers.insert("tracestate".to_string(), tracestate);
-                    }
-                    if let Some(x_request_id) = trace_context.x_request_id {
-                        headers.insert("x-request-id".to_string(), x_request_id);
-                    }
-                    if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
-                        headers.insert("x-dynamo-request-id".to_string(), x_dynamo_request_id);
-                    }
-                }
+                inject_trace_headers_into_map(&mut headers);
 
                 let _response = tcp_client.send_request(address, buffer, headers).await?;
             }

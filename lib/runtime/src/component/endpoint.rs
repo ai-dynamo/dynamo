@@ -350,7 +350,7 @@ enum TransportContext {
 ///
 /// This unified function handles both health check and discovery transport building,
 /// with context-specific differences:
-/// - HTTP: Health check uses port 8081, discovery uses 8080
+/// - HTTP: Both use the same port (default 8888, configurable via DYN_HTTP_RPC_PORT)
 /// - TCP: Health check omits endpoint suffix, discovery includes it for routing
 /// - NATS: Identical for both contexts
 fn build_transport_type(
@@ -362,14 +362,11 @@ fn build_transport_type(
     match mode {
         RequestPlaneMode::Http => {
             let http_host = crate::utils::get_http_rpc_host_from_env();
-            let default_port = match context {
-                TransportContext::HealthCheck => 8081,
-                TransportContext::Discovery => 8080,
-            };
+            // Both health check and discovery use the same port (8888) where the HTTP server binds
             let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(default_port);
+                .unwrap_or(8888);
             let rpc_root =
                 std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
 
@@ -385,7 +382,7 @@ fn build_transport_type(
             let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(9090);
+                .unwrap_or(9999);
 
             let tcp_endpoint = match context {
                 TransportContext::HealthCheck => {
