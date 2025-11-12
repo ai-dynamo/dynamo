@@ -11,15 +11,24 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 try:
-    from logai.applications.openset.anomaly_detection import AnomalyDetectionWorkflow
-    from logai.dataloader.data_loader import FileDataLoader
-    from logai.analysis.nn_anomaly_detector import NNAnomalyDetector
-    from logai.preprocess.preprocessor import Preprocessor
-    from logai.information_extraction.log_parser import LogParser
+    # Try to import LogAI - test basic package first
+    import logai
     LOGAI_AVAILABLE = True
-except ImportError:
+    LOGAI_IMPORT_ERROR = None
+    
+    # Try importing specific modules we need
+    try:
+        from logai.preprocess.preprocessor import Preprocessor
+        from logai.information_extraction.log_parser import LogParser
+    except ImportError as e:
+        # If specific imports fail, we can still use basic LogAI features
+        print(f"Note: Some LogAI features unavailable: {e}", file=sys.stderr)
+        pass
+        
+except ImportError as e:
     LOGAI_AVAILABLE = False
-    print("Warning: LogAI not available, using fallback error extraction", file=sys.stderr)
+    LOGAI_IMPORT_ERROR = str(e)
+    print(f"Warning: LogAI not available ({e}), using fallback error extraction", file=sys.stderr)
 
 
 class LogErrorExtractor:
@@ -63,6 +72,15 @@ class LogErrorExtractor:
             return []
         
         try:
+            # Check if required LogAI components are available
+            try:
+                from logai.preprocess.preprocessor import Preprocessor
+                from logai.information_extraction.log_parser import LogParser
+                from logai.dataloader.data_loader import FileDataLoader
+            except ImportError as e:
+                print(f"LogAI components not fully available: {e}", file=sys.stderr)
+                return []
+            
             # Write log content to a temporary file for LogAI processing
             temp_log = Path("/tmp/analysis.log")
             temp_log.write_text(self.log_content)
