@@ -61,9 +61,6 @@ async def _handle_non_leader_node(
         setup_prometheus_registry(engine, generate_endpoint)
         logging.info("Prometheus metrics registry configured for non-leader node")
 
-    # Keep the process alive to serve metrics
-    # The component's metrics endpoint is already exposed via the runtime
-    logging.info("Non-leader node ready. Serving metrics only.")
     # Wait indefinitely - the process will be terminated via signal handlers
     await asyncio.Event().wait()
 
