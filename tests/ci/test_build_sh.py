@@ -13,13 +13,99 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import shutil
 import subprocess
+import tarfile
 import tempfile
+import urllib.request
 from pathlib import Path
 
 import pytest
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge]
+
+
+@pytest.fixture(scope="module")
+def dynamo_repo_dir():
+    """
+    Create a temporary copy of the dynamo repository for isolated testing.
+
+    Attempts to download the repository from GitHub at the current HEAD commit.
+    Falls back to creating a local archive if download fails.
+    """
+    # Get the repository root (3 levels up from this test file)
+    repo_root = Path(__file__).parent.parent.parent
+
+    # Get current HEAD commit
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        commit_hash = result.stdout.strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"Failed to get git HEAD commit: {e}")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tar_path = Path(tmpdir) / "dynamo.tar.gz"
+
+        # Try to download from GitHub
+        github_url = f"https://github.com/ai-dynamo/dynamo/archive/{commit_hash}.tar.gz"
+        downloaded = False
+
+        try:
+            print(f"Attempting to download repository from {github_url}")
+            with urllib.request.urlopen(github_url, timeout=30) as response:
+                with open(tar_path, "wb") as f:
+                    shutil.copyfileobj(response, f)
+            downloaded = True
+            print("Successfully downloaded repository archive from GitHub")
+        except Exception as e:
+            print(f"Failed to download from GitHub: {e}")
+            print("Falling back to local git archive")
+
+        # Fallback to local git archive
+        if not downloaded:
+            try:
+                subprocess.run(
+                    [
+                        "git",
+                        "archive",
+                        "HEAD",
+                        "--format=tar.gz",
+                        f"--output={tar_path}",
+                    ],
+                    cwd=repo_root,
+                    check=True,
+                    timeout=60,
+                )
+                print("Successfully created local git archive")
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                raise RuntimeError(f"Failed to create local git archive: {e}")
+
+        # Extract the archive
+        extract_dir = Path(tmpdir) / "extracted"
+        extract_dir.mkdir()
+
+        with tarfile.open(tar_path, "r:gz") as tar:
+            tar.extractall(extract_dir, filter="data")
+
+        # GitHub archives extract to dynamo-{commit}/ subdirectory
+        # Local git archives extract directly
+        extracted_contents = list(extract_dir.iterdir())
+        if len(extracted_contents) == 1 and extracted_contents[0].is_dir():
+            # GitHub format: single subdirectory
+            repo_dir = extracted_contents[0]
+        else:
+            # Local git archive format: files directly in extract_dir
+            repo_dir = extract_dir
+
+        print(f"Repository extracted to: {repo_dir}")
+        yield str(repo_dir)
 
 
 @pytest.fixture
@@ -33,10 +119,9 @@ def temp_wheel_dir():
 
 
 @pytest.fixture
-def build_script_path():
-    """Get the path to the build.sh script"""
-    script_dir = Path(__file__).parent.parent.parent / "container"
-    build_sh = script_dir / "build.sh"
+def build_script_path(dynamo_repo_dir):
+    """Get the path to the build.sh script from the temporary repository"""
+    build_sh = Path(dynamo_repo_dir) / "container" / "build.sh"
     assert build_sh.exists(), f"build.sh not found at {build_sh}"
     return str(build_sh)
 
