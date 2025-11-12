@@ -9,7 +9,7 @@ use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +17,6 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio::sync::RwLock;
 
 /// Default timeout for TCP request acknowledgment
 const DEFAULT_TCP_REQUEST_TIMEOUT_SECS: u64 = 5;
@@ -133,27 +132,24 @@ impl TcpConnection {
 
 /// Simple connection pool for TCP connections
 struct TcpConnectionPool {
-    pools: RwLock<HashMap<SocketAddr, Arc<Mutex<Vec<TcpConnection>>>>>,
+    pools: DashMap<SocketAddr, Arc<Mutex<Vec<TcpConnection>>>>,
     config: TcpRequestConfig,
 }
 
 impl TcpConnectionPool {
     fn new(config: TcpRequestConfig) -> Self {
         Self {
-            pools: RwLock::new(HashMap::new()),
+            pools: DashMap::new(),
             config,
         }
     }
 
     async fn get_connection(&self, addr: SocketAddr) -> Result<TcpConnection> {
-        // Try to get from pool
-        {
-            let pools = self.pools.read().await;
-            if let Some(pool) = pools.get(&addr) {
-                let mut pool = pool.lock().await;
-                if let Some(conn) = pool.pop() {
-                    return Ok(conn);
-                }
+        // Try to get from pool (lock-free read with DashMap)
+        if let Some(pool) = self.pools.get(&addr) {
+            let mut pool = pool.lock().await;
+            if let Some(conn) = pool.pop() {
+                return Ok(conn);
             }
         }
 
@@ -164,14 +160,12 @@ impl TcpConnectionPool {
     async fn return_connection(&self, conn: TcpConnection) {
         let addr = conn.addr;
 
-        // Get or create pool for this address
-        let pool = {
-            let mut pools = self.pools.write().await;
-            pools
-                .entry(addr)
-                .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
-                .clone()
-        };
+        // Get or create pool for this address (lock-free with DashMap)
+        let pool = self
+            .pools
+            .entry(addr)
+            .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
+            .clone();
 
         let mut pool = pool.lock().await;
         if pool.len() < self.config.pool_size {
