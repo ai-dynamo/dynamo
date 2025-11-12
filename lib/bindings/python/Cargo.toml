@@ -23,6 +23,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
+media-nixl = ["dynamo-llm/media-nixl"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }

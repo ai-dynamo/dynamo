@@ -17,6 +17,8 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
+    MediaDecoder,
+    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
@@ -298,6 +300,23 @@ async def register_vllm_model(
     data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
     runtime_config.data_parallel_size = data_parallel_size
 
+    # Configure media decoder for frontend image decoding (PR #3988)
+    # This enables frontend to decode images and transfer via NIXL RDMA
+    media_decoder = MediaDecoder()
+    media_decoder.image_decoder(
+        {
+            "max_image_width": 4096,
+            "max_image_height": 4096,
+            "max_alloc": 128 * 1024 * 1024,  # 128MB
+        }
+    )
+
+    media_fetcher = MediaFetcher()
+    # Security: Only allow standard schemes, no direct IPs
+    media_fetcher.allow_direct_ip(False)
+    media_fetcher.allow_direct_port(False)
+    media_fetcher.timeout_ms(30000)  # 30s timeout
+
     await register_llm(
         model_input,
         model_type,
@@ -308,6 +327,8 @@ async def register_vllm_model(
         migration_limit=migration_limit,
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
+        media_decoder=media_decoder,
+        media_fetcher=media_fetcher,
     )
 
 
