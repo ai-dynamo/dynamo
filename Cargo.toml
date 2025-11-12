@@ -4,6 +4,7 @@
 [workspace]
 members = [
     "launch/dynamo-run",
+    "launch/dynamo-tui",
     "lib/llm",
     "lib/runtime",
     "lib/config",
