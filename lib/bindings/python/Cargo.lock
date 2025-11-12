@@ -1657,6 +1657,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "inotify",
+ "libc",
  "local-ip-address",
  "log",
  "nid",

@@ -2398,6 +2398,7 @@ dependencies = [
  "hyper-util",
  "inotify",
  "jsonschema",
+ "libc",
  "local-ip-address",
  "log",
  "nid",

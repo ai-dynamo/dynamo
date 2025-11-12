@@ -19,7 +19,19 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+use tokio_util::bytes::BytesMut;
 use tracing::Instrument;
+
+/// Default maximum message size for TCP server (32 MB)
+const DEFAULT_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
+
+/// Get maximum message size from environment or use default
+fn get_max_message_size() -> usize {
+    std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_MESSAGE_SIZE)
+}
 
 /// Shared TCP server that handles multiple endpoints on a single port
 pub struct SharedTcpServer {
@@ -122,13 +134,40 @@ impl SharedTcpServer {
     }
 
     async fn handle_connection(
-        mut stream: TcpStream,
+        stream: TcpStream,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
     ) -> Result<()> {
+        use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
+
+        // Split stream into read and write halves for concurrent operations
+        let (read_half, write_half) = tokio::io::split(stream);
+
+        // Channel for sending responses to the write task (zero-copy Bytes)
+        let (response_tx, response_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+
+        // Spawn write task
+        let write_task = tokio::spawn(Self::write_loop(write_half, response_rx));
+
+        // Run read task in current context
+        let read_result = Self::read_loop(read_half, handlers, response_tx).await;
+
+        // Write task will end when response_tx is dropped
+        write_task.await??;
+
+        read_result
+    }
+
+    async fn read_loop(
+        mut read_half: tokio::io::ReadHalf<TcpStream>,
+        handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
+        response_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
+    ) -> Result<()> {
+        use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
+
         loop {
-            // Read endpoint path length
+            // Read endpoint path length (2 bytes)
             let mut path_len_buf = [0u8; 2];
-            match stream.read_exact(&mut path_len_buf).await {
+            match read_half.read_exact(&mut path_len_buf).await {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     break;
@@ -142,22 +181,59 @@ impl SharedTcpServer {
 
             // Read endpoint path
             let mut path_buf = vec![0u8; path_len];
-            stream.read_exact(&mut path_buf).await?;
-            let endpoint_path = String::from_utf8(path_buf)?;
+            read_half.read_exact(&mut path_buf).await?;
 
-            // Read payload length
+            // Read payload length (4 bytes)
             let mut len_buf = [0u8; 4];
-            stream.read_exact(&mut len_buf).await?;
-            let len = u32::from_be_bytes(len_buf) as usize;
+            read_half.read_exact(&mut len_buf).await?;
+            let payload_len = u32::from_be_bytes(len_buf) as usize;
 
-            // Sanity check
-            if len > 16 * 1024 * 1024 {
-                anyhow::bail!("Request too large: {} bytes", len);
+            // Sanity check - enforce maximum message size
+            let max_message_size = get_max_message_size();
+            if payload_len > max_message_size {
+                tracing::warn!(
+                    "Request too large: {} bytes (max: {} bytes), closing connection",
+                    payload_len,
+                    max_message_size
+                );
+                // Send error response
+                let error_response =
+                    TcpResponseMessage::new(Bytes::from_static(b"Request too large"));
+                if let Ok(encoded) = error_response.encode() {
+                    let _ = response_tx.send(encoded);
+                }
+                break;
             }
 
             // Read request payload
-            let mut payload = vec![0u8; len];
-            stream.read_exact(&mut payload).await?;
+            let mut payload_buf = vec![0u8; payload_len];
+            read_half.read_exact(&mut payload_buf).await?;
+
+            // Reconstruct the full message buffer for decoding using BytesMut
+            let mut full_msg = BytesMut::with_capacity(2 + path_len + 4 + payload_len);
+            full_msg.extend_from_slice(&path_len_buf);
+            full_msg.extend_from_slice(&path_buf);
+            full_msg.extend_from_slice(&len_buf);
+            full_msg.extend_from_slice(&payload_buf);
+
+            // Decode using codec (zero-copy conversion)
+            let full_msg_bytes = full_msg.freeze();
+            let request_msg = match TcpRequestMessage::decode(&full_msg_bytes) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    tracing::warn!("Failed to decode TCP request: {}", e);
+                    // Send error response
+                    let error_response =
+                        TcpResponseMessage::new(Bytes::from(format!("Decode error: {}", e)));
+                    if let Ok(encoded) = error_response.encode() {
+                        let _ = response_tx.send(encoded);
+                    }
+                    continue;
+                }
+            };
+
+            let endpoint_path = request_msg.endpoint_path;
+            let payload = request_msg.payload;
 
             // Look up handler (lock-free read with DashMap)
             let handler = handlers.get(&endpoint_path).map(|h| h.clone());
@@ -166,25 +242,28 @@ impl SharedTcpServer {
                 Some(h) => h,
                 None => {
                     tracing::warn!("No handler found for endpoint: {}", endpoint_path);
-                    // Send error response
-                    let error_msg = format!("Unknown endpoint: {}", endpoint_path);
-                    let error_bytes = error_msg.as_bytes();
-                    let error_len = error_bytes.len() as u32;
-                    stream.write_all(&error_len.to_be_bytes()).await?;
-                    stream.write_all(error_bytes).await?;
-                    stream.flush().await?;
+                    // Send error response using codec
+                    let error_response = TcpResponseMessage::new(
+                        Bytes::from(format!("Unknown endpoint: {}", endpoint_path)),
+                    );
+                    if let Ok(encoded) = error_response.encode() {
+                        let _ = response_tx.send(encoded);
+                    }
                     continue;
                 }
             };
 
             handler.inflight.fetch_add(1, Ordering::SeqCst);
 
-            // Send acknowledgment immediately
-            let ack = b"";
-            let ack_len = ack.len() as u32;
-            stream.write_all(&ack_len.to_be_bytes()).await?;
-            stream.write_all(ack).await?;
-            stream.flush().await?;
+            // Send acknowledgment immediately using codec (non-blocking, zero-copy)
+            let ack_response = TcpResponseMessage::empty();
+            if let Ok(encoded_ack) = ack_response.encode() {
+                // Send to write task without blocking reads
+                if response_tx.send(encoded_ack).is_err() {
+                    tracing::debug!("Write task closed, ending read loop");
+                    break;
+                }
+            }
 
             // Process request asynchronously
             let service_handler = handler.service_handler.clone();
@@ -223,6 +302,17 @@ impl SharedTcpServer {
             });
         }
 
+        Ok(())
+    }
+
+    async fn write_loop(
+        mut write_half: tokio::io::WriteHalf<TcpStream>,
+        mut response_rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
+    ) -> Result<()> {
+        while let Some(response) = response_rx.recv().await {
+            write_half.write_all(&response).await?;
+            write_half.flush().await?;
+        }
         Ok(())
     }
 }
