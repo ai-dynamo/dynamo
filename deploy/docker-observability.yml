@@ -112,8 +112,9 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector:0.115.1
     container_name: otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
-      - ./observability/opentelemetry.yaml:/etc/otelcol/config.yaml
+      - ./observability/opentelemetry.yaml:/etc/otel-collector-config.yaml
     ports:
       - "4317:4317"   # OTLP gRPC receiver (Dynamo/SGLang send here)
       - "4318:4318"   # OTLP HTTP receiver
