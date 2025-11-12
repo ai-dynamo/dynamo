@@ -161,6 +161,7 @@ pub struct Metrics {
     request_duration: HistogramVec,
     input_sequence_length: HistogramVec,
     output_sequence_length: HistogramVec,
+    output_tokens_counter: IntCounterVec,
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
 
@@ -266,6 +267,7 @@ impl Metrics {
     /// - `{prefix}_request_duration_seconds` - HistogramVec for the duration of requests
     /// - `{prefix}_input_sequence_tokens` - HistogramVec for input sequence length in tokens
     /// - `{prefix}_output_sequence_tokens` - HistogramVec for output sequence length in tokens
+    /// - `{prefix}_output_tokens_total` - IntCounterVec for total output tokens generated (real-time updates)
     /// - `{prefix}_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
     /// - `{prefix}_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
     ///
@@ -392,6 +394,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let output_tokens_counter = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::OUTPUT_TOKENS_TOTAL),
+                "Total number of output tokens generated (updates in real-time)",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         // Time to first token buckets: configurable via DYN_METRICS_TTFT_{MIN,MAX,COUNT}
         let (ttft_min, ttft_max, ttft_count) =
             parse_bucket_config("DYN_METRICS_TTFT", 0.001, 480.0, 18);
@@ -487,6 +498,7 @@ impl Metrics {
             request_duration,
             input_sequence_length,
             output_sequence_length,
+            output_tokens_counter,
             time_to_first_token,
             inter_token_latency,
             model_total_kv_blocks,
@@ -581,6 +593,7 @@ impl Metrics {
         registry.register(Box::new(self.request_duration.clone()))?;
         registry.register(Box::new(self.input_sequence_length.clone()))?;
         registry.register(Box::new(self.output_sequence_length.clone()))?;
+        registry.register(Box::new(self.output_tokens_counter.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
         registry.register(Box::new(self.inter_token_latency.clone()))?;
 
@@ -831,6 +844,12 @@ impl ResponseMetricCollector {
         if num_tokens == 0 {
             return;
         }
+
+        // Increment the real-time output tokens counter
+        self.metrics
+            .output_tokens_counter
+            .with_label_values(&[&self.model])
+            .inc_by(num_tokens as u64);
 
         if self.is_first_token {
             // NOTE: when there are multiple tokens in the first response,
@@ -1186,5 +1205,152 @@ mod tests {
                 "Bucket values should be in increasing order after deduplication"
             );
         }
+    }
+
+    #[test]
+    fn test_output_tokens_counter_increments() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        // Create response collector
+        let mut collector = metrics.clone().create_response_collector(model);
+
+        // Simulate first chunk (5 tokens)
+        collector.observe_response(100, 5);
+
+        // Verify counter incremented by 5
+        let counter_value = metrics
+            .output_tokens_counter
+            .with_label_values(&[model])
+            .get();
+        assert_eq!(counter_value, 5);
+
+        // Simulate second chunk (10 tokens)
+        collector.observe_response(100, 10);
+
+        // Verify counter incremented to 15
+        let counter_value = metrics
+            .output_tokens_counter
+            .with_label_values(&[model])
+            .get();
+        assert_eq!(counter_value, 15);
+
+        // Simulate third chunk (7 tokens)
+        collector.observe_response(100, 7);
+
+        // Verify counter incremented to 22
+        let counter_value = metrics
+            .output_tokens_counter
+            .with_label_values(&[model])
+            .get();
+        assert_eq!(counter_value, 22);
+    }
+
+    #[test]
+    fn test_output_tokens_counter_zero_tokens() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let mut collector = metrics.clone().create_response_collector(model);
+
+        // Simulate chunk with zero tokens (should not increment)
+        collector.observe_response(100, 0);
+
+        // Verify counter remains 0
+        let counter_value = metrics
+            .output_tokens_counter
+            .with_label_values(&[model])
+            .get();
+        assert_eq!(counter_value, 0);
+
+        // Add some tokens
+        collector.observe_response(100, 5);
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model])
+                .get(),
+            5
+        );
+
+        // Try zero tokens again (should not change counter)
+        collector.observe_response(100, 0);
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model])
+                .get(),
+            5
+        );
+    }
+
+    #[test]
+    fn test_output_tokens_counter_multiple_models() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model1 = "model-1";
+        let model2 = "model-2";
+
+        // Create collectors for different models
+        let mut collector1 = metrics.clone().create_response_collector(model1);
+        let mut collector2 = metrics.clone().create_response_collector(model2);
+
+        // Increment model1
+        collector1.observe_response(100, 10);
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model1])
+                .get(),
+            10
+        );
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model2])
+                .get(),
+            0
+        );
+
+        // Increment model2
+        collector2.observe_response(200, 20);
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model1])
+                .get(),
+            10
+        );
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model2])
+                .get(),
+            20
+        );
+
+        // Increment model1 again
+        collector1.observe_response(100, 5);
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model1])
+                .get(),
+            15
+        );
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model2])
+                .get(),
+            20
+        );
     }
 }

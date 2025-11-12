@@ -43,8 +43,7 @@ To see the actual metrics available in your SGLang version:
 ### 1. Launch SGLang with Metrics Enabled
 
 ```bash
-# Set environment variables
-export DYN_SYSTEM_ENABLED=true
+# Set system metrics port (automatically enables metrics server)
 export DYN_SYSTEM_PORT=8081
 
 # Start SGLang worker with metrics enabled

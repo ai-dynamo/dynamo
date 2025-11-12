@@ -678,7 +678,9 @@ spec:
                   description: ComponentType indicates the role of this component (for example, "main").
                   type: string
                 dynamoNamespace:
-                  description: Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
+                  description: |-
+                    DynamoNamespace is deprecated and will be removed in a future version.
+                    The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
                   type: string
                 envFromSecret:
                   description: |-
@@ -9808,6 +9810,9 @@ spec:
                       x-kubernetes-list-type: map
                   required: []
                   type: object
+                globalDynamoNamespace:
+                  description: GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+                  type: boolean
                 ingress:
                   description: Ingress config to expose the component outside the cluster (or through a service mesh).
                   properties:
@@ -10001,6 +10006,20 @@ spec:
                         More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes
                       format: int32
                       type: integer
+                  type: object
+                modelRef:
+                  description: |-
+                    ModelRef references a model that this component serves
+                    When specified, a headless service will be created for endpoint discovery
+                  properties:
+                    name:
+                      description: Name is the base model identifier (e.g., "llama-3-70b-instruct-v1")
+                      type: string
+                    revision:
+                      description: Revision is the model revision/version (optional)
+                      type: string
+                  required:
+                    - name
                   type: object
                 multinode:
                   description: Multinode is the configuration for multinode components.

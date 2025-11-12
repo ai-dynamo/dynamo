@@ -16,9 +16,10 @@
 //! - `NATS_AUTH_CREDENTIALS_FILE`: the path to the credentials file
 //!
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
+use crate::metrics::MetricsHierarchy;
 use crate::traits::events::EventPublisher;
-use crate::{Result, metrics::MetricsHierarchy};
 
+use anyhow::Result;
 use async_nats::connection::State;
 use async_nats::{Subscriber, client, jetstream};
 use async_trait::async_trait;

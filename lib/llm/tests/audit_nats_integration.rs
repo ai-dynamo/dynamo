@@ -51,7 +51,7 @@ mod tests {
     /// Helper to create a test DistributedRuntime with NATS
     async fn create_test_drt() -> dynamo_runtime::DistributedRuntime {
         let rt = Runtime::from_current().unwrap();
-        let config = dynamo_runtime::distributed::DistributedConfig::from_settings(false);
+        let config = dynamo_runtime::distributed::DistributedConfig::from_settings();
         dynamo_runtime::DistributedRuntime::new(rt, config)
             .await
             .expect("Failed to create DistributedRuntime")
@@ -167,7 +167,7 @@ mod tests {
 
                 bus::init(100);
                 let drt = create_test_drt().await;
-                sink::spawn_workers_from_env(Some(&drt));
+                sink::spawn_workers_from_env(&drt);
                 time::sleep(Duration::from_millis(100)).await;
 
                 // Emit audit record
@@ -224,7 +224,7 @@ mod tests {
 
                 bus::init(100);
                 let drt = create_test_drt().await;
-                sink::spawn_workers_from_env(Some(&drt));
+                sink::spawn_workers_from_env(&drt);
                 time::sleep(Duration::from_millis(100)).await;
 
                 // Request with store=true (should be audited)

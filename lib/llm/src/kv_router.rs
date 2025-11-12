@@ -8,14 +8,14 @@ use std::time::Duration;
 use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_runtime::{
-    component::{Component, InstanceSource},
+    component::Component,
+    discovery::{DiscoveryQuery, watch_and_extract_field},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
     },
-    prelude::*,
     protocols::annotated::Annotated,
-    utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction},
+    traits::DistributedRuntimeProvider,
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ use crate::{
         subscriber::start_kv_router_background,
     },
     local_model::runtime_config::ModelRuntimeConfig,
-    model_card::{self, ModelDeploymentCard},
+    model_card::ModelDeploymentCard,
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
 };
@@ -70,8 +70,6 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for radix tree snapshot storage
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
-pub const ROUTER_SNAPSHOT_LOCK: &str = "router-snapshot-lock";
-pub const ROUTER_CLEANUP_LOCK: &str = "router-cleanup-lock";
 
 /// A trait that users can implement to define custom selection logic
 pub trait WorkerSelector {
@@ -228,29 +226,22 @@ impl KvRouter {
         let generate_endpoint = component.endpoint("generate");
         let client = generate_endpoint.client().await?;
 
-        let instances_rx = match client.instance_source.as_ref() {
-            InstanceSource::Dynamic(rx) => rx.clone(),
-            InstanceSource::Static => {
-                panic!("Expected dynamic instance source for KV routing");
-            }
+        let instances_rx = client.instance_source.as_ref().clone();
+
+        // Watch for runtime config updates via discovery interface
+        let discovery = component.drt().discovery();
+        let discovery_key = DiscoveryQuery::EndpointModels {
+            namespace: component.namespace().name().to_string(),
+            component: component.name().to_string(),
+            endpoint: "generate".to_string(),
         };
-
-        // Create runtime config watcher using the generic etcd watcher
-        // TODO: Migrate to discovery_client() once it exposes kv_get_and_watch_prefix functionality
-        let etcd_client = component
-            .drt()
-            .etcd_client()
-            .expect("Cannot KV route without etcd client");
-
-        let runtime_configs_watcher = watch_prefix_with_extraction(
-            etcd_client,
-            &format!("{}/{}", model_card::ROOT_PATH, component.path()),
-            key_extractors::lease_id,
-            |card: ModelDeploymentCard| Some(card.runtime_config),
-            cancellation_token.clone(),
-        )
-        .await?;
-        let runtime_configs_rx = runtime_configs_watcher.receiver();
+        let discovery_stream = discovery
+            .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+            .await?;
+        let runtime_configs_rx =
+            watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
+                card.runtime_config
+            });
 
         let indexer = if kv_router_config.overlap_score_weight == 0.0 {
             // When overlap_score_weight is zero, we don't need to track prefixes
@@ -512,120 +503,111 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        match self.inner.client.instance_source.as_ref() {
-            InstanceSource::Static => self.inner.r#static(request).await,
-            InstanceSource::Dynamic(_) => {
-                // Extract context ID for request tracking
-                let context_id = request.context().id().to_string();
+        // Extract context ID for request tracking
+        let context_id = request.context().id().to_string();
 
-                // Check if this is a query_instance_id request first
-                let query_instance_id = request.has_annotation("query_instance_id");
+        // Check if this is a query_instance_id request first
+        let query_instance_id = request.has_annotation("query_instance_id");
 
-                let (instance_id, dp_rank, overlap_amount) = if let Some(id) =
-                    request.backend_instance_id
-                {
-                    // If instance_id is set, use it and compute actual overlap
-                    let dp_rank = request.dp_rank.unwrap_or(0);
-                    if query_instance_id {
-                        tracing::debug!(
-                            "backend_instance_id is set, routing to instance {id} with dp_rank {dp_rank} and ignoring query_instance_id annotation"
-                        );
-                    }
-
-                    // Compute actual overlap blocks by querying the indexer
-                    let block_hashes =
-                        compute_block_hash_for_seq(&request.token_ids, self.chooser.block_size());
-                    let overlap_scores = self.chooser.indexer.find_matches(block_hashes).await?;
-                    let worker = WorkerWithDpRank::new(id, dp_rank);
-                    let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
-
-                    self.chooser
-                        .add_request(
-                            context_id.clone(),
-                            &request.token_ids,
-                            overlap_blocks,
-                            worker,
-                        )
-                        .await;
-                    (id, dp_rank, overlap_blocks)
-                } else {
-                    // Otherwise, find the best match
-                    let (best_worker, overlap_amount) = self
-                        .chooser
-                        .find_best_match(
-                            Some(&context_id),
-                            &request.token_ids,
-                            request.router_config_override.as_ref(),
-                            !query_instance_id, // Don't update states if query_instance_id
-                        )
-                        .await?;
-                    (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
-                };
-
-                // if request has the annotation "query_instance_id",
-                // then the request will not be routed to the worker,
-                // and instead the worker_instance_id will be returned.
-                let stream_context = request.context().clone();
-                if query_instance_id {
-                    let instance_id_str = instance_id.to_string();
-                    let response =
-                        Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
-
-                    // Return the tokens in nvext.token_data format
-                    let response_tokens =
-                        Annotated::from_annotation("token_data", &request.token_ids)?;
-                    tracing::trace!(
-                        "Tokens requested in the response through the query_instance_id annotation: {:?}",
-                        response_tokens
-                    );
-                    let stream = stream::iter(vec![response, response_tokens]);
-                    return Ok(ResponseStream::new(Box::pin(stream), stream_context));
-                }
-                let (mut backend_input, context) = request.into_parts();
-                backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
-                backend_input.dp_rank = Some(dp_rank);
-                let updated_request = context.map(|_| backend_input);
-
-                let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
-                let stream_context = response_stream.context();
-                let chooser = self.chooser.clone();
-                let context_for_monitoring = stream_context.clone();
-
-                let wrapped_stream = Box::pin(async_stream::stream! {
-                    let mut prefill_marked = false;
-
-                    loop {
-                        tokio::select! {
-                            biased;
-
-                            _ = context_for_monitoring.stopped() => {
-                                tracing::debug!("Request {context_id} cancelled, ending stream");
-                                break;
-                            }
-
-                            item = response_stream.next() => {
-                                let Some(item) = item else {
-                                    break;
-                                };
-
-                                if !prefill_marked {
-                                    if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
-                                        tracing::warn!("Failed to mark prefill completed for request {context_id}: {e:?}");
-                                    }
-                                    prefill_marked = true;
-                                }
-                                yield item;
-                            }
-                        }
-                    }
-
-                    if let Err(e) = chooser.free(&context_id).await {
-                        tracing::warn!("Failed to free request {context_id}: {e:?}");
-                    }
-                });
-                Ok(ResponseStream::new(wrapped_stream, stream_context))
+        let (instance_id, dp_rank, overlap_amount) = if let Some(id) = request.backend_instance_id {
+            // If instance_id is set, use it and compute actual overlap
+            let dp_rank = request.dp_rank.unwrap_or(0);
+            if query_instance_id {
+                tracing::debug!(
+                    "backend_instance_id is set, routing to instance {id} with dp_rank {dp_rank} and ignoring query_instance_id annotation"
+                );
             }
+
+            // Compute actual overlap blocks by querying the indexer
+            let block_hashes =
+                compute_block_hash_for_seq(&request.token_ids, self.chooser.block_size());
+            let overlap_scores = self.chooser.indexer.find_matches(block_hashes).await?;
+            let worker = WorkerWithDpRank::new(id, dp_rank);
+            let overlap_blocks = overlap_scores.scores.get(&worker).copied().unwrap_or(0);
+
+            self.chooser
+                .add_request(
+                    context_id.clone(),
+                    &request.token_ids,
+                    overlap_blocks,
+                    worker,
+                )
+                .await;
+            (id, dp_rank, overlap_blocks)
+        } else {
+            // Otherwise, find the best match
+            let (best_worker, overlap_amount) = self
+                .chooser
+                .find_best_match(
+                    Some(&context_id),
+                    &request.token_ids,
+                    request.router_config_override.as_ref(),
+                    !query_instance_id, // Don't update states if query_instance_id
+                )
+                .await?;
+            (best_worker.worker_id, best_worker.dp_rank, overlap_amount)
+        };
+
+        // if request has the annotation "query_instance_id",
+        // then the request will not be routed to the worker,
+        // and instead the worker_instance_id will be returned.
+        let stream_context = request.context().clone();
+        if query_instance_id {
+            let instance_id_str = instance_id.to_string();
+            let response = Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
+
+            // Return the tokens in nvext.token_data format
+            let response_tokens = Annotated::from_annotation("token_data", &request.token_ids)?;
+            tracing::trace!(
+                "Tokens requested in the response through the query_instance_id annotation: {:?}",
+                response_tokens
+            );
+            let stream = stream::iter(vec![response, response_tokens]);
+            return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
+        let (mut backend_input, context) = request.into_parts();
+        backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
+        backend_input.dp_rank = Some(dp_rank);
+        let updated_request = context.map(|_| backend_input);
+
+        let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
+        let stream_context = response_stream.context();
+        let chooser = self.chooser.clone();
+        let context_for_monitoring = stream_context.clone();
+
+        let wrapped_stream = Box::pin(async_stream::stream! {
+            let mut prefill_marked = false;
+
+            loop {
+                tokio::select! {
+                    biased;
+
+                    _ = context_for_monitoring.stopped() => {
+                        tracing::debug!("Request {context_id} cancelled, ending stream");
+                        break;
+                    }
+
+                    item = response_stream.next() => {
+                        let Some(item) = item else {
+                            break;
+                        };
+
+                        if !prefill_marked {
+                            if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
+                                tracing::warn!("Failed to mark prefill completed for request {context_id}: {e:?}");
+                            }
+                            prefill_marked = true;
+                        }
+                        yield item;
+                    }
+                }
+            }
+
+            if let Err(e) = chooser.free(&context_id).await {
+                tracing::warn!("Failed to free request {context_id}: {e:?}");
+            }
+        });
+        Ok(ResponseStream::new(wrapped_stream, stream_context))
     }
 }
 
