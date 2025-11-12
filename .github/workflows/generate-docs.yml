@@ -256,6 +256,7 @@ jobs:
         env:
           ARTIFACTS_PATH: dynamo-docs
           TARGET_PATH: ${{ vars.DOCS_PUBLISH_S3_TARGET_PATH }}
+          COMMIT_MSG: ${{ github.event.head_commit.message || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -272,6 +273,7 @@ jobs:
 
           # Determine version from various sources
           VERSION=""
+          PUBLISH_TO_LATEST="true"
 
           # Option 1: Direct tag push
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
@@ -281,22 +283,33 @@ jobs:
               echo "Detected version from tag: ${VERSION}"
             fi
 
+            # Check for /not-latest flag in commit message
+            if [[ "${COMMIT_MSG}" =~ /not-latest ]]; then
+              PUBLISH_TO_LATEST="false"
+              echo "Detected /not-latest flag in commit message"
+            fi
+
           # Option 2: Manual dispatch with version input
           elif [[ -n "${{ inputs.version || '' }}" ]]; then
             VERSION="${{ inputs.version }}"
             echo "Using version from manual input: ${VERSION}"
 
-          # Option 3: Check commit message for version tag (e.g., for main branch releases)
-          elif [[ "${{ github.event.head_commit.message || '' }}" =~ version:\ *v?([0-9]+(\.[0-9]+){1,2}([._-](post|rc|dev)[0-9]+)?) ]]; then
-            VERSION="${BASH_REMATCH[1]}"
-            echo "Detected version from commit message: ${VERSION}"
+            # Don't publish to latest on manual dispatch
+            PUBLISH_TO_LATEST="false"
+            echo "Manual dispatch detected - will not publish to latest"
           fi
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "artifacts_path=${ARTIFACTS_PATH}" >> "$GITHUB_OUTPUT"
+          echo "publish_to_latest=${PUBLISH_TO_LATEST}" >> "$GITHUB_OUTPUT"
 
           if [[ -n "${VERSION}" ]]; then
             echo "::notice::Publishing version: ${VERSION}"
+            if [[ "${PUBLISH_TO_LATEST}" == "true" ]]; then
+              echo "::notice::Will also publish to 'latest'"
+            else
+              echo "::notice::Will NOT publish to 'latest'"
+            fi
           else
             echo "::notice::Publishing as dev (no version detected)"
           fi
@@ -324,20 +337,20 @@ jobs:
           S3_ROOT: ${{ steps.paths.outputs.s3_root }}
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
           VERSION: ${{ steps.vars.outputs.version }}
-          COMMIT_MSG: ${{ github.event.head_commit.message || '' }}
+          PUBLISH_TO_LATEST: ${{ steps.vars.outputs.publish_to_latest }}
         shell: bash
         run: |
           set -euo pipefail
           echo "Publishing version ${VERSION} to ${S3_ROOT}/${S3_PATH}/archive/${VERSION}"
           aws s3 sync . "${S3_ROOT}/${S3_PATH}/archive/${VERSION}" --exclude .buildinfo --exclude .doctrees --delete
 
-          # Also publish this version as 'latest' unless /not-latest flag is present
-          if [[ ! "${COMMIT_MSG}" =~ /not-latest ]]; then
+          # Also publish this version as 'latest' if determined in version step
+          if [[ "${PUBLISH_TO_LATEST}" == "true" ]]; then
             echo "Publishing version ${VERSION} to ${S3_ROOT}/${S3_PATH}/latest"
             aws s3 sync . "${S3_ROOT}/${S3_PATH}/latest" --exclude .buildinfo --exclude .doctrees --delete
             echo "published_latest=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Skipping 'latest' update due to /not-latest flag"
+            echo "Skipping 'latest' update (not publishing to latest)"
             echo "published_latest=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -502,7 +515,7 @@ jobs:
             if [[ "${PUBLISHED_LATEST}" == "true" ]]; then
               echo "- ✅ **Latest:** \`${VERSION}\` → \`s3://.../${S3_PATH}/latest\` (updated to match release)" >> $GITHUB_STEP_SUMMARY
             else
-              echo "- ⏭️ **Latest:** not updated (version published with /not-latest flag)" >> $GITHUB_STEP_SUMMARY
+              echo "- ⏭️ **Latest:** not updated (manual dispatch or /not-latest flag)" >> $GITHUB_STEP_SUMMARY
             fi
           fi
           if [[ "${PUBLISHED_DEV}" == "true" ]]; then
