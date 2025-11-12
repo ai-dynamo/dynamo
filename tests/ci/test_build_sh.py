@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import shutil
 import subprocess
 import tarfile
@@ -36,19 +37,24 @@ def dynamo_repo_dir():
     # Get the repository root (3 levels up from this test file)
     repo_root = Path(__file__).parent.parent.parent
 
-    # Get current HEAD commit
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=True,
-        )
-        commit_hash = result.stdout.strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        raise RuntimeError(f"Failed to get git HEAD commit: {e}")
+    # Get commit hash from environment variable or git
+    commit_hash = os.environ.get("DYNAMO_GIT_COMMIT")
+    if commit_hash:
+        print(f"Using commit from DYNAMO_GIT_COMMIT: {commit_hash}")
+    else:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            )
+            commit_hash = result.stdout.strip()
+            print(f"Using commit from git HEAD: {commit_hash}")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            raise RuntimeError(f"Failed to get git HEAD commit: {e}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tar_path = Path(tmpdir) / "dynamo.tar.gz"
