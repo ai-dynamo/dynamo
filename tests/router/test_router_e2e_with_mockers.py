@@ -77,6 +77,7 @@ class MockerProcess:
         request,
         mocker_args: Optional[Dict[str, Any]] = None,
         num_mockers: int = 1,
+        store_backend: str = "etcd",
     ):
         # Generate a unique namespace suffix shared by all mockers
         namespace_suffix = generate_random_suffix()
@@ -99,6 +100,8 @@ class MockerProcess:
                 MODEL_NAME,
                 "--endpoint",
                 self.endpoint,
+                "--store-kv",
+                store_backend,
             ]
 
             # Add individual CLI arguments from mocker_args
@@ -163,7 +166,7 @@ class MockerProcess:
 class KVRouterProcess(ManagedProcess):
     """Manages the KV router process using dynamo.frontend"""
 
-    def __init__(self, request, frontend_port: int):
+    def __init__(self, request, frontend_port: int, store_backend: str = "etcd"):
         command = [
             "python",
             "-m",
@@ -174,6 +177,8 @@ class KVRouterProcess(ManagedProcess):
             "kv",
             "--http-port",
             str(frontend_port),
+            "--store-kv",
+            store_backend,
         ]
 
         super().__init__(
@@ -545,14 +550,17 @@ def test_mocker_two_kv_router(
 
         for port in router_ports:
             logger.info(f"Starting KV router frontend on port {port}")
-            kv_router = KVRouterProcess(request, port)
+            kv_router = KVRouterProcess(request, port, store_backend)
             kv_router.__enter__()
             kv_routers.append(kv_router)
 
         # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
-            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            store_backend=store_backend,
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
@@ -988,7 +996,10 @@ def test_indexers_sync(
         # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
-            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            store_backend=store_backend,
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         # Initialize mockers
