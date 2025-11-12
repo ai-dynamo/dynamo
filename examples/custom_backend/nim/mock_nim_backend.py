@@ -24,7 +24,7 @@ from typing import Any, AsyncGenerator
 
 import uvloop
 
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 
 # Global counter for incrementing metrics
 request_count = 0
@@ -106,7 +106,7 @@ async def worker(runtime: DistributedRuntime):
     await stats_endpoint.serve_endpoint(handle_stats_request)  # type: ignore[arg-type]
 
 
-def main():
+async def main():
     import argparse
 
     # Parse args before calling dynamo_worker to determine static mode
@@ -119,12 +119,17 @@ def main():
     # Set static mode based on --use-etcd flag (default is static/no etcd)
     is_static = not args.use_etcd
 
-    # Create the worker with appropriate static mode
-    worker_func = dynamo_worker(static=is_static)(worker)
+    loop = asyncio.get_running_loop()
+    if is_static:
+        runtime = DistributedRuntime(loop, "file")
+    else:
+        runtime = DistributedRuntime(loop, "etcd")
 
-    uvloop.install()
-    asyncio.run(worker_func())  # type: ignore[arg-type]
+    try:
+        await worker(runtime)  # type: ignore[arg-type]
+    finally:
+        runtime.shutdown()
 
 
 if __name__ == "__main__":
-    main()
+    uvloop.run(main())

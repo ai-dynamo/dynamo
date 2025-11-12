@@ -118,11 +118,11 @@ impl TorchTensor for VllmTensor {
 #[pyclass]
 #[derive(Clone)]
 pub struct BlockTransferHandler {
-    _impl: Arc<RustBlockTransferHandler>,
+    _impl: Arc<dyn RustBlockTransferHandler>,
 }
 
 impl BlockTransferHandler {
-    pub fn get_handler(&self) -> Arc<RustBlockTransferHandler> {
+    pub fn get_handler(&self) -> Arc<dyn RustBlockTransferHandler> {
         self._impl.clone()
     }
 }

@@ -249,7 +249,10 @@ impl
                 next.generate(decode_request).await
             }
             Err(e) => {
-                tracing::debug!(error = %e, "Remote prefill failed, falling back to decode-only");
+                tracing::warn!(
+                    error = %e,
+                    "Remote prefill failed, falling back to decode-only. This may impact performance in disaggregated deployments. Verify prefill workers are healthy and accessible."
+                );
                 next.generate(context.map(|_| req)).await
             }
         }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::{
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
-    entrypoint::{self, EngineConfig, input::common},
+    entrypoint::{EngineConfig, input::common},
     grpc::service::kserve,
     kv_router::KvRouterConfig,
     namespace::is_global_namespace,
@@ -47,75 +47,6 @@ pub async fn run(
                 target_namespace,
             )
             .await?;
-            grpc_service
-        }
-        EngineConfig::StaticRemote(local_model) => {
-            let card = local_model.card();
-            let checksum = card.mdcsum();
-            let router_mode = local_model.router_config().router_mode;
-
-            let grpc_service = grpc_service_builder.build()?;
-            let manager = grpc_service.model_manager();
-
-            let endpoint_id = local_model.endpoint_id();
-            let component = distributed_runtime
-                .namespace(&endpoint_id.namespace)?
-                .component(&endpoint_id.component)?;
-            let client = component.endpoint(&endpoint_id.name).client().await?;
-
-            let kv_chooser = if router_mode == RouterMode::KV {
-                Some(
-                    manager
-                        .kv_chooser_for(
-                            &component,
-                            card.kv_cache_block_size,
-                            Some(local_model.router_config().kv_router_config),
-                        )
-                        .await?,
-                )
-            } else {
-                None
-            };
-
-            let tokenizer_hf = card.tokenizer_hf()?;
-            let chat_engine = entrypoint::build_routed_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(
-                card,
-                &client,
-                router_mode,
-                None,
-                kv_chooser.clone(),
-                tokenizer_hf.clone(),
-                None, // No prefill chooser in grpc static mode
-            )
-            .await?;
-            manager.add_chat_completions_model(
-                local_model.display_name(),
-                checksum,
-                chat_engine,
-            )?;
-
-            let completions_engine = entrypoint::build_routed_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(
-                card,
-                &client,
-                router_mode,
-                None,
-                kv_chooser,
-                tokenizer_hf,
-                None, // No prefill chooser in grpc static mode
-            )
-            .await?;
-            manager.add_completions_model(
-                local_model.display_name(),
-                checksum,
-                completions_engine,
-            )?;
-
             grpc_service
         }
         EngineConfig::StaticFull { engine, model, .. } => {

@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """
 Test configuration and fixtures for Dynamo Python bindings tests.
@@ -403,6 +391,17 @@ def nats_and_etcd():
                 print(f"Error removing ETCD data dir: {e}")
 
 
+@pytest.fixture(scope="function")
+def temp_file_store():
+    """
+    A temporary directory to use as the key-value store. Cleaned up on test exit.
+    Local to the unit test using it.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ["DYN_FILE_KV"] = tmpdir
+        yield tmpdir
+
+
 @pytest.fixture(scope="function", autouse=False)
 async def runtime(request):
     """
@@ -436,6 +435,6 @@ This is required because DistributedRuntime is a process-level singleton.
             )
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "mem", True)
+    runtime = DistributedRuntime(loop, "file")
     yield runtime
     runtime.shutdown()

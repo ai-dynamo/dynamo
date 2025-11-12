@@ -11,6 +11,38 @@ Dynamo provides health check and liveness HTTP endpoints for each component whic
 can be used to configure startup, liveness and readiness probes in
 orchestration frameworks such as Kubernetes.
 
+## Environment Variables
+
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `DYN_SYSTEM_PORT` | System status server port | `8081` | `9090` |
+| `DYN_SYSTEM_STARTING_HEALTH_STATUS` | Initial health status | `notready` | `ready`, `notready` |
+| `DYN_SYSTEM_HEALTH_PATH` | Custom health endpoint path | `/health` | `/custom/health` |
+| `DYN_SYSTEM_LIVE_PATH` | Custom liveness endpoint path | `/live` | `/custom/live` |
+| `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` | Endpoints required for ready state | none | `["generate"]` |
+
+## Getting Started Quickly
+
+Enable health checks and query endpoints:
+
+```bash
+# Start your Dynamo components
+python -m dynamo.frontend --http-port 8000 &
+
+# Enable system status server on port 8081
+DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
+```
+
+Check health status:
+
+```bash
+# Frontend health (port 8000)
+curl -s localhost:8000/health | jq
+
+# Worker health (port 8081)
+curl -s localhost:8081/health | jq
+```
+
 ## Frontend Liveness Check
 
 The frontend liveness endpoint reports a status of `live` as long as
@@ -123,16 +155,6 @@ component is shutdown. The endpoints return HTTP status code of `HTTP/1.1 503 Se
 when initializing and HTTP status code `HTTP/1.1 200 OK` once ready.
 
 > **Note**: Both /live and /ready return the same information
-
-### Environment Variables for Enabling Health Checks
-
-| **Environment Variable** | **Description**     | **Example Settings**                             |
-| -------------------------| ------------------- | ------------------------------------------------ |
-| `DYN_SYSTEM_PORT`        | Specifies the port for the system status server (automatically enables it when set to a positive value). | `9090`, `8081`                           |
-| `DYN_SYSTEM_STARTING_HEALTH_STATUS`     | Sets the initial health status of the system (ready/not ready).                | `ready`, `notready`      |
-| `DYN_SYSTEM_HEALTH_PATH`                | Custom path for the health endpoint.                                         | `/custom/health`           |
-| `DYN_SYSTEM_LIVE_PATH`                   | Custom path for the liveness endpoint.                                       | `/custom/live`            |
-| `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` | Specifies endpoints to check for determining overall system health status.    | `["generate"]`            |
 
 ### Example Environment Setting
 

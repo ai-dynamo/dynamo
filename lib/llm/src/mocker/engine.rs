@@ -6,31 +6,33 @@
 //! This module provides an AsyncEngine implementation that wraps the Scheduler
 //! to provide streaming token generation with realistic timing simulation.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use futures::StreamExt;
+use rand::Rng;
+use tokio::sync::{Mutex, OnceCell, mpsc};
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_runtime::{
+    component::Component,
+    engine::AsyncEngineContextProvider,
+    pipeline::{AsyncEngine, Error, ManyOut, ResponseStream, SingleIn, async_trait},
+    traits::DistributedRuntimeProvider,
+};
+
 use crate::kv_router::publisher::WorkerMetricsPublisher;
 use crate::mocker::protocols::DirectRequest;
 use crate::mocker::protocols::{MockEngineArgs, OutputSignal, WorkerType};
 use crate::mocker::scheduler::Scheduler;
 use crate::protocols::TokenIdType;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::protocols::annotated::Annotated;
-use tokio_util::sync::CancellationToken;
-
-use dynamo_runtime::{
-    Result,
-    component::Component,
-    engine::AsyncEngineContextProvider,
-    pipeline::{AsyncEngine, Error, ManyOut, ResponseStream, SingleIn, async_trait},
-    traits::DistributedRuntimeProvider,
-};
-use futures::StreamExt;
-use rand::Rng;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{Mutex, OnceCell, mpsc};
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use uuid::Uuid;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 

@@ -1,0 +1,110 @@
+
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dynamo
+  labels:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+spec:
+  envs:
+  - name: DYN_LOG
+    value: "debug"
+  services:
+    Frontend:
+      dynamoNamespace: dynamo
+      componentType: frontend
+      replicas: 1
+      envs:
+        - name: DYN_SYSTEM_PORT
+          value: "9090"
+      extraPodSpec:
+        mainContainer:
+          image: ${IMAGE}
+    VllmDecodeWorker:
+      dynamoNamespace: vllm-disagg
+      componentType: backend
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      envs:
+        - name: DYN_SYSTEM_PORT
+          value: "9090"
+        - name: DYN_SYSTEM_STARTING_HEALTH_STATUS
+          value: "notready"
+        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+          value: "[\"generate\", \"clear_kv_blocks\"]"
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 9090
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 60
+      livenessProbe:
+        httpGet:
+          path: /live
+          port: 9090
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 60
+      extraPodSpec:
+        terminationGracePeriodSeconds: 120
+        mainContainer:
+          image: ${IMAGE}
+          workingDir: /workspace/components/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+    VllmPrefillWorker:
+      dynamoNamespace: vllm-disagg
+      componentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      envs:
+        - name: DYN_SYSTEM_PORT
+          value: "9090"
+        - name: DYN_SYSTEM_STARTING_HEALTH_STATUS
+          value: "notready"
+        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+          value: "[\"generate\", \"clear_kv_blocks\"]"
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 9090
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 60
+      livenessProbe:
+        httpGet:
+          path: /live
+          port: 9090
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 60
+      extraPodSpec:
+        terminationGracePeriodSeconds: 120
+        mainContainer:
+          image: ${IMAGE}
+          workingDir: /workspace/components/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --is-prefill-worker

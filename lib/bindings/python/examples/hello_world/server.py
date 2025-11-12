@@ -21,7 +21,7 @@ class RequestHandler:
             yield char
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     # Set up signal handler for graceful shutdown
     loop = asyncio.get_running_loop()

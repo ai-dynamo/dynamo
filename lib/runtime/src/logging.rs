@@ -144,11 +144,9 @@ impl Default for LoggingConfig {
     }
 }
 
-/// Check if OTLP trace exporting is enabled (set OTEL_EXPORT_ENABLED=1 to enable)
+/// Check if OTLP trace exporting is enabled (set OTEL_EXPORT_ENABLED to a truthy value: 1, true, on, yes)
 fn otlp_exporter_enabled() -> bool {
-    std::env::var(OTEL_EXPORT_ENABLED_ENV)
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    crate::config::env_is_truthy(OTEL_EXPORT_ENABLED_ENV)
 }
 
 /// Get the service name from environment or use default

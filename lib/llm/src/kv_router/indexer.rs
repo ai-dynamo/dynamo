@@ -68,6 +68,9 @@ pub enum KvRouterError {
 
     #[error("Indexer is dropped request")]
     IndexerDroppedRequest,
+
+    #[error("Prune operation failed: {0}")]
+    PruneFailed(String),
 }
 
 /// Errors that can occur during KV Cache Event processing.
@@ -235,6 +238,8 @@ pub struct RadixTree {
     lookup: HashMap<WorkerWithDpRank, HashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
     /// The time buffer the radix tree should check when considering frequence of block accesses
     expiration_duration: Option<Duration>,
+    /// The tree current size.
+    current_size: usize,
 }
 
 impl Default for RadixTree {
@@ -254,6 +259,7 @@ impl RadixTree {
             root: Rc::new(RefCell::new(RadixBlock::new())),
             lookup: HashMap::new(),
             expiration_duration,
+            current_size: 0,
         }
     }
 
@@ -380,6 +386,9 @@ impl RadixTree {
                                 .children
                                 .insert(block_id.tokens_hash, new_block.clone());
 
+                            // increment the current size when creating a new block
+                            self.current_size = self.current_size.saturating_add(1);
+
                             new_block
                         }
                     };
@@ -428,6 +437,9 @@ impl RadixTree {
                     if guard.workers.is_empty() {
                         // if no workers are using this block, that is true for all children
                         guard.children.clear();
+
+                        // Decrement the current size when removing the last worker from a node
+                        self.current_size = self.current_size.saturating_sub(1);
                     }
                     // remove the block from the lookup table
                     worker_lookup.remove(&block);
@@ -460,6 +472,9 @@ impl RadixTree {
                     // If no workers are using this block, that is true for all children
                     if block.borrow().workers.is_empty() {
                         block.borrow_mut().children.clear();
+
+                        // Decrement the current size when removing the last worker from a node
+                        self.current_size = self.current_size.saturating_sub(1);
                     }
                 });
 
@@ -559,6 +574,10 @@ impl RadixTree {
         }
 
         events
+    }
+
+    pub fn current_size(&self) -> usize {
+        self.current_size
     }
 }
 
