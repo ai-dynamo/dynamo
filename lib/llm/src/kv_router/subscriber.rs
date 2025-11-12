@@ -478,15 +478,20 @@ async fn cleanup_orphaned_consumers(
         return;
     };
 
-    // Filter to only routers for this component (keys are "v1/kv_routers/namespace/component/uuid")
-    let component_prefix = format!("{}/{}/", KV_ROUTERS_ROOT_PATH, component.path());
+    // Filter to only routers for this component
+    // Note: keys differ between storage backends:
+    // - FileStore: "namespace/component/uuid" (relative to bucket)
+    // - EtcdStore: "v1/kv_routers/namespace/component/uuid" (full path)
+    // Use contains() to handle both cases
+    let component_path = component.path();
     let active_uuids: HashSet<String> = entries
         .iter()
         .filter_map(|(key, _)| {
-            // Only consider keys that start with this component's path
-            if !key.starts_with(&component_prefix) {
+            // Check if key contains this component's path
+            if !key.contains(&component_path) {
                 return None;
             }
+            // Extract the last part (should be the UUID)
             key.split('/').next_back().map(str::to_string)
         })
         .collect();
