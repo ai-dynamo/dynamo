@@ -3,19 +3,13 @@
 
 use std::sync::Arc;
 
-use super::http_router::{HttpAddressedRouter, HttpRequestClient};
 use super::unified_client::RequestPlaneClient;
 use super::*;
-use crate::config::RequestPlaneMode;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
-use crate::logging::DistributedTraceContext;
-use crate::logging::get_distributed_tracing_context;
-use crate::logging::inject_otel_context_into_nats_headers;
 use crate::logging::inject_trace_headers_into_map;
 use crate::pipeline::network::ConnectionInfo;
 use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
-use crate::pipeline::network::ResponseService;
 use crate::pipeline::network::STREAM_ERR_MSG;
 use crate::pipeline::network::StreamOptions;
 use crate::pipeline::network::TwoPartCodec;
@@ -25,8 +19,6 @@ use crate::pipeline::{ManyOut, PipelineError, ResponseStream, SingleIn};
 use crate::protocols::maybe_error::MaybeError;
 
 use anyhow::{Error, Result};
-use async_nats::client::Client;
-use async_nats::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde::Serialize;
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};

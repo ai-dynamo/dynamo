@@ -4,24 +4,11 @@
 //! HTTP/2 client for request plane
 
 use super::unified_client::{Headers, RequestPlaneClient};
-use super::*;
-use crate::logging::{DistributedTraceContext, get_distributed_tracing_context, inject_trace_headers_into_map};
-use crate::pipeline::network::{
-    ConnectionInfo, NetworkStreamWrapper, PendingConnections, ResponseStream, STREAM_ERR_MSG,
-    StreamOptions,
-    codec::{TwoPartCodec, TwoPartMessage},
-};
-use crate::pipeline::{AddressedRequest, AsyncEngine, Data, Error, ManyOut, SingleIn};
-use crate::{Result, protocols::maybe_error::MaybeError};
+use crate::{Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_stream::StreamExt;
-use tracing as log;
-use tracing::Instrument;
 
 /// Default timeout for HTTP requests (ack only, not full response)
 const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 5;
@@ -213,158 +200,6 @@ impl RequestPlaneClient for HttpRequestClient {
     fn is_healthy(&self) -> bool {
         // HTTP client is stateless and always healthy if created successfully
         true
-    }
-}
-
-/// HTTP-based AddressedPushRouter
-///
-/// This router sends requests via HTTP/2 instead of NATS.
-/// Responses still stream back over TCP (unchanged).
-pub struct HttpAddressedRouter {
-    // HTTP client for request plane
-    http_client: Arc<HttpRequestClient>,
-
-    // TCP server for response plane (unchanged)
-    resp_transport: Arc<tcp::server::TcpStreamServer>,
-}
-
-impl HttpAddressedRouter {
-    pub fn new(
-        http_client: Arc<HttpRequestClient>,
-        resp_transport: Arc<tcp::server::TcpStreamServer>,
-    ) -> Result<Arc<Self>> {
-        Ok(Arc::new(Self {
-            http_client,
-            resp_transport,
-        }))
-    }
-}
-
-#[async_trait]
-impl<T, U> AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>, Error> for HttpAddressedRouter
-where
-    T: Data + Serialize,
-    U: Data + for<'de> Deserialize<'de> + MaybeError,
-{
-    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
-        let request_id = request.context().id().to_string();
-        let (addressed_request, context) = request.transfer(());
-        let (request, address) = addressed_request.into_parts();
-        let engine_ctx = context.context();
-        let engine_ctx_ = engine_ctx.clone();
-
-        // Registration options for the data plane in a single in / many out configuration
-        let options = StreamOptions::builder()
-            .context(engine_ctx.clone())
-            .enable_request_stream(false)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
-
-        // Register our needs with the data plane (TCP for responses)
-        let pending_connections: PendingConnections = self.resp_transport.register(options).await;
-
-        // Validate and unwrap the RegisteredStream object
-        let pending_response_stream = match pending_connections.into_parts() {
-            (None, Some(recv_stream)) => recv_stream,
-            _ => {
-                panic!("Invalid data plane registration for a SingleIn/ManyOut transport");
-            }
-        };
-
-        // Separate out the connection info and the stream provider from the registered stream
-        let (connection_info, response_stream_provider) = pending_response_stream.into_parts();
-
-        // Package up the connection info as part of the "header" component of the two part message
-        let control_message = RequestControlMessage {
-            id: engine_ctx.id().to_string(),
-            request_type: RequestType::SingleIn,
-            response_type: ResponseType::ManyOut,
-            connection_info,
-        };
-
-        // Build the two part message where we package the connection info and the request
-        let ctrl = serde_json::to_vec(&control_message)?;
-        let data = serde_json::to_vec(&request)?;
-
-        log::trace!(
-            request_id,
-            "packaging two-part message; ctrl: {} bytes, data: {} bytes",
-            ctrl.len(),
-            data.len()
-        );
-
-        let msg = TwoPartMessage::from_parts(ctrl.into(), data.into());
-        let codec = TwoPartCodec::default();
-        let buffer = codec.encode_message(msg)?;
-
-        log::trace!(request_id, "sending HTTP request to {}", address);
-
-        // Insert Trace Context into Headers using shared helper
-        let mut headers = std::collections::HashMap::new();
-        inject_trace_headers_into_map(&mut headers);
-
-        // Send HTTP request (replaces NATS request)
-        let _response = self
-            .http_client
-            .send_request(address, buffer, headers)
-            .await?;
-
-        log::trace!(request_id, "awaiting transport handshake");
-        let response_stream = response_stream_provider
-            .await
-            .map_err(|_| PipelineError::DetachedStreamReceiver)?
-            .map_err(PipelineError::ConnectionFailed)?;
-
-        // TODO: Detect end-of-stream using Server-Sent Events (SSE)
-        let mut is_complete_final = false;
-        let stream = tokio_stream::StreamNotifyClose::new(
-            tokio_stream::wrappers::ReceiverStream::new(response_stream.rx),
-        )
-        .filter_map(move |res| {
-            if let Some(res_bytes) = res {
-                if is_complete_final {
-                    return Some(U::from_err(
-                        Error::msg(
-                            "Response received after generation ended - this should never happen",
-                        )
-                        .into(),
-                    ));
-                }
-                match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
-                    Ok(item) => {
-                        is_complete_final = item.complete_final;
-                        if let Some(data) = item.data {
-                            Some(data)
-                        } else if is_complete_final {
-                            None
-                        } else {
-                            Some(U::from_err(
-                                Error::msg("Empty response received - this should never happen")
-                                    .into(),
-                            ))
-                        }
-                    }
-                    Err(err) => {
-                        let json_str = String::from_utf8_lossy(&res_bytes);
-                        log::warn!(%err, %json_str, "Failed deserializing JSON to response");
-                        Some(U::from_err(Error::new(err).into()))
-                    }
-                }
-            } else if is_complete_final {
-                // end of stream
-                None
-            } else if engine_ctx_.is_stopped() {
-                log::debug!("Request cancelled and then trying to read a response");
-                None
-            } else {
-                // stream ended unexpectedly
-                log::debug!("{STREAM_ERR_MSG}");
-                Some(U::from_err(Error::msg(STREAM_ERR_MSG).into()))
-            }
-        });
-
-        Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
     }
 }
 
