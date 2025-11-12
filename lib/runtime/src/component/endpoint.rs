@@ -132,8 +132,12 @@ impl EndpointConfigBuilder {
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
             // Build transport based on request plane mode
-            let transport =
-                build_transport_for_health_check(request_plane_mode, &endpoint_name, &subject);
+            let transport = build_transport_type(
+                request_plane_mode,
+                &endpoint_name,
+                &subject,
+                TransportContext::HealthCheck,
+            );
 
             let instance = Instance {
                 component: component_name.clone(),
@@ -300,8 +304,13 @@ impl EndpointConfigBuilder {
         // consistent registration/discovery across the system.
         let discovery = endpoint.drt().discovery();
 
-        // Build transport for etcd registration based on request plane mode
-        let transport = build_transport_type(request_plane_mode, &endpoint_name, &subject);
+        // Build transport for discovery service based on request plane mode
+        let transport = build_transport_type(
+            request_plane_mode,
+            &endpoint_name,
+            &subject,
+            TransportContext::Discovery,
+        );
 
         let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
             namespace: namespace_name.clone(),
@@ -329,59 +338,38 @@ impl EndpointConfigBuilder {
     }
 }
 
-/// Build transport for health check based on request plane mode
-fn build_transport_for_health_check(
-    mode: RequestPlaneMode,
-    endpoint_name: &str,
-    subject: &str,
-) -> TransportType {
-    match mode {
-        RequestPlaneMode::Http => {
-            // For HTTP mode, construct the HTTP endpoint URL
-            let http_host = crate::utils::get_http_rpc_host_from_env();
-            let http_port = std::env::var("DYN_HTTP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(8081);
-            let rpc_root =
-                std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
-
-            let http_endpoint = format!(
-                "http://{}:{}{}/{}",
-                http_host, http_port, rpc_root, endpoint_name
-            );
-
-            TransportType::Http(http_endpoint)
-        }
-        RequestPlaneMode::Tcp => {
-            // For TCP mode, construct the TCP endpoint
-            let tcp_host = crate::utils::get_tcp_rpc_host_from_env();
-            let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(9090); // Default TCP RPC port
-
-            let tcp_endpoint = format!("{}:{}", tcp_host, tcp_port);
-
-            TransportType::Tcp(tcp_endpoint)
-        }
-        RequestPlaneMode::Nats => TransportType::NatsTcp(subject.to_string()),
-    }
+/// Context for building transport type - determines port and formatting differences
+enum TransportContext {
+    /// For health check targets
+    HealthCheck,
+    /// For discovery service registration
+    Discovery,
 }
 
-/// Build transport for etcd registration based on request plane mode
+/// Build transport type based on request plane mode and context
+///
+/// This unified function handles both health check and discovery transport building,
+/// with context-specific differences:
+/// - HTTP: Health check uses port 8081, discovery uses 8080
+/// - TCP: Health check omits endpoint suffix, discovery includes it for routing
+/// - NATS: Identical for both contexts
 fn build_transport_type(
     mode: RequestPlaneMode,
     endpoint_name: &str,
     subject: &str,
+    context: TransportContext,
 ) -> TransportType {
     match mode {
         RequestPlaneMode::Http => {
             let http_host = crate::utils::get_http_rpc_host_from_env();
+            let default_port = match context {
+                TransportContext::HealthCheck => 8081,
+                TransportContext::Discovery => 8080,
+            };
             let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(8080);
+                .unwrap_or(default_port);
             let rpc_root =
                 std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
 
@@ -393,15 +381,22 @@ fn build_transport_type(
             TransportType::Http(http_endpoint)
         }
         RequestPlaneMode::Tcp => {
-            // Get TCP host and port from environment
             let tcp_host = crate::utils::get_tcp_rpc_host_from_env();
             let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(9090); // Default TCP RPC port
+                .unwrap_or(9090);
 
-            // Include endpoint name in the TCP address for routing
-            let tcp_endpoint = format!("{}:{}/{}", tcp_host, tcp_port, endpoint_name);
+            let tcp_endpoint = match context {
+                TransportContext::HealthCheck => {
+                    // Health check uses simple host:port format
+                    format!("{}:{}", tcp_host, tcp_port)
+                }
+                TransportContext::Discovery => {
+                    // Discovery includes endpoint name for routing
+                    format!("{}:{}/{}", tcp_host, tcp_port, endpoint_name)
+                }
+            };
 
             TransportType::Tcp(tcp_endpoint)
         }
