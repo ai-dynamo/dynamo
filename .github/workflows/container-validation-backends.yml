@@ -68,8 +68,17 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
+          set -x
+          exec > >(tee -a linter-${{ matrix.platform.arch }}.log) 2>&1
+          
           cd deploy/cloud/operator
-          docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          if ! docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .; then
+            bash ../../.github/scripts/create_error_annotation.sh \
+              "Linter: operator (${{ matrix.platform.arch }})" \
+              "64" \
+              "linter-${{ matrix.platform.arch }}.log" \
+              "Linter check failed for operator on ${{ matrix.platform.arch }}"
+          fi
       - name: Tester
         shell: bash
         env:
@@ -96,12 +105,21 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
+          set -x
+          exec > >(tee -a build-operator-${{ matrix.platform.arch }}.log) 2>&1
+          
           cd deploy/cloud/operator
-          docker buildx build --load \
+          if ! docker buildx build --load \
               --platform linux/${{ matrix.platform.arch }} \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
               -f Dockerfile \
-              -t dynamo-operator:latest .
+              -t dynamo-operator:latest .; then
+            bash ../../.github/scripts/create_error_annotation.sh \
+              "Build Container: operator (${{ matrix.platform.arch }})" \
+              "96" \
+              "build-operator-${{ matrix.platform.arch }}.log" \
+              "Docker build failed for operator on ${{ matrix.platform.arch }}"
+          fi
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
@@ -562,48 +580,10 @@ jobs:
         # Create docker pull secret for operator image
         kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
         
-        # Function to create inline annotation and exit
-        create_annotation_and_exit() {
-          local ERROR_MSG="$1"
-          echo "=== Deployment failed, creating annotation ==="
-          
-          # Install Python and LogAI inline
-          pip install --upgrade pip logai 2>/dev/null || echo "LogAI installation skipped"
-          chmod +x .github/scripts/extract_log_errors.py 2>/dev/null || true
-          
-          # Extract errors from log
-          if [ -f "deploy-operator.log" ]; then
-            EXTRACTED_ERROR=$(python3 .github/scripts/extract_log_errors.py deploy-operator.log 2>/dev/null || echo "")
-          else
-            EXTRACTED_ERROR=""
-          fi
-          
-          # Use extracted error or fall back to manual error
-          if [ -n "$EXTRACTED_ERROR" ]; then
-            FINAL_ERROR="$EXTRACTED_ERROR"
-          else
-            FINAL_ERROR="$ERROR_MSG"
-          fi
-          
-          # Add pod context if available
-          if [ -n "$NAMESPACE" ]; then
-            POD_STATUS=$(kubectl get pods -n $NAMESPACE -o json 2>/dev/null || echo "{}")
-            POD_ERRORS=$(echo "$POD_STATUS" | jq -r '.items[] | select(.status.phase != "Running") | "Pod: \(.metadata.name), Status: \(.status.phase)"' 2>/dev/null || echo "")
-            if [ -n "$POD_ERRORS" ]; then
-              FINAL_ERROR="${FINAL_ERROR}\n\nPod Status:\n${POD_ERRORS}"
-            fi
-          fi
-          
-          # Create GitHub annotation using workflow command
-          echo "::error file=.github/workflows/container-validation-backends.yml,line=512,title=Deploy Operator Failed::${FINAL_ERROR}"
-          
-          exit 1
-        }
-        
         # Check if Helm is available
         echo "Checking Helm availability..."
         if ! command -v helm &> /dev/null; then
-          create_annotation_and_exit "Helm is not installed or not available in PATH. Helm installation may have failed during runner setup."
+          bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Helm is not installed or not available in PATH. Helm installation may have failed during runner setup." "$NAMESPACE"
         fi
         
         echo "Helm version: $(helm version --short)"
@@ -611,13 +591,13 @@ jobs:
         # Install helm dependencies
         echo "Installing Helm dependencies..."
         if ! helm repo add bitnami https://charts.bitnami.com/bitnami 2>&1; then
-          create_annotation_and_exit "Failed to add Helm bitnami repository"
+          bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Failed to add Helm bitnami repository" "$NAMESPACE"
         fi
         
         cd deploy/cloud/helm/platform/
         
         if ! helm dep build . 2>&1; then
-          create_annotation_and_exit "Failed to build Helm dependencies"
+          bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Failed to build Helm dependencies" "$NAMESPACE"
         fi
         
         # Install platform with namespace restriction for single profile testing
@@ -637,7 +617,7 @@ jobs:
           echo "=== Helm Status ==="
           helm status dynamo-platform -n ${NAMESPACE} || true
           
-          create_annotation_and_exit "Failed to install dynamo-platform Helm chart. This may be due to: pre-install hook timeout, image pull failures, or resource constraints."
+          bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Failed to install dynamo-platform Helm chart. This may be due to: pre-install hook timeout, image pull failures, or resource constraints." "$NAMESPACE"
         fi
         
         # Wait for all deployments to be ready
@@ -649,7 +629,7 @@ jobs:
           echo "=== Deployment Status ==="
           kubectl get deployments -n ${NAMESPACE} || true
           
-          create_annotation_and_exit "Deployment rollout timed out after 300 seconds"
+          bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Deployment rollout timed out after 300 seconds" "$NAMESPACE"
         fi
     
 
@@ -795,40 +775,8 @@ jobs:
         fi
         
         if [ $TEST_RESULT -ne 0 ]; then
-          # Test failed - extract errors and create annotation inline
-          echo "=== Test failed, extracting errors and creating annotation ==="
-          
-          # Install Python and LogAI inline
-          pip install --upgrade pip logai 2>/dev/null || echo "LogAI installation skipped"
-          chmod +x .github/scripts/extract_log_errors.py 2>/dev/null || true
-          
-          # Extract errors from log
-          if [ -f "test-output.log" ]; then
-            EXTRACTED_ERROR=$(python3 .github/scripts/extract_log_errors.py test-output.log 2>/dev/null || echo "")
-          else
-            EXTRACTED_ERROR=""
-          fi
-          
-          # Use extracted error or fall back to manual error
-          if [ -n "$EXTRACTED_ERROR" ]; then
-            FINAL_ERROR="$EXTRACTED_ERROR"
-          else
-            FINAL_ERROR="$ERROR_MSG"
-          fi
-          
-          # Add pod context if available
-          if [ -n "$GRAPH_NAME" ]; then
-            POD_STATUS=$(kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $NAMESPACE -o json 2>/dev/null || echo "{}")
-            POD_ERRORS=$(echo "$POD_STATUS" | jq -r '.items[] | select(.status.phase != "Running") | "Pod: \(.metadata.name), Status: \(.status.phase)"' 2>/dev/null || echo "")
-            if [ -n "$POD_ERRORS" ]; then
-              FINAL_ERROR="${FINAL_ERROR}\n\nPod Status:\n${POD_ERRORS}"
-            fi
-          fi
-          
-          # Create GitHub annotation using workflow command
-          echo "::error file=.github/workflows/container-validation-backends.yml,line=777,title=Deploy Test Failed: ${{ env.FRAMEWORK }} (${{ matrix.profile }})::${FINAL_ERROR}"
-          
-          exit 1
+          # Test failed - use common annotation script
+          bash .github/scripts/create_error_annotation.sh "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }})" "777" "test-output.log" "$ERROR_MSG" "$NAMESPACE"
         fi
     - name: Cleanup
       if: always()
