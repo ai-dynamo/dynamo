@@ -1,0 +1,98 @@
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
+ARG EPP_IMAGE="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty"
+ARG PYTHON_VERSION=3.12
+ARG ENABLE_KVBM=false
+
+FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
+
+FROM ${EPP_IMAGE} AS epp
+
+FROM nvcr.io/nvidia/base/ubuntu:noble-20250619 AS frontend
+
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        # required for AIC perf files
+        ca-certificates \
+        git \
+        git-lfs \
+        # curl for downloading files
+        curl \
+        libstdc++6 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /
+COPY --from=epp /epp /epp
+
+# Create dynamo user with group 0 for OpenShift compatibility
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -m -s /bin/bash -g 0 dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && mkdir -p /home/dynamo/.cache /opt/dynamo \
+    && chown -R dynamo: /opt/dynamo /home/dynamo/.cache \
+    && chmod -R g+w /opt/dynamo /home/dynamo/.cache
+
+# Set HOME so ModelExpress can find the cache directory
+ENV HOME=/home/dynamo
+
+# Switch to dynamo user
+USER dynamo
+ENV DYNAMO_HOME=/opt/dynamo
+
+# Copy NATS and ETCD from base stage
+COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+ENV PATH=/usr/local/bin/etcd/:$PATH
+
+# Install uv package manager
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# Create and activate virtual environment
+ARG PYTHON_VERSION
+RUN uv venv /opt/dynamo/venv --python $PYTHON_VERSION
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
+
+# Copy built artifacts and workspace from dynamo_base (dev image)
+COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: --from=dynamo_base /workspace/ /workspace/
+
+ARG ENABLE_KVBM
+RUN uv pip install \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "$ENABLE_KVBM" = "true" ]; then \
+        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
+    fi && \
+    cd /workspace/benchmarks && \
+    UV_GIT_LFS=1 uv pip install --no-cache .
+    
+# Install common and test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
+
+
+# Setup launch banner in common directory accessible to all users
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
+
+# Setup environment for all users
+USER root
+RUN chmod 755 /opt/dynamo/.launch_screen && \
+    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+USER dynamo
+
+CMD ["/bin/bash"]
+
