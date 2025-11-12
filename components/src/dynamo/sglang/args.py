@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Any, Dict, Generator, List, Optional
 
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import register_encoder
@@ -248,6 +249,19 @@ async def parse_args(args: list[str]) -> Config:
     # SGLang args
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
     ServerArgs.add_cli_args(parser)
+
+    # Handle config file if present
+    if "--config" in args:
+        # Extract boolean actions from the parser to handle them correctly in YAML
+        boolean_actions = []
+        for action in parser._actions:
+            if hasattr(action, "dest") and hasattr(action, "action"):
+                if action.action in ["store_true", "store_false"]:
+                    boolean_actions.append(action.dest)
+
+        # Merge config file arguments with CLI arguments
+        config_merger = ConfigArgumentMerger(boolean_actions=boolean_actions)
+        args = config_merger.merge_config_with_args(args)
 
     parsed_args = parser.parse_args(args)
 
