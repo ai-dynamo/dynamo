@@ -38,7 +38,7 @@ ARG SCCACHE_REGION=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF=v1.19.0
-ARG NIXL_REF=0.7.0
+ARG NIXL_REF=0.7.1
 ARG NIXL_GDRCOPY_REF=v2.5.1
 
 # Python configuration
