@@ -57,4 +57,6 @@ python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   --skip-tokenizer-init \
-  --enable-metrics
+  --enable-metrics \
+  --enable-trace \
+  --otlp-traces-endpoint localhost:4317

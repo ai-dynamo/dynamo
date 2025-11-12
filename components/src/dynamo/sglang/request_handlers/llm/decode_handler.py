@@ -112,6 +112,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         logging.debug(f"New Request ID: {context.id()}")
+        trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
@@ -174,6 +175,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
+                rid=trace_id
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):
