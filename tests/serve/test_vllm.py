@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import logging
 import os
+import urllib.request
 from dataclasses import dataclass, field
 
 import pytest
@@ -33,6 +35,8 @@ class VLLMConfig(EngineConfig):
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
+
+COCO_IMAGE_URL = "http://images.cocodataset.org/test2017/000000155781.jpg"
 
 # vLLM test configurations
 vllm_configs = {
@@ -117,9 +121,7 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                        },
+                        "image_url": {"url": COCO_IMAGE_URL},
                     },
                 ],
                 repeat_count=1,
@@ -143,54 +145,12 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                        },
+                        "image_url": {"url": COCO_IMAGE_URL},
                     },
                 ],
                 repeat_count=1,
                 expected_response=["bus"],
             )
-        ],
-    ),
-    "multimodal_agg_qwen": VLLMConfig(
-        name="multimodal_agg_qwen",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_2],
-        model="Qwen/Qwen2.5-VL-7B-Instruct",
-        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
-        delayed_start=0,
-        timeout=360,
-        request_payloads=[
-            # HTTP URL test
-            chat_payload(
-                [
-                    {"type": "text", "text": "What is in this image?"},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                        },
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["bus"],
-            ),
-            # Base64 data URL test (1x1 PNG inline, avoids network fetch)
-            chat_payload(
-                [
-                    {"type": "text", "text": "What do you see in this image?"},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
-                        },
-                    },
-                ],
-                repeat_count=1,
-                expected_response=[],  # Just validate no error
-            ),
         ],
     ),
     # TODO: Update this test case when we have video multimodal support in vllm official components
@@ -231,6 +191,60 @@ vllm_configs = {
     #     script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
     # ),
 }
+
+# Try to fetch COCO image and convert to base64, fall back to 1x1 PNG if unavailable
+coco_image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
+coco_expected_response = []
+image_data = None
+try:
+    with urllib.request.urlopen(COCO_IMAGE_URL, timeout=5.0) as response:
+        image_data = response.read()
+except Exception as e:
+    logger.warning(
+        f"Failed to fetch COCO image ({type(e).__name__}: {e}), using 1x1 fallback"
+    )
+
+if image_data is not None:
+    coco_image_b64 = base64.b64encode(image_data).decode("utf-8")
+    coco_expected_response = ["bus"]
+    logger.info(f"Successfully fetched COCO image from {COCO_IMAGE_URL}")
+
+vllm_configs["multimodal_agg_qwen"] = VLLMConfig(
+    name="multimodal_agg_qwen",
+    directory=vllm_dir,
+    script_name="agg_multimodal.sh",
+    marks=[pytest.mark.gpu_2],
+    model="Qwen/Qwen2.5-VL-7B-Instruct",
+    script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
+    delayed_start=0,
+    timeout=360,
+    request_payloads=[
+        # HTTP URL test
+        chat_payload(
+            [
+                {"type": "text", "text": "What is in this image?"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": COCO_IMAGE_URL},
+                },
+            ],
+            repeat_count=1,
+            expected_response=["bus"],
+        ),
+        # Base64 data URL test (COCO image if available, else 1x1 PNG fallback)
+        chat_payload(
+            [
+                {"type": "text", "text": "What is in this image?"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{coco_image_b64}"},
+                },
+            ],
+            repeat_count=1,
+            expected_response=coco_expected_response,
+        ),
+    ],
+)
 
 
 @pytest.fixture(params=params_with_model_mark(vllm_configs))
