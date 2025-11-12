@@ -35,10 +35,13 @@ jobs:
         with:
           driver: docker
 
-      - name: Install Rust toolchain and cbindgen
+      - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y \
+            curl bash openssl gettext git jq ca-certificates apt-transport-https lsb-release gnupg \
+            build-essential protobuf-compiler
           # Install Rust (cargo + rustc)
           curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
           # Make cargo available to later steps
