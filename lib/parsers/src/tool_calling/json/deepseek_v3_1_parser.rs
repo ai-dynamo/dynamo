@@ -8,15 +8,15 @@ use uuid::Uuid;
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
-/// Extract individual tool call blocks from the input string.
+/// Extract individual tool call blocks from the input string for DeepSeek V3.1 format.
 /// Returns a list of strings, each representing one tool call block.
 ///
-/// DeepSeek format: <｜tool▁call▁begin｜>{name}<｜tool▁sep｜>{args}<｜tool▁call▁end｜>
+/// DeepSeek V3.1 format: <｜tool▁call▁begin｜>{name}<｜tool▁sep｜>{args}<｜tool▁call▁end｜>
 ///
 /// DeepSeek uses nested tokens:
 /// - Wrapper tokens: <｜tool▁calls▁begin｜> ... <｜tool▁calls▁end｜> (wraps all tool calls)
 /// - Individual tokens: <｜tool▁call▁begin｜> ... <｜tool▁call▁end｜> (individual call)
-fn extract_tool_call_blocks(
+fn extract_tool_call_blocks_v3_1(
     input: &str,
     start_tokens: &[String],
     end_tokens: &[String],
@@ -74,7 +74,10 @@ fn extract_tool_call_blocks(
 /// Parse a single tool call block that contains function name and arguments separated by a separator token.
 ///
 /// Format: {function_name}<｜tool▁sep｜>{json_arguments}
-fn parse_single_tool_call(block: &str, separator_tokens: &[String]) -> Option<(String, Value)> {
+fn parse_single_tool_call_v3_1(
+    block: &str,
+    separator_tokens: &[String],
+) -> Option<(String, Value)> {
     // Try each separator token
     for sep_token in separator_tokens.iter() {
         if sep_token.is_empty() {
@@ -186,7 +189,8 @@ pub fn parse_tool_calls_deepseek_v3_1(
     };
 
     // Extract individual tool call blocks
-    let blocks = extract_tool_call_blocks(trimmed, &tool_call_start_tokens, &tool_call_end_tokens);
+    let blocks =
+        extract_tool_call_blocks_v3_1(trimmed, &tool_call_start_tokens, &tool_call_end_tokens);
 
     if blocks.is_empty() {
         // Found start token but no valid blocks
@@ -196,7 +200,9 @@ pub fn parse_tool_calls_deepseek_v3_1(
     // Parse each block to extract function name and arguments
     let mut tool_calls: Vec<ToolCallResponse> = Vec::new();
     for block in blocks {
-        if let Some((function_name, arguments)) = parse_single_tool_call(&block, separator_tokens) {
+        if let Some((function_name, arguments)) =
+            parse_single_tool_call_v3_1(&block, separator_tokens)
+        {
             tool_calls.push(ToolCallResponse {
                 id: format!("call-{}", Uuid::new_v4()),
                 tp: ToolCallType::Function,
