@@ -228,33 +228,19 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8)
 
 
 def get_runtime(store_backend="etcd"):
-    """Get or create a DistributedRuntime instance.
-
-    This handles the case where a worker is already initialized (common in CI)
-    by using the detached() method to reuse the existing runtime.
+    """Create a DistributedRuntime instance for testing.
 
     Args:
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
     """
     try:
-        # Try to use existing runtime (common in CI where tests run in same process)
-        _runtime_instance = DistributedRuntime.detached()
-        logger.info("Using detached runtime (worker already initialized)")
-    except Exception as e:
-        # If no existing runtime, create a new one
-        logger.info(
-            f"Creating new runtime with {store_backend} backend (detached failed: {e})"
-        )
-        try:
-            # Try to get running loop (works in async context)
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop, create a new one (sync context)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        _runtime_instance = DistributedRuntime(loop, store_backend)
-
-    return _runtime_instance
+        # Try to get running loop (works in async context)
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop, create a new one (sync context)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return DistributedRuntime(loop, store_backend)
 
 
 async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
