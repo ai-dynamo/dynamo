@@ -9,6 +9,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import sglang as sgl
 from opentelemetry import propagate, trace
 from sglang.srt.tracing import trace as sglang_trace
+from sglang.srt.tracing.trace import SglangTracePropagateContext
 
 from dynamo._core import Client, Component, Context
 from dynamo.sglang.args import Config, DisaggregationMode
@@ -98,16 +99,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         return {k: v for k, v in param_mapping.items() if v is not None}
 
-    def _propagate_trace_context_to_sglang(self, rid: str, context: Context):
-        """Propagate Dynamo's trace context to SGLang.
+    def _propagate_trace_context_to_sglang(self, rid: str, context: Context, bootstrap_room: int = 0):
+        """Propagate Dynamo's trace context to SGLang via remote_trace_contexts.
 
         Lightweight: Returns immediately if tracing is disabled or no trace context exists.
 
         Args:
             rid: Request ID to associate with the trace context.
             context: Dynamo Context object containing trace information from Rust.
+            bootstrap_room: Bootstrap room ID (0 for aggregated mode, actual room for disaggregated).
         """
-        logging.info(f"[TRACE PROPAGATION] Called for rid={rid}, sglang_tracing_enabled={sglang_trace.tracing_enabled}")
+        logging.info(f"[TRACE PROPAGATION] Called for rid={rid}, bootstrap_room={bootstrap_room}, sglang_tracing_enabled={sglang_trace.tracing_enabled}")
 
         # CRITICAL PATH OPTIMIZATION: Early exit if tracing is disabled
         if not sglang_trace.tracing_enabled or not rid:
@@ -129,27 +131,33 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         traceparent = f"00-{trace_id}-{span_id}-01"
         logging.info(f"[TRACE PROPAGATION] Built traceparent: {traceparent}")
 
-        # Build trace context in SGLang's expected format
+        # Build trace context in SGLang's expected format (for remote propagation)
         carrier = {"traceparent": traceparent}
 
         # Extract OTEL context from the carrier
         otel_context = propagate.extract(carrier)
 
-        # Get the span context from the extracted context
-        span_context = trace.get_current_span(otel_context).get_span_context()
-
+        # Build the propagate context for this bootstrap room
         trace_context = {
-            "root_span": carrier,
-            "prev_span": {
-                "span_id": int(span_id, 16),  # Convert hex to int
-                "trace_id": int(trace_id, 16),
+            str(bootstrap_room): {
+                "root_span": carrier,
+                "prev_span": {
+                    "span_id": int(span_id, 16),  # Convert hex to int
+                    "trace_id": int(trace_id, 16),
+                }
             }
         }
 
-        logging.info(f"[TRACE PROPAGATION] Calling trace_set_proc_propagate_context with rid={rid}")
-        # Propagate to SGLang
-        sglang_trace.trace_set_proc_propagate_context(rid, trace_context)
-        logging.info(f"[TRACE PROPAGATION] Successfully propagated trace context for rid={rid}")
+        # Encode as base64 (like HTTP headers do)
+        import json
+        import base64
+        json_str = json.dumps(trace_context, ensure_ascii=False)
+        base64_context = base64.b64encode(json_str.encode("utf-8")).decode("utf-8")
+
+        logging.info(f"[TRACE PROPAGATION] Calling trace_set_remote_propagate_context with bootstrap_room={bootstrap_room}")
+        # Propagate to SGLang's remote_trace_contexts (like HTTP headers)
+        sglang_trace.trace_set_remote_propagate_context(base64_context)
+        logging.info(f"[TRACE PROPAGATION] Successfully propagated trace context for rid={rid}, bootstrap_room={bootstrap_room}")
 
     async def generate(
         self, request: Dict[str, Any], context: Context
@@ -210,8 +218,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if not bootstrap_info:
                 raise RuntimeError("No bootstrap info received from prefill worker")
 
-            # Propagate trace context to SGLang
-            self._propagate_trace_context_to_sglang(trace_id, context)
+            # Propagate trace context to SGLang with bootstrap_room
+            bootstrap_room = bootstrap_info["bootstrap_room"]
+            self._propagate_trace_context_to_sglang(trace_id, context, bootstrap_room)
 
             decode = await self.engine.async_generate(
                 **input_param,
