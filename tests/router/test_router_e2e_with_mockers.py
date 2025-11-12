@@ -248,6 +248,49 @@ def get_runtime(store_backend="etcd"):
     return DistributedRuntime(loop, store_backend)
 
 
+async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):
+    """Check NATS consumers for the KV events stream.
+
+    Args:
+        namespace: The namespace to check consumers for
+        expected_count: Optional expected number of consumers. If provided, logs an error if count doesn't match.
+
+    Returns:
+        List of consumer names
+    """
+    component_subject = f"namespace.{namespace}.component.mocker"
+    slugified = component_subject.lower().replace(".", "-").replace("_", "-")
+    stream_name = f"{slugified}-kv-events"
+    logger.info(f"Checking consumers for stream: {stream_name}")
+
+    nc = await nats.connect("nats://localhost:4222")
+    try:
+        js = nc.jetstream()
+        consumer_infos = await js.consumers_info(stream_name)
+        consumer_names = [info.name for info in consumer_infos]
+        logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
+
+        # Log detailed consumer info
+        for info in consumer_infos:
+            logger.info(
+                f"Consumer {info.name}: "
+                f"num_pending={info.num_pending}, "
+                f"num_ack_pending={info.num_ack_pending}, "
+                f"ack_floor={info.ack_floor}, "
+                f"delivered={info.delivered}"
+            )
+
+        if expected_count is not None:
+            assert (
+                len(consumer_names) == expected_count
+            ), f"Expected {expected_count} durable consumers, found {len(consumer_names)}: {consumer_names}"
+            logger.info(f"✓ Verified {expected_count} durable consumers exist")
+
+        return consumer_names
+    finally:
+        await nc.close()
+
+
 async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
     """Send multiple requests concurrently, alternating between URLs if multiple provided"""
 
@@ -587,72 +630,34 @@ def test_mocker_two_kv_router(
         async def verify_consumer_lifecycle():
             logger.info("Verifying durable consumers lifecycle")
 
-            # Construct the stream name
-            component_subject = f"namespace.{mockers.namespace}.component.mocker"
-            slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-            stream_name = f"{slugified}-kv-events"
+            # Check initial consumer count - should have 2 (one for each router process)
+            await check_nats_consumers(mockers.namespace, expected_count=2)
 
-            logger.info(f"Checking consumers for stream: {stream_name}")
+            # Kill the first router process
+            logger.info(f"Killing first router on port {router_ports[0]}")
+            kv_routers[0].__exit__(None, None, None)
 
-            # Connect to NATS and list consumers
-            nc = await nats.connect("nats://localhost:4222")
-            try:
-                js = nc.jetstream()
+            # Wait for cleanup to happen (consumer deletion is triggered by etcd watch)
+            await asyncio.sleep(1)
 
-                # List consumers - should have 2 (one for each router process)
-                consumer_infos = await js.consumers_info(stream_name)
-                consumer_names = [info.name for info in consumer_infos]
-                logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
+            # Verify only 1 consumer remains
+            await check_nats_consumers(mockers.namespace, expected_count=1)
+            logger.info(
+                "✓ Verified 1 durable consumer remains after killing first router"
+            )
 
-                assert (
-                    len(consumer_names) == 2
-                ), f"Expected 2 durable consumers (one per router), found {len(consumer_names)}: {consumer_names}"
-                logger.info("✓ Verified 2 durable consumers exist (one per router)")
+            # Kill the second router process
+            logger.info(f"Killing second router on port {router_ports[1]}")
+            kv_routers[1].__exit__(None, None, None)
 
-                # Kill the first router process
-                logger.info(f"Killing first router on port {router_ports[0]}")
-                kv_routers[0].__exit__(None, None, None)
+            # Wait for cleanup to happen
+            await asyncio.sleep(1)
 
-                # Wait for cleanup to happen (consumer deletion is triggered by etcd watch)
-                await asyncio.sleep(1)
-
-                # Verify only 1 consumer remains
-                consumer_infos = await js.consumers_info(stream_name)
-                consumer_names = [info.name for info in consumer_infos]
-                logger.info(
-                    f"After killing router1, found {len(consumer_names)} consumers: {consumer_names}"
-                )
-
-                assert (
-                    len(consumer_names) == 1
-                ), f"Expected 1 durable consumer after killing router1, found {len(consumer_names)}: {consumer_names}"
-                logger.info(
-                    "✓ Verified 1 durable consumer remains after killing first router"
-                )
-
-                # Kill the second router process
-                logger.info(f"Killing second router on port {router_ports[1]}")
-                kv_routers[1].__exit__(None, None, None)
-
-                # Wait for cleanup to happen
-                await asyncio.sleep(1)
-
-                # Verify no consumers remain
-                consumer_infos = await js.consumers_info(stream_name)
-                consumer_names = [info.name for info in consumer_infos]
-                logger.info(
-                    f"After killing router2, found {len(consumer_names)} consumers: {consumer_names}"
-                )
-
-                assert (
-                    len(consumer_names) == 0
-                ), f"Expected 0 durable consumers after killing both routers, found {len(consumer_names)}: {consumer_names}"
-                logger.info(
-                    "✓ Verified 0 durable consumers remain after killing both routers"
-                )
-
-            finally:
-                await nc.close()
+            # Verify no consumers remain
+            await check_nats_consumers(mockers.namespace, expected_count=0)
+            logger.info(
+                "✓ Verified 0 durable consumers remain after killing both routers"
+            )
 
         # Run consumer lifecycle verification
         asyncio.run(verify_consumer_lifecycle())
@@ -1007,12 +1012,20 @@ def test_indexers_sync(
 
         # Use async to manage the test flow
         async def test_sync():
-            # Get runtime and create endpoint
-            runtime = get_runtime(store_backend)
-            # Use the namespace from the mockers
-            namespace = runtime.namespace(mockers.namespace)
-            component = namespace.component("mocker")
-            endpoint = component.endpoint("generate")
+            # Create SEPARATE runtimes for each router to ensure independence
+            # This is especially important for file storage backend where connection_id
+            # would otherwise be shared between routers
+            runtime1 = get_runtime(store_backend)
+            runtime2 = get_runtime(store_backend)
+
+            # Use the namespace from the mockers for both runtimes
+            namespace1 = runtime1.namespace(mockers.namespace)
+            component1 = namespace1.component("mocker")
+            endpoint1 = component1.endpoint("generate")
+
+            namespace2 = runtime2.namespace(mockers.namespace)
+            component2 = namespace2.component("mocker")
+            endpoint2 = component2.endpoint("generate")
 
             # Create KvRouterConfig with lower snapshot threshold for testing
             kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
@@ -1056,13 +1069,13 @@ def test_indexers_sync(
             # Launch first router
             logger.info("Creating first KV router")
             kv_push_router1 = KvPushRouter(
-                endpoint=endpoint,
+                endpoint=endpoint1,
                 block_size=BLOCK_SIZE,
                 kv_router_config=kv_router_config,
             )
 
             # Wait for mockers to be ready
-            await wait_for_mockers_ready(endpoint, kv_push_router1)
+            await wait_for_mockers_ready(endpoint1, kv_push_router1)
 
             # Send 25 requests to first router
             logger.info("Sending 25 requests to first router")
@@ -1080,7 +1093,7 @@ def test_indexers_sync(
             # Launch second router - will automatically sync with the first router's state
             logger.info("Creating second KV router")
             kv_push_router2 = KvPushRouter(
-                endpoint=endpoint,
+                endpoint=endpoint2,
                 block_size=BLOCK_SIZE,
                 kv_router_config=kv_router_config,
             )
@@ -1096,6 +1109,9 @@ def test_indexers_sync(
             # Wait another 1 second for internal synchronization
             logger.info("Waiting for final synchronization")
             await asyncio.sleep(1)
+
+            # Check NATS consumers to verify both routers have separate consumers
+            await check_nats_consumers(mockers.namespace, expected_count=2)
 
             # Verify NATS object store bucket was created with snapshot
             # Mirror the Rust bucket naming logic from subscriber.rs:
