@@ -21,62 +21,25 @@ use crate::{
     transports::etcd::Client as EtcdClient,
 };
 
-/// Each state will be have a nonce associated with it
-/// The state will be emitted in a watch channel, so we can observe the
-/// critical state transitions.
-enum MapState {
-    /// The map is empty; value = nonce
-    Empty(u64),
-
-    /// The map is not-empty; values are (nonce, count)
-    NonEmpty(u64, u64),
-
-    /// The watcher has finished, no more events will be emitted
-    Finished,
-}
-
-enum EndpointEvent {
-    Put(String, u64),
-    Delete(String),
-}
-
 #[derive(Clone, Debug)]
 pub struct Client {
     // This is me
     pub endpoint: Endpoint,
-    // These are the remotes I know about from watching etcd
-    pub instance_source: Arc<InstanceSource>,
+    // These are the remotes I know about from watching key-value store
+    pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
     // These are the instance source ids less those reported as down from sending rpc
     instance_avail: Arc<ArcSwap<Vec<u64>>>,
     // These are the instance source ids less those reported as busy (above threshold)
     instance_free: Arc<ArcSwap<Vec<u64>>>,
 }
 
-#[derive(Clone, Debug)]
-pub enum InstanceSource {
-    Static,
-    Dynamic(tokio::sync::watch::Receiver<Vec<Instance>>),
-}
-
 impl Client {
-    // Client will only talk to a single static endpoint
-    pub(crate) async fn new_static(endpoint: Endpoint) -> Result<Self> {
-        Ok(Client {
-            endpoint,
-            instance_source: Arc::new(InstanceSource::Static),
-            instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
-            instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
-        })
-    }
-
-    // Client with auto-discover instances using etcd
-    pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
+    // Client with auto-discover instances using key-value store
+    pub(crate) async fn new(endpoint: Endpoint) -> Result<Self> {
         tracing::debug!(
             "Client::new_dynamic: Creating dynamic client for endpoint: {}",
             endpoint.path()
         );
-        const INSTANCE_REFRESH_PERIOD: Duration = Duration::from_secs(1);
-
         let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
         tracing::debug!(
             "Client::new_dynamic: Got instance source for endpoint: {}",
@@ -110,12 +73,9 @@ impl Client {
         self.endpoint.etcd_root()
     }
 
-    /// Instances available from watching etcd
+    /// Instances available from watching key-value store
     pub fn instances(&self) -> Vec<Instance> {
-        match self.instance_source.as_ref() {
-            InstanceSource::Static => vec![],
-            InstanceSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
-        }
+        self.instance_source.borrow().clone()
     }
 
     pub fn instance_ids(&self) -> Vec<u64> {
@@ -136,50 +96,39 @@ impl Client {
             "wait_for_instances: Starting wait for endpoint: {}",
             self.endpoint.path()
         );
-        let mut instances: Vec<Instance> = vec![];
-        if let InstanceSource::Dynamic(mut rx) = self.instance_source.as_ref().clone() {
-            // wait for there to be 1 or more endpoints
-            let mut iteration = 0;
-            loop {
-                instances = rx.borrow_and_update().to_vec();
+        let mut rx = self.instance_source.as_ref().clone();
+        // wait for there to be 1 or more endpoints
+        let mut iteration = 0;
+        let mut instances: Vec<Instance>;
+        loop {
+            instances = rx.borrow_and_update().to_vec();
+            tracing::debug!(
+                "wait_for_instances: iteration={}, current_instance_count={}, endpoint={}",
+                iteration,
+                instances.len(),
+                self.endpoint.path()
+            );
+            if instances.is_empty() {
                 tracing::debug!(
-                    "wait_for_instances: iteration={}, current_instance_count={}, endpoint={}",
-                    iteration,
+                    "wait_for_instances: No instances yet, waiting for change notification for endpoint: {}",
+                    self.endpoint.path()
+                );
+                rx.changed().await?;
+                tracing::debug!(
+                    "wait_for_instances: Change notification received for endpoint: {}",
+                    self.endpoint.path()
+                );
+            } else {
+                tracing::info!(
+                    "wait_for_instances: Found {} instance(s) for endpoint: {}",
                     instances.len(),
                     self.endpoint.path()
                 );
-                if instances.is_empty() {
-                    tracing::debug!(
-                        "wait_for_instances: No instances yet, waiting for change notification for endpoint: {}",
-                        self.endpoint.path()
-                    );
-                    rx.changed().await?;
-                    tracing::debug!(
-                        "wait_for_instances: Change notification received for endpoint: {}",
-                        self.endpoint.path()
-                    );
-                } else {
-                    tracing::info!(
-                        "wait_for_instances: Found {} instance(s) for endpoint: {}",
-                        instances.len(),
-                        self.endpoint.path()
-                    );
-                    break;
-                }
-                iteration += 1;
+                break;
             }
-        } else {
-            tracing::debug!(
-                "wait_for_instances: Static instance source, no dynamic discovery for endpoint: {}",
-                self.endpoint.path()
-            );
+            iteration += 1;
         }
         Ok(instances)
-    }
-
-    /// Is this component know at startup and not discovered via etcd?
-    pub fn is_static(&self) -> bool {
-        matches!(self.instance_source.as_ref(), InstanceSource::Static)
     }
 
     /// Mark an instance as down/unavailable
@@ -204,7 +153,7 @@ impl Client {
         self.instance_free.store(Arc::new(free_ids));
     }
 
-    /// Monitor the ETCD instance source and update instance_avail.
+    /// Monitor the key-value instance source and update instance_avail.
     fn monitor_instance_source(&self) {
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
@@ -214,15 +163,7 @@ impl Client {
             endpoint_path
         );
         tokio::task::spawn(async move {
-            let mut rx = match client.instance_source.as_ref() {
-                InstanceSource::Static => {
-                    tracing::error!(
-                        "monitor_instance_source: Static instance source is not watchable"
-                    );
-                    return;
-                }
-                InstanceSource::Dynamic(rx) => rx.clone(),
-            };
+            let mut rx = client.instance_source.as_ref().clone();
             let mut iteration = 0;
             while !cancel_token.is_cancelled() {
                 let instance_ids: Vec<u64> = rx
@@ -267,7 +208,7 @@ impl Client {
 
     async fn get_or_create_dynamic_instance_source(
         endpoint: &Endpoint,
-    ) -> Result<Arc<InstanceSource>> {
+    ) -> Result<Arc<tokio::sync::watch::Receiver<Vec<Instance>>>> {
         let drt = endpoint.drt();
         let instance_sources = drt.instance_sources();
         let mut instance_sources = instance_sources.lock().await;
@@ -401,7 +342,7 @@ impl Client {
             let _ = watch_tx.send(vec![]);
         });
 
-        let instance_source = Arc::new(InstanceSource::Dynamic(watch_rx));
+        let instance_source = Arc::new(watch_rx);
         instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
         tracing::debug!(
             "get_or_create_dynamic_instance_source: Successfully created and cached instance source for endpoint: {}",

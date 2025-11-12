@@ -80,7 +80,7 @@ def create_profiler_parser() -> argparse.Namespace:
             decode_interpolation_granularity: Int (how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length, default: 6)
             use_ai_configurator: Boolean (use ai-configurator to estimate benchmarking results instead of running actual deployment, default: False)
             aic_system: String (target system for use with aiconfigurator, default: None)
-            aic_model_name: String (aiconfigurator name of the target model, default: None)
+            aic_hf_id: String (aiconfigurator huggingface id of the target model, default: None)
             aic_backend: String (aiconfigurator backend of the target model, if not provided, will use args.backend, default: "")
             aic_backend_version: String (specify backend version when using aiconfigurator to estimate perf, default: None)
             dry_run: Boolean (dry run the profile job, default: False)
@@ -260,10 +260,10 @@ def create_profiler_parser() -> argparse.Namespace:
         help="Target system for use with aiconfigurator (e.g. h100_sxm, h200_sxm)",
     )
     parser.add_argument(
-        "--aic-model-name",
+        "--aic-hf-id",
         type=str,
-        default=config.get("sweep", {}).get("aic_model_name"),
-        help="aiconfigurator name of the target model (e.g. QWEN3_32B, DEEPSEEK_V3)",
+        default=config.get("sweep", {}).get("aic_hf_id"),
+        help="aiconfigurator name of the target model (e.g. Qwen/Qwen3-32B, meta-llama/Llama-3.1-405B)",
     )
     parser.add_argument(
         "--aic-backend",
