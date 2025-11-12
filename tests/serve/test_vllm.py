@@ -4,10 +4,10 @@
 import base64
 import logging
 import os
-import urllib.request
 from dataclasses import dataclass, field
 
 import pytest
+import requests
 
 from tests.serve.common import (
     WORKSPACE_DIR,
@@ -194,17 +194,21 @@ vllm_configs = {
 
 # Try to fetch COCO image and convert to base64, fall back to 1x1 PNG if unavailable
 coco_image_b64 = ""
+coco_image_mime = ""
 coco_expected_response = []
 
 try:
-    image_data = urllib.request.urlopen(COCO_IMAGE_URL, timeout=5.0).read()
-    coco_image_b64 = base64.b64encode(image_data).decode("utf-8")
+    coco_image_b64 = base64.b64encode(
+        requests.get(COCO_IMAGE_URL, timeout=5.0).content
+    ).decode()
+    coco_image_mime = "image/jpeg"
     coco_expected_response = ["bus"]
     logger.info(f"Successfully fetched image from {COCO_IMAGE_URL}")
 except Exception as e:
     coco_image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
+    coco_image_mime = "image/png"
     logger.warning(
-        f"Failed to fetch COCO image ({type(e).__name__}: {e}), using 1x1 image fallback"
+        f"Failed to fetch COCO image ({type(e).__name__}: {e}), using 1x1 image as fallback"
     )
 
 vllm_configs["multimodal_agg_qwen"] = VLLMConfig(
@@ -235,7 +239,9 @@ vllm_configs["multimodal_agg_qwen"] = VLLMConfig(
                 {"type": "text", "text": "What is in this image?"},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{coco_image_b64}"},
+                    "image_url": {
+                        "url": f"data:{coco_image_mime};base64,{coco_image_b64}"
+                    },
                 },
             ],
             repeat_count=1,
