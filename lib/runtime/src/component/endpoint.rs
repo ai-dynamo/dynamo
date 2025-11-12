@@ -397,6 +397,6 @@ fn build_transport_type(
 
             TransportType::Tcp(tcp_endpoint)
         }
-        RequestPlaneMode::Nats => TransportType::NatsTcp(subject.to_string()),
+        RequestPlaneMode::Nats => TransportType::Nats(subject.to_string()),
     }
 }

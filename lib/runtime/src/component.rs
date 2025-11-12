@@ -78,7 +78,7 @@ pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
-    NatsTcp(String),
+    Nats(String),
     Http(String),
     Tcp(String),
 }
