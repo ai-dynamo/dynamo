@@ -145,7 +145,14 @@ def run_build_script(build_script_path, args, expect_failure=False):
         tuple: (exit_code, stdout, stderr)
     """
     cmd = ["bash", build_script_path] + args
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+    # Add placeholder environment variables required by build.sh
+    env = os.environ.copy()
+    env["commit_id"] = "commit_id"
+    env["current_tag"] = "current_tag"
+    env["latest_tag"] = "latest_tag"
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
 
     if not expect_failure and result.returncode != 0:
         print(f"Command failed: {' '.join(cmd)}")
