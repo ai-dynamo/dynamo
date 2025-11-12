@@ -108,8 +108,8 @@ export IMAGE="<dynamo_trtllm_image>"
 # For example, assuming your cluster had a `/lustre` directory on the host, you
 # could add that as a mount like so:
 #
-# export MOUNTS="${PWD}/../:/mnt,/lustre:/lustre"
-export MOUNTS="${PWD}/../:/mnt"
+# export MOUNTS="${PWD}/../../../../:/mnt,/lustre:/lustre"
+export MOUNTS="${PWD}/../../../../:/mnt"
 
 # NOTE: In general, Deepseek R1 is very large, so it is recommended to
 # pre-download the model weights and save them in some shared location,
