@@ -4,7 +4,6 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
-export DYN_LOG=debug
 # Parse command-line arguments for request plane mode
 REQUEST_PLANE="tcp"  # Default to TCP
 
