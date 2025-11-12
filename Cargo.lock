@@ -2384,6 +2384,7 @@ dependencies = [
  "chrono",
  "console-subscriber",
  "criterion 0.5.1",
+ "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
  "educe",
