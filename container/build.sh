@@ -491,6 +491,10 @@ if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
 fi
 
+# Set the commit sha in the container so we can inspect what build this relates to
+DYNAMO_COMMIT_SHA=$(git rev-parse HEAD)
+BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
+
 # Special handling for vLLM on ARM64 - set required defaults if not already specified by user
 if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     # Set base image tag to CUDA 12.9 if using the default value (user didn't override)
