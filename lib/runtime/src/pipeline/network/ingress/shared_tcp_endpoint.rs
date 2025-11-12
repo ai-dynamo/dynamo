@@ -10,8 +10,8 @@ use crate::SystemHealth;
 use crate::pipeline::network::PushWorkHandler;
 use anyhow::Result;
 use bytes::Bytes;
+use dashmap::DashMap;
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,7 +23,7 @@ use tracing::Instrument;
 
 /// Shared TCP server that handles multiple endpoints on a single port
 pub struct SharedTcpServer {
-    handlers: Arc<tokio::sync::RwLock<HashMap<String, Arc<EndpointHandler>>>>,
+    handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
     bind_addr: SocketAddr,
     cancellation_token: CancellationToken,
 }
@@ -42,7 +42,7 @@ struct EndpointHandler {
 impl SharedTcpServer {
     pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
         Arc::new(Self {
-            handlers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            handlers: Arc::new(DashMap::new()),
             bind_addr,
             cancellation_token,
         })
@@ -69,7 +69,7 @@ impl SharedTcpServer {
             notify: Arc::new(Notify::new()),
         });
 
-        self.handlers.write().await.insert(endpoint_path, handler);
+        self.handlers.insert(endpoint_path, handler);
 
         tracing::info!(
             "Registered endpoint '{}' with shared TCP server on {}",
@@ -81,7 +81,7 @@ impl SharedTcpServer {
     }
 
     pub async fn unregister_endpoint(&self, endpoint_path: &str, endpoint_name: &str) {
-        self.handlers.write().await.remove(endpoint_path);
+        self.handlers.remove(endpoint_path);
         tracing::info!(
             "Unregistered endpoint '{}' from shared TCP server",
             endpoint_name
@@ -123,7 +123,7 @@ impl SharedTcpServer {
 
     async fn handle_connection(
         mut stream: TcpStream,
-        handlers: Arc<tokio::sync::RwLock<HashMap<String, Arc<EndpointHandler>>>>,
+        handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
     ) -> Result<()> {
         loop {
             // Read endpoint path length
@@ -159,11 +159,8 @@ impl SharedTcpServer {
             let mut payload = vec![0u8; len];
             stream.read_exact(&mut payload).await?;
 
-            // Look up handler
-            let handler = {
-                let handlers_read = handlers.read().await;
-                handlers_read.get(&endpoint_path).cloned()
-            };
+            // Look up handler (lock-free read with DashMap)
+            let handler = handlers.get(&endpoint_path).map(|h| h.clone());
 
             let handler = match handler {
                 Some(h) => h,

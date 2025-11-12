@@ -16,12 +16,12 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
+use dashmap::DashMap;
 use derive_builder::Builder;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as Http2Builder;
 use hyper_util::service::TowerToHyperService;
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Notify;
@@ -38,7 +38,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Shared HTTP server that handles multiple endpoints on a single port
 pub struct SharedHttpServer {
-    handlers: Arc<tokio::sync::RwLock<HashMap<String, Arc<EndpointHandler>>>>,
+    handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
     bind_addr: SocketAddr,
     cancellation_token: CancellationToken,
 }
@@ -58,7 +58,7 @@ struct EndpointHandler {
 impl SharedHttpServer {
     pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
         Arc::new(Self {
-            handlers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            handlers: Arc::new(DashMap::new()),
             bind_addr,
             cancellation_token,
         })
@@ -92,14 +92,14 @@ impl SharedHttpServer {
             .set_endpoint_health_status(&endpoint_name, HealthStatus::Ready);
 
         let subject_clone = subject.clone();
-        self.handlers.write().await.insert(subject, handler);
+        self.handlers.insert(subject, handler);
         tracing::debug!("Registered endpoint handler for subject: {}", subject_clone);
         Ok(())
     }
 
     /// Unregister an endpoint handler
     pub async fn unregister_endpoint(&self, subject: &str, endpoint_name: &str) {
-        if let Some(handler) = self.handlers.write().await.remove(subject) {
+        if let Some((_, handler)) = self.handlers.remove(subject) {
             handler
                 .system_health
                 .lock()
@@ -173,9 +173,8 @@ impl SharedHttpServer {
 
     /// Wait for all inflight requests across all endpoints
     pub async fn wait_for_inflight(&self) {
-        let handlers = self.handlers.read().await;
-        for handler in handlers.values() {
-            while handler.inflight.load(Ordering::SeqCst) > 0 {
+        for handler in self.handlers.iter() {
+            while handler.value().inflight.load(Ordering::SeqCst) > 0 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         }
@@ -189,16 +188,14 @@ async fn handle_shared_request(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // Look up the handler for this endpoint
-    let handlers = server.handlers.read().await;
-    let handler = match handlers.get(&endpoint_path) {
+    // Look up the handler for this endpoint (lock-free read with DashMap)
+    let handler = match server.handlers.get(&endpoint_path) {
         Some(h) => h.clone(),
         None => {
             tracing::warn!("No handler found for endpoint: {}", endpoint_path);
             return (StatusCode::NOT_FOUND, "Endpoint not found");
         }
     };
-    drop(handlers);
 
     // Increment inflight counter
     handler.inflight.fetch_add(1, Ordering::SeqCst);
