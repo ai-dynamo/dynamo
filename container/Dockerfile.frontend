@@ -5,7 +5,6 @@
 ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
 ARG EPP_IMAGE="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty"
 ARG PYTHON_VERSION=3.12
-ARG ENABLE_KVBM=false
 
 FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 
@@ -13,14 +12,11 @@ FROM ${EPP_IMAGE} AS epp
 
 FROM nvcr.io/nvidia/base/ubuntu:noble-20250619 AS frontend
 
+ARG PYTHON_VERSION
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        # required for AIC perf files
+        # required for EPP
         ca-certificates \
-        git \
-        git-lfs \
-        # curl for downloading files
-        curl \
         libstdc++6 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -49,39 +45,8 @@ COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
-# Install uv package manager
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
-# Create and activate virtual environment
-ARG PYTHON_VERSION
-RUN uv venv /opt/dynamo/venv --python $PYTHON_VERSION
-
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
-
-ARG ENABLE_KVBM
-# Copy built artifacts and workspace from dynamo_base (dev image)
-COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
-COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-RUN uv pip install \
-    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
-    fi && \
-    cd /opt/dynamo/benchmarks && \
-    UV_GIT_LFS=1 uv pip install --no-cache .
-
-# Install common and test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
-        --no-cache \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
-
-# Copy tests, benchmarks, deploy and components for CI with correct ownership
+COPY --chown=dynamo: container/launch_message.txt /opt/dynamo/.launch_screen
+# Copy tests, benchmarks, deploy and components with correct ownership
 COPY --chown=dynamo: tests /workspace/tests
 COPY --chown=dynamo: examples /workspace/examples
 COPY --chown=dynamo: benchmarks /workspace/benchmarks
@@ -91,9 +56,14 @@ COPY --chown=dynamo: recipes/ /workspace/recipes/
 # Copy attribution files with correct ownership
 COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 
-# Setup launch banner in common directory accessible to all users
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
-    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="/opt/dynamo/venv/bin:$PATH"
+# Copy virtual environment directly from dynamo_base (dev image)
+# This includes all installed packages: dynamo, nixl, requirements.txt, requirements.test.txt
+# Copy uv to system /bin
+COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+RUN uv python install $PYTHON_VERSION
+COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/venv/ /opt/dynamo/venv/
 
 # Setup environment for all users
 USER root
