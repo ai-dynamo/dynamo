@@ -24,14 +24,20 @@ use tokio_util::sync::CancellationToken;
 /// Network configuration loaded from environment variables
 #[derive(Clone)]
 struct NetworkConfig {
-    // HTTP configuration
+    // HTTP server configuration
     http_host: String,
     http_port: u16,
     http_rpc_root: String,
 
-    // TCP configuration
+    // TCP server configuration
     tcp_host: String,
     tcp_port: u16,
+
+    // HTTP client configuration
+    http_client_config: super::egress::http_router::Http2Config,
+
+    // TCP client configuration
+    tcp_client_config: super::egress::tcp_client::TcpRequestConfig,
 
     // NATS configuration (provided externally, not from env)
     nats_client: Option<async_nats::Client>,
@@ -45,7 +51,7 @@ impl NetworkConfig {
         nats_client: Option<async_nats::Client>,
     ) -> Self {
         Self {
-            // HTTP configuration
+            // HTTP server configuration
             http_host: std::env::var("DYN_HTTP_RPC_HOST")
                 .unwrap_or_else(|_| crate::utils::get_http_rpc_host_from_env()),
             http_port: std::env::var("DYN_HTTP_RPC_PORT")
@@ -55,13 +61,19 @@ impl NetworkConfig {
             http_rpc_root: std::env::var("DYN_HTTP_RPC_ROOT_PATH")
                 .unwrap_or_else(|_| "/v1/rpc".to_string()),
 
-            // TCP configuration
+            // TCP server configuration
             tcp_host: std::env::var("DYN_TCP_RPC_HOST")
                 .unwrap_or_else(|_| crate::utils::get_tcp_rpc_host_from_env()),
             tcp_port: std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(9999),
+
+            // HTTP client configuration (reads DYN_HTTP2_* env vars)
+            http_client_config: super::egress::http_router::Http2Config::from_env(),
+
+            // TCP client configuration (reads DYN_TCP_* env vars)
+            tcp_client_config: super::egress::tcp_client::TcpRequestConfig::from_env(),
 
             // NATS (external)
             nats_client,
@@ -287,19 +299,19 @@ impl NetworkManager {
     fn create_http_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
         use super::egress::http_router::HttpRequestClient;
 
-        // HttpRequestClient reads its own env vars internally
-        // TODO: Refactor HttpRequestClient to accept config from NetworkManager
-        tracing::debug!("Creating HTTP request plane client");
-        Ok(Arc::new(HttpRequestClient::from_env()?))
+        tracing::debug!("Creating HTTP request plane client with config from NetworkManager");
+        Ok(Arc::new(HttpRequestClient::with_config(
+            self.config.http_client_config.clone(),
+        )?))
     }
 
     fn create_tcp_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
         use super::egress::tcp_client::TcpRequestClient;
 
-        // TcpRequestClient reads its own env vars internally
-        // TODO: Refactor TcpRequestClient to accept config from NetworkManager
-        tracing::debug!("Creating TCP request plane client");
-        Ok(Arc::new(TcpRequestClient::from_env()?))
+        tracing::debug!("Creating TCP request plane client with config from NetworkManager");
+        Ok(Arc::new(TcpRequestClient::with_config(
+            self.config.tcp_client_config.clone(),
+        )?))
     }
 
     fn create_nats_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
