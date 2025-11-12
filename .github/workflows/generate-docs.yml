@@ -273,7 +273,7 @@ jobs:
 
           # Determine version from various sources
           VERSION=""
-          PUBLISH_TO_LATEST="true"
+          PUBLISH_TO_LATEST="false"
 
           # Option 1: Direct tag push
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
@@ -281,6 +281,7 @@ jobs:
             if [[ "${TAG}" =~ ^v([0-9]+(\.[0-9]+){1,2}([._-](post|rc|dev)[0-9]+)?)$ ]]; then
               VERSION="${BASH_REMATCH[1]}"
               echo "Detected version from tag: ${VERSION}"
+              PUBLISH_TO_LATEST="true"
             fi
 
             # Check for /not-latest flag in commit message
@@ -356,7 +357,7 @@ jobs:
           echo "published=true" >> "$GITHUB_OUTPUT"
 
       - name: Publish latest
-        if: ${{ steps.vars.outputs.publish_to_latest == 'true' }}
+        if: ${{ steps.publish_version.outputs.published == 'true' && steps.vars.outputs.publish_to_latest == 'true' }}
         working-directory: ${{ env.DOCS_DIR }}
         id: publish_latest
         env:
