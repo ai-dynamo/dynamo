@@ -87,7 +87,8 @@ check_existing_deployment() {
         status=$(kubectl get dynamographdeployment "$DEPLOYMENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.state}')
         if [ "$status" = "successful" ]; then
             # Check if frontend pod is running
-            if kubectl get pods -n "$NAMESPACE" -l "nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-namespace=vllm-disagg-planner" --field-selector=status.phase=Running | grep -q .; then
+            # Note: operator automatically prefixes k8s namespace to dynamo-namespace
+            if kubectl get pods -n "$NAMESPACE" -l "nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-namespace=${NAMESPACE}-vllm-disagg-planner" --field-selector=status.phase=Running | grep -q .; then
                 log_success "Existing deployment is ready"
                 return 0
             else
@@ -132,7 +133,8 @@ deploy_planner() {
     log_info "Waiting for pods to be running (this may take several minutes for image pulls)..."
 
     log_info "Waiting for frontend pod..."
-    if kubectl wait --for=condition=Ready pod -l "nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-namespace=vllm-disagg-planner" -n "$NAMESPACE" --timeout=900s; then
+    # Note: operator automatically prefixes k8s namespace to dynamo-namespace
+    if kubectl wait --for=condition=Ready pod -l "nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-namespace=${NAMESPACE}-vllm-disagg-planner" -n "$NAMESPACE" --timeout=900s; then
         log_success "Frontend pod is ready"
     else
         log_error "Frontend pod failed to become ready within timeout"
