@@ -42,15 +42,12 @@ pub struct DistributedRuntime {
     // local runtime
     runtime: Runtime,
 
-    // we might consider a unifed transport manager here
+    // Unified transport manager
     etcd_client: Option<transports::etcd::Client>,
     nats_client: Option<transports::nats::Client>,
     store: KeyValueStoreManager,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
-    http_server:
-        Arc<OnceCell<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>>>,
-    shared_tcp_server:
-        Arc<OnceCell<Arc<crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer>>>,
+    network_manager: Arc<OnceCell<Arc<crate::pipeline::network::manager::NetworkManager>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
 
     // Service discovery client
@@ -178,8 +175,7 @@ impl DistributedRuntime {
             store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
-            http_server: Arc::new(OnceCell::new()),
-            shared_tcp_server: Arc::new(OnceCell::new()),
+            network_manager: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             discovery_metadata,
@@ -343,101 +339,65 @@ impl DistributedRuntime {
             .clone())
     }
 
+    /// Get the network manager (lazy initialization)
+    ///
+    /// The network manager consolidates all network configuration and provides
+    /// unified access to request plane servers and clients.
+    pub async fn network_manager(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::manager::NetworkManager>> {
+        use crate::pipeline::network::manager::NetworkManager;
+
+        let manager = self
+            .network_manager
+            .get_or_try_init(async {
+                // Get NATS client if available
+                let nats_client = self.nats_client().map(|c| c.client().clone());
+
+                // NetworkManager handles all config reading and mode selection
+                anyhow::Ok(NetworkManager::new(
+                    self.child_token(),
+                    nats_client,
+                    self.component_registry.clone(),
+                ))
+            })
+            .await?;
+
+        Ok(manager.clone())
+    }
+
+    /// Get the request plane server (convenience method)
+    ///
+    /// This is a shortcut for `network_manager().await?.server().await`.
+    pub async fn request_plane_server(
+        &self,
+    ) -> Result<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>> {
+        let manager = self.network_manager().await?;
+        manager.server().await
+    }
+
+    /// DEPRECATED: Use network_manager().server() instead
+    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
     pub async fn http_server(
         &self,
     ) -> Result<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>> {
-        use crate::pipeline::network::ingress::http_endpoint::SharedHttpServer;
-
-        let http_host = crate::utils::get_http_rpc_host_from_env();
-        let http_port = std::env::var("DYN_HTTP_RPC_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(8888);
-        let bind_addr: std::net::SocketAddr = format!("{}:{}", http_host, http_port)
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid HTTP bind address: {}", e))?;
-
-        let cancel_token = self.child_token();
-
-        let server = self
-            .http_server
-            .get_or_try_init(async move {
-                let server = SharedHttpServer::new(bind_addr, cancel_token.clone());
-
-                // Spawn the server in the background
-                let server_clone = server.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = server_clone.start().await {
-                        tracing::error!("Shared HTTP server error: {}", e);
-                    }
-                });
-
-                anyhow::Ok(server)
-            })
-            .await?;
-
-        Ok(server.clone())
+        // For backward compatibility, try to downcast
+        let _server = self.request_plane_server().await?;
+        // This will only work if we're actually in HTTP mode
+        // For now, just return an error suggesting the new API
+        anyhow::bail!("http_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types.")
     }
 
+    /// DEPRECATED: Use network_manager().server() instead
+    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
     pub async fn shared_tcp_server(
         &self,
     ) -> Result<Arc<crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer>> {
-        use crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer;
-
-        let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(9999);
-
-        // Bind to 0.0.0.0 to accept connections from any interface
-        let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{}", tcp_port)
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid TCP bind address: {}", e))?;
-
-        tracing::info!(
-            "Initializing shared TCP server on 0.0.0.0:{} (all interfaces)",
-            tcp_port
-        );
-
-        let cancel_token = self.child_token();
-
-        let server = self
-            .shared_tcp_server
-            .get_or_try_init(async move {
-                tracing::info!("Creating shared TCP server instance on {}", bind_addr);
-                let server = SharedTcpServer::new(bind_addr, cancel_token.clone());
-
-                // Spawn the server in the background
-                let server_clone = server.clone();
-                let bind_addr_for_log = bind_addr;
-                tokio::spawn(async move {
-                    tracing::info!("About to start shared TCP server on {}", bind_addr_for_log);
-                    match server_clone.start().await {
-                        Ok(_) => {
-                            tracing::info!(
-                                "Shared TCP server on {} stopped gracefully",
-                                bind_addr_for_log
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "Shared TCP server on {} failed: {}",
-                                bind_addr_for_log,
-                                e
-                            );
-                        }
-                    }
-                });
-
-                anyhow::Ok(server)
-            })
-            .await?;
-
-        tracing::info!(
-            "Shared TCP server initialized successfully on {}",
-            bind_addr
-        );
-        Ok(server.clone())
+        // For backward compatibility, try to downcast
+        let _server = self.request_plane_server().await?;
+        // This will only work if we're actually in TCP mode
+        // For now, just return an error suggesting the new API
+        anyhow::bail!("shared_tcp_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types.")
     }
 
     pub fn nats_client(&self) -> Option<&nats::Client> {

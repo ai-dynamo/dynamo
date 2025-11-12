@@ -88,8 +88,9 @@ impl EndpointConfigBuilder {
 
         let registry = endpoint.drt().component_registry().inner.lock().await;
 
-        // get the group
-        let group = registry
+        // Note: NATS service group is no longer needed here as the NetworkManager
+        // handles all transport-specific initialization internally
+        let _group = registry
             .services
             .get(&service_name)
             .map(|service| service.group(endpoint.component.service_name()))
@@ -182,122 +183,60 @@ impl EndpointConfigBuilder {
         let component_name_for_task = component_name.clone();
         let endpoint_name_for_task = endpoint_name.clone();
 
-        let task = match request_plane_mode {
-            RequestPlaneMode::Http => {
-                // HTTP mode - use SharedHttpServer
-                let http_server = endpoint.drt().http_server().await?;
+        // Get the unified request plane server (works for all transport types)
+        let server = endpoint.drt().request_plane_server().await?;
 
-                // Register this endpoint with the shared server
-                http_server
-                    .register_endpoint(
-                        endpoint_name_for_task.clone(),
-                        handler,
-                        connection_id,
-                        namespace_name_for_task.clone(),
-                        component_name_for_task.clone(),
-                        endpoint_name_for_task.clone(),
-                        system_health.clone(),
-                    )
-                    .await?;
+        tracing::info!(
+            endpoint = %endpoint_name_for_task,
+            transport = server.transport_name(),
+            "Registering endpoint with request plane server"
+        );
 
-                // Create a task that waits for cancellation and then unregisters
-                let endpoint_name_for_cleanup = endpoint_name_for_task.clone();
-                let http_server_for_cleanup = http_server.clone();
-                let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
+        // Register endpoint with the server (unified interface)
+        server
+            .register_endpoint(
+                endpoint_name_for_task.clone(),
+                handler,
+                connection_id,
+                namespace_name_for_task.clone(),
+                component_name_for_task.clone(),
+                system_health.clone(),
+            )
+            .await?;
 
-                tokio::spawn(async move {
-                    cancel_token_for_cleanup.cancelled().await;
+        // Create cleanup task that unregisters on cancellation
+        let endpoint_name_for_cleanup = endpoint_name_for_task.clone();
+        let server_for_cleanup = server.clone();
+        let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
 
-                    tracing::debug!("Unregistering endpoint from shared HTTP server");
-                    http_server_for_cleanup
-                        .unregister_endpoint(&endpoint_name_for_cleanup, &endpoint_name_for_cleanup)
-                        .await;
+        let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+            cancel_token_for_cleanup.cancelled().await;
 
-                    // Unregister from graceful shutdown tracker
-                    if let Some(tracker) = tracker_clone {
-                        tracing::debug!("Unregister endpoint from graceful shutdown tracker");
-                        tracker.unregister_endpoint();
-                    }
+            tracing::debug!(
+                endpoint = %endpoint_name_for_cleanup,
+                "Unregistering endpoint from request plane server"
+            );
 
-                    Ok(())
-                })
+            // Unregister from server
+            if let Err(e) = server_for_cleanup
+                .unregister_endpoint(&endpoint_name_for_cleanup)
+                .await
+            {
+                tracing::warn!(
+                    endpoint = %endpoint_name_for_cleanup,
+                    error = %e,
+                    "Failed to unregister endpoint"
+                );
             }
-            RequestPlaneMode::Tcp => {
-                // TCP mode - use SharedTcpServer
-                tracing::info!("Starting endpoint in TCP mode, initializing SharedTcpServer");
-                let tcp_server = endpoint.drt().shared_tcp_server().await?;
-                tracing::info!("SharedTcpServer obtained, registering endpoint");
 
-                // Register this endpoint with the shared TCP server
-                tcp_server
-                    .register_endpoint(
-                        endpoint_name_for_task.clone(),
-                        handler,
-                        connection_id,
-                        namespace_name_for_task.clone(),
-                        component_name_for_task.clone(),
-                        endpoint_name_for_task.clone(),
-                        system_health.clone(),
-                    )
-                    .await?;
-
-                // Create a task that waits for cancellation and then unregisters
-                let endpoint_name_for_cleanup = endpoint_name_for_task.clone();
-                let tcp_server_for_cleanup = tcp_server.clone();
-                let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
-
-                tokio::spawn(async move {
-                    cancel_token_for_cleanup.cancelled().await;
-
-                    tracing::debug!("Unregistering endpoint from shared TCP server");
-                    tcp_server_for_cleanup
-                        .unregister_endpoint(&endpoint_name_for_cleanup, &endpoint_name_for_cleanup)
-                        .await;
-
-                    // Unregister from graceful shutdown tracker
-                    if let Some(tracker) = tracker_clone {
-                        tracing::debug!("Unregister endpoint from graceful shutdown tracker");
-                        tracker.unregister_endpoint();
-                    }
-
-                    Ok(())
-                })
+            // Unregister from graceful shutdown tracker
+            if let Some(tracker) = tracker_clone {
+                tracing::debug!("Unregister endpoint from graceful shutdown tracker");
+                tracker.unregister_endpoint();
             }
-            RequestPlaneMode::Nats => {
-                let service_endpoint = group
-                    .endpoint(&endpoint.name_with_id(connection_id))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to start endpoint: {e}"))?;
 
-                let push_endpoint = PushEndpoint::builder()
-                    .service_handler(handler)
-                    .cancellation_token(endpoint_shutdown_token.clone())
-                    .graceful_shutdown(graceful_shutdown)
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
-
-                tokio::spawn(async move {
-                    let result = push_endpoint
-                        .start(
-                            service_endpoint,
-                            namespace_name_for_task,
-                            component_name_for_task,
-                            endpoint_name_for_task,
-                            connection_id,
-                            system_health,
-                        )
-                        .await;
-
-                    // Unregister from graceful shutdown tracker
-                    if let Some(tracker) = tracker_clone {
-                        tracing::debug!("Unregistering endpoint from graceful shutdown tracker");
-                        tracker.unregister_endpoint();
-                    }
-
-                    result
-                })
-            }
-        };
+            anyhow::Ok(())
+        });
 
         // Register this endpoint instance in the discovery plane
         // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
