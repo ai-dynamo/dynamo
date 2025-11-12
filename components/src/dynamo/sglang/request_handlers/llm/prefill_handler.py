@@ -68,7 +68,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Fast path: Check if we have a valid span before doing any work
         current_span = trace.get_current_span()
         span_context = current_span.get_span_context() if current_span else None
-        if not span_context or not span_context.is_valid():
+        if not span_context or not span_context.is_valid:
             return
 
         # Only do expensive operations if tracing is enabled and span is valid
