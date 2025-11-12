@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [pytest.mark.unit, pytest.mark.ci, pytest.mark.cpu_only]
+pytestmark = [pytest.mark.unit, pytest.mark.pre_merge]
 
 
 @pytest.fixture
