@@ -121,7 +121,7 @@ TensorRT-LLM provides Prometheus metrics through the `MetricsCollector` class (s
 
 ## Non-Prometheus Performance Metrics
 
-TensorRT-LLM provides extensive performance data beyond the basic Prometheus metrics. These are **not exposed to Prometheus**.
+TensorRT-LLM provides extensive performance data beyond the basic Prometheus metrics. These are not currently exposed to Prometheus.
 
 ### Available via Code References
 
