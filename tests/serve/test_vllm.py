@@ -193,21 +193,19 @@ vllm_configs = {
 }
 
 # Try to fetch COCO image and convert to base64, fall back to 1x1 PNG if unavailable
-coco_image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
+coco_image_b64 = ""
 coco_expected_response = []
-image_data = None
-try:
-    with urllib.request.urlopen(COCO_IMAGE_URL, timeout=5.0) as response:
-        image_data = response.read()
-except Exception as e:
-    logger.warning(
-        f"Failed to fetch COCO image ({type(e).__name__}: {e}), using 1x1 fallback"
-    )
 
-if image_data is not None:
+try:
+    image_data = urllib.request.urlopen(COCO_IMAGE_URL, timeout=5.0).read()
     coco_image_b64 = base64.b64encode(image_data).decode("utf-8")
     coco_expected_response = ["bus"]
     logger.info(f"Successfully fetched COCO image from {COCO_IMAGE_URL}")
+except Exception as e:
+    coco_image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
+    logger.warning(
+        f"Failed to fetch COCO image ({type(e).__name__}: {e}), using 1x1 fallback"
+    )
 
 vllm_configs["multimodal_agg_qwen"] = VLLMConfig(
     name="multimodal_agg_qwen",
