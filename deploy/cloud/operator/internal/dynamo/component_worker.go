@@ -75,6 +75,10 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
+			Name:  "DYN_SYSTEM_ENABLED",
+			Value: "true",
+		},
+		{
 			Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
 			Value: "[\"generate\"]",
 		},
