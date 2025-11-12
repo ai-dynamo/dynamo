@@ -9,6 +9,7 @@ on:
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
+  workflow_dispatch:  # Allow manual triggering for testing
 
 concurrency:
     group: ${{ github.workflow }}-build-test-${{ github.ref_name || github.run_id }}
@@ -360,8 +361,8 @@ jobs:
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    # Temporarily override skip condition for testing
-    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing - run even if dependencies fail
+    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -597,8 +598,8 @@ jobs:
 
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
-    # Temporarily override skip condition for testing
-    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing - run even if dependencies fail
+    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
@@ -872,8 +873,8 @@ jobs:
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
-    # Temporarily override skip condition for testing
-    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing - run even if dependencies fail
+    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
@@ -894,8 +895,8 @@ jobs:
 
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
-    # Temporarily override skip condition for testing
-    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing - run even if dependencies fail
+    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
