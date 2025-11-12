@@ -322,10 +322,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
-
 ##############################################
 ########## Dev entrypoint image ##############
 ##############################################
+
 FROM base AS dev
 
 ARG ENABLE_KVBM
