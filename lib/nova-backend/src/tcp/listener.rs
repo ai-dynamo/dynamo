@@ -240,6 +240,25 @@ impl TcpListener {
                     }
                 }
                 _ = cancel_token.cancelled() => {
+                    // if the cancel_token is triggered, we should continue to accept responses for outstanding requests
+                    // however, we should stop accepting new requests
+                    //
+                    // todo:
+                    // - drop the adapter.message_stream
+                    // - if the a new message comes in, reply with an error
+                    // - we should stay alive until all outstanding requests have finished
+                    //   - under that condition, we should get a second stage of cancellation
+                    //   - we will need a stage_two_cancel_token instead of the current stage_one_cancel_token
+                    // - on stage two shutdown, we issue a SHUT_WR which will issue a FIN, then we must continue to pull all
+                    //   outstanding responses from framed until it's closed
+                    // - once all open recv sockets have closed, then we can issue stage_three_cancel_token.cancel() which
+                    //   will tell the senders they can exit because all outstanding requests have finished and no more
+                    //   incoming messages can be received.
+                    //
+                    // - this will close all the adapter channels and begin the cascading shutdown of the transport
+                    // - we will need an inflight counter for receives - which the response manager can track from it's free
+                    //   list - once all awaiting responses have returned to the arena we are done.
+
                     debug!("Connection handler for {} cancelled", peer_addr);
                     break;
                 }
@@ -268,16 +287,16 @@ impl TcpListener {
         };
 
         // Try to send with ownership transfer (zero-copy)
-        match sender.send_async((header.clone(), payload.clone())).await {
+        match sender.send_async((header, payload)).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 // Send failed - invoke error callback with the data
                 error_handler.on_error(
-                    header,
-                    payload,
-                    format!("Failed to route {:?} frame: {}", msg_type, e),
+                    e.0.0, // header
+                    e.0.1, // payload
+                    format!("Failed to route {:?}", msg_type),
                 );
-                Err(anyhow::anyhow!("Failed to send to stream: {}", e))
+                Err(anyhow::anyhow!("Failed to send to stream"))
             }
         }
     }

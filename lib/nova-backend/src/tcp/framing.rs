@@ -31,6 +31,7 @@ const MIN_HEADER_SIZE: usize = 2 + 1 + 4 + 4; // 11 bytes
 /// This decoder maintains state across multiple calls to support partial
 /// frame reception. It decodes frames into (MessageType, header: Bytes, payload: Bytes)
 /// where header and payload are zero-copy slices of the receive buffer.
+#[derive(Debug, Clone)]
 pub struct TcpFrameCodec {
     state: DecodeState,
 }
@@ -216,8 +217,13 @@ impl Encoder<Bytes> for TcpFrameCodec {
 mod tests {
     use super::*;
 
-    /// Helper to create a test frame
-    fn create_frame(
+    /// Helper to create raw frames with arbitrary parameters for negative testing.
+    ///
+    /// This function bypasses normal validation and encoding logic to create
+    /// intentionally invalid frames (wrong schema version, oversized frames, etc.)
+    /// for testing error handling paths. Use `TcpFrameCodec::encode_frame()` for
+    /// testing valid frame construction.
+    fn create_unsafe_frame(
         schema_version: u16,
         frame_type: MessageType,
         header: &[u8],
@@ -236,18 +242,21 @@ mod tests {
     #[test]
     fn test_decode_message_frame() {
         let mut codec = TcpFrameCodec::new();
-        let header = b"test-header";
-        let payload = b"test-payload-data";
+        let header = Bytes::from(&b"test-header"[..]);
+        let payload = Bytes::from(&b"test-payload-data"[..]);
 
-        let mut buf = create_frame(SCHEMA_VERSION_V1, MessageType::Message, header, payload);
+        let framed =
+            TcpFrameCodec::encode_frame(MessageType::Message, header.clone(), payload.clone())
+                .unwrap();
+        let mut buf = BytesMut::from(&framed[..]);
 
         let result = codec.decode(&mut buf).unwrap();
         assert!(result.is_some());
 
         let (msg_type, decoded_header, decoded_payload) = result.unwrap();
         assert_eq!(msg_type, MessageType::Message);
-        assert_eq!(&decoded_header[..], header);
-        assert_eq!(&decoded_payload[..], payload);
+        assert_eq!(decoded_header, header);
+        assert_eq!(decoded_payload, payload);
     }
 
     #[test]
@@ -261,10 +270,11 @@ mod tests {
 
         for frame_type in &frame_types {
             let mut codec = TcpFrameCodec::new();
-            let header = b"header";
-            let payload = b"payload";
+            let header = Bytes::from(&b"header"[..]);
+            let payload = Bytes::from(&b"payload"[..]);
 
-            let mut buf = create_frame(SCHEMA_VERSION_V1, *frame_type, header, payload);
+            let framed = TcpFrameCodec::encode_frame(*frame_type, header, payload).unwrap();
+            let mut buf = BytesMut::from(&framed[..]);
 
             let result = codec.decode(&mut buf).unwrap();
             assert!(result.is_some());
@@ -277,27 +287,31 @@ mod tests {
     #[test]
     fn test_decode_empty_payload() {
         let mut codec = TcpFrameCodec::new();
-        let header = b"ack-header";
-        let payload = b"";
+        let header = Bytes::from(&b"ack-header"[..]);
+        let payload = Bytes::new();
 
-        let mut buf = create_frame(SCHEMA_VERSION_V1, MessageType::Ack, header, payload);
+        let framed =
+            TcpFrameCodec::encode_frame(MessageType::Ack, header.clone(), payload.clone()).unwrap();
+        let mut buf = BytesMut::from(&framed[..]);
 
         let result = codec.decode(&mut buf).unwrap();
         assert!(result.is_some());
 
         let (msg_type, decoded_header, decoded_payload) = result.unwrap();
         assert_eq!(msg_type, MessageType::Ack);
-        assert_eq!(&decoded_header[..], header);
+        assert_eq!(decoded_header, header);
         assert_eq!(decoded_payload.len(), 0);
     }
 
     #[test]
     fn test_decode_partial_frame() {
         let mut codec = TcpFrameCodec::new();
-        let header = b"test-header";
-        let payload = b"test-payload";
+        let header = Bytes::from(&b"test-header"[..]);
+        let payload = Bytes::from(&b"test-payload"[..]);
 
-        let full_frame = create_frame(SCHEMA_VERSION_V1, MessageType::Message, header, payload);
+        let full_frame =
+            TcpFrameCodec::encode_frame(MessageType::Message, header.clone(), payload.clone())
+                .unwrap();
 
         // Send only first 5 bytes (partial header)
         let mut buf = BytesMut::from(&full_frame[..5]);
@@ -316,8 +330,8 @@ mod tests {
 
         let (msg_type, decoded_header, decoded_payload) = result.unwrap();
         assert_eq!(msg_type, MessageType::Message);
-        assert_eq!(&decoded_header[..], header);
-        assert_eq!(&decoded_payload[..], payload);
+        assert_eq!(decoded_header, header);
+        assert_eq!(decoded_payload, payload);
     }
 
     #[test]
@@ -326,7 +340,7 @@ mod tests {
         let header = b"header";
         let payload = b"payload";
 
-        let mut buf = create_frame(999, MessageType::Message, header, payload);
+        let mut buf = create_unsafe_frame(999, MessageType::Message, header, payload);
 
         let result = codec.decode(&mut buf);
         assert!(result.is_err());
@@ -381,18 +395,20 @@ mod tests {
         let mut buf = BytesMut::new();
 
         // Add two frames to buffer
-        buf.extend_from_slice(&create_frame(
-            SCHEMA_VERSION_V1,
+        let frame1 = TcpFrameCodec::encode_frame(
             MessageType::Message,
-            b"header1",
-            b"payload1",
-        ));
-        buf.extend_from_slice(&create_frame(
-            SCHEMA_VERSION_V1,
+            Bytes::from(&b"header1"[..]),
+            Bytes::from(&b"payload1"[..]),
+        )
+        .unwrap();
+        let frame2 = TcpFrameCodec::encode_frame(
             MessageType::Response,
-            b"header2",
-            b"payload2",
-        ));
+            Bytes::from(&b"header2"[..]),
+            Bytes::from(&b"payload2"[..]),
+        )
+        .unwrap();
+        buf.extend_from_slice(&frame1);
+        buf.extend_from_slice(&frame2);
 
         // Decode first frame
         let result = codec.decode(&mut buf).unwrap();
@@ -417,17 +433,20 @@ mod tests {
     #[test]
     fn test_zero_copy_bytes_share_buffer() {
         let mut codec = TcpFrameCodec::new();
-        let header = b"shared-header";
-        let payload = b"shared-payload";
+        let header = Bytes::from(&b"shared-header"[..]);
+        let payload = Bytes::from(&b"shared-payload"[..]);
 
-        let mut buf = create_frame(SCHEMA_VERSION_V1, MessageType::Message, header, payload);
+        let framed =
+            TcpFrameCodec::encode_frame(MessageType::Message, header.clone(), payload.clone())
+                .unwrap();
+        let mut buf = BytesMut::from(&framed[..]);
 
         let result = codec.decode(&mut buf).unwrap().unwrap();
         let (_, decoded_header, decoded_payload) = result;
 
         // Verify the slices contain correct data
-        assert_eq!(&decoded_header[..], header);
-        assert_eq!(&decoded_payload[..], payload);
+        assert_eq!(decoded_header, header);
+        assert_eq!(decoded_payload, payload);
 
         // Clone should be cheap (just RC increment)
         let header_clone = decoded_header.clone();
