@@ -6,6 +6,8 @@ import logging
 from typing import Any, AsyncGenerator, Dict
 
 import sglang as sgl
+from opentelemetry import propagate, trace
+from sglang.srt.tracing import trace as sglang_trace
 
 from dynamo._core import Component, Context
 from dynamo.sglang.args import Config
@@ -51,6 +53,40 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         logging.info("Prefill engine shutdown")
         super().cleanup()
 
+    def _propagate_trace_context_to_sglang(self, rid: str):
+        """Propagate current OTEL trace context to SGLang.
+
+        Lightweight: Returns immediately if tracing is disabled or no valid span exists.
+
+        Args:
+            rid: Request ID to associate with the trace context.
+        """
+        # CRITICAL PATH OPTIMIZATION: Early exit if tracing is disabled
+        if not sglang_trace.tracing_enabled or not rid:
+            return
+
+        # Fast path: Check if we have a valid span before doing any work
+        current_span = trace.get_current_span()
+        span_context = current_span.get_span_context() if current_span else None
+        if not span_context or not span_context.is_valid():
+            return
+
+        # Only do expensive operations if tracing is enabled and span is valid
+        carrier: dict[str, str] = {}
+        propagate.inject(carrier)
+
+        # Build trace context in SGLang's expected format
+        trace_context = {
+            "root_span": carrier,
+            "prev_span": {
+                "span_id": span_context.span_id,
+                "trace_id": span_context.trace_id,
+            }
+        }
+
+        # Propagate to SGLang (has internal guard but we've already checked)
+        sglang_trace.trace_set_proc_propagate_context(rid, trace_context)
+
     async def generate(
         self, request: Dict[str, Any], context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -77,6 +113,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         input_param = self._get_input_param(request["request"])
 
+        # Propagate trace context to SGLang
+        self._propagate_trace_context_to_sglang(trace_id)
+
         results = await self.engine.async_generate(
             **input_param,
             sampling_params=request["sampling_params"],
@@ -84,6 +123,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_host=self.bootstrap_host,
             bootstrap_port=self.bootstrap_port,
             bootstrap_room=bootstrap_room,
+            rid=trace_id,
         )
 
         task = asyncio.create_task(self._consume_results(results, context))
