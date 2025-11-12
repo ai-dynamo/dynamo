@@ -11,7 +11,6 @@
 pub mod codec;
 pub mod egress;
 pub mod ingress;
-pub mod request_plane_factory;
 pub mod tcp;
 
 use crate::SystemHealth;

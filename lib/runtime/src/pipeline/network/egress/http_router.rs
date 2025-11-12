@@ -5,7 +5,7 @@
 
 use super::unified_client::{Headers, RequestPlaneClient};
 use super::*;
-use crate::logging::{DistributedTraceContext, get_distributed_tracing_context};
+use crate::logging::{DistributedTraceContext, get_distributed_tracing_context, inject_trace_headers_into_map};
 use crate::pipeline::network::{
     ConnectionInfo, NetworkStreamWrapper, PendingConnections, ResponseStream, STREAM_ERR_MSG,
     StreamOptions,
@@ -300,23 +300,9 @@ where
 
         log::trace!(request_id, "sending HTTP request to {}", address);
 
-        // Insert Trace Context into Headers
+        // Insert Trace Context into Headers using shared helper
         let mut headers = std::collections::HashMap::new();
-        if let Some(trace_context) = get_distributed_tracing_context() {
-            headers.insert(
-                "traceparent".to_string(),
-                trace_context.create_traceparent(),
-            );
-            if let Some(tracestate) = trace_context.tracestate {
-                headers.insert("tracestate".to_string(), tracestate);
-            }
-            if let Some(x_request_id) = trace_context.x_request_id {
-                headers.insert("x-request-id".to_string(), x_request_id);
-            }
-            if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
-                headers.insert("x-dynamo-request-id".to_string(), x_dynamo_request_id);
-            }
-        }
+        inject_trace_headers_into_map(&mut headers);
 
         // Send HTTP request (replaces NATS request)
         let _response = self

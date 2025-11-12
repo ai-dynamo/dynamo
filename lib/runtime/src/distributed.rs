@@ -46,9 +46,6 @@ pub struct DistributedRuntime {
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     http_server:
         Arc<OnceCell<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>>>,
-    tcp_request_server: Arc<
-        OnceCell<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>>,
-    >,
     shared_tcp_server:
         Arc<OnceCell<Arc<crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
@@ -157,7 +154,6 @@ impl DistributedRuntime {
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             http_server: Arc::new(OnceCell::new()),
-            tcp_request_server: Arc::new(OnceCell::new()),
             shared_tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
@@ -336,7 +332,7 @@ impl DistributedRuntime {
         let http_port = std::env::var("DYN_HTTP_RPC_PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(8081);
+            .unwrap_or(8888);
         let bind_addr: std::net::SocketAddr = format!("{}:{}", http_host, http_port)
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid HTTP bind address: {}", e))?;
@@ -363,29 +359,6 @@ impl DistributedRuntime {
         Ok(server.clone())
     }
 
-    pub async fn tcp_request_server(
-        &self,
-    ) -> Result<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>>
-    {
-        use crate::config::RequestPlaneMode;
-        use crate::pipeline::network::request_plane_factory::RequestPlane;
-
-        let cancel_token = self.child_token();
-
-        let server = self
-            .tcp_request_server
-            .get_or_try_init(async move {
-                let server =
-                    RequestPlane::create_server(RequestPlaneMode::Tcp, cancel_token.clone())
-                        .await?;
-
-                anyhow::Ok(server)
-            })
-            .await?;
-
-        Ok(server.clone())
-    }
-
     pub async fn shared_tcp_server(
         &self,
     ) -> Result<Arc<crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer>> {
@@ -394,7 +367,7 @@ impl DistributedRuntime {
         let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(9090);
+            .unwrap_or(9999);
 
         // Bind to 0.0.0.0 to accept connections from any interface
         let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{}", tcp_port)
