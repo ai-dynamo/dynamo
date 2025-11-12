@@ -867,8 +867,8 @@ class ManagedDeployment:
             logging.getLogger("httpx").setLevel(logging.WARNING)
             await self._init_kubernetes()
             await self._delete_deployment()
-            await self._restart_etcd()
-            await self._restart_nats()
+            # ETCD and NATS restarts removed - platform is now managed cluster-wide
+            # No need to restart these services as they are managed by the cluster operator
             await self._create_deployment()
             await self._wait_for_ready()
 
