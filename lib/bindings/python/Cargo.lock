@@ -1504,6 +1504,7 @@ dependencies = [
  "either",
  "erased-serde",
  "etcd-client",
+ "flate2",
  "futures",
  "futures-util",
  "galil-seiferas",
