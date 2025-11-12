@@ -1,31 +1,76 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub use crate::component::Component;
+use crate::component::{Component, Instance};
+use crate::pipeline::PipelineError;
 use crate::storage::key_value_store::{
     EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, KeyValueStoreSelect,
     MemoryStore,
 };
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
-    ErrorContext,
-    component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
-    discovery::DiscoveryClient,
+    component::{self, ComponentBuilder, Endpoint, Namespace},
+    discovery::Discovery,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     service::ServiceClient,
     transports::{etcd, nats, tcp},
 };
+use crate::{discovery, system_status_server, transports};
 
 use super::utils::GracefulShutdownTracker;
-use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
-use std::sync::OnceLock;
+use crate::SystemHealth;
+use crate::runtime::Runtime;
 
+use async_once_cell::OnceCell;
+use std::sync::{Arc, OnceLock, Weak};
+use tokio::sync::watch::Receiver;
+
+use anyhow::Result;
 use derive_getters::Dissolve;
 use figment::error;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+type InstanceMap = HashMap<Endpoint, Weak<Receiver<Vec<Instance>>>>;
+
+/// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
+/// communication protocols and transports.
+#[derive(Clone)]
+pub struct DistributedRuntime {
+    // local runtime
+    runtime: Runtime,
+
+    // we might consider a unifed transport manager here
+    etcd_client: Option<transports::etcd::Client>,
+    nats_client: Option<transports::nats::Client>,
+    store: KeyValueStoreManager,
+    tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
+
+    // Service discovery client
+    discovery_client: Arc<dyn discovery::Discovery>,
+
+    // Discovery metadata (only used for Kubernetes backend)
+    // Shared with system status server to expose via /metadata endpoint
+    discovery_metadata: Option<Arc<tokio::sync::RwLock<discovery::DiscoveryMetadata>>>,
+
+    // local registry for components
+    // the registry allows us to use share runtime resources across instances of the same component object.
+    // take for example two instances of a client to the same remote component. The registry allows us to use
+    // a single endpoint watcher for both clients, this keeps the number background tasking watching specific
+    // paths in etcd to a minimum.
+    component_registry: component::Registry,
+
+    instance_sources: Arc<tokio::sync::Mutex<InstanceMap>>,
+
+    // Health Status
+    system_health: Arc<parking_lot::Mutex<SystemHealth>>,
+
+    // This hierarchy's own metrics registry
+    metrics_registry: MetricsRegistry,
+}
 
 impl MetricsHierarchy for DistributedRuntime {
     fn basename(&self) -> String {
@@ -49,12 +94,12 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let (selected_kv_store, nats_config, is_static) = config.dissolve();
+        let (selected_kv_store, nats_config) = config.dissolve();
 
         let runtime_clone = runtime.clone();
 
-        let (etcd_client, store) = match (is_static, selected_kv_store) {
-            (false, KeyValueStoreSelect::Etcd(etcd_config)) => {
+        let (etcd_client, store) = match selected_kv_store {
+            KeyValueStoreSelect::Etcd(etcd_config) => {
                 let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
                     // The returned error doesn't show because of a dropped runtime error, so
                     // log it first.
@@ -62,10 +107,8 @@ impl DistributedRuntime {
                 let store = KeyValueStoreManager::etcd(etcd_client.clone());
                 (Some(etcd_client), store)
             }
-            (false, KeyValueStoreSelect::File(root)) => (None, KeyValueStoreManager::file(root)),
-            (true, _) | (false, KeyValueStoreSelect::Memory) => {
-                (None, KeyValueStoreManager::memory())
-            }
+            KeyValueStoreSelect::File(root) => (None, KeyValueStoreManager::file(root)),
+            KeyValueStoreSelect::Memory => (None, KeyValueStoreManager::memory()),
         };
 
         let nats_client = Some(nats_config.clone().connect().await?);
@@ -92,12 +135,37 @@ impl DistributedRuntime {
 
         let nats_client_for_metrics = nats_client.clone();
 
-        // Initialize discovery client with mock implementation
-        // TODO: Replace MockDiscoveryClient with KeyValueStoreDiscoveryClient or KubeDiscoveryClient
-        let discovery_client = {
-            use crate::discovery::{MockDiscoveryClient, SharedMockRegistry};
-            let registry = SharedMockRegistry::new();
-            Arc::new(MockDiscoveryClient::new(None, registry)) as Arc<dyn DiscoveryClient>
+        // Initialize discovery client based on backend configuration
+        let discovery_backend =
+            std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "kv_store".to_string());
+
+        let (discovery_client, discovery_metadata) = match discovery_backend.as_str() {
+            "kubernetes" => {
+                tracing::info!("Initializing Kubernetes discovery backend");
+                let metadata = Arc::new(tokio::sync::RwLock::new(
+                    crate::discovery::DiscoveryMetadata::new(),
+                ));
+                let client = crate::discovery::KubeDiscoveryClient::new(
+                    metadata.clone(),
+                    runtime.primary_token(),
+                )
+                .await
+                .inspect_err(
+                    |err| tracing::error!(%err, "Failed to initialize Kubernetes discovery client"),
+                )?;
+                (Arc::new(client) as Arc<dyn Discovery>, Some(metadata))
+            }
+            _ => {
+                tracing::info!("Initializing KV store discovery backend");
+                use crate::discovery::KVStoreDiscovery;
+                (
+                    Arc::new(KVStoreDiscovery::new(
+                        store.clone(),
+                        runtime.primary_token(),
+                    )) as Arc<dyn Discovery>,
+                    None,
+                )
+            }
         };
 
         let distributed_runtime = Self {
@@ -108,8 +176,8 @@ impl DistributedRuntime {
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
+            discovery_metadata,
             component_registry: component::Registry::new(),
-            is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
@@ -151,6 +219,7 @@ impl DistributedRuntime {
                 port,
                 cancel_token,
                 Arc::new(distributed_runtime.clone()),
+                distributed_runtime.discovery_metadata.clone(),
             )
             .await
             {
@@ -210,13 +279,7 @@ impl DistributedRuntime {
     }
 
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings(false);
-        Self::new(runtime, config).await
-    }
-
-    // Call this if you are using static workers that do not need etcd-based discovery.
-    pub async fn from_settings_without_discovery(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings(true);
+        let config = DistributedConfig::from_settings();
         Self::new(runtime, config).await
     }
 
@@ -228,8 +291,19 @@ impl DistributedRuntime {
         self.runtime.primary_token()
     }
 
+    // TODO: Don't hand out pointers, instead have methods to use the registry in friendly ways
+    // (without being aware of async locks and so on)
+    pub fn component_registry(&self) -> &component::Registry {
+        &self.component_registry
+    }
+
+    // TODO: Don't hand out pointers, instead provide system health related services.
+    pub fn system_health(&self) -> Arc<parking_lot::Mutex<SystemHealth>> {
+        self.system_health.clone()
+    }
+
     pub fn connection_id(&self) -> u64 {
-        self.store.connection_id()
+        self.discovery_client.instance_id()
     }
 
     pub fn shutdown(&self) {
@@ -239,12 +313,12 @@ impl DistributedRuntime {
 
     /// Create a [`Namespace`]
     pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
-        Namespace::new(self.clone(), name.into(), self.is_static)
+        Namespace::new(self.clone(), name.into())
     }
 
-    /// TODO: Return discovery client when KeyValueDiscoveryClient or KubeDiscoveryClient is implemented
-    pub fn discovery_client(&self) -> Result<Arc<dyn DiscoveryClient>> {
-        Err(error!("Discovery client not implemented!"))
+    /// Returns the discovery interface for service registration and discovery
+    pub fn discovery(&self) -> Arc<dyn Discovery> {
+        self.discovery_client.clone()
     }
 
     pub(crate) fn service_client(&self) -> Option<ServiceClient> {
@@ -257,7 +331,7 @@ impl DistributedRuntime {
             .get_or_try_init(async move {
                 let options = tcp::server::ServerOptions::default();
                 let server = tcp::server::TcpStreamServer::new(options).await?;
-                OK(server)
+                Ok::<_, PipelineError>(server)
             })
             .await?
             .clone())
@@ -296,7 +370,7 @@ impl DistributedRuntime {
         self.runtime.graceful_shutdown_tracker()
     }
 
-    pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
+    pub fn instance_sources(&self) -> Arc<Mutex<InstanceMap>> {
         self.instance_sources.clone()
     }
 }
@@ -305,15 +379,13 @@ impl DistributedRuntime {
 pub struct DistributedConfig {
     pub store_backend: KeyValueStoreSelect,
     pub nats_config: nats::ClientOptions,
-    pub is_static: bool,
 }
 
 impl DistributedConfig {
-    pub fn from_settings(is_static: bool) -> DistributedConfig {
+    pub fn from_settings() -> DistributedConfig {
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::default()),
             nats_config: nats::ClientOptions::default(),
-            is_static,
         }
     }
 
@@ -325,24 +397,26 @@ impl DistributedConfig {
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::new(etcd_config)),
             nats_config: nats::ClientOptions::default(),
-            is_static: false,
         }
     }
 }
 
 pub mod distributed_test_utils {
     //! Common test helper functions for DistributedRuntime tests
-    // TODO: Use in-memory DistributedRuntime for tests instead of full runtime when available.
 
     /// Helper function to create a DRT instance for integration-only tests.
     /// Uses from_current to leverage existing tokio runtime
-    /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings_without_discovery
+    /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings
     #[cfg(feature = "integration")]
-    pub async fn create_test_drt_async() -> crate::DistributedRuntime {
+    pub async fn create_test_drt_async() -> super::DistributedRuntime {
+        use crate::{storage::key_value_store::KeyValueStoreSelect, transports::nats};
+
         let rt = crate::Runtime::from_current().unwrap();
-        crate::DistributedRuntime::from_settings_without_discovery(rt)
-            .await
-            .unwrap()
+        let config = super::DistributedConfig {
+            store_backend: KeyValueStoreSelect::Memory,
+            nats_config: nats::ClientOptions::default(),
+        };
+        super::DistributedRuntime::new(rt, config).await.unwrap()
     }
 }
 
@@ -353,7 +427,7 @@ mod tests {
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_disabled() {
         // Test uptime with system status server disabled
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 
