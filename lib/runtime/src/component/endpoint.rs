@@ -112,7 +112,7 @@ impl EndpointConfigBuilder {
         }
 
         // Determine request plane mode
-        let request_plane_mode = RequestPlaneMode::from_env();
+        let request_plane_mode = RequestPlaneMode::get();
         tracing::info!(
             "Endpoint starting with request plane mode: {:?}",
             request_plane_mode
