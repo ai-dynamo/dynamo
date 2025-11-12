@@ -35,10 +35,17 @@ fn test_namespace_etcd_path_format() {
 #[cfg(feature = "integration")]
 #[tokio::test]
 async fn test_recursive_namespace_implementation() {
+    use dynamo_runtime::{
+        distributed::DistributedConfig, storage::key_value_store::KeyValueStoreSelect,
+        transports::nats,
+    };
+
     let runtime = Runtime::from_current().unwrap();
-    let distributed_runtime = DistributedRuntime::from_settings_without_discovery(runtime)
-        .await
-        .unwrap();
+    let config = DistributedConfig {
+        store_backend: KeyValueStoreSelect::Memory,
+        nats_config: nats::ClientOptions::default(),
+    };
+    let distributed_runtime = DistributedRuntime::new(runtime, config).await.unwrap();
 
     // Test single namespace
     let ns1 = distributed_runtime.namespace("ns1").unwrap();
@@ -74,10 +81,17 @@ async fn test_recursive_namespace_implementation() {
 #[cfg(feature = "integration")]
 #[tokio::test]
 async fn test_multiple_branches_recursive_namespaces() {
+    use dynamo_runtime::{
+        distributed::DistributedConfig, storage::key_value_store::KeyValueStoreSelect,
+        transports::nats,
+    };
+
     let runtime = Runtime::from_current().unwrap();
-    let distributed_runtime = DistributedRuntime::from_settings_without_discovery(runtime)
-        .await
-        .unwrap();
+    let config = DistributedConfig {
+        store_backend: KeyValueStoreSelect::Memory,
+        nats_config: nats::ClientOptions::default(),
+    };
+    let distributed_runtime = DistributedRuntime::new(runtime, config).await.unwrap();
 
     // Create root namespace
     let root = distributed_runtime.namespace("root").unwrap();

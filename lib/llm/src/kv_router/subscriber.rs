@@ -295,12 +295,7 @@ pub async fn start_kv_router_background(
 
     // Get instances_rx for tracking current workers
     let client = generate_endpoint.client().await?;
-    let instances_rx = match client.instance_source.as_ref() {
-        dynamo_runtime::component::InstanceSource::Dynamic(rx) => rx.clone(),
-        dynamo_runtime::component::InstanceSource::Static => {
-            anyhow::bail!("Expected dynamic instance source for KV routing");
-        }
-    };
+    let instances_rx = client.instance_source.as_ref().clone();
 
     // Only set up snapshot-related resources if snapshot_tx, get_workers_tx, and threshold are provided
     let snapshot_resources = if let (Some(get_workers_tx), Some(snapshot_tx), Some(_)) = (

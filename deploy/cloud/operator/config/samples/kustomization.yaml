@@ -19,4 +19,5 @@ resources:
 - nvidia.com_v1alpha1_dynamocomponent.yaml
 - nvidia.com_v1alpha1_dynamographdeployment.yaml
 - nvidia.com_v1alpha1_dynamographdeploymentrequest.yaml
+- nvidia.com_v1alpha1_dynamomodel.yaml
 #+kubebuilder:scaffold:manifestskustomizesamples

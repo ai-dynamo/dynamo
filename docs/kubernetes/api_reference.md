@@ -37,6 +37,7 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 - [DynamoComponentDeployment](#dynamocomponentdeployment)
 - [DynamoGraphDeployment](#dynamographdeployment)
 - [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
+- [DynamoModel](#dynamomodel)
 
 
 
@@ -167,6 +168,7 @@ _Appears in:_
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
+| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  |  |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
 | `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
@@ -203,6 +205,7 @@ _Appears in:_
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
+| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  |  |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
 | `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
@@ -345,6 +348,81 @@ _Appears in:_
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
 
 
+#### DynamoModel
+
+
+
+DynamoModel is the Schema for the dynamo models API
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `DynamoModel` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoModelSpec](#dynamomodelspec)_ |  |  |  |
+| `status` _[DynamoModelStatus](#dynamomodelstatus)_ |  |  |  |
+
+
+#### DynamoModelSpec
+
+
+
+DynamoModelSpec defines the desired state of DynamoModel
+
+
+
+_Appears in:_
+- [DynamoModel](#dynamomodel)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `modelName` _string_ | ModelName is the full model identifier (e.g., "meta-llama/Llama-3.3-70B-Instruct-lora") |  | Required: \{\} <br /> |
+| `baseModelName` _string_ | BaseModelName is the base model identifier that matches the service label<br />This is used to discover endpoints via headless services |  | Required: \{\} <br /> |
+| `modelType` _string_ | ModelType specifies the type of model (e.g., "base", "lora", "adapter") | base | Enum: [base lora adapter] <br /> |
+| `source` _[ModelSource](#modelsource)_ | Source specifies the model source location (only applicable for lora model type) |  |  |
+
+
+#### DynamoModelStatus
+
+
+
+DynamoModelStatus defines the observed state of DynamoModel
+
+
+
+_Appears in:_
+- [DynamoModel](#dynamomodel)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  |  |
+| `readyEndpoints` _integer_ | ReadyEndpoints is the count of endpoints that are ready |  |  |
+| `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  |  |
+
+
+#### EndpointInfo
+
+
+
+EndpointInfo represents a single endpoint (pod) serving the model
+
+
+
+_Appears in:_
+- [DynamoModelStatus](#dynamomodelstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `address` _string_ | Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090") |  |  |
+| `podName` _string_ | PodName is the name of the pod serving this endpoint |  |  |
+| `ready` _boolean_ | Ready indicates whether the endpoint is ready to serve traffic<br />For LoRA models: true if the POST /loras request succeeded with a 2xx status code<br />For base models: always false (no probing performed) |  |  |
+
+
 #### IngressSpec
 
 
@@ -385,6 +463,40 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `secretName` _string_ | SecretName is the name of a Kubernetes Secret containing the TLS certificate and key. |  |  |
+
+
+#### ModelReference
+
+
+
+ModelReference identifies a model served by this component
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the base model identifier (e.g., "llama-3-70b-instruct-v1") |  | Required: \{\} <br /> |
+| `revision` _string_ | Revision is the model revision/version (optional) |  |  |
+
+
+#### ModelSource
+
+
+
+ModelSource defines the source location of a model
+
+
+
+_Appears in:_
+- [DynamoModelSpec](#dynamomodelspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `uri` _string_ | URI is the model source URI<br />Supported formats:<br />- S3: s3://bucket/path/to/model<br />- HuggingFace: hf://org/model@revision_sha |  | Required: \{\} <br /> |
 
 
 #### MultinodeSpec

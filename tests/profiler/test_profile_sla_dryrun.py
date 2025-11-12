@@ -67,7 +67,7 @@ class TestProfileSLADryRun:
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
-                self.aic_model_name = None
+                self.aic_hf_id = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
@@ -109,7 +109,7 @@ class TestProfileSLADryRun:
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
-                self.aic_model_name = None
+                self.aic_hf_id = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
@@ -170,7 +170,7 @@ class TestProfileSLADryRun:
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
-                self.aic_model_name = None
+                self.aic_hf_id = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
@@ -221,7 +221,7 @@ class TestProfileSLADryRun:
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
-                self.aic_model_name = None
+                self.aic_hf_id = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 8
@@ -294,7 +294,7 @@ class TestProfileSLADryRun:
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
-                self.aic_model_name = None
+                self.aic_hf_id = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
                 # Set to 0 to trigger auto-generation path
@@ -360,7 +360,7 @@ class TestProfileSLADryRun:
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
-                self.aic_model_name = None
+                self.aic_hf_id = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 0
@@ -425,7 +425,7 @@ class TestProfileSLADryRun:
                 self.dry_run = True
                 self.use_ai_configurator = False
                 self.aic_system = None
-                self.aic_model_name = None
+                self.aic_hf_id = None
                 self.aic_backend = ""
                 self.aic_backend_version = None
                 self.num_gpus_per_node = 0

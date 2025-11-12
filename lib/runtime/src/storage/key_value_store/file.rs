@@ -14,7 +14,7 @@ use std::{collections::HashMap, pin::Pin};
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures::StreamExt;
-use inotify::{Event, EventMask, EventStream, Inotify, WatchMask};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 
 use crate::storage::key_value_store::KeyValue;
@@ -117,8 +117,10 @@ pub struct Directory {
 
 impl Directory {
     fn new(root: PathBuf, p: PathBuf) -> Self {
+        // Canonicalize root to handle symlinks (e.g., /var -> /private/var on macOS)
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
         Directory {
-            root,
+            root: canonical_root,
             p,
             owned_files: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -197,63 +199,87 @@ impl KeyValueBucket for Directory {
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
-        let inotify = Inotify::init().map_err(to_fs_err)?;
-        inotify
-            .watches()
-            .add(
-                &self.p,
-                WatchMask::MODIFY | WatchMask::CREATE | WatchMask::DELETE,
-            )
+        let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+
+        let mut watcher = RecommendedWatcher::new(
+            move |res: Result<Event, notify::Error>| {
+                if let Err(err) = tx.blocking_send(res) {
+                    tracing::error!(error = %err, "Failed to send file watch event");
+                }
+            },
+            Config::default(),
+        )
+        .map_err(to_fs_err)?;
+
+        watcher
+            .watch(&self.p, RecursiveMode::NonRecursive)
             .map_err(to_fs_err)?;
 
         let dir = self.p.clone();
+        let root = self.root.clone();
+
         Ok(Box::pin(async_stream::stream! {
-            let mut buffer = [0; 1024];
-            let mut events = match inotify.into_event_stream(&mut buffer) {
-                Ok(events) => events,
-                Err(err) => {
-                    tracing::error!(error = %err, "Failed getting event stream from inotify");
-                    return;
-                }
-            };
-            while let Some(Ok(event)) = events.next().await {
-                let Some(name) = event.name else {
-                    tracing::warn!("Unexpected event on the directory itself");
-                    continue;
-                };
-                let item_path = dir.join(name);
-                let key = match item_path.strip_prefix(&self.root) {
-                    Ok(stripped) => stripped.display().to_string().replace("_", "/"),
+            // Keep watcher alive for the duration of the stream
+            let _watcher = watcher;
+
+            while let Some(event_result) = rx.recv().await {
+                let event = match event_result {
+                    Ok(event) => event,
                     Err(err) => {
-                        // Possibly this should be a panic.
-                        // A key cannot be outside the file store root.
-                        tracing::error!(
-                            error = %err,
-                            item_path = %item_path.display(),
-                            root = %self.root.display(),
-                            "Item in file store is not prefixed with file store root. Should be impossible. Ignoring invalid key.");
+                        tracing::error!(error = %err, "Failed receiving file watch event");
                         continue;
                     }
                 };
 
-                match event.mask {
-                    EventMask::MODIFY | EventMask::CREATE => {
-                        let data: bytes::Bytes = match fs::read(&item_path) {
-                            Ok(data) => data.into(),
-                            Err(err) => {
-                                tracing::warn!(error = %err, item = %item_path.display(), "Failed reading event item. Skipping.");
-                                continue;
-                            }
-                        };
-                        let item = KeyValue::new(key, data);
-                        yield WatchEvent::Put(item);
-                    }
-                    EventMask::DELETE => {
-                        yield WatchEvent::Delete(Key::from_raw(key));
-                    }
-                    event_type => {
-                        tracing::warn!(?event_type, dir = %dir.display(), "Unexpected event type");
+                for item_path in event.paths {
+                    // Skip if the event is for the directory itself
+                    if item_path == dir {
+                        tracing::warn!("Unexpected event on the directory itself");
                         continue;
+                    }
+
+                    // Canonicalize paths to handle symlinks (e.g., /var -> /private/var on macOS)
+                    let canonical_item_path = match item_path.canonicalize() {
+                        Ok(p) => p,
+                        Err(err) => {
+                            tracing::warn!(error = %err, item = %item_path.display(), "Failed to canonicalize path. Using original path.");
+                            item_path.clone()
+                        }
+                    };
+
+                    let key = match canonical_item_path.strip_prefix(&root) {
+                        Ok(stripped) => stripped.display().to_string().replace("_", "/"),
+                        Err(err) => {
+                            // Possibly this should be a panic.
+                            // A key cannot be outside the file store root.
+                            tracing::error!(
+                                error = %err,
+                                item_path = %canonical_item_path.display(),
+                                root = %root.display(),
+                                "Item in file store is not prefixed with file store root. Should be impossible. Ignoring invalid key.");
+                            continue;
+                        }
+                    };
+
+                    match event.kind {
+                        EventKind::Create(_) | EventKind::Modify(_) => {
+                            let data: bytes::Bytes = match fs::read(&item_path) {
+                                Ok(data) => data.into(),
+                                Err(err) => {
+                                    tracing::warn!(error = %err, item = %item_path.display(), "Failed reading event item. Skipping.");
+                                    continue;
+                                }
+                            };
+                            let item = KeyValue::new(key, data);
+                            yield WatchEvent::Put(item);
+                        }
+                        EventKind::Remove(_) => {
+                            yield WatchEvent::Delete(Key::from_raw(key));
+                        }
+                        event_type => {
+                            tracing::debug!(?event_type, dir = %dir.display(), "Ignoring event type");
+                            continue;
+                        }
                     }
                 }
             }
