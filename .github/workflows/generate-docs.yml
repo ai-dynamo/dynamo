@@ -421,7 +421,7 @@ jobs:
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
           VERSION: ${{ steps.vars.outputs.version }}
           PUBLISHED_VERSION: ${{ steps.publish_version.outputs.published || 'false' }}
-          PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
+          # PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -429,7 +429,8 @@ jobs:
           echo "request_name=Publish docs from ${GITHUB_REPOSITORY}@${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
 
           # Only flush cache if we actually published something
-          if [[ "${PUBLISHED_VERSION}" == "true" ]] || [[ "${PUBLISHED_DEV}" == "true" ]]; then
+          # if [[ "${PUBLISHED_VERSION}" == "true" ]] || [[ "${PUBLISHED_DEV}" == "true" ]]; then
+          if [[ "${PUBLISHED_VERSION}" == "true" ]]; then
             echo "perform_flush=true" >> "$GITHUB_OUTPUT"
           else
             echo "perform_flush=false" >> "$GITHUB_OUTPUT"
@@ -504,8 +505,8 @@ jobs:
           VERSION: ${{ steps.vars.outputs.version }}
           S3_PATH: ${{ steps.paths.outputs.s3_path }}
           PUBLISHED_VERSION: ${{ steps.publish_version.outputs.published || 'false' }}
-          PUBLISHED_LATEST: ${{ steps.publish_version.outputs.published_latest || 'false' }}
-          PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
+          # PUBLISHED_LATEST: ${{ steps.publish_latest.outputs.published || 'false' }}
+          # PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
           CACHE_FLUSHED: ${{ steps.publish.outputs.perform_flush }}
         run: |
           echo "## 📚 Documentation Publishing Summary" >> $GITHUB_STEP_SUMMARY
@@ -516,16 +517,17 @@ jobs:
           echo "### Published To" >> $GITHUB_STEP_SUMMARY
           if [[ "${PUBLISHED_VERSION}" == "true" ]]; then
             echo "- ✅ **Version:** \`${VERSION}\` → \`s3://.../${S3_PATH}/archive/${VERSION}\`" >> $GITHUB_STEP_SUMMARY
-            if [[ "${PUBLISHED_LATEST}" == "true" ]]; then
-              echo "- ✅ **Latest:** \`${VERSION}\` → \`s3://.../${S3_PATH}/latest\` (updated to match release)" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "- ⏭️ **Latest:** not updated (manual dispatch or /not-latest flag)" >> $GITHUB_STEP_SUMMARY
-            fi
+            # if [[ "${PUBLISHED_LATEST}" == "true" ]]; then
+            #   echo "- ✅ **Latest:** \`${VERSION}\` → \`s3://.../${S3_PATH}/latest\` (updated to match release)" >> $GITHUB_STEP_SUMMARY
+            # else
+            #   echo "- ⏭️ **Latest:** not updated (manual dispatch or /not-latest flag)" >> $GITHUB_STEP_SUMMARY
+            # fi
           fi
-          if [[ "${PUBLISHED_DEV}" == "true" ]]; then
-            echo "- ✅ **Dev:** \`s3://.../${S3_PATH}/dev\` (main branch)" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [[ "${PUBLISHED_VERSION}" != "true" ]] && [[ "${PUBLISHED_DEV}" != "true" ]]; then
+          # if [[ "${PUBLISHED_DEV}" == "true" ]]; then
+          #   echo "- ✅ **Dev:** \`s3://.../${S3_PATH}/dev\` (main branch)" >> $GITHUB_STEP_SUMMARY
+          # fi
+          # if [[ "${PUBLISHED_VERSION}" != "true" ]] && [[ "${PUBLISHED_DEV}" != "true" ]]; then
+          if [[ "${PUBLISHED_VERSION}" != "true" ]]; then
             echo "- ⚠️ No documentation was published" >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
