@@ -70,6 +70,12 @@ pub enum FocusColumn {
     Endpoints,
 }
 
+impl Default for FocusColumn {
+    fn default() -> Self {
+        FocusColumn::Namespaces
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct App {
     namespaces: BTreeMap<String, NamespaceState>,
@@ -91,21 +97,16 @@ pub struct Selection {
 
 #[derive(Debug, Clone)]
 pub struct NamespaceState {
-    pub name: String,
     pub components: BTreeMap<String, ComponentState>,
-    pub created_at: Instant,
 }
 
 #[derive(Debug, Clone)]
 pub struct ComponentState {
-    pub name: String,
     pub endpoints: BTreeMap<String, EndpointState>,
-    pub created_at: Instant,
 }
 
 #[derive(Debug, Clone)]
 pub struct EndpointState {
-    pub name: String,
     pub instances: BTreeMap<u64, InstanceState>,
     pub status: EndpointStatus,
     pub updated_at: Instant,
@@ -269,25 +270,20 @@ impl App {
             .namespaces
             .entry(instance.namespace.clone())
             .or_insert_with(|| NamespaceState {
-                name: instance.namespace.clone(),
                 components: BTreeMap::new(),
-                created_at: Instant::now(),
             });
 
         let component = namespace
             .components
             .entry(instance.component.clone())
             .or_insert_with(|| ComponentState {
-                name: instance.component.clone(),
                 endpoints: BTreeMap::new(),
-                created_at: Instant::now(),
             });
 
         let endpoint = component
             .endpoints
             .entry(instance.endpoint.clone())
             .or_insert_with(|| EndpointState {
-                name: instance.endpoint.clone(),
                 instances: BTreeMap::new(),
                 status: EndpointStatus::Provisioning,
                 updated_at: Instant::now(),
@@ -331,22 +327,19 @@ impl App {
     fn move_selection(&mut self, delta: isize) {
         match self.selection.focus {
             FocusColumn::Namespaces => {
-                self.shift_index(
-                    &mut self.selection.namespace_index,
-                    self.namespace_count(),
-                    delta,
-                );
+                let count = self.namespace_count();
+                Self::shift_index(&mut self.selection.namespace_index, count, delta);
                 self.selection.component_index = 0;
                 self.selection.endpoint_index = 0;
             }
             FocusColumn::Components => {
                 let count = self.component_count();
-                self.shift_index(&mut self.selection.component_index, count, delta);
+                Self::shift_index(&mut self.selection.component_index, count, delta);
                 self.selection.endpoint_index = 0;
             }
             FocusColumn::Endpoints => {
                 let count = self.endpoint_count();
-                self.shift_index(&mut self.selection.endpoint_index, count, delta);
+                Self::shift_index(&mut self.selection.endpoint_index, count, delta);
             }
         }
     }
@@ -362,7 +355,7 @@ impl App {
         };
     }
 
-    fn shift_index(&self, index: &mut usize, len: usize, delta: isize) {
+    fn shift_index(index: &mut usize, len: usize, delta: isize) {
         if len == 0 {
             *index = 0;
             return;

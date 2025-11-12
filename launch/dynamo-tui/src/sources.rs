@@ -40,7 +40,7 @@ pub async fn spawn_discovery_pipeline(
 
     tx.send(AppEvent::DiscoverySnapshot(endpoints)).await.ok();
 
-    let mut stream = discovery
+    let stream = discovery
         .list_and_watch(DiscoveryQuery::AllEndpoints, Some(cancel.clone()))
         .await
         .context("failed to watch discovery events")?;
@@ -48,7 +48,7 @@ pub async fn spawn_discovery_pipeline(
     let cancel_listener = cancel.clone();
 
     let handle = tokio::spawn(async move {
-        let mut tx = tx;
+        let tx = tx;
         let mut instances_by_id = instances_by_id;
         let mut stream = stream;
         loop {
@@ -116,7 +116,7 @@ pub async fn spawn_nats_pipeline(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let handle = tokio::spawn(async move {
-        let mut tx = tx;
+        let tx = tx;
         let nats_client = nats_client;
         loop {
             tokio::select! {
@@ -171,15 +171,15 @@ pub async fn spawn_metrics_pipeline(
     .await
     .ok();
 
-    let mut prev_sample: Option<PrometheusSample> = None;
+    let prev_sample: Option<PrometheusSample> = None;
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let handle = tokio::spawn(async move {
-        let mut tx = tx;
+        let tx = tx;
         let mut prev_sample = prev_sample;
 
-        if collect_metrics_once(&client, &metrics_url, &mut prev_sample, &mut tx)
+        if collect_metrics_once(&client, &metrics_url, &mut prev_sample, &tx)
             .await
             .is_err()
         {
@@ -190,7 +190,7 @@ pub async fn spawn_metrics_pipeline(
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = ticker.tick() => {
-                    if collect_metrics_once(&client, &metrics_url, &mut prev_sample, &mut tx).await.is_err() {
+                    if collect_metrics_once(&client, &metrics_url, &mut prev_sample, &tx).await.is_err() {
                         continue;
                     }
                 }
@@ -205,7 +205,7 @@ async fn collect_metrics_once(
     client: &reqwest::Client,
     metrics_url: &str,
     prev_sample: &mut Option<PrometheusSample>,
-    tx: &mut mpsc::Sender<AppEvent>,
+    tx: &mpsc::Sender<AppEvent>,
 ) -> anyhow::Result<()> {
     match client.get(metrics_url).send().await {
         Ok(response) => match response.text().await {

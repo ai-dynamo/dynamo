@@ -2537,6 +2537,7 @@ name = "dynamo-tui"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "async-nats",
  "clap 4.5.48",
  "crossterm 0.27.0",
  "dynamo-runtime",

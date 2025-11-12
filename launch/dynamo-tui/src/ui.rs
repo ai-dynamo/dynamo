@@ -12,7 +12,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::app::{App, EndpointStatus, FocusColumn, InstanceState};
+use crate::app::{App, FocusColumn, InstanceState};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.size();
@@ -138,13 +138,13 @@ fn render_endpoints(frame: &mut Frame, area: Rect, app: &App) {
 
     let endpoint_items: Vec<ListItem> = (0..app.endpoint_count())
         .filter_map(|idx| {
-            let (_, endpoint) = app.endpoint_at(
+            let (name, endpoint) = app.endpoint_at(
                 app.selection().namespace_index,
                 app.selection().component_index,
                 idx,
             )?;
             let summary = app.endpoint_health_summary(endpoint);
-            Some((idx, endpoint.name.clone(), summary))
+            Some((idx, name.clone(), summary))
         })
         .map(|(idx, name, summary)| {
             let selected = idx == app.selection().endpoint_index;
@@ -215,7 +215,7 @@ fn render_endpoint_detail(frame: &mut Frame, area: Rect, app: &App) {
     ]));
 
     if let Some(last_seen) = summary.last_seen {
-        if let Ok(elapsed) = Instant::now().checked_duration_since(last_seen) {
+        if let Some(elapsed) = Instant::now().checked_duration_since(last_seen) {
             lines.push(Line::from(vec![
                 Span::styled(
                     "Last activity: ",
@@ -366,18 +366,16 @@ fn render_metrics(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let mut message = String::new();
-    let mut style = Style::default().fg(Color::Gray);
-
-    if let Some(err) = app.last_error() {
-        message = format!("Error: {err}");
-        style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+    let (mut message, style) = if let Some(err) = app.last_error() {
+        (
+            format!("Error: {err}"),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )
     } else if let Some(info) = app.last_info() {
-        message = info.clone();
-        style = Style::default().fg(Color::Cyan);
+        (info.clone(), Style::default().fg(Color::Cyan))
     } else {
-        message = "Ready".to_string();
-    }
+        ("Ready".to_string(), Style::default().fg(Color::Gray))
+    };
 
     if let Some(updated) = app.last_update() {
         let elapsed = format_duration(updated.elapsed()).to_string();

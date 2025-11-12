@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -22,7 +23,7 @@ pub fn spawn_input_listener(
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut tx = tx;
+        let tx = tx;
         loop {
             if cancel.is_cancelled() {
                 break;
@@ -51,7 +52,7 @@ pub fn spawn_input_listener(
     })
 }
 
-fn poll_crossterm_event() -> crossterm::Result<Option<Event>> {
+fn poll_crossterm_event() -> Result<Option<Event>> {
     if crossterm::event::poll(Duration::from_millis(100))? {
         Ok(Some(crossterm::event::read()?))
     } else {

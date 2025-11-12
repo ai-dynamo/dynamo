@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
     tasks.push(input::spawn_input_listener(input_tx, cancel_token.clone()));
 
     let backend = CrosstermBackend::new(std::io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    let terminal = Terminal::new(backend)?;
 
     execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     crossterm::terminal::enable_raw_mode()?;
