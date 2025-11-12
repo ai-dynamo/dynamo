@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{CancellationToken, ErrorContext, Result, Runtime, error};
+use crate::runtime::Runtime;
+use anyhow::{Context, Result};
 
 use async_nats::jetstream::kv;
 use derive_builder::Builder;
@@ -19,6 +20,7 @@ use etcd_client::{
 };
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
 use tokio::time::{Duration, interval};
+use tokio_util::sync::CancellationToken;
 
 mod connector;
 mod lease;
@@ -110,7 +112,7 @@ impl Client {
 
     /// Get a clone of the underlying [`etcd_client::Client`] instance.
     /// This returns a clone since the client is behind an RwLock.
-    pub fn etcd_client(&self) -> etcd_client::Client {
+    fn etcd_client(&self) -> etcd_client::Client {
         self.connector.get_client()
     }
 
@@ -119,28 +121,48 @@ impl Client {
         self.primary_lease
     }
 
-    pub async fn kv_create(&self, key: &str, value: Vec<u8>, lease_id: Option<u64>) -> Result<()> {
+    /// Returns Ok(None) if value was created, Ok(Some(revision)) if the value already exists.
+    pub async fn kv_create(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        lease_id: Option<u64>,
+    ) -> Result<Option<u64>> {
         let id = lease_id.unwrap_or(self.lease_id());
         let put_options = PutOptions::new().with_lease(id as i64);
 
-        // Build the transaction
+        // Build transaction that creates key only if it doesn't exist
         let txn = Txn::new()
             .when(vec![Compare::version(key, CompareOp::Equal, 0)]) // Ensure the lock does not exist
             .and_then(vec![
                 TxnOp::put(key, value, Some(put_options)), // Create the object
+            ])
+            .or_else(vec![
+                TxnOp::get(key, None), // Key exists, get its info
             ]);
 
         // Execute the transaction
         let result = self.connector.get_client().kv_client().txn(txn).await?;
 
+        // Created
         if result.succeeded() {
-            Ok(())
-        } else {
-            for resp in result.op_responses() {
-                tracing::warn!(response = ?resp, "kv_create etcd op response");
-            }
-            Err(error!("Unable to create key. Check etcd server status"))
+            return Ok(None);
         }
+
+        // Already exists
+        if let Some(etcd_client::TxnOpResponse::Get(get_resp)) =
+            result.op_responses().into_iter().next()
+            && let Some(kv) = get_resp.kvs().first()
+        {
+            let version = kv.version() as u64;
+            return Ok(Some(version));
+        }
+
+        // Error
+        for resp in result.op_responses() {
+            tracing::warn!(response = ?resp, "kv_create etcd op response");
+        }
+        anyhow::bail!("Unable to create key. Check etcd server status")
     }
 
     /// Atomically create a key if it does not exist, or validate the values are identical if the key exists.
@@ -180,17 +202,15 @@ impl Client {
                 Some(response) => match response {
                     TxnOpResponse::Txn(response) => match response.succeeded() {
                         true => Ok(()),
-                        false => Err(error!(
+                        false => anyhow::bail!(
                             "Unable to create or validate key. Check etcd server status"
-                        )),
+                        ),
                     },
-                    _ => Err(error!(
-                        "Unable to validate key operation. Check etcd server status"
-                    )),
+                    _ => {
+                        anyhow::bail!("Unable to validate key operation. Check etcd server status")
+                    }
                 },
-                None => Err(error!(
-                    "Unable to create or validate key. Check etcd server status"
-                )),
+                None => anyhow::bail!("Unable to create or validate key. Check etcd server status"),
             }
         }
     }
@@ -372,7 +392,7 @@ impl Client {
         // Get the start revision
         let mut start_revision = get_response
             .header()
-            .ok_or(error!("missing header; unable to get revision"))?
+            .ok_or(anyhow::anyhow!("missing header; unable to get revision"))?
             .revision();
         tracing::trace!("{prefix}: start_revision: {start_revision}");
         start_revision += 1;
@@ -731,7 +751,7 @@ mod tests {
     fn test_ectd_client() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings(false);
+        let config = DistributedConfig::from_settings();
 
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();
@@ -774,7 +794,7 @@ mod tests {
     fn test_kv_cache() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings(false);
+        let config = DistributedConfig::from_settings();
 
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();

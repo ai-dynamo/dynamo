@@ -51,7 +51,7 @@ mod tests {
     /// Helper to create a test DistributedRuntime with NATS
     async fn create_test_drt() -> dynamo_runtime::DistributedRuntime {
         let rt = Runtime::from_current().unwrap();
-        let config = dynamo_runtime::distributed::DistributedConfig::from_settings(false);
+        let config = dynamo_runtime::distributed::DistributedConfig::from_settings();
         dynamo_runtime::DistributedRuntime::new(rt, config)
             .await
             .expect("Failed to create DistributedRuntime")

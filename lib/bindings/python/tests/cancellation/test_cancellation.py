@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import asyncio
 
@@ -32,6 +20,8 @@ class MockServer:
         self.context_is_killed = False
 
     async def generate(self, request, context):
+        print("################## generate called ######################")
+
         self.context_is_stopped = False
         self.context_is_killed = False
 
@@ -127,7 +117,7 @@ class MockServer:
 @pytest.fixture
 def namespace():
     """Namespace for this test file"""
-    return "cancellation_unit_test"
+    return "cancellation-unit-test"
 
 
 @pytest.fixture
@@ -176,7 +166,7 @@ async def client(runtime, namespace):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
-async def test_client_context_cancel(server, client):
+async def test_client_context_cancel(temp_file_store, server, client):
     _, handler = server
     context = Context()
     stream = await client.generate("_generate_until_context_cancelled", context=context)
@@ -209,7 +199,7 @@ async def test_client_context_cancel(server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
-async def test_client_loop_break(server, client):
+async def test_client_loop_break(temp_file_store, server, client):
     _, handler = server
     stream = await client.generate("_generate_until_context_cancelled")
 
@@ -241,7 +231,7 @@ async def test_client_loop_break(server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
-async def test_server_context_cancel(server, client):
+async def test_server_context_cancel(temp_file_store, server, client):
     _, handler = server
     stream = await client.generate("_generate_and_cancel_context")
 
@@ -265,7 +255,7 @@ async def test_server_context_cancel(server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
-async def test_server_raise_cancelled(server, client):
+async def test_server_raise_cancelled(temp_file_store, server, client):
     _, handler = server
     stream = await client.generate("_generate_and_raise_cancelled")
 
@@ -293,7 +283,7 @@ async def test_server_raise_cancelled(server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
-async def test_client_context_already_cancelled(server, client):
+async def test_client_context_already_cancelled(temp_file_store, server, client):
     _, handler = server
     context = Context()
     context.stop_generating()
@@ -315,7 +305,9 @@ async def test_client_context_already_cancelled(server, client):
 
 @pytest.mark.forked
 @pytest.mark.asyncio
-async def test_client_context_cancel_before_await_request(server, client):
+async def test_client_context_cancel_before_await_request(
+    temp_file_store, server, client
+):
     _, handler = server
     context = Context()
     request = client.generate("_generate_until_context_cancelled", context=context)

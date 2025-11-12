@@ -7,10 +7,10 @@ use crate::{
     backend::{Backend, ExecutionContext},
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
-    entrypoint::{self, EngineConfig},
+    entrypoint::EngineConfig,
     kv_router::{KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
-    model_card::{self, ModelDeploymentCard},
+    model_card::ModelDeploymentCard,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
@@ -59,7 +59,6 @@ pub async fn prepare_engine(
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
         EngineConfig::Dynamic(local_model) => {
-            let store = Arc::new(distributed_runtime.store().clone());
             let model_manager = Arc::new(ModelManager::new());
             let watch_obj = Arc::new(ModelWatcher::new(
                 distributed_runtime.clone(),
@@ -68,14 +67,16 @@ pub async fn prepare_engine(
                 None,
                 None,
             ));
-            let (_, receiver) = store.watch(
-                model_card::ROOT_PATH,
-                None,
-                distributed_runtime.primary_token(),
-            );
+            let discovery = distributed_runtime.discovery();
+            let discovery_stream = discovery
+                .list_and_watch(
+                    dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+                    Some(distributed_runtime.primary_token().clone()),
+                )
+                .await?;
             let inner_watch_obj = watch_obj.clone();
             let _watcher_task = tokio::spawn(async move {
-                inner_watch_obj.watch(receiver, None).await;
+                inner_watch_obj.watch(discovery_stream, None).await;
             });
             tracing::info!("Waiting for remote model..");
 
@@ -92,58 +93,6 @@ pub async fn prepare_engine(
                 inspect_template: false,
                 card: None,
                 request_template: local_model.request_template(),
-            })
-        }
-        EngineConfig::StaticRemote(local_model) => {
-            // The card should have been loaded at 'build' phase earlier
-            let card = local_model.card();
-            let router_mode = local_model.router_config().router_mode;
-
-            let endpoint_id = local_model.endpoint_id();
-            let component = distributed_runtime
-                .namespace(&endpoint_id.namespace)?
-                .component(&endpoint_id.component)?;
-
-            let client = component.endpoint(&endpoint_id.name).client().await?;
-
-            let kv_chooser = if router_mode == RouterMode::KV {
-                let model_manager = Arc::new(ModelManager::new());
-                Some(
-                    model_manager
-                        .kv_chooser_for(
-                            &component,
-                            card.kv_cache_block_size,
-                            Some(local_model.router_config().kv_router_config),
-                        )
-                        .await?,
-                )
-            } else {
-                None
-            };
-
-            let hf_tokenizer = card.tokenizer_hf()?;
-            let chat_engine = entrypoint::build_routed_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(
-                card,
-                &client,
-                router_mode,
-                None,
-                kv_chooser.clone(),
-                hf_tokenizer,
-                None, // No prefill chooser in static mode
-            )
-            .await?;
-
-            let service_name = local_model.service_name().to_string();
-            tracing::info!("Static connecting to {service_name}");
-            Ok(PreparedEngine {
-                service_name,
-                engine: chat_engine,
-                inspect_template: false,
-                request_template: local_model.request_template(),
-                card: Some(local_model.into_card()),
             })
         }
         EngineConfig::StaticFull { engine, model, .. } => {

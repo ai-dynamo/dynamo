@@ -14,8 +14,8 @@
 ARG DEV_BASE=""
 FROM ${DEV_BASE} AS local-dev
 
-# Don't want ubuntu to be editable, just change uid and gid.
-ENV USERNAME=ubuntu
+# Don't want dynamo to be editable, just change uid and gid.
+ENV USERNAME=dynamo
 ARG USER_UID
 ARG USER_GID
 ARG WORKSPACE_DIR=/workspace
@@ -50,7 +50,10 @@ RUN apt-get install -y sudo gnupg2 gnupg1 \
     && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME \
     && mkdir -p /home/$USERNAME \
-    && groupmod -g $USER_GID $USERNAME \
+    # Handle GID conflicts: if target GID exists and it's not our group, remove it
+    && (getent group $USER_GID | grep -v "^$USERNAME:" && groupdel $(getent group $USER_GID | cut -d: -f1) || true) \
+    # Create group if it doesn't exist, otherwise modify existing group
+    && (getent group $USERNAME > /dev/null 2>&1 && groupmod -g $USER_GID $USERNAME || groupadd -g $USER_GID $USERNAME) \
     && usermod -u $USER_UID -g $USER_GID $USERNAME \
     && chown -R $USERNAME:$USERNAME /home/$USERNAME \
     && chsh -s /bin/bash $USERNAME

@@ -226,7 +226,7 @@ def get_runtime():
             # No running loop, create a new one (sync context)
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-        _runtime_instance = DistributedRuntime(loop, "etcd", False)
+        _runtime_instance = DistributedRuntime(loop, "etcd")
 
     return _runtime_instance
 

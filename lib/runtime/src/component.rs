@@ -39,7 +39,7 @@ use crate::{
 };
 
 use super::{
-    DistributedRuntime, Result, Runtime, error,
+    DistributedRuntime, Runtime,
     traits::*,
     transports::etcd::{COMPONENT_KEYWORD, ENDPOINT_KEYWORD},
     transports::nats::Slug,
@@ -69,13 +69,13 @@ mod namespace;
 mod registry;
 pub mod service;
 
-pub use client::{Client, InstanceSource};
+pub use client::Client;
 
 /// The root key-value path where each instance registers itself in.
 /// An instance is namespace+component+endpoint+lease_id and must be unique.
 pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
     NatsTcp(String),
@@ -166,10 +166,6 @@ pub struct Component {
     #[builder(setter(into))]
     namespace: Namespace,
 
-    // A static component's endpoints cannot be discovered via etcd, they are
-    // fixed at startup time.
-    is_static: bool,
-
     /// This hierarchy's own metrics registry
     #[builder(default = "crate::MetricsRegistry::new()")]
     metrics_registry: crate::MetricsRegistry,
@@ -179,15 +175,12 @@ impl Hash for Component {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.namespace.name().hash(state);
         self.name.hash(state);
-        self.is_static.hash(state);
     }
 }
 
 impl PartialEq for Component {
     fn eq(&self, other: &Self) -> bool {
-        self.namespace.name() == other.namespace.name()
-            && self.name == other.name
-            && self.is_static == other.is_static
+        self.namespace.name() == other.namespace.name() && self.name == other.name
     }
 }
 
@@ -271,35 +264,37 @@ impl Component {
         Endpoint {
             component: self.clone(),
             name: endpoint.into(),
-            is_static: self.is_static,
             labels: Vec::new(),
             metrics_registry: crate::MetricsRegistry::new(),
         }
     }
 
     pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
-        let client = self.drt.store();
-        let Some(bucket) = client.get_bucket(&self.instance_root()).await? else {
-            return Ok(vec![]);
+        let discovery = self.drt.discovery();
+
+        let discovery_query = crate::discovery::DiscoveryQuery::ComponentEndpoints {
+            namespace: self.namespace.name(),
+            component: self.name.clone(),
         };
-        let entries = bucket.entries().await?;
-        let mut instances = Vec::with_capacity(entries.len());
-        for (name, bytes) in entries.into_iter() {
-            let val = match serde_json::from_slice::<Instance>(&bytes) {
-                Ok(val) => val,
-                Err(err) => {
-                    anyhow::bail!("Error converting storage response to Instance: {err}. {name}",);
-                }
-            };
-            instances.push(val);
-        }
+
+        let discovery_instances = discovery.list(discovery_query).await?;
+
+        // Extract Instance from DiscoveryInstance::Endpoint wrapper
+        let mut instances: Vec<Instance> = discovery_instances
+            .into_iter()
+            .filter_map(|di| match di {
+                crate::discovery::DiscoveryInstance::Endpoint(instance) => Some(instance),
+                _ => None, // Ignore all other variants (ModelCard, etc.)
+            })
+            .collect();
+
         instances.sort();
         Ok(instances)
     }
 
     /// Scrape ServiceSet, which contains NATS stats as well as user defined stats
     /// embedded in data field of ServiceInfo.
-    pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {
+    pub async fn scrape_stats(&self, timeout: Duration) -> anyhow::Result<ServiceSet> {
         // Debug: scraping stats for component
         let service_name = self.service_name();
         let Some(service_client) = self.drt().service_client() else {
@@ -317,7 +312,7 @@ impl Component {
     /// then subsequent scrapes occur at a fixed interval of 9.8 seconds (MAX_WAIT_MS),
     /// which should be near or smaller than typical Prometheus scraping intervals to ensure
     /// metrics are fresh when Prometheus collects them.
-    pub fn start_scraping_nats_service_component_metrics(&self) -> Result<()> {
+    pub fn start_scraping_nats_service_component_metrics(&self) -> anyhow::Result<()> {
         const MAX_WAIT_MS: std::time::Duration = std::time::Duration::from_millis(9800); // Should be <= Prometheus scrape interval
 
         // If there is another component with the same service name, this will fail.
@@ -370,7 +365,7 @@ impl Component {
     /// Returns a stream of `ServiceInfo` objects.
     /// This should be consumed by a `[tokio::time::timeout_at`] because each services
     /// will only respond once, but there is no way to know when all services have responded.
-    pub async fn stats_stream(&self) -> Result<()> {
+    pub async fn stats_stream(&self) -> anyhow::Result<()> {
         unimplemented!("collect_stats")
     }
 
@@ -380,7 +375,7 @@ impl Component {
         // Pre-check to save cost of creating the service, but don't hold the lock
         if self
             .drt
-            .component_registry
+            .component_registry()
             .inner
             .lock()
             .await
@@ -397,7 +392,7 @@ impl Component {
         let (nats_service, stats_reg) =
             service::build_nats_service(nats_client, self, description).await?;
 
-        let mut guard = self.drt.component_registry.inner.lock().await;
+        let mut guard = self.drt.component_registry().inner.lock().await;
         if !guard.services.contains_key(&service_name) {
             // Normal case
             guard.services.insert(service_name.clone(), nats_service);
@@ -433,8 +428,6 @@ pub struct Endpoint {
     /// Endpoint name
     name: String,
 
-    is_static: bool,
-
     /// Additional labels for metrics
     labels: Vec<(String, String)>,
 
@@ -446,15 +439,12 @@ impl Hash for Endpoint {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.component.hash(state);
         self.name.hash(state);
-        self.is_static.hash(state);
     }
 }
 
 impl PartialEq for Endpoint {
     fn eq(&self, other: &Self) -> bool {
-        self.component == other.component
-            && self.name == other.name
-            && self.is_static == other.is_static
+        self.component == other.component && self.name == other.name
     }
 }
 
@@ -551,27 +541,19 @@ impl Endpoint {
         format!("{ns}/{cp}/{ep}/{lease_id:x}")
     }
 
-    /// The endpoint as an EtcdPath object with lease ID
-    pub fn etcd_path_object_with_lease_id(&self, lease_id: i64) -> EtcdPath {
-        if self.is_static {
-            self.etcd_path()
-        } else {
-            EtcdPath::new_endpoint_with_lease(
-                &self.component.namespace().name(),
-                self.component.name(),
-                &self.name,
-                lease_id,
-            )
-            .expect("Endpoint name and component name should be valid")
-        }
+    /// The endpoint as an EtcdPath object with instance ID
+    pub fn etcd_path_object_with_lease_id(&self, instance_id: i64) -> EtcdPath {
+        EtcdPath::new_endpoint_with_lease(
+            &self.component.namespace().name(),
+            self.component.name(),
+            &self.name,
+            instance_id,
+        )
+        .expect("Endpoint name and component name should be valid")
     }
 
-    pub fn name_with_id(&self, lease_id: u64) -> String {
-        if self.is_static {
-            self.name.clone()
-        } else {
-            format!("{}-{:x}", self.name, lease_id)
-        }
+    pub fn name_with_id(&self, instance_id: u64) -> String {
+        format!("{}-{:x}", self.name, instance_id)
     }
 
     pub fn subject(&self) -> String {
@@ -587,12 +569,8 @@ impl Endpoint {
         )
     }
 
-    pub async fn client(&self) -> Result<client::Client> {
-        if self.is_static {
-            client::Client::new_static(self.clone()).await
-        } else {
-            client::Client::new_dynamic(self.clone()).await
-        }
+    pub async fn client(&self) -> anyhow::Result<client::Client> {
+        client::Client::new(self.clone()).await
     }
 
     pub fn endpoint_builder(&self) -> endpoint::EndpointConfigBuilder {
@@ -608,8 +586,6 @@ pub struct Namespace {
 
     #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
-
-    is_static: bool,
 
     #[builder(default = "None")]
     parent: Option<Arc<Namespace>>,
@@ -633,8 +609,8 @@ impl std::fmt::Debug for Namespace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Namespace {{ name: {}; is_static: {}; parent: {:?} }}",
-            self.name, self.is_static, self.parent
+            "Namespace {{ name: {}; parent: {:?} }}",
+            self.name, self.parent
         )
     }
 }
@@ -652,29 +628,26 @@ impl std::fmt::Display for Namespace {
 }
 
 impl Namespace {
-    pub(crate) fn new(runtime: DistributedRuntime, name: String, is_static: bool) -> Result<Self> {
+    pub(crate) fn new(runtime: DistributedRuntime, name: String) -> anyhow::Result<Self> {
         Ok(NamespaceBuilder::default()
             .runtime(Arc::new(runtime))
             .name(name)
-            .is_static(is_static)
             .build()?)
     }
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
-    pub fn component(&self, name: impl Into<String>) -> Result<Component> {
+    pub fn component(&self, name: impl Into<String>) -> anyhow::Result<Component> {
         Ok(ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
-            .is_static(self.is_static)
             .build()?)
     }
 
     /// Create a [`Namespace`] in the parent namespace
-    pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
+    pub fn namespace(&self, name: impl Into<String>) -> anyhow::Result<Namespace> {
         Ok(NamespaceBuilder::default()
             .runtime(self.runtime.clone())
             .name(name.into())
-            .is_static(self.is_static)
             .parent(Some(Arc::new(self.clone())))
             .build()?)
     }
