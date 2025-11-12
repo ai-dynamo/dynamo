@@ -73,8 +73,8 @@ export IMAGE="<dynamo_trtllm_image>"
 # For example, assuming your cluster had a `/lustre` directory on the host, you
 # could add that as a mount like so:
 #
-# export MOUNTS="${PWD}/../:/mnt,/lustre:/lustre"
-export MOUNTS="${PWD}/../:/mnt"
+# export MOUNTS="${PWD}/../../../../:/mnt,/lustre:/lustre"
+export MOUNTS="${PWD}/../../../../:/mnt"
 
 # Can point to local FS as weel
 # export MODEL_PATH="/location/to/model"
