@@ -492,7 +492,7 @@ if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
 fi
 
 # Set the commit sha in the container so we can inspect what build this relates to
-DYNAMO_COMMIT_SHA=$(git rev-parse HEAD)
+DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA:-$(git rev-parse HEAD)}
 BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
 
 # Special handling for vLLM on ARM64 - set required defaults if not already specified by user
