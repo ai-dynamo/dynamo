@@ -34,7 +34,7 @@ limitations under the License.
 >
 > Before running the deployment, you must update the engine configuration files to change `backend: DEFAULT` to `backend: default` (lowercase). Run the following command:
 > ```bash
-> sed -i 's/backend: DEFAULT/backend: default/g' /mnt/recipes/llama4/trtllm/multimodal/prefill.yaml /mnt/recipes/llama4/trtllm/multimodal/decode.yaml
+> sed -i 's/backend: DEFAULT/backend: default/g' /mnt/examples/backends/trtllm/engine_configs/llama4/multimodal/prefill.yaml /mnt/examples/backends/trtllm/engine_configs/llama4/multimodal/decode.yaml
 > ```
 
 
@@ -100,8 +100,8 @@ deployment across 4 nodes:
 
 ```bash
 # Defaults set in srun_disaggregated.sh, but can customize here.
-# export PREFILL_ENGINE_CONFIG="/mnt/recipes/llama4/trtllm/multimodal/prefill.yaml"
-# export DECODE_ENGINE_CONFIG="/mnt/recipes/llama4/trtllm/multimodal/decode.yaml"
+# export PREFILL_ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/llama4/multimodal/prefill.yaml"
+# export DECODE_ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/llama4/multimodal/decode.yaml"
 
 # Customize NUM_PREFILL_NODES to match the desired parallelism in PREFILL_ENGINE_CONFIG
 # Customize NUM_DECODE_NODES to match the desired parallelism in DECODE_ENGINE_CONFIG
