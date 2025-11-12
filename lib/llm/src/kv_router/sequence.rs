@@ -161,10 +161,12 @@ impl ActiveSequences {
     }
 
     pub fn new_tokens(&self, isl: usize, overlap: u32) -> usize {
-        isl.checked_sub((overlap as usize) * self.block_size)
+        let cached_tokens = (overlap as usize) * self.block_size;
+        isl.checked_sub(cached_tokens)
             .unwrap_or_else(|| {
                 tracing::error!(
-                    "prefill_tokens < 0 with overlap {overlap} and ISL {isl}, returning 0"
+                    "prefill_tokens < 0 with ISL {isl} < cached_tokens {cached_tokens} (overlap {overlap} * block_size {}), returning 0",
+                    self.block_size
                 );
                 0
             })
