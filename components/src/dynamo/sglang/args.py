@@ -272,7 +272,7 @@ def _extract_config_section(
         raise
 
     config_index = args.index("--config")
-    args = list(args)  
+    args = list(args)
     args[config_index + 1] = temp_path
 
     return args, temp_path
