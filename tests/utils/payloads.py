@@ -305,13 +305,13 @@ class MetricsPayload(BasePayload):
         elif backend == "trtllm":
             metrics_to_check.append(
                 MetricCheck(
-                    # Check: Minimum count of unique trtllm:* metrics
-                    name="trtllm:*",
-                    pattern=lambda name: r"^trtllm:\w+",
+                    # Check: Minimum count of unique trtllm_* metrics
+                    name="trtllm_*",
+                    pattern=lambda name: r"^trtllm_\w+",
                     validator=lambda value: len(set(value))
                     >= 4,  # 80% of typical ~5 trtllm metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                    error_msg=lambda name, value: f"Expected at least 4 unique trtllm:* metrics, but found only {len(set(value))}",
-                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique trtllm:* metrics (minimum required: 4)",
+                    error_msg=lambda name, value: f"Expected at least 4 unique trtllm_* metrics, but found only {len(set(value))}",
+                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique trtllm_* metrics (minimum required: 4)",
                     multiline=True,
                 )
             )
