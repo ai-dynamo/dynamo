@@ -17,6 +17,9 @@ pub mod http;
 #[cfg(feature = "nats")]
 pub mod nats;
 
+#[cfg(feature = "grpc")]
+pub mod grpc;
+
 mod transport;
 
 use std::{collections::HashMap, sync::Arc};

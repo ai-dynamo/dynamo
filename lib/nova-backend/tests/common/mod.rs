@@ -10,6 +10,8 @@
 
 use bytes::Bytes;
 use dynamo_identity::InstanceId;
+#[cfg(feature = "grpc")]
+use dynamo_nova_backend::grpc::{GrpcTransport, GrpcTransportBuilder};
 #[cfg(feature = "http")]
 use dynamo_nova_backend::http::{HttpTransport, HttpTransportBuilder};
 #[cfg(feature = "nats")]
@@ -328,6 +330,22 @@ impl TestTransportHandle<NatsTransport> {
     }
 }
 
+// gRPC-specific convenience constructors
+#[cfg(feature = "grpc")]
+impl TestTransportHandle<GrpcTransport> {
+    /// Create a new gRPC transport with OS-provided port
+    ///
+    /// This is a convenience method for creating gRPC transports.
+    /// For other transport types, use `with_factory()`.
+    pub async fn new_grpc() -> anyhow::Result<Self> {
+        Self::with_factory(|| {
+            // Use default builder which binds to 0.0.0.0:0 (OS-provided port)
+            GrpcTransportBuilder::new().build()
+        })
+        .await
+    }
+}
+
 /// Multi-transport test cluster
 ///
 /// A generic cluster that works with any transport implementation.
@@ -464,6 +482,22 @@ impl TestCluster<NatsTransport> {
     }
 }
 
+// gRPC-specific convenience constructor
+#[cfg(feature = "grpc")]
+impl TestCluster<GrpcTransport> {
+    /// Create a new gRPC test cluster with the specified number of transports
+    ///
+    /// This is a convenience method for creating gRPC clusters.
+    /// For other transport types, use `with_factory()`.
+    pub async fn new_grpc(size: usize) -> anyhow::Result<Self> {
+        Self::with_factory(size, || {
+            // Use default builder which binds to OS-provided ports
+            GrpcTransportBuilder::new().build()
+        })
+        .await
+    }
+}
+
 // Helper utilities
 
 /// Get a random available port
@@ -568,5 +602,22 @@ impl TransportFactory for NatsFactory {
 
     async fn create_cluster(size: usize) -> anyhow::Result<TestCluster<Self::Transport>> {
         TestCluster::new_nats(size).await
+    }
+}
+
+/// gRPC transport factory
+#[cfg(feature = "grpc")]
+pub struct GrpcFactory;
+
+#[cfg(feature = "grpc")]
+impl TransportFactory for GrpcFactory {
+    type Transport = GrpcTransport;
+
+    async fn create() -> anyhow::Result<TestTransportHandle<Self::Transport>> {
+        TestTransportHandle::new_grpc().await
+    }
+
+    async fn create_cluster(size: usize) -> anyhow::Result<TestCluster<Self::Transport>> {
+        TestCluster::new_grpc(size).await
     }
 }

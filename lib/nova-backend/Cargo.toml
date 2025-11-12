@@ -10,10 +10,11 @@ repository.workspace = true
 keywords.workspace = true
 
 [features]
-default = ["ucx", "http", "nats"]
+default = ["ucx", "http", "nats", "grpc"]
 ucx = ["dep:async-ucx"]
 http = ["dep:axum", "dep:reqwest"]
 nats = ["dep:async-nats", "dep:bs58"]
+grpc = ["dep:tonic", "dep:prost", "dep:tower", "dep:hyper", "dep:http", "dep:http-body", "dep:http-body-util", "dep:hyper-util", "dep:tokio-stream"]
 
 [dependencies]
 dynamo-identity = { workspace = true }
@@ -50,7 +51,19 @@ axum = { version = "0.8", optional = true }
 reqwest = { workspace = true , optional = true }
 async-nats = { version = "0.37", optional = true }
 bs58 = { version = "0.5", optional = true }
+prost = { version = "0.13", optional = true }
+tonic = { version = "0.13.1", optional = true }
+tower = { version = "0.5", optional = true }
+hyper = { version = "1.0", optional = true }
+http = { version = "1.0", optional = true }
+http-body = { version = "1.0", optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper-util = { version = "0.1", optional = true, features = ["tokio", "server", "server-auto"] }
+tokio-stream = { version = "0.1", optional = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+tonic-build = "0.13.1"

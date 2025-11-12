@@ -17,6 +17,9 @@ use dynamo_nova_backend::{Transport, tcp::TcpTransportBuilder};
 #[cfg(feature = "http")]
 use dynamo_nova_backend::http::HttpTransportBuilder;
 
+#[cfg(feature = "grpc")]
+use dynamo_nova_backend::grpc::GrpcTransportBuilder;
+
 #[cfg(feature = "ucx")]
 use dynamo_nova_backend::ucx::UcxTransportBuilder;
 
@@ -42,6 +45,9 @@ enum TransportType {
     /// HTTP transport
     #[cfg(feature = "http")]
     Http,
+    /// gRPC transport
+    #[cfg(feature = "grpc")]
+    Grpc,
     /// UCX transport
     #[cfg(feature = "ucx")]
     Ucx,
@@ -90,6 +96,15 @@ fn create_transport(
                 .unwrap();
             Ok(Arc::new(
                 HttpTransportBuilder::new().bind_addr(addr).build()?,
+            ))
+        }
+        #[cfg(feature = "grpc")]
+        TransportType::Grpc => {
+            let addr = format!("127.0.0.1:{}", get_random_port())
+                .parse::<SocketAddr>()
+                .unwrap();
+            Ok(Arc::new(
+                GrpcTransportBuilder::new().bind_addr(addr).build()?,
             ))
         }
         #[cfg(feature = "ucx")]
