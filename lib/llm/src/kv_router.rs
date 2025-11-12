@@ -268,7 +268,6 @@ impl KvRouter {
                 Some(PruneConfig {
                     max_tree_size: 2usize.pow(14), // 2** 14 = 16384
                     prune_target_ratio: 0.8,
-                    prune_interval: Duration::from_secs(30),
                 }),
             ))
         };

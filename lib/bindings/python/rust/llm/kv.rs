@@ -729,7 +729,6 @@ impl ApproxKvIndexer {
         let prune_config = Some(llm_rs::kv_router::approx::PruneConfig {
             max_tree_size: 2usize.pow(14), // 2** 14 = 16384
             prune_target_ratio: 0.8,
-            prune_interval: Duration::from_secs(30),
         });
         let inner = Arc::new(llm_rs::kv_router::approx::ApproxKvIndexer::new(
             component.inner.drt().runtime().child_token(),

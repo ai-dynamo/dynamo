@@ -21,7 +21,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::hash::Hash;
 use std::sync::OnceLock;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -91,8 +91,6 @@ pub struct PruneConfig {
     /// For example, if max_tree_size is 100 and target_size_ratio is 0.5,
     /// we will prune down to 50 nodes when max_tree_size is exceeded.
     pub prune_target_ratio: f64,
-    /// Interval at which to prune the tree, so that it stays within the max_tree_size.
-    pub prune_interval: Duration,
 }
 
 /// A data structure to manage a collection of timers, addressable by a key.
@@ -230,7 +228,7 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
         let mut pruned_keys = Vec::new();
         let mut num_pruned = 0;
 
-        while num_pruned < (current_size - target_size) {
+        while num_pruned < current_size.saturating_sub(target_size) {
             if let Some((Reverse(expiry_time), key)) = self.expirations.pop() {
                 if self.timers.get(&key) == Some(&expiry_time) {
                     // This is a valid, non-stale timer.
@@ -279,6 +277,7 @@ impl ApproxKvIndexer {
         let (_get_workers_tx, mut get_workers_rx) =
             mpsc::channel::<super::indexer::GetWorkersRequest>(16);
         let (dump_tx, mut dump_rx) = mpsc::channel::<DumpRequest>(16);
+        let (prune_tx, mut prune_rx) = watch::channel(false);
         let cancel_clone = token.clone();
         let task = std::thread::spawn(move || {
             // create a new tokio runtime which will only perform work on a single thread
@@ -289,17 +288,9 @@ impl ApproxKvIndexer {
 
             runtime.block_on(async move {
                 let mut trie = RadixTree::new();
-                // Use a reasonable threshold - can be made configurable if needed
+                // Use a reasonable threshold for ttl - can be made configurable if needed
                 let mut prune_manager: PruneManager<BlockEntry> = PruneManager::new(ttl, 50, prune_config.clone());
                 let mut event_id = 0;
-
-                // Create a future that periodically tries to prune the tree.
-                let mut prune_fut = if let Some(prune_config) = &prune_config {
-                    tokio::time::interval(prune_config.prune_interval)
-                } else {
-                    // If there is no prune config, never tick.
-                    tokio::time::interval(Duration::MAX)
-                };
 
                 loop {
                     // Create a future that sleeps until the next expiration time.
@@ -352,6 +343,22 @@ impl ApproxKvIndexer {
                                     worker: result.worker,
                                     seq_position: idx,
                                 }).collect());
+
+                                // Check if we need to prune due to tree size exceeding max threshold.
+                                if let Some(prune_config) = &prune_manager.prune_config {
+                                    let current_size = trie.current_size();
+                                    if current_size > prune_config.max_tree_size {
+                                        tracing::info!(
+                                            "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
+                                            current_size,
+                                            prune_config.max_tree_size
+                                        );
+                                        // Send a signal to the pruning watcher to schedule pruning.
+                                        if let Err(e) = prune_tx.send(true) {
+                                            tracing::error!("Failed to send prune schedule signal: {:?}", e);
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -363,6 +370,31 @@ impl ApproxKvIndexer {
                         Some(request) = match_rx.recv() => {
                             let scores = trie.find_matches(request.sequence, false);
                             request.resp.send(scores).unwrap();
+                        }
+
+                        Ok(_) = prune_rx.changed() => {
+                            // The tree has exceeded the max tree size, so proceed with pruning.
+                            if let Ok(pruned) = prune_manager.prune(trie.current_size()) {
+                                pruned.iter().for_each(|p| {
+                                    event_id += 1;
+
+                                    let event = RouterEvent::new(
+                                        p.worker.worker_id,
+                                        KvCacheEvent {
+                                            event_id,
+                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                                block_hashes: vec![p.key],
+                                            }),
+                                            dp_rank: p.worker.dp_rank,
+                                        }
+                                    );
+                                    let _ = trie.apply_event(event);
+                                });
+                                // Reset the pruning watcher to false to indicate that pruning is complete.
+                                if let Err(e) = prune_tx.send(true) {
+                                    tracing::error!("Failed to send prune completion signal: {:?}", e);
+                                }
+                            }
                         }
 
                         _ = expiry_fut => {
@@ -384,26 +416,6 @@ impl ApproxKvIndexer {
 
                                 let _ = trie.apply_event(event);
                             });
-                        }
-
-                        _ = prune_fut.tick() => {
-                            if let Ok(pruned) = prune_manager.prune(trie.current_size()) {
-                                pruned.iter().for_each(|p| {
-                                    event_id += 1;
-
-                                    let event = RouterEvent::new(
-                                        p.worker.worker_id,
-                                        KvCacheEvent {
-                                            event_id,
-                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                                block_hashes: vec![p.key],
-                                            }),
-                                            dp_rank: p.worker.dp_rank,
-                                        }
-                                    );
-                                    let _ = trie.apply_event(event);
-                                });
-                            }
                         }
                     }
                 }
@@ -880,7 +892,6 @@ mod tests {
         let prune_config = PruneConfig {
             max_tree_size: 100,
             prune_target_ratio: 0.5,
-            prune_interval: Duration::from_secs(1),
         };
 
         let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, Some(prune_config));
@@ -905,7 +916,6 @@ mod tests {
         let prune_config = PruneConfig {
             max_tree_size: 10,
             prune_target_ratio: 0.5,
-            prune_interval: Duration::from_secs(1),
         };
 
         let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, Some(prune_config));
@@ -967,20 +977,19 @@ mod tests {
         assert!(entry1 < entry2);
     }
 
-    /// End-to-end test for [`ApproxKvIndexer`] with periodic pruning
-    ///   0. Max tree size is 5, target size is 2, prune interval is 100ms.
-    ///   1. Insert 6 blocks (exceeding max_tree_size of 5)
-    ///   2. Verify all 6 blocks are initially present
-    ///   3. Wait for periodic pruning to kick in
-    ///   4. Verify the 4 oldest blocks are pruned
-    ///   5. Verify the 2 newest blocks remain
+    /// End-to-end test for [`ApproxKvIndexer`] with pruning
+    ///   0. Max tree size is 5, target size is 2 (prune_target_ratio = 0.4)
+    ///   1. Insert 5 blocks (at max_tree_size but not exceeding)
+    ///   2. Verify all 5 blocks are present
+    ///   3. Insert 6th block (exceeds threshold, triggers reactive pruning)
+    ///   4. Verify pruning occurred: 4 oldest blocks removed
+    ///   5. Verify 2 newest blocks remain
     #[tokio::test]
-    async fn test_approx_indexer_periodic_pruning() {
+    async fn test_approx_indexer_e2e_pruning() {
         const TTL: Duration = Duration::from_secs(60); // Long TTL to avoid expiry
         let prune_config = PruneConfig {
-            max_tree_size: 5,                           // Very small to trigger pruning quickly
-            prune_target_ratio: 0.4,                    // target size is 5 * 0.4 = 2
-            prune_interval: Duration::from_millis(100), // Frequent pruning
+            max_tree_size: 5,        // Very small to trigger pruning quickly
+            prune_target_ratio: 0.4, // target size is 5 * 0.4 = 2
         };
 
         let cancel = CancellationToken::new();
@@ -988,8 +997,8 @@ mod tests {
 
         let worker = WorkerWithDpRank::from_worker_id(42);
 
-        // Insert 6 sequences (6 blocks total, exceeding max_tree_size of 5)
-        for i in 0..6 {
+        // Insert 5 sequences (5 blocks total, at max_tree_size but not exceeding)
+        for i in 0..5 {
             let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
             indexer
                 .process_routing_decision_for_request(&tokens, worker)
@@ -998,20 +1007,27 @@ mod tests {
             time::sleep(Duration::from_millis(1)).await; // Ensure different timestamps
         }
 
-        // First, verify all 6 blocks are registered
-        let mut all_present = true;
-        for i in 0..6 {
+        // Verify all 5 blocks are present (no pruning yet)
+        for i in 0..5 {
             let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
             let scores = indexer.find_matches_for_request(&tokens).await.unwrap();
-            if scores.scores.get(&worker).copied() != Some(1) {
-                all_present = false;
-                break;
-            }
+            assert_eq!(
+                scores.scores.get(&worker).copied(),
+                Some(1),
+                "Block {} should be present before threshold is exceeded",
+                i
+            );
         }
-        assert!(all_present);
 
-        // Wait for periodic pruning to kick in (prune_interval = 100ms)
-        time::sleep(Duration::from_millis(150)).await;
+        // Insert 6th block - this exceeds max_tree_size and should trigger reactive pruning
+        let tokens: Vec<u32> = vec![50, 51, 52, 53];
+        indexer
+            .process_routing_decision_for_request(&tokens, worker)
+            .await
+            .unwrap();
+
+        // Wait for pruning to complete
+        time::sleep(Duration::from_millis(100)).await;
 
         // After pruning, we will have exactly 2 blocks (5 * 0.4 = 2)
         // The 2 newest blocks (i=4, i=5) will remain, oldest 4 blocks (i=0,1,2,3) will be pruned
@@ -1047,7 +1063,6 @@ mod tests {
         let prune_config = PruneConfig {
             max_tree_size: 5,
             prune_target_ratio: 0.8,
-            prune_interval: Duration::from_secs(1),
         };
 
         let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, Some(prune_config));
