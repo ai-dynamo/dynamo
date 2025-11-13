@@ -126,7 +126,7 @@ Key configurations include:
 - A service for the inference gateway
 - Required RBAC roles and bindings
 - RBAC permissions
-- values-dynamo-epp.yaml sets epp.dynamo.namespace=vllm-agg for the bundled example. Point it at your actual Dynamo namespace by editing that file or adding --set epp.dynamo.namespace=<namespace> (and likewise for epp.dynamo.component, epp.dynamo.kvBlockSize if they differ).
+- dynamoGraphDeploymentName - the name of the Dynamo Graph where your model is deployed.
 
 
 **Configuration**
