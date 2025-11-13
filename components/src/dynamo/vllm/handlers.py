@@ -8,8 +8,8 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
 
+import PIL
 import torch
-from PIL import Image
 from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -126,7 +126,7 @@ class BaseWorkerHandler(ABC):
 
     async def _read_decoded_image_via_nixl(
         self, decoded_meta: Dict[str, Any]
-    ) -> Image.Image:
+    ) -> PIL.Image.Image:
         """Read decoded image via NIXL RDMA and convert to PIL.Image."""
         # Lazy-init connector
         if self._connector is None:
@@ -170,7 +170,7 @@ class BaseWorkerHandler(ABC):
         modes = {1: "L", 3: "RGB", 4: "RGBA"}
         if modes[shape[2]] == "L":
             arr = arr.squeeze(-1)
-        return Image.fromarray(arr, modes[shape[2]])
+        return PIL.Image.fromarray(arr, modes[shape[2]])
 
     async def _extract_multimodal_data(
         self, request: Dict[str, Any]
@@ -179,8 +179,8 @@ class BaseWorkerHandler(ABC):
         Extract and decode multimodal data from PreprocessedRequest.
 
         Supports two variants:
-        1. Url: Frontend passes URL, backend decodes (fallback, slower)
-        2. Decoded: Frontend decoded, NIXL RDMA transfer (optimal, faster)
+        1. Url: Frontend passes URL, backend decodes
+        2. Decoded: Frontend decoded, NIXL RDMA transfer
         """
         if "multi_modal_data" not in request or request["multi_modal_data"] is None:
             return None
@@ -192,21 +192,19 @@ class BaseWorkerHandler(ABC):
         images = []
         for item in mm_map.get(IMAGE_URL_KEY, []):
             if isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                # Fast path: Frontend decoded, NIXL RDMA transfer (PR #3988)
                 decoded_meta = item[DECODED_VARIANT_KEY]
                 image = await self._read_decoded_image_via_nixl(decoded_meta)
                 images.append(image)
                 logger.info(
-                    f"✓ Using DECODED path: Loaded image via NIXL RDMA "
+                    f"Using DECODED path: Loaded image via NIXL RDMA "
                     f"(shape={decoded_meta.get('shape')}, dtype={decoded_meta.get('dtype')})"
                 )
             elif isinstance(item, dict) and URL_VARIANT_KEY in item:
-                # Fallback path: Decode URL in Python backend (current behavior)
                 url = item[URL_VARIANT_KEY]
                 image = await self.image_loader.load_image(url)
                 images.append(image)
                 logger.info(
-                    f"⊙ Using URL path: Loaded image from URL (type={url.split(':')[0]})"
+                    f"Using URL path: Loaded image from URL (type={url.split(':')[0]})"
                 )
 
         if images:

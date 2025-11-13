@@ -300,9 +300,6 @@ async def register_vllm_model(
     data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
     runtime_config.data_parallel_size = data_parallel_size
 
-    # Enable frontend RDMA decoding with default settings
-    # MediaDecoder defaults: 128MB limit, sensible image size limits
-    # MediaFetcher defaults: 30s timeout, secure (no direct IP/port)
     await register_llm(
         model_input,
         model_type,
