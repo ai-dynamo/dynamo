@@ -36,7 +36,6 @@ class Config:
     is_prefill_worker: bool
     is_decode_worker: bool
     migration_limit: int = 0
-    kv_port: Optional[int] = None
     custom_jinja_template: Optional[str] = None
     store_kv: str
 
@@ -310,20 +309,12 @@ def parse_args() -> Config:
     return config
 
 
-async def configure_ports(config: Config):
-    """Configure port settings from dedicated environment overrides."""
-
-    if config.engine_args.enable_prefix_caching:
-        config.kv_port = envs.DYN_VLLM_KV_EVENT_PORT
-
-    if config.has_connector("nixl"):
-        ensure_side_channel_host()
-
-
 def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
+
     # If prefix caching is not enabled, no events config needed
-    if not config.engine_args.enable_prefix_caching:
+    if not config.engine_args.enable_prefix_caching or config.is_decode_worker:
+        logger.info("No kv_events_config required")
         return None
 
     # There is a bug with KV events publishing when LORA is enabled.
@@ -347,20 +338,19 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     # If user provided their own config, use that
     if c := getattr(config.engine_args, "kv_events_config"):
         logger.info(f"Using user-provided kv_events_config {c}")
-        return None
+        return c
 
     # Create default events config for prefix caching
-    if config.kv_port is None:
-        raise ValueError(
-            "config.kv_port is not set; call configure_ports(...) before overwrite_args "
-            "or provide --kv-event-config to supply an explicit endpoint."
-        )
+    port = envs.DYN_VLLM_KV_EVENT_PORT
+    logger.info(
+        f"Using env-var DYN_VLLM_KV_EVENT_PORT={port} to create kv_events_config"
+    )
     dp_rank = config.engine_args.data_parallel_rank or 0
 
     return KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
-        endpoint=f"tcp://*:{config.kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
+        endpoint=f"tcp://*:{port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
     )
 
 
@@ -416,6 +406,10 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
 
 def overwrite_args(config):
     """Set vLLM defaults for Dynamo."""
+
+    if config.has_connector("nixl"):
+        ensure_side_channel_host()
+
     defaults = {
         "task": "generate",
         # As of vLLM >=0.10.0 the engine unconditionally calls
@@ -431,13 +425,10 @@ def overwrite_args(config):
     if kv_transfer_config:
         defaults["kv_transfer_config"] = kv_transfer_config
 
-    kv_events_config = create_kv_events_config(config)
+    defaults["kv_events_config"] = create_kv_events_config(config)
     logger.info(
-        f"Using Dynamo default kv_events_config for publishing kv events over zmq: {kv_events_config}"
+        f"Using kv_events_config for publishing vLLM kv events over zmq: {defaults['kv_events_config']}"
     )
-
-    if kv_events_config:
-        defaults["kv_events_config"] = kv_events_config
 
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():
