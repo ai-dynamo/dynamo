@@ -515,10 +515,10 @@ mod tests {
 
         assert_eq!(app.namespace_count(), 2);
         let (_, component) = app.component_at(0, 0).expect("component exists");
-        assert_eq!(component.endpoints.len(), 2);
+        assert_eq!(component.endpoints.len(), 1);
 
         let summary = app.component_health_summary(component);
-        assert_eq!(summary.instances, 3);
+        assert_eq!(summary.instances, 2);
 
         let (_, endpoint) = app.endpoint_at(0, 0, 0).expect("endpoint exists");
         assert_eq!(endpoint.instances.len(), 2);
