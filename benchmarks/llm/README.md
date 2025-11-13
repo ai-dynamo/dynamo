@@ -19,6 +19,9 @@ limitations under the License.
 
 This guide provides detailed steps on benchmarking Large Language Models (LLMs) using the `perf.sh` and `plot_pareto.py` scripts in single and multi-node configurations. These scripts use [AIPerf](https://github.com/triton-inference-server/perf_analyzer) to collect performance metrics and generate Pareto frontier visualizations.
 
+> [!Note]
+> This workflow works with all Dynamo backends (vLLM, SGLang, TensorRT-LLM) since they all expose the same OpenAI-compatible HTTP API. The examples in this guide use vLLM for clarity, but you can benchmark SGLang or TensorRT-LLM deployments using the same workflow—just deploy your workers with `python -m dynamo.sglang` or `python -m dynamo.trtllm` instead.
+
 ## Overview
 
 The benchmarking tools in this directory help you:
