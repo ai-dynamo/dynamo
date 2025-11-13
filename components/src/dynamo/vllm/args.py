@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-import json
 import logging
 import os
 import socket
@@ -435,13 +434,7 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
 
     if has_user_kv_config:
         logger.info("Using user-provided kv_transfer_config from --kv-transfer-config")
-        try:
-            # The default AsyncEngineArgs.kv_transfer_config is a string, we need to parse it into a dict.
-            parsed_config = json.loads(config.engine_args.kv_transfer_config)
-            return KVTransferConfig(**parsed_config)
-        except Exception as e:
-            logger.error(f"Failed to parse kv_transfer_config: {e}")
-            raise ValueError(f"Failed to parse kv_transfer_config: {e}")
+        return None  # Let vLLM use the user's config
 
     # No connector list or empty list means no config
     if not config.connector_list:
