@@ -199,6 +199,7 @@ markers = [
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
     "kvbm: marks tests for KV behavior and model determinism",
+    "kvbm_v2: marks tests using KVBM V2",
     "model: model id used by a test or parameter",
     "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
     "k8s: marks tests as requiring Kubernetes",
