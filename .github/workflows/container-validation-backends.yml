@@ -73,9 +73,10 @@ jobs:
           
           cd deploy/cloud/operator
           if ! docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .; then
+            export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
             bash ../../.github/scripts/create_error_annotation.sh \
               "Linter: operator (${{ matrix.platform.arch }})" \
-              "64" \
+              "66" \
               "linter-${{ matrix.platform.arch }}.log" \
               "Linter check failed for operator on ${{ matrix.platform.arch }}"
           fi
@@ -114,9 +115,10 @@ jobs:
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
               -f Dockerfile \
               -t dynamo-operator:latest .; then
+            export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
             bash ../../.github/scripts/create_error_annotation.sh \
               "Build Container: operator (${{ matrix.platform.arch }})" \
-              "96" \
+              "102" \
               "build-operator-${{ matrix.platform.arch }}.log" \
               "Docker build failed for operator on ${{ matrix.platform.arch }}"
           fi
@@ -583,6 +585,7 @@ jobs:
         # Check if Helm is available
         echo "Checking Helm availability..."
         if ! command -v helm &> /dev/null; then
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
           bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Helm is not installed or not available in PATH. Helm installation may have failed during runner setup." "$NAMESPACE"
         fi
         
@@ -591,12 +594,14 @@ jobs:
         # Install helm dependencies
         echo "Installing Helm dependencies..."
         if ! helm repo add bitnami https://charts.bitnami.com/bitnami 2>&1; then
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
           bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Failed to add Helm bitnami repository" "$NAMESPACE"
         fi
         
         cd deploy/cloud/helm/platform/
         
         if ! helm dep build . 2>&1; then
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
           bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Failed to build Helm dependencies" "$NAMESPACE"
         fi
         
@@ -617,6 +622,7 @@ jobs:
           echo "=== Helm Status ==="
           helm status dynamo-platform -n ${NAMESPACE} || true
           
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
           bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Failed to install dynamo-platform Helm chart. This may be due to: pre-install hook timeout, image pull failures, or resource constraints." "$NAMESPACE"
         fi
         
@@ -629,6 +635,7 @@ jobs:
           echo "=== Deployment Status ==="
           kubectl get deployments -n ${NAMESPACE} || true
           
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
           bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Deployment rollout timed out after 300 seconds" "$NAMESPACE"
         fi
     
@@ -776,6 +783,7 @@ jobs:
         
         if [ $TEST_RESULT -ne 0 ]; then
           # Test failed - use common annotation script
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
           bash .github/scripts/create_error_annotation.sh "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }})" "777" "test-output.log" "$ERROR_MSG" "$NAMESPACE"
         fi
     - name: Cleanup

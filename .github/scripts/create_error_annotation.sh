@@ -68,7 +68,53 @@ fi
 # Create GitHub annotation using workflow command
 echo "::error file=.github/workflows/container-validation-backends.yml,line=${LINE_NUMBER},title=${STEP_NAME} Failed::${FINAL_ERROR}"
 
+# Also create check run via API if GITHUB_TOKEN is available
+if [ -n "$GITHUB_TOKEN" ]; then
+    echo "Creating check run via GitHub API..."
+    
+    # Escape the error message for JSON
+    ERROR_JSON=$(echo "$FINAL_ERROR" | jq -Rs .)
+    
+    CHECK_RUN_RESPONSE=$(curl -s -X POST \
+      -H "Authorization: token $GITHUB_TOKEN" \
+      -H "Accept: application/vnd.github.v3+json" \
+      "https://api.github.com/repos/${GITHUB_REPOSITORY}/check-runs" \
+      -d "{
+        \"name\": \"${STEP_NAME}\",
+        \"head_sha\": \"${GITHUB_SHA}\",
+        \"status\": \"completed\",
+        \"conclusion\": \"failure\",
+        \"output\": {
+          \"title\": \"${STEP_NAME} Failed\",
+          \"summary\": \"${STEP_NAME} failed with errors\",
+          \"text\": ${ERROR_JSON},
+          \"annotations\": [{
+            \"path\": \".github/workflows/container-validation-backends.yml\",
+            \"start_line\": ${LINE_NUMBER},
+            \"end_line\": ${LINE_NUMBER},
+            \"annotation_level\": \"failure\",
+            \"message\": ${ERROR_JSON},
+            \"title\": \"${STEP_NAME} Failed\"
+          }]
+        }
+      }")
+    
+    CHECK_RUN_ID=$(echo "$CHECK_RUN_RESPONSE" | jq -r '.id')
+    if [ "$CHECK_RUN_ID" != "null" ] && [ -n "$CHECK_RUN_ID" ]; then
+        echo "✓ Created check run with ID: $CHECK_RUN_ID"
+    else
+        echo "⚠ Check run creation may have failed"
+    fi
+fi
+
 echo "=== Annotation created for ${STEP_NAME} ==="
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "ERROR: ${STEP_NAME}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo -e "$FINAL_ERROR"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
 
 exit 1
 
