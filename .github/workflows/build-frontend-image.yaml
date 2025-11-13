@@ -103,6 +103,8 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       - name: Build Frontend Image
         shell: bash
+        env:
+          DOCKER_BUILDKIT: 0
         run: |
           set -euo pipefail
           cd ${{ github.workspace }}
