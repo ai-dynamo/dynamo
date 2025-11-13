@@ -18,7 +18,7 @@ data:
       max_num_tokens: 8192
       max_seq_len: 8192
     kv_cache_config:
-      enable_block_reuse: false
+      enable_block_reuse: true
       free_gpu_memory_fraction: 0.7
       dtype: fp8
     cache_transceiver_config:
@@ -47,7 +47,7 @@ data:
       max_num_tokens: 1024
       max_seq_len: 8192
     kv_cache_config:
-      enable_block_reuse: true
+      enable_block_reuse: false
       free_gpu_memory_fraction: 0.95
       dtype: fp8
     cache_transceiver_config:
