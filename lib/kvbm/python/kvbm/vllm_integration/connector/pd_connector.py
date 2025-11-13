@@ -14,14 +14,12 @@ from vllm.v1.core.sched.output import SchedulerOutput
 
 # Optional import for LMCache support
 _LMCacheConnectorV1: Optional[Type] = None
-_HAS_LMCACHE = False
 try:
     from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
         LMCacheConnectorV1,
     )
 
     _LMCacheConnectorV1 = LMCacheConnectorV1
-    _HAS_LMCACHE = True
 except ImportError:
     pass
 
@@ -57,12 +55,12 @@ class PdConnector(MultiConnector):
 
         # Build allowed types for first connector
         allowed_first_types: list[Type] = [DynamoConnector]
-        if _HAS_LMCACHE and _LMCacheConnectorV1 is not None:
+        if _LMCacheConnectorV1 is not None:
             allowed_first_types.append(_LMCacheConnectorV1)
 
         if not isinstance(self._connectors[0], tuple(allowed_first_types)):
             allowed_names = ["DynamoConnector"]
-            if _HAS_LMCACHE and _LMCacheConnectorV1 is not None:
+            if _LMCacheConnectorV1 is not None:
                 allowed_names.append("LMCacheConnectorV1")
             raise TypeError(
                 f"Expected first connector to be {' or '.join(allowed_names)}, "
