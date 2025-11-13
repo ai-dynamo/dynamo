@@ -1,12 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
+use anyhow::Result;
+pub use async_nats::service::endpoint::Stats as EndpointStats;
+use derive_builder::Builder;
 use derive_getters::Dissolve;
+use educe::Educe;
 use tokio_util::sync::CancellationToken;
 
-use super::*;
-
-pub use async_nats::service::endpoint::Stats as EndpointStats;
+use crate::{
+    component::{Endpoint, Instance, TransportType, service::EndpointStatsHandler},
+    pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint},
+    storage::key_value_store,
+    traits::DistributedRuntimeProvider,
+};
 
 #[derive(Educe, Builder, Dissolve)]
 #[educe(Debug)]
@@ -70,21 +79,20 @@ impl EndpointConfigBuilder {
 
         let service_name = endpoint.component.service_name();
 
-        // acquire the registry lock
-        let registry = endpoint.drt().component_registry.inner.lock().await;
-
         let metrics_labels: Option<Vec<(&str, &str)>> = metrics_labels
             .as_ref()
             .map(|v| v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect());
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
 
+        let registry = endpoint.drt().component_registry().inner.lock().await;
+
         // get the group
         let group = registry
             .services
             .get(&service_name)
             .map(|service| service.group(endpoint.component.service_name()))
-            .ok_or(error!("Service not found"))?;
+            .ok_or(anyhow::anyhow!("Service not found"))?;
 
         // get the stats handler map
         let handler_map = registry
@@ -116,10 +124,8 @@ impl EndpointConfigBuilder {
         let namespace_name = endpoint.component.namespace.name.clone();
         let component_name = endpoint.component.name.clone();
         let endpoint_name = endpoint.name.clone();
-        let system_health = endpoint.drt().system_health.clone();
+        let system_health = endpoint.drt().system_health();
         let subject = endpoint.subject_to(connection_id);
-        let etcd_path = endpoint.etcd_path_with_lease_id(connection_id);
-        let etcd_client = endpoint.component.drt.etcd_client.clone();
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
@@ -193,24 +199,19 @@ impl EndpointConfigBuilder {
             result
         });
 
-        // make the components service endpoint discovery in etcd
+        // Register this endpoint instance in the discovery plane
+        // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
+        // consistent registration/discovery across the system.
+        let discovery = endpoint.drt().discovery();
 
-        // client.register_service()
-        let info = Instance {
+        let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
+            namespace: namespace_name.clone(),
             component: component_name.clone(),
             endpoint: endpoint_name.clone(),
-            namespace: namespace_name.clone(),
-            instance_id: connection_id,
-            transport: TransportType::NatsTcp(subject),
+            transport: TransportType::NatsTcp(subject.clone()),
         };
 
-        let info = serde_json::to_vec_pretty(&info)?;
-
-        if let Some(etcd_client) = &etcd_client
-            && let Err(e) = etcd_client
-                .kv_create(&etcd_path, info, Some(connection_id))
-                .await
-        {
+        if let Err(e) = discovery.register(discovery_spec).await {
             tracing::error!(
                 component_name,
                 endpoint_name,
@@ -218,10 +219,11 @@ impl EndpointConfigBuilder {
                 "Unable to register service for discovery"
             );
             endpoint_shutdown_token.cancel();
-            return Err(error!(
+            anyhow::bail!(
                 "Unable to register service for discovery. Check discovery service status"
-            ));
+            );
         }
+
         task.await??;
 
         Ok(())

@@ -38,6 +38,7 @@ class Config:
     migration_limit: int = 0
     kv_port: Optional[int] = None
     custom_jinja_template: Optional[str] = None
+    store_kv: str
 
     # mirror vLLM
     model: str
@@ -57,6 +58,7 @@ class Config:
     multimodal_processor: bool = False
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
+    multimodal_decode_worker: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
     # dump config to file
@@ -147,6 +149,11 @@ def parse_args() -> Config:
         help="Run as multimodal worker component for LLM inference with multimodal data",
     )
     parser.add_argument(
+        "--multimodal-decode-worker",
+        action="store_true",
+        help="Run as multimodal decode worker in disaggregated mode",
+    )
+    parser.add_argument(
         "--multimodal-encode-prefill-worker",
         action="store_true",
         help="Run as unified encode+prefill+decode worker for models requiring integrated image encoding (e.g., Llama 4)",
@@ -163,6 +170,12 @@ def parse_args() -> Config:
             "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
             "'USER: <image> please describe the image ASSISTANT:'."
         ),
+    )
+    parser.add_argument(
+        "--store-kv",
+        type=str,
+        default=os.environ.get("DYN_STORE_KV", "etcd"),
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     add_config_dump_args(parser)
 
@@ -194,11 +207,12 @@ def parse_args() -> Config:
         int(bool(args.multimodal_processor))
         + int(bool(args.multimodal_encode_worker))
         + int(bool(args.multimodal_worker))
+        + int(bool(args.multimodal_decode_worker))
         + int(bool(args.multimodal_encode_prefill_worker))
     )
     if mm_flags > 1:
         raise ValueError(
-            "Use only one of --multimodal-processor, --multimodal-encode-worker, --multimodal-worker, or --multimodal-encode-prefill-worker"
+            "Use only one of --multimodal-processor, --multimodal-encode-worker, --multimodal-worker, --multimodal-decode-worker, or --multimodal-encode-prefill-worker"
         )
 
     # Set component and endpoint based on worker type
@@ -211,8 +225,14 @@ def parse_args() -> Config:
     elif args.multimodal_encode_prefill_worker:
         config.component = "encoder"
         config.endpoint = "generate"
+    elif args.multimodal_decode_worker:
+        # Uses "decoder" component name because prefill worker connects to "decoder"
+        # (prefill uses "backend" to receive from encoder)
+        config.component = "decoder"
+        config.endpoint = "generate"
     elif args.multimodal_worker and args.is_prefill_worker:
-        config.component = "prefill"
+        # Multimodal prefill worker stays as "backend" to maintain encoder connection
+        config.component = "backend"
         config.endpoint = "generate"
     elif args.is_prefill_worker:
         config.component = "prefill"
@@ -231,8 +251,10 @@ def parse_args() -> Config:
     config.multimodal_processor = args.multimodal_processor
     config.multimodal_encode_worker = args.multimodal_encode_worker
     config.multimodal_worker = args.multimodal_worker
+    config.multimodal_decode_worker = args.multimodal_decode_worker
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.mm_prompt_template = args.mm_prompt_template
+    config.store_kv = args.store_kv
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
@@ -303,6 +325,24 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     # If prefix caching is not enabled, no events config needed
     if not config.engine_args.enable_prefix_caching:
         return None
+
+    # There is a bug with KV events publishing when LORA is enabled.
+    # This is fixed in https://github.com/vllm-project/vllm/pull/27728 but not released yet.
+    # remove below check once new vLLM version is released with the fix.
+    if config.engine_args.enable_lora:
+        if config.engine_args.kv_events_config is None:
+            # No explicit kv events config provided by user, we'll disable kv cache because LoRA is enabled and its not supported yet.
+            return None
+        else:
+            # User provided their own kv events config and it'll not work when LoRA is enabled.
+            message = (
+                "KV events doesn't work when LoRA is enabled due to upstream vLLM bug. "
+                "Please see https://github.com/vllm-project/vllm/pull/27728."
+                "For now, either disable lora or dont use explicit kv envents config."
+                "Dont set both --kv-events-config and --enable-lora in vllm command line args."
+            )
+            logger.error(message)
+            raise ValueError(message)
 
     # If user provided their own config, use that
     if c := getattr(config.engine_args, "kv_events_config"):

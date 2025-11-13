@@ -291,14 +291,12 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(job.Spec.Template.Spec.Containers[0].Name).Should(Equal(ContainerNameProfiler))
 			Expect(job.Spec.Template.Spec.Containers[1].Name).Should(Equal(ContainerNameOutputCopier))
 
-			// Verify PVC volume mount
+			// Verify emptyDir volume (not PVC)
 			Expect(job.Spec.Template.Spec.Volumes).Should(ContainElement(
 				corev1.Volume{
 					Name: VolumeNameProfilingOutput,
 					VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "dynamo-pvc",
-						},
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
 					},
 				},
 			))
@@ -350,7 +348,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 							"sweep": map[string]interface{}{
 								"use_ai_configurator": true,
 								"aic_system":          "h200_sxm",
-								"aic_model_name":      "QWEN3_32B",
+								"aic_hf_id":           "Qwen/Qwen3-32B",
 								"aic_backend_version": "0.20.0",
 							},
 						}),
@@ -852,7 +850,7 @@ var _ = Describe("DGDR Helper Functions", func() {
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"sweep": map[string]interface{}{
-								"force_rerun": true,
+								"prefill_interpolation_granularity": 16,
 							},
 						}),
 					},
@@ -1060,7 +1058,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 							"sweep": map[string]interface{}{
 								"use_ai_configurator": true,
 								"aic_system":          "h200_sxm",
-								"aic_model_name":      "QWEN3_32B",
+								"aic_hf_id":           "Qwen/Qwen3-32B",
 								"aic_backend_version": "0.20.0",
 							},
 						}),
