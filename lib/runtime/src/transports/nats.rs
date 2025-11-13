@@ -400,12 +400,6 @@ impl Default for NatsAuth {
     }
 }
 
-/// Is this file name / url in the NATS object store?
-/// Checks the name only, does not go to the store.
-pub fn is_nats_url(s: &str) -> bool {
-    s.starts_with(URL_PREFIX)
-}
-
 /// Extract NATS bucket and key from a nats URL of the form:
 /// nats://host[:port]/bucket/key
 pub fn url_to_bucket_and_key(url: &Url) -> anyhow::Result<(String, String)> {
