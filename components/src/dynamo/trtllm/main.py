@@ -39,12 +39,13 @@ import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import get_publisher
+from dynamo.trtllm.request_handlers.handler_base import DisaggregationMode
 from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
@@ -53,7 +54,6 @@ from dynamo.trtllm.utils.trtllm_utils import (
     Config,
     cmd_line_args,
     deep_update,
-    is_first_worker,
     parse_endpoint,
 )
 
@@ -102,11 +102,13 @@ async def get_engine_runtime_config(
         return runtime_config
 
 
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
-    # Set up signal handler for graceful shutdown
-    loop = asyncio.get_running_loop()
+async def worker():
+    config = cmd_line_args()
 
+    loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, config.store_kv)
+
+    # Set up signal handler for graceful shutdown
     def signal_handler():
         # Schedule the shutdown coroutine instead of calling it directly
         asyncio.create_task(graceful_shutdown(runtime))
@@ -116,7 +118,6 @@ async def worker(runtime: DistributedRuntime):
 
     logging.info("Signal handlers set up for graceful shutdown")
 
-    config = cmd_line_args()
     await init(runtime, config)
 
 
@@ -125,37 +126,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     Instantiate and serve
     """
     logging.info(f"Initializing the worker with config: {config}")
-
-    next_client = None
-    if config.next_endpoint:
-        logging.info(
-            f"Initializing next worker client for endpoint: {config.next_endpoint}"
-        )
-        parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
-            config.next_endpoint
-        )
-        next_client = (
-            await runtime.namespace(parsed_namespace)
-            .component(parsed_component_name)
-            .endpoint(parsed_endpoint_name)
-            .client()
-        )
-
-    # Set up prefill router client for decode workers
-    next_router_client = None
-    if config.disaggregation_mode.value == "decode":
-        try:
-            logging.info("Initializing prefill router client")
-            next_router_client = (
-                await runtime.namespace(config.namespace)
-                .component("router")  # Standalone router for prefill workers
-                .endpoint("generate")
-                .client()
-            )
-            logging.info("Prefill router client initialized successfully")
-        except Exception as e:
-            logging.warning(f"Failed to initialize prefill router client: {e}")
-            logging.info("Will use direct prefill worker client only")
 
     encode_client = None
     if config.encode_endpoint:
@@ -241,18 +211,19 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
-        # Convert KvCacheConfig object to dict and add the parameter
+        # Add it to kv_cache_config while preserving cache_transceiver_config from YAML
         current_kv_config = arg_map["kv_cache_config"]
         if isinstance(current_kv_config, KvCacheConfig):
+            # Convert KvCacheConfig object to dict (no cache_transceiver_config to preserve)
             arg_map["kv_cache_config"] = {
                 "free_gpu_memory_fraction": config.free_gpu_memory_fraction,
                 "event_buffer_max_size": DEFAULT_KV_EVENT_BUFFER_MAX_SIZE,
             }
         elif isinstance(current_kv_config, dict):
-            if "event_buffer_max_size" not in current_kv_config:
-                current_kv_config[
-                    "event_buffer_max_size"
-                ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            # Add event_buffer_max_size while preserving cache_transceiver_config and other YAML settings
+            current_kv_config[
+                "event_buffer_max_size"
+            ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
@@ -272,7 +243,13 @@ async def init(runtime: DistributedRuntime, config: Config):
     default_sampling_params._setup(tokenizer)
     default_sampling_params.stop = None
     model_input = ModelInput.Tokens
-    model_type = ModelType.Chat | ModelType.Completions
+
+    # Set model type based on disaggregation mode for unified frontend support
+    if config.disaggregation_mode == DisaggregationMode.PREFILL:
+        model_type = ModelType.Prefill
+    else:
+        model_type = ModelType.Chat | ModelType.Completions
+
     multimodal_processor = None
 
     if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
@@ -355,12 +332,12 @@ async def init(runtime: DistributedRuntime, config: Config):
                 logging.info("TensorRT-LLM MetricsCollector initialized")
 
                 # Register callback to expose TRT-LLM metrics via Dynamo endpoint
-                # Filter out python_/process_ metrics and add trtllm: prefix to remaining metrics
+                # Filter out python_/process_ metrics and add trtllm_ prefix to remaining metrics
                 register_engine_metrics_callback(
                     endpoint=endpoint,
                     registry=REGISTRY,
                     exclude_prefixes=["python_", "process_"],
-                    add_prefix="trtllm:",
+                    add_prefix="trtllm_",
                 )
                 logging.info("TensorRT-LLM Prometheus metrics registered")
             except Exception as e:
@@ -375,9 +352,6 @@ async def init(runtime: DistributedRuntime, config: Config):
             default_sampling_params=default_sampling_params,
             publisher=None,
             disaggregation_mode=config.disaggregation_mode,
-            disaggregation_strategy=config.disaggregation_strategy,
-            next_client=next_client,
-            next_router_client=next_router_client,
             encode_client=encode_client,
             multimodal_processor=multimodal_processor,
             connector=connector,
@@ -385,14 +359,10 @@ async def init(runtime: DistributedRuntime, config: Config):
             metrics_collector=metrics_collector,
         )
 
-        if next_client:
-            logging.info(
-                f"Waiting for the next endpoint to be ready: {config.next_endpoint}"
-            )
-            await next_client.wait_for_instances()
-
-        if is_first_worker(config):
-            # Register the model with runtime config
+        # Register the model with runtime config
+        # Encode workers do NOT register - they're internal workers only
+        # Prefill and decode workers register - frontend detects their role via ModelType
+        if config.disaggregation_mode != DisaggregationMode.ENCODE:
             await register_llm(
                 model_input,
                 model_type,

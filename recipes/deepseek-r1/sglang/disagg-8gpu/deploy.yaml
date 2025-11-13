@@ -23,7 +23,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1800
             failureThreshold: 60
-          image: my-registry/sglang-wideep-runtime:my-tag
+          image: my-registry/sglang-runtime:my-tag
     decode:
       dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
@@ -45,8 +45,8 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: my-registry/sglang-wideep-runtime:my-tag
-          workingDir: /workspace/examples/backends/sglang
+          image: my-registry/sglang-runtime:my-tag
+          workingDir: /sgl-workspace/dynamo
           command:
             - python3
             - -m
@@ -67,12 +67,11 @@ spec:
             - --skip-tokenizer-init
             - --disaggregation-mode
             - decode
-            - --disaggregation-transfer-backend
-            - nixl
             - --disaggregation-bootstrap-port
             - "30001"
             - --host
             - 0.0.0.0
+            - --prefill-round-robin-balance
     prefill:
       dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
@@ -94,8 +93,8 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: my-registry/sglang-wideep-runtime:my-tag
-          workingDir: /workspace/examples/backends/sglang
+          image: my-registry/sglang-runtime:my-tag
+          workingDir: /sgl-workspace/dynamo
           command:
             - python3
             - -m
@@ -113,9 +112,9 @@ spec:
             - --skip-tokenizer-init
             - --disaggregation-mode
             - prefill
-            - --disaggregation-transfer-backend
-            - nixl
             - --disaggregation-bootstrap-port
             - "30001"
             - --host
             - 0.0.0.0
+            - --load-balance-method
+            - round_robin

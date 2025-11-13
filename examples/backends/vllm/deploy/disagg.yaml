@@ -34,6 +34,7 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
+            - --is-decode-worker
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret

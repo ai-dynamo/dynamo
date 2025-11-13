@@ -3,9 +3,12 @@
 
 use std::sync::Arc;
 
+use dynamo_llm::{self as llm_rs};
+use llm_rs::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use llm_rs::model_type::{ModelInput, ModelType};
 use pyo3::prelude::*;
 
-use crate::{CancellationToken, engine::*, to_pyerr};
+use crate::{CancellationToken, engine::*, llm::local_model::ModelRuntimeConfig, to_pyerr};
 
 pub use dynamo_llm::grpc::service::kserve;
 
@@ -56,12 +59,28 @@ impl KserveGrpcService {
             .map_err(to_pyerr)
     }
 
+    #[pyo3(signature = (model, checksum, engine, runtime_config=None))]
     pub fn add_tensor_model(
         &self,
         model: String,
         checksum: String,
         engine: PythonAsyncEngine,
+        runtime_config: Option<ModelRuntimeConfig>,
     ) -> PyResult<()> {
+        // If runtime_config is provided, create and save a ModelDeploymentCard
+        // so the ModelConfig endpoint can return model configuration
+        if let Some(runtime_config) = runtime_config {
+            let mut card = RsModelDeploymentCard::with_name_only(&model);
+            card.model_type = ModelType::TensorBased;
+            card.model_input = ModelInput::Tensor;
+            card.runtime_config = runtime_config.inner;
+
+            self.inner
+                .model_manager()
+                .save_model_card(&model, card)
+                .map_err(to_pyerr)?;
+        }
+
         let engine = Arc::new(engine);
         self.inner
             .model_manager()
@@ -84,10 +103,17 @@ impl KserveGrpcService {
     }
 
     pub fn remove_tensor_model(&self, model: String) -> PyResult<()> {
+        // Remove the engine
         self.inner
             .model_manager()
             .remove_tensor_model(&model)
-            .map_err(to_pyerr)
+            .map_err(to_pyerr)?;
+
+        // Also remove the model card if it exists
+        // (It's ok if it doesn't exist since runtime_config is optional, we just ignore the None return)
+        let _ = self.inner.model_manager().remove_model_card(&model);
+
+        Ok(())
     }
 
     pub fn list_chat_completions_models(&self) -> PyResult<Vec<String>> {

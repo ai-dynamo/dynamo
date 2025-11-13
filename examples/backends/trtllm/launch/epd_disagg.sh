@@ -6,7 +6,6 @@
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2-VL-7B-Instruct"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen2-VL-7B-Instruct"}
-export DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"decode_first"}
 export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/qwen2-vl-7b-instruct/trtllm/prefill.yaml"}
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/qwen2-vl-7b-instruct/trtllm/decode.yaml"}
 export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/qwen2-vl-7b-instruct/trtllm/encode.yaml"}
@@ -37,7 +36,6 @@ CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$ENCODE_ENGINE_ARGS" \
-  --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
   --modality "$MODALITY" \
   --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
   --max-file-size-mb "$MAX_FILE_SIZE_MB" \
@@ -49,7 +47,6 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
-  --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
   --modality "$MODALITY" \
   --disaggregation-mode prefill \
   --encode-endpoint "$ENCODE_ENDPOINT" &
@@ -60,7 +57,6 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$DECODE_ENGINE_ARGS" \
-  --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
   --modality "$MODALITY" \
   --disaggregation-mode decode &
 DECODE_PID=$!

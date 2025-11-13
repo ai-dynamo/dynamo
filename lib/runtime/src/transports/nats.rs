@@ -16,9 +16,10 @@
 //! - `NATS_AUTH_CREDENTIALS_FILE`: the path to the credentials file
 //!
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
+use crate::metrics::MetricsHierarchy;
 use crate::traits::events::EventPublisher;
-use crate::{Result, metrics::MetricsHierarchy};
 
+use anyhow::Result;
 use async_nats::connection::State;
 use async_nats::{Subscriber, client, jetstream};
 use async_trait::async_trait;
@@ -397,12 +398,6 @@ impl Default for NatsAuth {
 
         NatsAuth::UserPass("user".to_string(), "user".to_string())
     }
-}
-
-/// Is this file name / url in the NATS object store?
-/// Checks the name only, does not go to the store.
-pub fn is_nats_url(s: &str) -> bool {
-    s.starts_with(URL_PREFIX)
 }
 
 /// Extract NATS bucket and key from a nats URL of the form:

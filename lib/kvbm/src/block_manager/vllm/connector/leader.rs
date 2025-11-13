@@ -507,31 +507,33 @@ impl Leader for KvConnectorLeader {
         // grab the slot
         let shared_slot = self.slot_manager().get_slot(&request_id)?;
 
-        // mark the slot as finished
+        // Acquire lock BEFORE marking as finished
+        // This ensures we check state and prevent new operations from being created
         let mut slot = shared_slot
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
-        slot.mark_as_finished(self.iteration_counter)?;
 
-        // todo: allow the request to resolve when it should exit
-        // the request may have some outstanding operations
-        // we would like to inform it to shutdown, then have it signal to the work that is officially gone,
-        // then we can remove the slot and trigger the worker to clean up as well.
+        // Mark the slot as finished (sets state to Finishing if there are operations,
+        // or Finished if all operations are complete)
+        slot.mark_as_finished(self.iteration_counter)?;
 
         // remove the request from the inflight requests
         self.inflight_requests.remove(&request_id);
-
-        // remove it from the manager as we will never use it again
-        self.slot_manager().remove_slot(&request_id)?;
 
         // if the slot has finished, we can return false to vllm, indicating all gpu blocks are free to be reused
         // otherwise, we return true, which means there are still outstanding operations on gpu blocks which
         // must be awaited before the gpu blocks can be reused. if we return true, then it is the worker side
         // of the connector api which will be used to inform vllm that the request is finished.
         if let SlotState::Finished = slot.state() {
+            // All operations complete - safe to remove slot and tell vLLM blocks are free
+            self.slot_manager().remove_slot(&request_id)?;
             Ok(false)
         } else {
             debug_assert!(matches!(slot.state(), SlotState::Finishing));
+            // Still has pending operations - keep slot alive for worker to process
+            // Don't remove slot here. Worker needs it to process the finish event.
+            // Worker will remove it after verifying all operations are complete.
+            // The lock on the slot prevents new operations from being created in offload_blocks()
             Ok(true)
         }
     }
