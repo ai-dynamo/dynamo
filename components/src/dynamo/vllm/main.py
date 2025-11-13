@@ -17,6 +17,8 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
+    MediaDecoder,
+    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
@@ -308,6 +310,8 @@ async def register_vllm_model(
         migration_limit=migration_limit,
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
+        media_decoder=MediaDecoder(),
+        media_fetcher=MediaFetcher(),
     )
 
 
