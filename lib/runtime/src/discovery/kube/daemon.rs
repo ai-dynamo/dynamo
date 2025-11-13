@@ -181,8 +181,8 @@ impl DiscoveryDaemon {
     ) -> Result<MetadataSnapshot> {
         let start = std::time::Instant::now();
 
-        // Extract ALL ready endpoints (instance_id, pod_name, pod_ip) directly from reflector
-        let all_endpoints: Vec<(u64, String, String)> = reader
+        // Extract ALL ready endpoints (instance_id, pod_name, pod_ip, system_port) directly from reflector
+        let all_endpoints: Vec<(u64, String, String, Option<u16>)> = reader
             .state()
             .iter()
             .flat_map(|arc_slice| extract_endpoint_info(arc_slice.as_ref()))
@@ -194,12 +194,15 @@ impl DiscoveryDaemon {
         );
 
         // Concurrent fetch: Fetch metadata for all endpoints in parallel
+        let default_system_port = self.pod_info.system_port;
         let fetch_futures = all_endpoints
             .into_iter()
-            .map(|(instance_id, pod_name, pod_ip)| {
+            .map(|(instance_id, pod_name, pod_ip, system_port)| {
                 let daemon = self.clone();
+                // Use system_port from EndpointSlice, fall back to default from PodInfo
+                let port = system_port.unwrap_or(default_system_port);
                 async move {
-                    match daemon.fetch_metadata(&pod_name, &pod_ip).await {
+                    match daemon.fetch_metadata(&pod_name, &pod_ip, port).await {
                         Ok(metadata) => Some((instance_id, metadata)),
                         Err(e) => {
                             tracing::warn!(
@@ -241,7 +244,7 @@ impl DiscoveryDaemon {
     }
 
     /// Fetch metadata for a single pod (with caching)
-    async fn fetch_metadata(&self, pod_name: &str, pod_ip: &str) -> Result<Arc<DiscoveryMetadata>> {
+    async fn fetch_metadata(&self, pod_name: &str, pod_ip: &str, system_port: u16) -> Result<Arc<DiscoveryMetadata>> {
         let instance_id = hash_pod_name(pod_name);
 
         // Check cache
@@ -258,7 +261,7 @@ impl DiscoveryDaemon {
         }
 
         // Cache miss: fetch from HTTP
-        let url = format!("http://{}:{}/metadata", pod_ip, self.pod_info.system_port);
+        let url = format!("http://{}:{}/metadata", pod_ip, system_port);
 
         tracing::debug!("Fetching metadata from {url}");
 

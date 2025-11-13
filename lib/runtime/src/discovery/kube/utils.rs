@@ -13,10 +13,31 @@ pub fn hash_pod_name(pod_name: &str) -> u64 {
     hasher.finish()
 }
 
+/// Extract the system port from an EndpointSlice's ports
+/// Looks for a port with name "system", falls back to first port if not found
+fn extract_system_port(slice: &EndpointSlice) -> Option<u16> {
+    slice.ports.as_ref().and_then(|ports| {
+        // First try to find port named "system"
+        ports
+            .iter()
+            .find(|p| p.name.as_deref() == Some("system"))
+            .and_then(|p| p.port.map(|port| port as u16))
+            // Fall back to first port if "system" not found
+            .or_else(|| {
+                ports
+                    .first()
+                    .and_then(|p| p.port.map(|port| port as u16))
+            })
+    })
+}
+
 /// Extract endpoint information from an EndpointSlice
-/// Returns (instance_id, pod_name, pod_ip) tuples for ready endpoints
-pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String, String)> {
+/// Returns (instance_id, pod_name, pod_ip, system_port) tuples for ready endpoints
+pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String, String, Option<u16>)> {
     let mut result = Vec::new();
+
+    // Extract system port from EndpointSlice ports
+    let system_port = extract_system_port(slice);
 
     let endpoints = &slice.endpoints;
 
@@ -46,7 +67,7 @@ pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String, 
 
         // Get first IP only (avoid duplicate instance IDs)
         if let Some(ip) = endpoint.addresses.first() {
-            result.push((instance_id, pod_name.to_string(), ip.clone()));
+            result.push((instance_id, pod_name.to_string(), ip.clone(), system_port));
         }
     }
 
