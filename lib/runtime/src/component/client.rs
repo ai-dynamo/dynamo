@@ -31,6 +31,10 @@ pub struct Client {
     instance_avail: Arc<ArcSwap<Vec<u64>>>,
     // These are the instance source ids less those reported as busy (above threshold)
     instance_free: Arc<ArcSwap<Vec<u64>>>,
+    // Watch sender for available instance IDs (for sending updates)
+    instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
+    // Watch receiver for available instance IDs (for cloning to external subscribers)
+    instance_avail_rx: tokio::sync::watch::Receiver<Vec<u64>>,
 }
 
 impl Client {
@@ -46,11 +50,14 @@ impl Client {
             endpoint.path()
         );
 
+        let (avail_tx, avail_rx) = tokio::sync::watch::channel(vec![]);
         let client = Client {
             endpoint: endpoint.clone(),
             instance_source: instance_source.clone(),
             instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
             instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_avail_tx: Arc::new(avail_tx),
+            instance_avail_rx: avail_rx,
         };
         tracing::debug!(
             "Client::new_dynamic: Starting instance source monitor for endpoint: {}",
@@ -88,6 +95,11 @@ impl Client {
 
     pub fn instance_ids_free(&self) -> arc_swap::Guard<Arc<Vec<u64>>> {
         self.instance_free.load()
+    }
+
+    /// Get a watcher for available instance IDs
+    pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
+        self.instance_avail_rx.clone()
     }
 
     /// Wait for at least one Instance to be available for this Endpoint
@@ -138,7 +150,10 @@ impl Client {
             .iter()
             .filter_map(|&id| if id == instance_id { None } else { Some(id) })
             .collect::<Vec<_>>();
-        self.instance_avail.store(Arc::new(filtered));
+        self.instance_avail.store(Arc::new(filtered.clone()));
+
+        // Notify watch channel subscribers about the change
+        let _ = self.instance_avail_tx.send(filtered);
 
         tracing::debug!("inhibiting instance {instance_id}");
     }
@@ -183,6 +198,9 @@ impl Client {
                 // TODO: this resets both tracked available and free instances
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
                 client.instance_free.store(Arc::new(instance_ids.clone()));
+
+                // Send update to watch channel subscribers
+                let _ = client.instance_avail_tx.send(instance_ids);
 
                 tracing::debug!(
                     "monitor_instance_source: instance source updated, endpoint={}",

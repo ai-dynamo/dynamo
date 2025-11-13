@@ -16,9 +16,7 @@ use dynamo_runtime::config::environment_names::kvbm::leader as env_kvbm_leader;
 const CPU_CACHE: &str = env_cpu_cache::DYN_KVBM_CPU_CACHE_GB;
 const CPU_CACHE_OVERRIDE: &str = env_cpu_cache::DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS;
 
-const DISK_CACHE: &str = env_disk_cache::DYN_KVBM_DISK_CACHE_GB;
-const DISK_CACHE_OVERRIDE: &str = env_disk_cache::DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS;
-const DEFAULT_INIT_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_INIT_TIMEOUT_SECS: u64 = 1800;
 
 fn read_env_usize(key: &str) -> Option<usize> {
     std::env::var(key).ok()?.trim().parse::<usize>().ok()
@@ -89,7 +87,10 @@ impl KvbmLeader {
             .world_size(world_size)
             .leader_init_timeout_secs(leader_init_timeout_sec)
             .host_blocks_config(get_blocks_config(CPU_CACHE, CPU_CACHE_OVERRIDE))
-            .disk_blocks_config(get_blocks_config(DISK_CACHE, DISK_CACHE_OVERRIDE))
+            .disk_blocks_config(get_blocks_config(
+                env_disk_cache::DYN_KVBM_DISK_CACHE_GB,
+                env_disk_cache::DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS,
+            ))
             .leader_pub_url(get_leader_zmq_pub_url())
             .leader_ack_url(get_leader_zmq_ack_url())
             .build()

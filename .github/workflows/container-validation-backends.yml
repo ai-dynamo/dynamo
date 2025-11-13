@@ -11,7 +11,11 @@ on:
       - release/*.*.*
 
 concurrency:
-    group: ${{ github.workflow }}-build-test-${{ github.ref_name || github.run_id }}
+    # The group name is a ternary operation. If the ref_name is 'main',
+    # then the group name uses the run_id to ensure a unique group for
+    # 'main' pushes. Otherwise, the group name is the ref_name, so that
+    # workflows on the same PR/branch have the same group name for cancelling.
+    group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
     cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -331,7 +335,7 @@ jobs:
         run: |
           # Set namespace using test scenario
           export FRAMEWORK=${{ matrix.framework.name }}
-          echo "NAMESPACE=gh-job-id-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
+          echo "NAMESPACE=gh-id-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
           set -x
 
           # Setup kubeconfig
@@ -510,9 +514,12 @@ jobs:
       run: |
         set -x
 
-        # Set namespace using branch
-        BRANCH_SANITIZED="${BRANCH/\//-}"
-        NAMESPACE="gh-job-id-${{ github.run_id }}-${BRANCH_SANITIZED}-deploy-tests"
+        # Set namespace
+        # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
+        BRANCH_SANITIZED="${BRANCH//\//-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+        NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
         echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
         # Setup kubeconfig

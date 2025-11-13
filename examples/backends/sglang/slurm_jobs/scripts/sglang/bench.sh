@@ -4,14 +4,16 @@
 
 n_prefill=$1
 n_decode=$2
-total_gpus=$3
+prefill_gpus=$3
+decode_gpus=$4
+total_gpus=$((prefill_gpus+decode_gpus))
 
-chosen_isl=$4
-chosen_osl=$5
-concurrency_list=$6
+chosen_isl=$5
+chosen_osl=$6
+concurrency_list=$7
 
 IFS='x' read -r -a chosen_concurrencies <<< "$concurrency_list"
-chosen_req_rate=$7
+chosen_req_rate=$8
 
 echo "Config ${chosen_isl}; ${chosen_osl}; ${chosen_concurrencies[@]}; ${chosen_req_rate}"
 

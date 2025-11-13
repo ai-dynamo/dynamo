@@ -998,13 +998,10 @@ async fn create_kv_router_from_endpoint(
     block_size: usize,
     kv_router_config: Option<llm_rs::kv_router::KvRouterConfig>,
 ) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
-    // Get component from endpoint
-    let component = endpoint.inner.component();
-
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let kv_router = model_manager
-        .kv_chooser_for(component, block_size as u32, kv_router_config)
+        .kv_chooser_for(&endpoint.inner, block_size as u32, kv_router_config)
         .await
         .map_err(to_pyerr)?;
 

@@ -121,9 +121,10 @@ impl ActiveSequences {
         isl: usize,
         overlap: u32,
     ) -> HashSet<RequestId> {
-        // Check for double-add and panic early
+        // Check for double-add and log error, returning early
         if self.active_seqs.contains_key(&request_id) {
-            panic!("Request {request_id} is already active. Cannot accept double-add.");
+            tracing::error!("Request {request_id} is already active. Ignoring duplicate add.");
+            return HashSet::new();
         }
 
         // Lazily check and clean up expired requests, capturing removed IDs
@@ -160,8 +161,15 @@ impl ActiveSequences {
     }
 
     pub fn new_tokens(&self, isl: usize, overlap: u32) -> usize {
-        isl.checked_sub((overlap as usize) * self.block_size)
-            .unwrap_or_else(|| panic!("prefill_tokens < 0 with overlap {overlap} and ISL {isl}"))
+        let cached_tokens = (overlap as usize) * self.block_size;
+        isl.checked_sub(cached_tokens)
+            .unwrap_or_else(|| {
+                tracing::error!(
+                    "prefill_tokens < 0 with ISL {isl} < cached_tokens {cached_tokens} (overlap {overlap} * block_size {}), returning 0",
+                    self.block_size
+                );
+                0
+            })
     }
 
     pub fn potential_blocks_and_tokens(

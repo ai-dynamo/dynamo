@@ -107,11 +107,11 @@ vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv
 ## Troubleshooting
 
 1. Allocating large memory and disk storage can take some time and lead to KVBM worker initialization timeout.
-To avoid it, please set a longer timeout for leader–worker initialization.
+To avoid it, please set a longer timeout (default 1800 seconds) for leader–worker initialization.
 
 ```bash
-# 1200 means 1200 seconds timeout
-export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=1200
+# 3600 means 3600 seconds timeout
+export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=3600
 ```
 
 2. When offloading to disk is enabled, KVBM could fail to start up if fallocate is not supported to create the files.
@@ -127,12 +127,13 @@ export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true
 Follow below steps to enable metrics collection and view via Grafana dashboard:
 ```bash
 # Start the basic services (etcd & natsd), along with Prometheus and Grafana
-docker compose -f deploy/docker-compose.yml --profile metrics up -d
+docker compose -f deploy/docker-observability.yml up -d
 
 # Set env var DYN_KVBM_METRICS to true, when launch via dynamo
 # Optionally set DYN_KVBM_METRICS_PORT to choose the /metrics port (default: 6880).
 # NOTE: update launch/disagg_kvbm.sh or launch/disagg_kvbm_2p2d.sh as needed
 DYN_KVBM_METRICS=true \
+DYN_KVBM_CPU_CACHE_GB=20 \
 python -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
@@ -142,7 +143,7 @@ python -m dynamo.vllm \
 sudo ufw allow 6880/tcp
 ```
 
-View grafana metrics via http://localhost:3001 (default login: dynamo/dynamo) and look for KVBM Dashboard
+View grafana metrics via http://localhost:3000 (default login: dynamo/dynamo) and look for KVBM Dashboard
 
 ## Benchmark KVBM
 

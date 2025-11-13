@@ -46,9 +46,9 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
 For a simple single-GPU deployment, start the frontend and a single vLLM worker:
 
 ```bash
-# Start the frontend with tracing enabled
+# Start the frontend with tracing enabled (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
 export OTEL_SERVICE_NAME=dynamo-frontend
-python -m dynamo.frontend --router-mode kv --http-port=8000 &
+python -m dynamo.frontend --router-mode kv &
 
 # Start a single vLLM worker (aggregated prefill and decode)
 export OTEL_SERVICE_NAME=dynamo-worker-vllm
@@ -83,9 +83,9 @@ export DYN_LOGGING_JSONL=true
 export OTEL_EXPORT_ENABLED=true
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
 
-# Run frontend
+# Run frontend (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
 export OTEL_SERVICE_NAME=dynamo-frontend
-python -m dynamo.frontend --router-mode kv --http-port=8000 &
+python -m dynamo.frontend --router-mode kv &
 
 # Run decode worker, make sure to wait for start up
 export OTEL_SERVICE_NAME=dynamo-worker-decode

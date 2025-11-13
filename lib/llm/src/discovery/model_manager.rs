@@ -10,10 +10,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
 
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
-use dynamo_runtime::{
-    component::{Component, Endpoint},
-    storage::key_value_store::Key,
-};
+use dynamo_runtime::{component::Endpoint, storage::key_value_store::Key};
 
 use crate::{
     discovery::KV_ROUTERS_ROOT_PATH,
@@ -292,32 +289,33 @@ impl ModelManager {
 
     pub async fn kv_chooser_for(
         &self,
-        component: &Component,
+        endpoint: &Endpoint,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        let service_name = component.service_name();
+        let endpoint_path = endpoint.path();
 
-        if let Some(kv_chooser) = self.get_kv_chooser(&service_name) {
+        if let Some(kv_chooser) = self.get_kv_chooser(&endpoint_path) {
             // Check if the existing router has a different block size
             if kv_chooser.block_size() != kv_cache_block_size {
                 tracing::warn!(
-                    component = %service_name,
+                    endpoint = %endpoint_path,
                     existing_block_size = %kv_chooser.block_size(),
                     requested_block_size = %kv_cache_block_size,
-                    "KV Router block size mismatch! Component is requesting a different kv_cache_block_size than the existing router. \
+                    "KV Router block size mismatch! Endpoint is requesting a different kv_cache_block_size than the existing router. \
                      This will cause routing to fail silently. Consider using the same block size or restarting the router."
                 );
             }
             return Ok(kv_chooser);
         }
 
-        let store = component.drt().store();
+        let client = endpoint.client().await?;
+        let store = endpoint.component().drt().store();
         let router_bucket = store
             .get_or_create_bucket(KV_ROUTERS_ROOT_PATH, None)
             .await?;
         let router_uuid = uuid::Uuid::new_v4();
-        let router_key = Key::from_raw(format!("{}/{router_uuid}", component.path()));
+        let router_key = Key::from_raw(format!("{}/{router_uuid}", endpoint.path()));
         let json_router_config = serde_json::to_vec_pretty(&kv_router_config.unwrap_or_default())?;
         router_bucket
             .insert(&router_key, json_router_config.into(), 0)
@@ -325,7 +323,8 @@ impl ModelManager {
 
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
         let chooser = KvRouter::new(
-            component.clone(),
+            endpoint.clone(),
+            client,
             kv_cache_block_size,
             Some(selector),
             kv_router_config,
@@ -335,7 +334,7 @@ impl ModelManager {
         let new_kv_chooser = Arc::new(chooser);
         self.kv_choosers
             .lock()
-            .insert(service_name, new_kv_chooser.clone());
+            .insert(endpoint_path, new_kv_chooser.clone());
         Ok(new_kv_chooser)
     }
 

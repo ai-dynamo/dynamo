@@ -107,15 +107,16 @@ impl PrefillRouter {
             "Activating prefill router"
         );
 
-        let client = endpoint.client().await?;
-
         let inner_router = if self.router_mode.is_kv_routing() {
-            // Create KV chooser using the component from the endpoint
+            // Create KV chooser using the endpoint
             let kv_chooser = model_manager
-                .kv_chooser_for(endpoint.component(), kv_cache_block_size, kv_router_config)
+                .kv_chooser_for(&endpoint, kv_cache_block_size, kv_router_config)
                 .await?;
 
-            // Build the PushRouter for prefill with KV mode
+            // Extract client from kv_chooser to ensure shared state
+            let client = kv_chooser.client().clone();
+
+            // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
                 client,
                 RouterMode::KV,
@@ -127,6 +128,9 @@ impl PrefillRouter {
             // Wrap it in KvPushRouter
             InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new(push_router, kv_chooser)))
         } else {
+            // Create client for simple router
+            let client = endpoint.client().await?;
+
             // Create simple push router with the frontend's router mode
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
                 client,

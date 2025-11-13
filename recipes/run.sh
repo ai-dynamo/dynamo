@@ -233,7 +233,7 @@ if [[ "$INTEGRATION" == "gaie" ]]; then
     # run gaie checks.
     SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     "${SCRIPT_DIR}/gaie_checks.sh"
-    kubectl apply -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
+    $DRY_RUN kubectl apply -R -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
     # For now do not run the benchmark
     exit
  fi

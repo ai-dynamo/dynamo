@@ -33,7 +33,8 @@ For visualizing metrics with Prometheus and Grafana, start the observability sta
 Launch a frontend and vLLM backend to test metrics:
 
 ```bash
-$ python -m dynamo.frontend --http-port 8000
+# Start frontend (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
+$ python -m dynamo.frontend
 
 # Enable system metrics server on port 8081
 $ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
