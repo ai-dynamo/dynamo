@@ -54,7 +54,7 @@ spec:
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
-          mountPoint: /root/.cache/huggingface
+          mountPoint: /opt/models
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -92,7 +92,9 @@ spec:
           - name: ENGINE_ARGS
             value: "/opt/dynamo/configs/config.yaml"
           - name: MODEL_PATH
-            value: "/root/.cache/huggingface/hub/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
+            value: "/opt/models/hub/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
+          - name: HF_HOME
+            value: /opt/models
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config
