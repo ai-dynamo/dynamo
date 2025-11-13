@@ -136,6 +136,3 @@ insta.opt-level = 3
 codegen-units = 1
 lto = "thin"
 
-[patch.crates-io]
-hyper = { version = "=1.7.0" }
-hyper-util = { version = "=0.1.17" }
