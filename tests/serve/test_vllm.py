@@ -35,18 +35,16 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
 
-# Load fixture image for multimodal tests
-FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
-BASKETBALL_IMG_PATH = os.path.join(FIXTURES_DIR, "basketball.png")
-
-# Encode image for base64 tests
-with open(BASKETBALL_IMG_PATH, "rb") as f:
+BASKETBALL_IMG_B64 = None
+# Encode basketball image for base64 multimodal tests
+with open(
+    os.path.join(os.path.dirname(__file__), "fixtures", "basketball.png"), "rb"
+) as f:
     BASKETBALL_IMG_B64 = base64.b64encode(f.read()).decode()
 
-# HTTP URL for image pytest-httpserver.
+# HTTP URL for image (pytest-httpserver will serve this)
 IMAGE_SERVER_PORT = 8765
-IMAGE_SERVER_URL = f"http://localhost:{IMAGE_SERVER_PORT}"
-BASKETBALL_IMG_URL = f"{IMAGE_SERVER_URL}/basketball.png"
+BASKETBALL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/basketball.png"
 
 # vLLM test configurations
 vllm_configs = {
@@ -131,7 +129,7 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"file://{BASKETBALL_IMG_PATH}"},
+                        "image_url": {"url": BASKETBALL_IMG_URL},
                     },
                 ],
                 repeat_count=1,
@@ -155,7 +153,7 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"file://{BASKETBALL_IMG_PATH}"},
+                        "image_url": {"url": BASKETBALL_IMG_URL},
                     },
                 ],
                 repeat_count=1,
