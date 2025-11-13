@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import signal
+import tempfile
 from typing import Optional
 
 import uvloop
@@ -193,6 +194,16 @@ def setup_kv_event_publisher(
 
 
 def setup_vllm_engine(config, stat_logger=None):
+    # Set PROMETHEUS_MULTIPROC_DIR before setup to avoid vllm bug with TemporaryDirectory cleanup
+    # See: vllm/v1/metrics/prometheus.py:79 - passes TemporaryDirectory object instead of .name
+    if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+        os.environ["PROMETHEUS_MULTIPROC_DIR"] = tempfile.mkdtemp(
+            prefix="vllm_prometheus_"
+        )
+        logger.debug(
+            f"Created PROMETHEUS_MULTIPROC_DIR at: {os.environ['PROMETHEUS_MULTIPROC_DIR']}"
+        )
+
     setup_multiprocess_prometheus()
     logger.debug(
         f"Prometheus multiproc dir set to: {os.environ.get('PROMETHEUS_MULTIPROC_DIR')}"
