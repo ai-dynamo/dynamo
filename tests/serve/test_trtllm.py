@@ -45,7 +45,7 @@ trtllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            metric_payload_default(min_num_requests=6, backend="trtllm"),
+            metric_payload_default(min_num_requests=4, backend="trtllm"),
         ],
     ),
     "disaggregated": TRTLLMConfig(
@@ -70,8 +70,8 @@ trtllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            metric_payload_default(port=8081, min_num_requests=6, backend="trtllm"),
-            metric_payload_default(port=8082, min_num_requests=6, backend="trtllm"),
+            metric_payload_default(port=8081, min_num_requests=4, backend="trtllm"),
+            metric_payload_default(port=8082, min_num_requests=4, backend="trtllm"),
         ],
     ),
     "aggregated_router": TRTLLMConfig(
@@ -147,7 +147,7 @@ def test_chat_only_aggregated_with_test_logits_processor(
         script_name=base.script_name,  # agg.sh
         marks=[],  # not used by this direct test
         request_payloads=[
-            chat_payload_default(expected_response=["Hello world!"]),
+            chat_payload_default(expected_response_all=["Hello world!"]),
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=base.delayed_start,

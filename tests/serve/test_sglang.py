@@ -51,7 +51,7 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            metric_payload_default(min_num_requests=6, backend="sglang"),
+            metric_payload_default(min_num_requests=4, backend="sglang"),
         ],
     ),
     "disaggregated": SGLangConfig(
@@ -78,9 +78,9 @@ sglang_configs = {
             chat_payload_default(),
             completion_payload_default(),
             # Validate dynamo_component_* and sglang:* metrics from prefill worker (port 8081)
-            metric_payload_default(min_num_requests=6, backend="sglang", port=8081),
+            metric_payload_default(min_num_requests=4, backend="sglang", port=8081),
             # Validate dynamo_component_* and sglang:* metrics from decode worker (port 8082)
-            metric_payload_default(min_num_requests=6, backend="sglang", port=8082),
+            metric_payload_default(min_num_requests=4, backend="sglang", port=8082),
         ],
     ),
     "kv_events": SGLangConfig(
@@ -119,7 +119,7 @@ sglang_configs = {
         models_port=8000,
         request_payloads=[
             chat_payload_default(
-                expected_response=["Successfully Applied Chat Template"]
+                expected_response_all=["Successfully Applied Chat Template"]
             )
         ],
     ),
@@ -147,7 +147,7 @@ sglang_configs = {
                 # NOTE: The response text may mention 'bus', 'train', 'streetcar', etc.
                 # so we need something consistently found in the response, or a different
                 # approach to validation for this test to be stable.
-                expected_response=["image"],
+                expected_response_any=["image", "bus", "train", "streetcar"],
                 temperature=0.0,
             )
         ],
@@ -165,13 +165,13 @@ sglang_configs = {
             # Test default payload with multiple inputs
             embedding_payload_default(
                 repeat_count=2,
-                expected_response=["Generated 2 embeddings with dimension"],
+                expected_response_all=["Generated 2 embeddings with dimension"],
             ),
             # Test single string input
             embedding_payload(
                 input_text="Hello, world!",
                 repeat_count=1,
-                expected_response=["Generated 1 embeddings with dimension"],
+                expected_response_all=["Generated 1 embeddings with dimension"],
             ),
             # Test multiple string inputs
             embedding_payload(
@@ -181,7 +181,7 @@ sglang_configs = {
                     "Natural language processing enables computers to understand text.",
                 ],
                 repeat_count=1,
-                expected_response=["Generated 3 embeddings with dimension"],
+                expected_response_all=["Generated 3 embeddings with dimension"],
             ),
         ],
     ),

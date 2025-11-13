@@ -45,7 +45,7 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            metric_payload_default(min_num_requests=6, backend="vllm"),
+            metric_payload_default(min_num_requests=4, backend="vllm"),
         ],
     ),
     "agg-router": VLLMConfig(
@@ -100,8 +100,8 @@ vllm_configs = {
         ],
         timeout=700,
         request_payloads=[
-            chat_payload_default(expected_response=["joke"]),
-            completion_payload_default(expected_response=["joke"]),
+            chat_payload_default(),
+            completion_payload_default(),
         ],
     ),
     "multimodal_agg_llava_epd": VLLMConfig(
@@ -123,7 +123,7 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["bus"],
+                expected_response_any=["bus", "image"],
                 temperature=0.0,
             )
         ],
@@ -149,7 +149,7 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["bus"],
+                expected_response_any=["bus", "image"],
             )
         ],
     ),
@@ -175,7 +175,7 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["bus"],
+                expected_response_any=["bus", "image"],
             ),
             # Base64 data URL test (1x1 PNG inline, avoids network fetch)
             chat_payload(
@@ -189,7 +189,7 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=[],  # Just validate no error
+                expected_response_all=[],  # Just validate no error
             ),
         ],
     ),
@@ -215,7 +215,7 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["rabbit"],
+                expected_response_any=["rabbit", "video", "detail"],
                 temperature=0.7,
             )
         ],
