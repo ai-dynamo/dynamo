@@ -55,15 +55,17 @@ pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
+    enforce_disagg: bool,
 }
 
 impl PrefillRouter {
     /// Create a disabled prefill router that will never activate (passthrough only)
-    pub fn disabled(router_mode: RouterMode) -> Arc<Self> {
+    pub fn disabled(router_mode: RouterMode, enforce_disagg: bool) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: OnceLock::new(),
             cancel_token: CancellationToken::new(),
             router_mode,
+            enforce_disagg,
         })
     }
 
@@ -73,6 +75,7 @@ impl PrefillRouter {
         router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
+        enforce_disagg: bool,
     ) -> Arc<Self> {
         let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
@@ -81,6 +84,7 @@ impl PrefillRouter {
             prefill_router,
             cancel_token: cancel_token.clone(),
             router_mode,
+            enforce_disagg,
         });
 
         // Spawn background task to wait for activation
@@ -280,10 +284,23 @@ impl
                 next.generate(decode_request).await
             }
             Err(PrefillError::NotActivated) => {
+                if self.enforce_disagg {
+                    tracing::error!(
+                        "Prefill router not activated, but disaggregated mode is enforced. Failing request."
+                    );
+                    return Err(anyhow::anyhow!(PrefillError::NotActivated));
+                }
                 tracing::debug!("Prefill router not activated, falling back to decode-only");
                 next.generate(context.map(|_| req)).await
             }
             Err(e) => {
+                if self.enforce_disagg {
+                    tracing::error!(
+                        error = %e,
+                        "Remote prefill failed, but disaggregated mode is enforced. Failing request."
+                    );
+                    return Err(anyhow::anyhow!(e));
+                }
                 tracing::warn!(
                     error = %e,
                     "Remote prefill failed, falling back to decode-only. This may impact performance in disaggregated deployments. Verify prefill workers are healthy and accessible."
