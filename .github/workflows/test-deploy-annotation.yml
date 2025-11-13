@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Test Deploy Error Annotation
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/scripts/**'
+      - '.github/workflows/test-deploy-annotation.yml'
+
+jobs:
+  test-deploy-annotation:
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      
+      - name: Simulate Deploy Test Failure
+        id: deploy-test
+        run: |
+          set -x
+          exec > >(tee -a test-output.log) 2>&1
+          
+          # Simulate the exact log output from a real deploy test
+          echo "pwd"
+          echo "/runner/_work/dynamo/dynamo"
+          echo "+ export KUBECONFIG=/runner/_work/dynamo/dynamo/.kubeconfig"
+          echo "+ KUBECONFIG=/runner/_work/dynamo/dynamo/.kubeconfig"
+          echo "+ kubectl config set-context --current --namespace=gh-id-19315413755-pr-4196-dt"
+          echo 'Context "github-ci" modified.'
+          echo "+ exec"
+          echo "++ tee -a test-output.log"
+          echo "+ cd examples/backends/trtllm"
+          echo "+ export FRAMEWORK_RUNTIME_IMAGE=***/ai-dynamo/dynamo:38aae36591811e79795f10ab987fb0e797bdb60b-trtllm-amd64"
+          echo "+ FRAMEWORK_RUNTIME_IMAGE=***/ai-dynamo/dynamo:38aae36591811e79795f10ab987fb0e797bdb60b-trtllm-amd64"
+          echo "+ export KUBE_NS=gh-id-19315413755-pr-4196-dt"
+          echo "+ KUBE_NS=gh-id-19315413755-pr-4196-dt"
+          echo "++ yq e .metadata.name deploy/agg_router.yaml"
+          echo "+ export GRAPH_NAME=trtllm-agg-router"
+          echo "+ GRAPH_NAME=trtllm-agg-router"
+          echo "+ echo GRAPH_NAME=trtllm-agg-router"
+          echo "GRAPH_NAME=trtllm-agg-router"
+          echo "+ yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' deploy/agg_router.yaml"
+          echo "+ echo '=== UPDATED DEPLOYMENT FILE ==='"
+          echo "=== UPDATED DEPLOYMENT FILE ==="
+          echo "+ cat deploy/agg_router.yaml"
+          echo "# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved."
+          echo "# SPDX-License-Identifier: Apache-2.0"
+          echo ""
+          echo "apiVersion: nvidia.com/v1alpha1"
+          echo "kind: DynamoGraphDeployment"
+          echo "metadata:"
+          echo "  name: trtllm-agg-router"
+          echo "spec:"
+          echo "  services:"
+          echo "    Frontend:"
+          echo "      dynamoNamespace: trtllm-agg-router"
+          echo "      componentType: frontend"
+          echo "      replicas: 1"
+          echo "+ kubectl apply -n gh-id-19315413755-pr-4196-dt -f deploy/agg_router.yaml"
+          echo "dynamographdeployment.nvidia.com/trtllm-agg-router created"
+          echo "+ sleep 20"
+          echo "++ yq e .metadata.name deploy/agg_router.yaml"
+          echo "+ export GRAPH_NAME=trtllm-agg-router"
+          echo "+ GRAPH_NAME=trtllm-agg-router"
+          echo "+ echo 'Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: trtllm-agg-router'"
+          echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: trtllm-agg-router"
+          echo "+ kubectl wait --for=condition=ready pod -l nvidia.com/dynamo-graph-deployment-name=trtllm-agg-router -n gh-id-19315413755-pr-4196-dt --timeout=1300s"
+          echo "error: no matching resources found"
+          
+          # Now trigger the actual error handling
+          export ERROR_MSG="Test failed: error: no matching resources found"
+          export NAMESPACE="gh-id-19315413755-pr-4196-dt"
+          export GRAPH_NAME="trtllm-agg-router"
+          TEST_RESULT=1
+          
+          if [ $TEST_RESULT -ne 0 ]; then
+            # Test failed - use common annotation script
+            export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+            bash .github/scripts/create_error_annotation.sh "Deploy Test: trtllm (agg-router)" "50" "test-output.log" "$ERROR_MSG" "$NAMESPACE"
+          fi
+      
+      - name: Show Log Output
+        if: always()
+        run: |
+          echo "=== Generated test-output.log ==="
+          if [ -f test-output.log ]; then
+            cat test-output.log
+          else
+            echo "Log file not found"
+          fi
+      
+      - name: Show Annotation Script Output
+        if: always()
+        run: |
+          echo "=== Check if annotation was created ==="
+          echo "Look for annotations in the 'Files' tab and 'Checks' tab"
+          echo "Expected error: 'error: no matching resources found'"
+
