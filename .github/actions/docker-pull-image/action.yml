@@ -1,28 +1,126 @@
-name: 'Pull Docker Image from ACR'
-description: 'Login to Azure ACR and pull a nightly image'
+name: 'Pull Docker Image'
+description: 'Login to a registry and pull a tagged image into the local cache'
 inputs:
   image_tag:
     description: 'Local image tag (e.g., nightly-vllm-amd64)'
     required: true
+  repository:
+    description: 'Repository path (default ai-dynamo/dynamo)'
+    required: false
+    default: 'ai-dynamo/dynamo'
+  provider:
+    description: 'Registry provider: azure | aws'
+    required: false
+    default: 'azure'
+  # Azure inputs
   azure_acr_hostname:
     description: 'Azure ACR hostname'
-    required: true
+    required: false
   azure_acr_user:
     description: 'Azure ACR username'
-    required: true
+    required: false
   azure_acr_password:
     description: 'Azure ACR password'
-    required: true
+    required: false
+  # AWS inputs
+  aws_account_id:
+    description: 'AWS Account ID'
+    required: false
+  aws_default_region:
+    description: 'AWS Default Region'
+    required: false
+  aws_access_key_id:
+    description: 'AWS Access Key ID'
+    required: false
+  aws_secret_access_key:
+    description: 'AWS Secret Access Key'
+    required: false
 
 runs:
   using: "composite"
   steps:
     - name: Login to Azure ACR
+      if: ${{ !(inputs.provider == 'aws' || env.PREFER_PROVIDER == 'aws' || inputs.aws_account_id != '') }}
       shell: bash
+      env:
+        AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname || env.AZURE_ACR_HOSTNAME }}
       run: |
-        echo "${{ inputs.azure_acr_password }}" | docker login ${{ inputs.azure_acr_hostname }} --username ${{ inputs.azure_acr_user }} --password-stdin
-    - name: Pull and tag image
+        retry=0
+        until [ $retry -ge 3 ]; do
+          if echo "${{ inputs.azure_acr_password }}" | docker login "${AZURE_ACR_HOSTNAME}" --username ${{ inputs.azure_acr_user }} --password-stdin; then
+            break
+          fi
+          retry=$((retry+1))
+          echo "ACR login failed (attempt ${retry}/3). Retrying in 10s..."
+          sleep 10
+        done
+        if [ $retry -ge 3 ]; then
+          echo "ACR login failed after 3 attempts" >&2
+          exit 1
+        fi
+    - name: Pull and tag image from ACR
+      if: ${{ !(inputs.provider == 'aws' || env.PREFER_PROVIDER == 'aws' || inputs.aws_account_id != '') }}
       shell: bash
+      env:
+        AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname || env.AZURE_ACR_HOSTNAME }}
       run: |
-        docker pull ${{ inputs.azure_acr_hostname }}/ai-dynamo/dynamo:${{ inputs.image_tag }}
-        docker tag ${{ inputs.azure_acr_hostname }}/ai-dynamo/dynamo:${{ inputs.image_tag }} ${{ inputs.image_tag }}
+        retry=0
+        until [ $retry -ge 3 ]; do
+          if docker pull "${AZURE_ACR_HOSTNAME}/${{ inputs.repository }}:${{ inputs.image_tag }}"; then
+            break
+          fi
+          retry=$((retry+1))
+          echo "ACR pull failed (attempt ${retry}/3). Retrying in 15s..."
+          sleep 15
+        done
+        if [ $retry -ge 3 ]; then
+          echo "ACR pull failed after 3 attempts" >&2
+          exit 1
+        fi
+        docker tag "${AZURE_ACR_HOSTNAME}/${{ inputs.repository }}:${{ inputs.image_tag }}" ${{ inputs.image_tag }}
+
+    - name: Login to AWS ECR
+      if: ${{ inputs.provider == 'aws' || env.PREFER_PROVIDER == 'aws' || inputs.aws_account_id != '' }}
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id || env.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key || env.AWS_SECRET_ACCESS_KEY }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws_default_region || env.AWS_DEFAULT_REGION }}
+        AWS_ACCOUNT_ID: ${{ inputs.aws_account_id || env.AWS_ACCOUNT_ID }}
+      run: |
+        retry=0
+        until [ $retry -ge 3 ]; do
+          if aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | \
+             docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"; then
+            break
+          fi
+          retry=$((retry+1))
+          echo "ECR login failed (attempt ${retry}/3). Retrying in 10s..."
+          sleep 10
+        done
+        if [ $retry -ge 3 ]; then
+          echo "ECR login failed after 3 attempts" >&2
+          exit 1
+        fi
+    - name: Pull and tag image from ECR
+      if: ${{ inputs.provider == 'aws' || env.PREFER_PROVIDER == 'aws' || inputs.aws_account_id != '' }}
+      shell: bash
+      env:
+        AWS_DEFAULT_REGION: ${{ inputs.aws_default_region || env.AWS_DEFAULT_REGION }}
+        AWS_ACCOUNT_ID: ${{ inputs.aws_account_id || env.AWS_ACCOUNT_ID }}
+      run: |
+        ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        retry=0
+        until [ $retry -ge 3 ]; do
+          if docker pull "${ECR_HOSTNAME}/${{ inputs.repository }}:${{ inputs.image_tag }}"; then
+            break
+          fi
+          retry=$((retry+1))
+          echo "ECR pull failed (attempt ${retry}/3). Retrying in 15s..."
+          sleep 15
+        done
+        if [ $retry -ge 3 ]; then
+          echo "ECR pull failed after 3 attempts" >&2
+          exit 1
+        fi
+        docker tag "${ECR_HOSTNAME}/${{ inputs.repository }}:${{ inputs.image_tag }}" ${{ inputs.image_tag }}

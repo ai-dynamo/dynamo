@@ -12,17 +12,52 @@ concurrency:
   group: ${{ github.workflow }}-nightly-${{ github.run_id }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  id-token: write
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
+env:
+  REGISTRY_IMAGE: ai-dynamo/dynamo
+  NIGHTLY_IMAGE_PREFIX: nightly
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  PREFER_PROVIDER: aws
+
 ############################## BUILD JOBS ##############################
 
 jobs:
   build-vllm-amd64:
-    name: Build (vllm.amd64)
+    name: Build vLLM (amd64)
     runs-on: cpu-amd-m5-2xlarge
+    timeout-minutes: 90
     env:
       FRAMEWORK: vllm
       ARCH: amd64
+      BASE_IMAGE_TAG: ''
+      RUNTIME_IMAGE_TAG: ''
+      CUDA_VERSION: ''
+      TORCH_BACKEND: ''
     steps:
       - uses: actions/checkout@v4
+      - name: Configure AWS credentials (OIDC)
+        if: secrets.AWS_NIGHTLY_ROLE != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_NIGHTLY_ROLE }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+      - name: Configure AWS credentials (static keys)
+        if: secrets.AWS_NIGHTLY_ROLE == '' && secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -30,39 +65,57 @@ jobs:
           framework: ${{ env.FRAMEWORK }}
           target: runtime
           platform: linux/${{ env.ARCH }}
-          base_image_tag: ${{ env.ARCH == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ env.ARCH == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ env.ARCH == 'arm64' && '129' || '' }}
-          torch_backend: ${{ env.ARCH == 'arm64' && 'cu129' || '' }}
+          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
+          runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
+          cuda_version: ${{ env.CUDA_VERSION }}
+          torch_backend: ${{ env.TORCH_BACKEND }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Image
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-          aws_push: 'false'
+          push_tag: ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          aws_push: 'true'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ env.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   build-vllm-arm64:
-    name: Build (vllm.arm64)
+    name: Build vLLM (arm64)
     runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 90
     env:
       FRAMEWORK: vllm
       ARCH: arm64
+      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
+      RUNTIME_IMAGE_TAG: '12.9.0-runtime-ubuntu24.04'
+      CUDA_VERSION: '129'
+      TORCH_BACKEND: 'cu129'
     steps:
       - uses: actions/checkout@v4
+      - name: Configure AWS credentials (OIDC)
+        if: secrets.AWS_NIGHTLY_ROLE != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_NIGHTLY_ROLE }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+      - name: Configure AWS credentials (static keys)
+        if: secrets.AWS_NIGHTLY_ROLE == '' && secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -70,39 +123,57 @@ jobs:
           framework: ${{ env.FRAMEWORK }}
           target: runtime
           platform: linux/${{ env.ARCH }}
-          base_image_tag: ${{ env.ARCH == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ env.ARCH == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ env.ARCH == 'arm64' && '129' || '' }}
-          torch_backend: ${{ env.ARCH == 'arm64' && 'cu129' || '' }}
+          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
+          runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
+          cuda_version: ${{ env.CUDA_VERSION }}
+          torch_backend: ${{ env.TORCH_BACKEND }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Image
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-          aws_push: 'false'
+          push_tag: ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          aws_push: 'true'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ env.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   build-trtllm-amd64:
-    name: Build (trtllm.amd64)
+    name: Build TRTLLM (amd64)
     runs-on: cpu-amd-m5-2xlarge
+    timeout-minutes: 90
     env:
       FRAMEWORK: trtllm
       ARCH: amd64
+      BASE_IMAGE_TAG: ''
+      RUNTIME_IMAGE_TAG: ''
+      CUDA_VERSION: ''
+      TORCH_BACKEND: ''
     steps:
       - uses: actions/checkout@v4
+      - name: Configure AWS credentials (OIDC)
+        if: secrets.AWS_NIGHTLY_ROLE != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_NIGHTLY_ROLE }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+      - name: Configure AWS credentials (static keys)
+        if: secrets.AWS_NIGHTLY_ROLE == '' && secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -110,39 +181,57 @@ jobs:
           framework: ${{ env.FRAMEWORK }}
           target: runtime
           platform: linux/${{ env.ARCH }}
-          base_image_tag: ${{ env.ARCH == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ env.ARCH == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ env.ARCH == 'arm64' && '129' || '' }}
-          torch_backend: ${{ env.ARCH == 'arm64' && 'cu129' || '' }}
+          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
+          runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
+          cuda_version: ${{ env.CUDA_VERSION }}
+          torch_backend: ${{ env.TORCH_BACKEND }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Image
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-          aws_push: 'false'
+          push_tag: ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          aws_push: 'true'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ env.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   build-trtllm-arm64:
-    name: Build (trtllm.arm64)
+    name: Build TRTLLM (arm64)
     runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 90
     env:
       FRAMEWORK: trtllm
       ARCH: arm64
+      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
+      RUNTIME_IMAGE_TAG: '12.9.0-runtime-ubuntu24.04'
+      CUDA_VERSION: '129'
+      TORCH_BACKEND: 'cu129'
     steps:
       - uses: actions/checkout@v4
+      - name: Configure AWS credentials (OIDC)
+        if: secrets.AWS_NIGHTLY_ROLE != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_NIGHTLY_ROLE }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+      - name: Configure AWS credentials (static keys)
+        if: secrets.AWS_NIGHTLY_ROLE == '' && secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -150,39 +239,57 @@ jobs:
           framework: ${{ env.FRAMEWORK }}
           target: runtime
           platform: linux/${{ env.ARCH }}
-          base_image_tag: ${{ env.ARCH == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ env.ARCH == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ env.ARCH == 'arm64' && '129' || '' }}
-          torch_backend: ${{ env.ARCH == 'arm64' && 'cu129' || '' }}
+          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
+          runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
+          cuda_version: ${{ env.CUDA_VERSION }}
+          torch_backend: ${{ env.TORCH_BACKEND }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Image
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-          aws_push: 'false'
+          push_tag: ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          aws_push: 'true'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ env.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   build-sglang-amd64:
-    name: Build (sglang.amd64)
+    name: Build SGLang (amd64)
     runs-on: cpu-amd-m5-2xlarge
+    timeout-minutes: 90
     env:
       FRAMEWORK: sglang
       ARCH: amd64
+      BASE_IMAGE_TAG: ''
+      RUNTIME_IMAGE_TAG: ''
+      CUDA_VERSION: ''
+      TORCH_BACKEND: ''
     steps:
       - uses: actions/checkout@v4
+      - name: Configure AWS credentials (OIDC)
+        if: secrets.AWS_NIGHTLY_ROLE != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_NIGHTLY_ROLE }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+      - name: Configure AWS credentials (static keys)
+        if: secrets.AWS_NIGHTLY_ROLE == '' && secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -190,39 +297,57 @@ jobs:
           framework: ${{ env.FRAMEWORK }}
           target: runtime
           platform: linux/${{ env.ARCH }}
-          base_image_tag: ${{ env.ARCH == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ env.ARCH == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ env.ARCH == 'arm64' && '129' || '' }}
-          torch_backend: ${{ env.ARCH == 'arm64' && 'cu129' || '' }}
+          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
+          runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
+          cuda_version: ${{ env.CUDA_VERSION }}
+          torch_backend: ${{ env.TORCH_BACKEND }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Image
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-          aws_push: 'false'
+          push_tag: ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          aws_push: 'true'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ env.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   build-sglang-arm64:
-    name: Build (sglang.arm64)
+    name: Build SGLang (arm64)
     runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 90
     env:
       FRAMEWORK: sglang
       ARCH: arm64
+      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
+      RUNTIME_IMAGE_TAG: '12.9.0-runtime-ubuntu24.04'
+      CUDA_VERSION: '129'
+      TORCH_BACKEND: 'cu129'
     steps:
       - uses: actions/checkout@v4
+      - name: Configure AWS credentials (OIDC)
+        if: secrets.AWS_NIGHTLY_ROLE != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_NIGHTLY_ROLE }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+      - name: Configure AWS credentials (static keys)
+        if: secrets.AWS_NIGHTLY_ROLE == '' && secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -230,762 +355,754 @@ jobs:
           framework: ${{ env.FRAMEWORK }}
           target: runtime
           platform: linux/${{ env.ARCH }}
-          base_image_tag: ${{ env.ARCH == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ env.ARCH == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ env.ARCH == 'arm64' && '129' || '' }}
-          torch_backend: ${{ env.ARCH == 'arm64' && 'cu129' || '' }}
+          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
+          runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
+          cuda_version: ${{ env.CUDA_VERSION }}
+          torch_backend: ${{ env.TORCH_BACKEND }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Image
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:nightly-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-          aws_push: 'false'
+          push_tag: ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+          aws_push: 'true'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ env.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-  ############################## UNIT TEST JOBS ##############################
+############################## TEST JOBS ##############################
 
   unit-vllm-amd64:
-    name: Unit Tests (vllm.amd64)
-    runs-on: cpu-amd-m5-2xlarge
+    name: Unit vLLM (amd64)
     needs: build-vllm-amd64
-    if: needs.build-vllm-amd64.result == 'success'
+    runs-on: cpu-amd-m5-2xlarge
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-vllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-vllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
           pytest_marks: "vllm and unit and nightly"
           framework: vllm
           test_type: unit
           platform_arch: amd64
 
   unit-vllm-arm64:
-    name: Unit Tests (vllm.arm64)
-    runs-on: cpu-arm-r8g-4xlarge
+    name: Unit vLLM (arm64)
     needs: build-vllm-arm64
-    if: needs.build-vllm-arm64.result == 'success'
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-vllm-arm64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-vllm-arm64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
           pytest_marks: "vllm and unit and nightly"
           framework: vllm
           test_type: unit
           platform_arch: arm64
 
   unit-trtllm-amd64:
-    name: Unit Tests (trtllm.amd64)
-    runs-on: cpu-amd-m5-2xlarge
+    name: Unit TRTLLM (amd64)
     needs: build-trtllm-amd64
-    if: needs.build-trtllm-amd64.result == 'success'
+    runs-on: cpu-amd-m5-2xlarge
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-trtllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-trtllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
           pytest_marks: "trtllm and unit and nightly"
           framework: trtllm
           test_type: unit
           platform_arch: amd64
 
   unit-trtllm-arm64:
-    name: Unit Tests (trtllm.arm64)
-    runs-on: cpu-arm-r8g-4xlarge
+    name: Unit TRTLLM (arm64)
     needs: build-trtllm-arm64
-    if: needs.build-trtllm-arm64.result == 'success'
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-trtllm-arm64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-trtllm-arm64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
           pytest_marks: "trtllm and unit and nightly"
           framework: trtllm
           test_type: unit
           platform_arch: arm64
 
   unit-sglang-amd64:
-    name: Unit Tests (sglang.amd64)
-    runs-on: cpu-amd-m5-2xlarge
+    name: Unit SGLang (amd64)
     needs: build-sglang-amd64
-    if: needs.build-sglang-amd64.result == 'success'
+    runs-on: cpu-amd-m5-2xlarge
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-sglang-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-sglang-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
           pytest_marks: "sglang and unit and nightly"
           framework: sglang
           test_type: unit
           platform_arch: amd64
 
   unit-sglang-arm64:
-    name: Unit Tests (sglang.arm64)
-    runs-on: cpu-arm-r8g-4xlarge
+    name: Unit SGLang (arm64)
     needs: build-sglang-arm64
-    if: needs.build-sglang-arm64.result == 'success'
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-sglang-arm64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-sglang-arm64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
           pytest_marks: "sglang and unit and nightly"
           framework: sglang
           test_type: unit
           platform_arch: arm64
 
-  ############################## INTEGRATION TEST JOBS ##############################
-
   integration-vllm-amd64:
-    name: Integration Tests (vllm.amd64)
-    runs-on: gpu-l40-amd64
+    name: Integration vLLM (amd64)
     needs: build-vllm-amd64
-    if: needs.build-vllm-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-vllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-vllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
           pytest_marks: "vllm and integration and nightly"
           framework: vllm
           test_type: integration
           platform_arch: amd64
 
   integration-trtllm-amd64:
-    name: Integration Tests (trtllm.amd64)
-    runs-on: gpu-l40-amd64
+    name: Integration TRTLLM (amd64)
     needs: build-trtllm-amd64
-    if: needs.build-trtllm-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-trtllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-trtllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
           pytest_marks: "trtllm and integration and nightly"
           framework: trtllm
           test_type: integration
           platform_arch: amd64
 
   integration-sglang-amd64:
-    name: Integration Tests (sglang.amd64)
-    runs-on: gpu-l40-amd64
+    name: Integration SGLang (amd64)
     needs: build-sglang-amd64
-    if: needs.build-sglang-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-sglang-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-sglang-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
           pytest_marks: "sglang and integration and nightly"
           framework: sglang
           test_type: integration
           platform_arch: amd64
 
-  ############################## E2E SINGLE GPU TEST JOBS ##############################
-
   e2e-single-vllm-amd64:
-    name: E2E Tests Single GPU (vllm.amd64)
-    runs-on: gpu-l40-amd64
+    name: E2E Single GPU vLLM (amd64)
     needs: build-vllm-amd64
-    if: needs.build-vllm-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-vllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-vllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
           pytest_marks: "nightly and vllm and e2e and gpu_1"
           framework: vllm
           test_type: e2e
           platform_arch: amd64
 
   e2e-single-trtllm-amd64:
-    name: E2E Tests Single GPU (trtllm.amd64)
-    runs-on: gpu-l40-amd64
+    name: E2E Single GPU TRTLLM (amd64)
     needs: build-trtllm-amd64
-    if: needs.build-trtllm-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-trtllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-trtllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
           pytest_marks: "nightly and trtllm and e2e and gpu_1"
           framework: trtllm
           test_type: e2e
           platform_arch: amd64
 
   e2e-single-sglang-amd64:
-    name: E2E Tests Single GPU (sglang.amd64)
-    runs-on: gpu-l40-amd64
+    name: E2E Single GPU SGLang (amd64)
     needs: build-sglang-amd64
-    if: needs.build-sglang-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-sglang-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-sglang-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
           pytest_marks: "nightly and sglang and e2e and gpu_1"
           framework: sglang
           test_type: e2e
           platform_arch: amd64
 
-  ############################## E2E MULTI GPU TEST JOBS ##############################
-
   e2e-multi-vllm-amd64:
-    name: E2E Tests Multi-GPU (vllm.amd64)
-    runs-on: gpu-l40-amd64
+    name: E2E Multi GPU vLLM (amd64)
     needs: build-vllm-amd64
-    if: needs.build-vllm-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-vllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-vllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
           pytest_marks: "nightly and vllm and e2e and gpu_2"
           framework: vllm
           test_type: e2e
           platform_arch: amd64
 
   e2e-multi-trtllm-amd64:
-    name: E2E Tests Multi-GPU (trtllm.amd64)
-    runs-on: gpu-l40-amd64
+    name: E2E Multi GPU TRTLLM (amd64)
     needs: build-trtllm-amd64
-    if: needs.build-trtllm-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-trtllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-trtllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
           pytest_marks: "nightly and trtllm and e2e and gpu_2"
           framework: trtllm
           test_type: e2e
           platform_arch: amd64
 
   e2e-multi-sglang-amd64:
-    name: E2E Tests Multi-GPU (sglang.amd64)
-    runs-on: gpu-l40-amd64
+    name: E2E Multi GPU SGLang (amd64)
     needs: build-sglang-amd64
-    if: needs.build-sglang-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-sglang-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-sglang-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
           pytest_marks: "nightly and sglang and e2e and gpu_2"
           framework: sglang
           test_type: e2e
           platform_arch: amd64
 
-  ############################## COMPONENT TEST JOBS ##############################
-
   component-vllm-amd64-router:
-    name: Component Tests (vllm.amd64.router)
-    runs-on: gpu-l40-amd64
+    name: Component vLLM router (amd64)
     needs: build-vllm-amd64
-    if: needs.build-vllm-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-vllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-vllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
           pytest_marks: "nightly and router"
           framework: vllm
           test_type: component
           platform_arch: amd64
 
   component-vllm-amd64-planner:
-    name: Component Tests (vllm.amd64.planner)
-    runs-on: gpu-l40-amd64
+    name: Component vLLM planner (amd64)
     needs: build-vllm-amd64
-    if: needs.build-vllm-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-vllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-vllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
           pytest_marks: "nightly and planner"
           framework: vllm
           test_type: component
           platform_arch: amd64
 
   component-vllm-amd64-kvbm:
-    name: Component Tests (vllm.amd64.kvbm)
-    runs-on: gpu-l40-amd64
+    name: Component vLLM kvbm (amd64)
     needs: build-vllm-amd64
-    if: needs.build-vllm-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-vllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-vllm-amd64
-          pytest_marks: "nightly and kvbm and not slow" #TODO remove this.
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
+          pytest_marks: "nightly and kvbm and not slow"
           framework: vllm
           test_type: component
           platform_arch: amd64
 
   component-vllm-arm64-router:
-    name: Component Tests (vllm.arm64.router)
-    runs-on: cpu-arm-r8g-4xlarge
+    name: Component vLLM router (arm64)
     needs: build-vllm-arm64
-    if: needs.build-vllm-arm64.result == 'success'
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-vllm-arm64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-vllm-arm64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
           pytest_marks: "nightly and router"
           framework: vllm
           test_type: component
           platform_arch: arm64
 
   component-vllm-arm64-planner:
-    name: Component Tests (vllm.arm64.planner)
-    runs-on: cpu-arm-r8g-4xlarge
+    name: Component vLLM planner (arm64)
     needs: build-vllm-arm64
-    if: needs.build-vllm-arm64.result == 'success'
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-vllm-arm64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-vllm-arm64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
           pytest_marks: "nightly and planner"
           framework: vllm
           test_type: component
           platform_arch: arm64
 
   component-vllm-arm64-kvbm:
-    name: Component Tests (vllm.arm64.kvbm)
-    runs-on: cpu-arm-r8g-4xlarge
+    name: Component vLLM kvbm (arm64)
     needs: build-vllm-arm64
-    if: needs.build-vllm-arm64.result == 'success'
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-vllm-arm64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-vllm-arm64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
           pytest_marks: "nightly and kvbm"
           framework: vllm
           test_type: component
           platform_arch: arm64
 
   component-trtllm-amd64-router:
-    name: Component Tests (trtllm.amd64.router)
-    runs-on: gpu-l40-amd64
+    name: Component TRTLLM router (amd64)
     needs: build-trtllm-amd64
-    if: needs.build-trtllm-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-trtllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-trtllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
           pytest_marks: "nightly and router"
           framework: trtllm
           test_type: component
           platform_arch: amd64
 
   component-trtllm-amd64-planner:
-    name: Component Tests (trtllm.amd64.planner)
-    runs-on: gpu-l40-amd64
+    name: Component TRTLLM planner (amd64)
     needs: build-trtllm-amd64
-    if: needs.build-trtllm-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-trtllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-trtllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
           pytest_marks: "nightly and planner"
           framework: trtllm
           test_type: component
           platform_arch: amd64
 
   component-trtllm-amd64-kvbm:
-    name: Component Tests (trtllm.amd64.kvbm)
-    runs-on: gpu-l40-amd64
+    name: Component TRTLLM kvbm (amd64)
     needs: build-trtllm-amd64
-    if: needs.build-trtllm-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-trtllm-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-trtllm-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
           pytest_marks: "nightly and kvbm"
           framework: trtllm
           test_type: component
           platform_arch: amd64
 
   component-trtllm-arm64-router:
-    name: Component Tests (trtllm.arm64.router)
-    runs-on: cpu-arm-r8g-4xlarge
+    name: Component TRTLLM router (arm64)
     needs: build-trtllm-arm64
-    if: needs.build-trtllm-arm64.result == 'success'
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-trtllm-arm64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-trtllm-arm64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
           pytest_marks: "nightly and router"
           framework: trtllm
           test_type: component
           platform_arch: arm64
 
   component-trtllm-arm64-planner:
-    name: Component Tests (trtllm.arm64.planner)
-    runs-on: cpu-arm-r8g-4xlarge
+    name: Component TRTLLM planner (arm64)
     needs: build-trtllm-arm64
-    if: needs.build-trtllm-arm64.result == 'success'
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-trtllm-arm64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-trtllm-arm64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
           pytest_marks: "nightly and planner"
           framework: trtllm
           test_type: component
           platform_arch: arm64
 
   component-trtllm-arm64-kvbm:
-    name: Component Tests (trtllm.arm64.kvbm)
-    runs-on: cpu-arm-r8g-4xlarge
+    name: Component TRTLLM kvbm (arm64)
     needs: build-trtllm-arm64
-    if: needs.build-trtllm-arm64.result == 'success'
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-trtllm-arm64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-trtllm-arm64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
           pytest_marks: "nightly and kvbm"
           framework: trtllm
           test_type: component
           platform_arch: arm64
 
   component-sglang-amd64-router:
-    name: Component Tests (sglang.amd64.router)
-    runs-on: gpu-l40-amd64
+    name: Component SGLang router (amd64)
     needs: build-sglang-amd64
-    if: needs.build-sglang-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-sglang-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-sglang-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
           pytest_marks: "nightly and router"
           framework: sglang
           test_type: component
           platform_arch: amd64
 
   component-sglang-amd64-planner:
-    name: Component Tests (sglang.amd64.planner)
-    runs-on: gpu-l40-amd64
+    name: Component SGLang planner (amd64)
     needs: build-sglang-amd64
-    if: needs.build-sglang-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-sglang-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-sglang-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
           pytest_marks: "nightly and planner"
           framework: sglang
           test_type: component
           platform_arch: amd64
 
   component-sglang-amd64-kvbm:
-    name: Component Tests (sglang.amd64.kvbm)
-    runs-on: gpu-l40-amd64
+    name: Component SGLang kvbm (amd64)
     needs: build-sglang-amd64
-    if: needs.build-sglang-amd64.result == 'success'
+    runs-on: gpu-l40-amd64
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-sglang-amd64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-sglang-amd64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
           pytest_marks: "nightly and kvbm"
           framework: sglang
           test_type: component
           platform_arch: amd64
 
   component-sglang-arm64-router:
-    name: Component Tests (sglang.arm64.router)
-    runs-on: cpu-arm-r8g-4xlarge
+    name: Component SGLang router (arm64)
     needs: build-sglang-arm64
-    if: needs.build-sglang-arm64.result == 'success'
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-sglang-arm64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-sglang-arm64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
           pytest_marks: "nightly and router"
           framework: sglang
           test_type: component
           platform_arch: arm64
 
   component-sglang-arm64-planner:
-    name: Component Tests (sglang.arm64.planner)
-    runs-on: cpu-arm-r8g-4xlarge
+    name: Component SGLang planner (arm64)
     needs: build-sglang-arm64
-    if: needs.build-sglang-arm64.result == 'success'
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-sglang-arm64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-sglang-arm64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
           pytest_marks: "nightly and planner"
           framework: sglang
           test_type: component
           platform_arch: arm64
 
   component-sglang-arm64-kvbm:
-    name: Component Tests (sglang.arm64.kvbm)
-    runs-on: cpu-arm-r8g-4xlarge
+    name: Component SGLang kvbm (arm64)
     needs: build-sglang-arm64
-    if: needs.build-sglang-arm64.result == 'success'
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/docker-pull-image
+      - name: Pull nightly image
+        uses: ./.github/actions/docker-pull-image
         with:
-          image_tag: nightly-sglang-arm64
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
-          image_tag: nightly-sglang-arm64
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
           pytest_marks: "nightly and kvbm"
           framework: sglang
           test_type: component
@@ -1084,75 +1201,50 @@ jobs:
           path: results.md
           retention-days: 7
 
-  # TODO: improve the Slack message and add more details.
-  # notify-slack:
-  #   name: Notify Slack
-  #   runs-on: cpu-amd-m5-2xlarge
-  #   if: always() && github.event_name == 'schedule' && !github.event.repository.fork
-  #   needs: results-summary
-  #   steps:
-  #     - name: Download results summary
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: nightly-results-summary
-  #         path: .
-  #       continue-on-error: true
+  notify-slack:
+    name: Notify Slack
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'schedule' && !github.event.repository.fork && secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL != ''
+    needs: results-summary
+    permissions:
+      contents: read
+    steps:
+      - name: Send Slack notification
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          JOBS_JSON=$(mktemp)
+          gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs --paginate > "$JOBS_JSON"
 
-  #     - name: Send Slack notification
-  #       env:
-  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
-  #         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-  #       run: |
-  #         set +x  # Prevent printing secrets.
+          FAIL_BLOCK=$(jq -r '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != null) |
+             "• " + .name + " (status: " + (.conclusion // "unknown") + ")"' "$JOBS_JSON")
 
-  #         # Ensure results.md exists
-  #         if [ ! -f results.md ]; then
-  #           echo "Results file not found, creating fallback message"
-  #           echo "Nightly CI Run: ${RUN_URL}" > results.md
-  #         fi
+          SUMMARY="Nightly CI results: ${RUN_URL}\n\n"
+          if [ -z "${FAIL_BLOCK}" ]; then
+            SUMMARY+="All jobs succeeded."
+          else
+            SUMMARY+="Failing jobs:\n${FAIL_BLOCK}"
+          fi
 
-  #         # Truncate large messages (Slack has ~40KB limit)
-  #         MAX_SIZE=30000
-  #         FILE_SIZE=$(wc -c < results.md)
-  #         if [ "$FILE_SIZE" -gt "$MAX_SIZE" ]; then
-  #           echo "Results file too large ($FILE_SIZE bytes), truncating..."
-  #           head -c 29000 results.md > results_truncated.md
-  #           printf "\n\n...(Results truncated. Full details: %s)" "$RUN_URL" >> results_truncated.md
-  #           mv results_truncated.md results.md
-  #         fi
+          PAYLOAD=$(jq -n --arg text "$SUMMARY" '{text: $text}')
 
-  #         # Safely encode message to JSON using jq
-  #         # Read file content and create proper JSON payload
-  #         PAYLOAD=$(jq -n --rawfile content results.md '{text: $content}')
+          send_slack() {
+            retry=0
+            until [ $retry -ge 3 ]; do
+              if curl -sSf -X POST -H "Content-Type: application/json" -d="$PAYLOAD" "$SLACK_WEBHOOK_URL" > /dev/null; then
+                echo "Slack notification sent"
+                return 0
+              fi
+              retry=$((retry+1))
+              echo "Slack notification failed (attempt ${retry}/3). Retrying in 10s..."
+              sleep 10
+            done
+            echo "Warning: Slack notification failed after 3 attempts" >&2
+            return 0
+          }
 
-  #         # Send to Slack with retry logic
-  #         send_slack() {
-  #           local retries=3
-  #           local delay=5
-
-  #           for attempt in $(seq 1 $retries); do
-  #             echo "Sending Slack notification (attempt $attempt/$retries)..."
-
-  #             http_code=$(curl -s -w "%{http_code}" -o /tmp/slack_response.txt \
-  #                  -X POST \
-  #                  -H "Content-Type: application/json" \
-  #                  -d "$PAYLOAD" \
-  #                  "$SLACK_WEBHOOK_URL")
-
-  #             if [ "$http_code" = "200" ]; then
-  #               echo "Slack notification sent successfully"
-  #               return 0
-  #             else
-  #               echo "HTTP $http_code returned. Response: $(cat /tmp/slack_response.txt 2>/dev/null || echo 'N/A')"
-  #               if [ $attempt -lt $retries ]; then
-  #                 echo "Retrying in ${delay}s..."
-  #                 sleep $delay
-  #               fi
-  #             fi
-  #           done
-
-  #           echo "Warning: Slack notification failed after $retries attempts (non-blocking)"
-  #           return 0
-  #         }
-
-  #         send_slack || true
+          set +x
+          send_slack

@@ -47,28 +47,93 @@ runs:
   steps:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
+
+    - name: ECR Login
+      shell: bash
+      if: ${{ inputs.aws_push == 'true' }}
+      env:
+        AWS_ACCOUNT_ID: ${{ inputs.aws_account_id || env.AWS_ACCOUNT_ID }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws_default_region || env.AWS_DEFAULT_REGION }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id || env.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key || env.AWS_SECRET_ACCESS_KEY }}
+      run: |
+        retry=0
+        until [ $retry -ge 3 ]; do
+          if aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | \
+             docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"; then
+            break
+          fi
+          retry=$((retry+1))
+          echo "ECR login failed (attempt ${retry}/3). Retrying in 10s..."
+          sleep 10
+        done
+        if [ $retry -ge 3 ]; then
+          echo "ECR login failed after 3 attempts" >&2
+          exit 1
+        fi
+
     - name: ACR Login
       shell: bash
       if: ${{ inputs.azure_push == 'true' }}
       run: |
-        echo "${{ inputs.azure_acr_password }}" | docker login ${{ inputs.azure_acr_hostname }} --username ${{ inputs.azure_acr_user }} --password-stdin
+        retry=0
+        until [ $retry -ge 3 ]; do
+          if echo "${{ inputs.azure_acr_password }}" | docker login ${{ inputs.azure_acr_hostname || env.AZURE_ACR_HOSTNAME }} --username ${{ inputs.azure_acr_user }} --password-stdin; then
+            break
+          fi
+          retry=$((retry+1))
+          echo "ACR login failed (attempt ${retry}/3). Retrying in 10s..."
+          sleep 10
+        done
+        if [ $retry -ge 3 ]; then
+          echo "ACR login failed after 3 attempts" >&2
+          exit 1
+        fi
+
     - name: ECR Tag and Push
       shell: bash
       if: ${{ inputs.aws_push == 'true' }}
       env:
         LOCAL_IMAGE: ${{ inputs.local_image }}
         PUSH_TAG: ${{ inputs.push_tag }}
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+        AWS_ACCOUNT_ID: ${{ inputs.aws_account_id || env.AWS_ACCOUNT_ID }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws_default_region || env.AWS_DEFAULT_REGION }}
       run: |
-        docker tag ${LOCAL_IMAGE} ${ECR_HOSTNAME}/${PUSH_TAG}
-        docker push ${ECR_HOSTNAME}/${PUSH_TAG}
+        ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+        docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${PUSH_TAG}"
+        retry=0
+        until [ $retry -ge 3 ]; do
+          if docker push "${ECR_HOSTNAME}/${PUSH_TAG}"; then
+            break
+          fi
+          retry=$((retry+1))
+          echo "ECR push failed (attempt ${retry}/3). Retrying in 15s..."
+          sleep 15
+        done
+        if [ $retry -ge 3 ]; then
+          echo "ECR push failed after 3 attempts" >&2
+          exit 1
+        fi
+
     - name: ACR Tag and Push
       shell: bash
       if: ${{ inputs.azure_push == 'true' }}
       env:
         LOCAL_IMAGE: ${{ inputs.local_image }}
         PUSH_TAG: ${{ inputs.push_tag }}
-        AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname }}
+        AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname || env.AZURE_ACR_HOSTNAME }}
       run: |
-        docker tag ${LOCAL_IMAGE} ${AZURE_ACR_HOSTNAME}/${PUSH_TAG}
-        docker push ${AZURE_ACR_HOSTNAME}/${PUSH_TAG}
+        docker tag "${LOCAL_IMAGE}" "${AZURE_ACR_HOSTNAME}/${PUSH_TAG}"
+        retry=0
+        until [ $retry -ge 3 ]; do
+          if docker push "${AZURE_ACR_HOSTNAME}/${PUSH_TAG}"; then
+            break
+          fi
+          retry=$((retry+1))
+          echo "ACR push failed (attempt ${retry}/3). Retrying in 15s..."
+          sleep 15
+        done
+        if [ $retry -ge 3 ]; then
+          echo "ACR push failed after 3 attempts" >&2
+          exit 1
+        fi
