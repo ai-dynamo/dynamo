@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use futures::StreamExt;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -23,6 +23,23 @@ use crate::{
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
 };
 
+/// Errors that can occur during prefill routing
+#[derive(Debug, thiserror::Error)]
+pub enum PrefillError {
+    /// Prefill router has not been activated yet
+    #[error("Prefill router not yet activated")]
+    NotActivated,
+
+    /// Error during prefill execution
+    /// TODO: Separate prefill worker error from prefill router error
+    #[error("Prefill execution failed: {0}")]
+    PrefillError(String),
+
+    /// Disaggregated params not found in prefill response
+    #[error("No disaggregated params in prefill response: {0}")]
+    NoDisaggregatedParams(String),
+}
+
 /// The inner router used by PrefillRouter
 enum InnerPrefillRouter {
     /// KV-aware routing using KvPushRouter
@@ -38,15 +55,17 @@ pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
+    enforce_disagg: bool,
 }
 
 impl PrefillRouter {
     /// Create a disabled prefill router that will never activate (passthrough only)
-    pub fn disabled(router_mode: RouterMode) -> Arc<Self> {
+    pub fn disabled(router_mode: RouterMode, enforce_disagg: bool) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: OnceLock::new(),
             cancel_token: CancellationToken::new(),
             router_mode,
+            enforce_disagg,
         })
     }
 
@@ -56,6 +75,7 @@ impl PrefillRouter {
         router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
+        enforce_disagg: bool,
     ) -> Arc<Self> {
         let prefill_router = OnceLock::new();
         let cancel_token = CancellationToken::new();
@@ -64,6 +84,7 @@ impl PrefillRouter {
             prefill_router,
             cancel_token: cancel_token.clone(),
             router_mode,
+            enforce_disagg,
         });
 
         // Spawn background task to wait for activation
@@ -158,34 +179,48 @@ impl PrefillRouter {
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<serde_json::Value, PrefillError> {
         // Get the prefill router, error if not activated
         let Some(prefill_router) = self.prefill_router.get() else {
-            bail!("Prefill router not yet activated");
+            return Err(PrefillError::NotActivated);
         };
 
         // Call the appropriate router based on the type
         let mut prefill_response = match prefill_router {
-            InnerPrefillRouter::KvRouter(router) => router.generate(request).await?,
-            InnerPrefillRouter::SimpleRouter(router) => router.generate(request).await?,
+            InnerPrefillRouter::KvRouter(router) => router
+                .generate(request)
+                .await
+                .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
+            InnerPrefillRouter::SimpleRouter(router) => router
+                .generate(request)
+                .await
+                .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
         };
 
         let Some(first_output) = prefill_response.next().await else {
-            bail!("Prefill router returned no output (stream ended)");
+            return Err(PrefillError::PrefillError(
+                "Prefill router returned no output (stream ended)".to_string(),
+            ));
         };
 
         while prefill_response.next().await.is_some() {}
 
         if let Some(err) = first_output.err() {
-            bail!("Prefill router returned error in output: {err:?}");
+            return Err(PrefillError::PrefillError(format!(
+                "Prefill router returned error in output: {err:?}"
+            )));
         }
 
         let Some(output) = &first_output.data else {
-            bail!("Prefill router output has no data field");
+            return Err(PrefillError::NoDisaggregatedParams(
+                "Prefill router output has no data field".to_string(),
+            ));
         };
 
         let Some(disaggregated_params) = output.disaggregated_params.clone() else {
-            bail!("Prefill router output missing disaggregated_params");
+            return Err(PrefillError::NoDisaggregatedParams(
+                "Prefill router output missing disaggregated_params".to_string(),
+            ));
         };
 
         Ok(disaggregated_params)
@@ -252,7 +287,24 @@ impl
                 let decode_request = context.map(|_| decode_req);
                 next.generate(decode_request).await
             }
+            Err(PrefillError::NotActivated) => {
+                if self.enforce_disagg {
+                    tracing::error!(
+                        "Prefill router not activated, but disaggregated mode is enforced. Failing request."
+                    );
+                    return Err(anyhow::anyhow!(PrefillError::NotActivated));
+                }
+                tracing::debug!("Prefill router not activated, falling back to decode-only");
+                next.generate(context.map(|_| req)).await
+            }
             Err(e) => {
+                if self.enforce_disagg {
+                    tracing::error!(
+                        error = %e,
+                        "Remote prefill failed, but disaggregated mode is enforced. Failing request."
+                    );
+                    return Err(anyhow::anyhow!(e));
+                }
                 tracing::warn!(
                     error = %e,
                     "Remote prefill failed, falling back to decode-only. This may impact performance in disaggregated deployments. Verify prefill workers are healthy and accessible."
