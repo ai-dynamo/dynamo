@@ -75,6 +75,8 @@ jobs:
         env:
           GAIE_DIR: ${{ env.GAIE_DIR }}
           DYNAMO_DIR: ${{ env.DYNAMO_DIR }}
+          PLATFORMS: linux/${{ matrix.platform.arch }}
+          TARGETARCH: ${{ matrix.platform.arch }}
         run: |
           set -euo pipefail
           echo "GAIE_DIR=${GAIE_DIR}"
