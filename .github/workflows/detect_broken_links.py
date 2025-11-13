@@ -895,39 +895,22 @@ Examples:
         print(output_content)
 
     # Exit with error code if broken links or problematic symlinks were found
-    # Note: "suspicious" symlinks are warnings only and don't cause failure
     has_broken_links = bool(all_broken_links)
+    has_problematic_symlinks = bool(all_problematic_symlinks)
 
-    # Only count critical symlink issues (broken, circular, external) as errors
-    critical_symlink_categories = ["broken", "circular", "external"]
-    critical_symlinks = {
-        category: issues
-        for category, issues in all_problematic_symlinks.items()
-        if category in critical_symlink_categories
-    }
-    has_critical_symlinks = bool(critical_symlinks)
-    total_critical_symlinks = sum(len(issues) for issues in critical_symlinks.values())
-
-    # Log suspicious symlinks separately as warnings
-    suspicious_symlinks = all_problematic_symlinks.get("suspicious", [])
-    if suspicious_symlinks:
-        logger.warning(
-            f"Found {len(suspicious_symlinks)} suspicious symlinks (warnings only, not causing failure)"
-        )
-
-    if has_broken_links or has_critical_symlinks:
+    if has_broken_links or has_problematic_symlinks:
         error_msg = []
         if has_broken_links:
             error_msg.append(f"{len(all_broken_links)} files with broken links")
-        if has_critical_symlinks:
-            error_msg.append(f"{total_critical_symlinks} critical problematic symlinks")
+        if has_problematic_symlinks:
+            error_msg.append(f"{total_problematic_symlinks} problematic symlinks")
 
         logger.warning(f"Exiting with error code 1 due to: {', '.join(error_msg)}")
         sys.exit(1)
     else:
         success_msg = "No broken links found"
         if args.check_symlinks:
-            success_msg += " and no critical problematic symlinks found"
+            success_msg += " and no problematic symlinks found"
         logger.info(f"{success_msg} - exiting successfully")
 
 
