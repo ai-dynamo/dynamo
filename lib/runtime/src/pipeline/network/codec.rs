@@ -187,16 +187,16 @@ impl Decoder for TcpRequestCodec {
         let total_len = header_size + payload_len;
 
         // Check max message size
-        if let Some(max_size) = self.max_message_size {
-            if total_len > max_size {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "Request too large: {} bytes (max: {} bytes)",
-                        total_len, max_size
-                    ),
-                ));
-            }
+        if let Some(max_size) = self.max_message_size
+            && total_len > max_size
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Request too large: {} bytes (max: {} bytes)",
+                    total_len, max_size
+                ),
+            ));
         }
 
         // Check if we have the full message
@@ -253,13 +253,16 @@ impl Encoder<TcpRequestMessage> for TcpRequestCodec {
         let total_len = 2 + endpoint_len + 4 + item.payload.len();
 
         // Check max message size
-        if let Some(max_size) = self.max_message_size {
-            if total_len > max_size {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Request too large: {} bytes (max: {} bytes)", total_len, max_size),
-                ));
-            }
+        if let Some(max_size) = self.max_message_size
+            && total_len > max_size
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Request too large: {} bytes (max: {} bytes)",
+                    total_len, max_size
+                ),
+            ));
         }
 
         // Reserve space
@@ -380,16 +383,16 @@ impl Decoder for TcpResponseCodec {
         let total_len = 4 + data_len;
 
         // Check max message size
-        if let Some(max_size) = self.max_message_size {
-            if total_len > max_size {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "Response too large: {} bytes (max: {} bytes)",
-                        total_len, max_size
-                    ),
-                ));
-            }
+        if let Some(max_size) = self.max_message_size
+            && total_len > max_size
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Response too large: {} bytes (max: {} bytes)",
+                    total_len, max_size
+                ),
+            ));
         }
 
         // Check if we have the full message
@@ -421,16 +424,16 @@ impl Encoder<TcpResponseMessage> for TcpResponseCodec {
         let total_len = 4 + item.data.len();
 
         // Check max message size
-        if let Some(max_size) = self.max_message_size {
-            if total_len > max_size {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "Response too large: {} bytes (max: {} bytes)",
-                        total_len, max_size
-                    ),
-                ));
-            }
+        if let Some(max_size) = self.max_message_size
+            && total_len > max_size
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Response too large: {} bytes (max: {} bytes)",
+                    total_len, max_size
+                ),
+            ));
         }
 
         // Reserve space

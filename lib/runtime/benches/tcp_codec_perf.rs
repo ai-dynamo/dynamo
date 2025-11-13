@@ -6,7 +6,7 @@
 //! Run with: cargo bench --bench tcp_codec_perf
 
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use dynamo_runtime::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
 
 /// Benchmark request encoding (hot path operation)
@@ -14,7 +14,7 @@ fn bench_request_encoding(c: &mut Criterion) {
     let mut group = c.benchmark_group("tcp_request_encoding");
 
     // Test different payload sizes
-    for size in [102_400, 1024_000, 31_000_000].iter() {
+    for size in [102_400, 1_024_000, 31_000_000].iter() {
         let payload = Bytes::from(vec![0u8; *size]);
         let endpoint = "api.endpoint.test".to_string();
 
@@ -124,4 +124,3 @@ criterion_group!(
     bench_request_roundtrip,
 );
 criterion_main!(benches);
-
