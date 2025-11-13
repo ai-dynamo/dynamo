@@ -7,7 +7,6 @@ import os
 from dataclasses import dataclass, field
 
 import pytest
-import requests
 
 from tests.serve.common import (
     WORKSPACE_DIR,
@@ -36,7 +35,18 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
 
-COCO_IMAGE_URL = "http://images.cocodataset.org/test2017/000000155781.jpg"
+# Load fixture image for multimodal tests
+FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
+BASKETBALL_IMG_PATH = os.path.join(FIXTURES_DIR, "basketball.png")
+
+# Encode image for base64 tests
+with open(BASKETBALL_IMG_PATH, "rb") as f:
+    BASKETBALL_IMG_B64 = base64.b64encode(f.read()).decode()
+
+# HTTP URL for image pytest-httpserver.
+IMAGE_SERVER_PORT = 8765
+IMAGE_SERVER_URL = f"http://localhost:{IMAGE_SERVER_PORT}"
+BASKETBALL_IMG_URL = f"{IMAGE_SERVER_URL}/basketball.png"
 
 # vLLM test configurations
 vllm_configs = {
@@ -121,11 +131,11 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": COCO_IMAGE_URL},
+                        "image_url": {"url": f"file://{BASKETBALL_IMG_PATH}"},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["bus"],
+                expected_response=["basketball"],
                 temperature=0.0,
             )
         ],
@@ -145,12 +155,50 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": COCO_IMAGE_URL},
+                        "image_url": {"url": f"file://{BASKETBALL_IMG_PATH}"},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["bus"],
+                expected_response=["basketball"],
             )
+        ],
+    ),
+    "multimodal_agg_qwen": VLLMConfig(
+        name="multimodal_agg_qwen",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[pytest.mark.gpu_2],
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
+        delayed_start=0,
+        timeout=360,
+        request_payloads=[
+            # Base64-encoded image
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{BASKETBALL_IMG_B64}"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["basketball"],
+            ),
+            # HTTP URL test
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": BASKETBALL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["basketball"],
+            ),
         ],
     ),
     # TODO: Update this test case when we have video multimodal support in vllm official components
@@ -192,64 +240,6 @@ vllm_configs = {
     # ),
 }
 
-# Try to fetch COCO image and convert to base64, fall back to 1x1 PNG if unavailable
-coco_image_b64 = ""
-coco_image_mime = ""
-coco_expected_response = []
-
-try:
-    coco_image_b64 = base64.b64encode(
-        requests.get(COCO_IMAGE_URL, timeout=5.0).content
-    ).decode()
-    coco_image_mime = "image/jpeg"
-    coco_expected_response = ["bus"]
-    logger.info(f"Successfully fetched image from {COCO_IMAGE_URL}")
-except Exception as e:
-    coco_image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
-    coco_image_mime = "image/png"
-    logger.warning(
-        f"Failed to fetch COCO image ({type(e).__name__}: {e}), using 1x1 image as fallback"
-    )
-
-vllm_configs["multimodal_agg_qwen"] = VLLMConfig(
-    name="multimodal_agg_qwen",
-    directory=vllm_dir,
-    script_name="agg_multimodal.sh",
-    marks=[pytest.mark.gpu_2],
-    model="Qwen/Qwen2.5-VL-7B-Instruct",
-    script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
-    delayed_start=0,
-    timeout=360,
-    request_payloads=[
-        # HTTP URL test
-        chat_payload(
-            [
-                {"type": "text", "text": "What is in this image?"},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": COCO_IMAGE_URL},
-                },
-            ],
-            repeat_count=1,
-            expected_response=["bus"],
-        ),
-        # Base64 data URL test (COCO image if available, else 1x1 PNG fallback)
-        chat_payload(
-            [
-                {"type": "text", "text": "What is in this image?"},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{coco_image_mime};base64,{coco_image_b64}"
-                    },
-                },
-            ],
-            repeat_count=1,
-            expected_response=coco_expected_response,
-        ),
-    ],
-)
-
 
 @pytest.fixture(params=params_with_model_mark(vllm_configs))
 def vllm_config_test(request):
@@ -260,7 +250,7 @@ def vllm_config_test(request):
 @pytest.mark.vllm
 @pytest.mark.e2e
 def test_serve_deployment(
-    vllm_config_test, request, runtime_services, predownload_models
+    vllm_config_test, request, runtime_services, predownload_models, image_server
 ):
     """
     Test dynamo serve deployments with different graph configurations.
