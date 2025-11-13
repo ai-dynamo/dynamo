@@ -35,6 +35,11 @@ jobs:
         with:
           driver: docker
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
       - name: Install dependencies
         shell: bash
         run: |
@@ -80,7 +85,7 @@ jobs:
           docker tag us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty ${EPP_IMAGE}
           docker push ${EPP_IMAGE}
           echo "EPP_IMAGE=${EPP_IMAGE}" >> $GITHUB_ENV
-      - name: Build Frontend Container
+      - name: Build Dynamo Base Conntainer
         id: build-image
         uses: ./.github/actions/docker-build
         with:
@@ -104,7 +109,7 @@ jobs:
             --build-arg DYNAMO_BASE_IMAGE=${{ steps.build-image.outputs.image_tag }} \
             --build-arg EPP_IMAGE=${{ env.EPP_IMAGE }} \
             --build-arg PYTHON_VERSION=3.12 \
-            -f container/Dockerfile.frontend \
+            -f ${DYNAMO_DIR}/container/Dockerfile.frontend \
             -t ${FRONTEND_IMAGE_TAG} \
             .
           echo "FRONTEND_IMAGE_TAG=${FRONTEND_IMAGE_TAG}" >> $GITHUB_ENV
