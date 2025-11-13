@@ -1146,11 +1146,17 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)).Should(Succeed())
 
-			// Verify security context has fsGroup set to 0
+			// Verify security context has all security fields set correctly
 			podSecurityContext := job.Spec.Template.Spec.SecurityContext
 			Expect(podSecurityContext).NotTo(BeNil())
+			Expect(podSecurityContext.RunAsNonRoot).NotTo(BeNil())
+			Expect(*podSecurityContext.RunAsNonRoot).To(BeTrue())
+			Expect(podSecurityContext.RunAsUser).NotTo(BeNil())
+			Expect(*podSecurityContext.RunAsUser).To(Equal(int64(1000)))
+			Expect(podSecurityContext.RunAsGroup).NotTo(BeNil())
+			Expect(*podSecurityContext.RunAsGroup).To(Equal(int64(1000)))
 			Expect(podSecurityContext.FSGroup).NotTo(BeNil())
-			Expect(*podSecurityContext.FSGroup).To(Equal(int64(0)))
+			Expect(*podSecurityContext.FSGroup).To(Equal(int64(1000)))
 
 			// Clean up
 			_ = k8sClient.Delete(ctx, job)
