@@ -1,12 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Shared pytest fixtures for serve tests.
-
-This module provides fixtures used across multiple serve test modules
-(test_vllm.py, test_sglang.py, test_trtllm.py) for testing inference serving.
-"""
 
 import os
 
