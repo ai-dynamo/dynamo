@@ -216,7 +216,7 @@ args:
 
 **Container Images:**
 ```yaml
-image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
+image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 # Update version tag as needed
 ```
 
