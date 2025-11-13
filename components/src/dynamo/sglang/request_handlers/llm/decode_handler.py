@@ -149,7 +149,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             bootstrap_info = None
             async for info in prefill_stream:
                 bootstrap_info = info.data()
-                break
 
             if not bootstrap_info:
                 raise RuntimeError("No bootstrap info received from prefill worker")
@@ -229,6 +228,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 next_total_toks = len(output_ids)
                 out["token_ids"] = output_ids[num_output_tokens_so_far:]
                 num_output_tokens_so_far = next_total_toks
+                if finish_reason:
+                    input_tokens = res["meta_info"]["prompt_tokens"]
+                    completion_tokens = res["meta_info"]["completion_tokens"]
+                    cached_tokens = res["meta_info"]["cached_tokens"]
+                    prefill_prompt_tokens_details = None
+                    if cached_tokens is not None and cached_tokens > 0:
+                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
+                    out["completion_usage"] = {
+                        "prompt_tokens": input_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": input_tokens + completion_tokens,
+                        "prompt_tokens_details": prefill_prompt_tokens_details,
+                    }
                 if not context.is_stopped():
                     yield out
 

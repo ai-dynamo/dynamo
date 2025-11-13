@@ -21,6 +21,7 @@ use crate::{
     discovery::ModelManager,
     kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
+    protocols::common::preprocessor::PrefillResult,
 };
 
 /// The inner router used by PrefillRouter
@@ -154,11 +155,8 @@ impl PrefillRouter {
         Ok(())
     }
 
-    /// Call the prefill router and extract disaggregated_params
-    async fn call_prefill(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-    ) -> Result<serde_json::Value> {
+    /// Call the prefill router and extract structured prefill result
+    async fn call_prefill(&self, request: SingleIn<PreprocessedRequest>) -> Result<PrefillResult> {
         // Get the prefill router, error if not activated
         let Some(prefill_router) = self.prefill_router.get() else {
             bail!("Prefill router not yet activated");
@@ -174,7 +172,22 @@ impl PrefillRouter {
             bail!("Prefill router returned no output (stream ended)");
         };
 
-        while prefill_response.next().await.is_some() {}
+        let mut prompt_tokens_details = first_output
+            .data
+            .as_ref()
+            .and_then(|o| o.completion_usage.as_ref())
+            .and_then(|u| u.prompt_tokens_details.clone());
+
+        while let Some(next) = prefill_response.next().await {
+            if let Some(o) = next.data.as_ref()
+                && prompt_tokens_details.is_none()
+            {
+                prompt_tokens_details = o
+                    .completion_usage
+                    .as_ref()
+                    .and_then(|u| u.prompt_tokens_details.clone());
+            }
+        }
 
         if let Some(err) = first_output.err() {
             bail!("Prefill router returned error in output: {err:?}");
@@ -188,7 +201,10 @@ impl PrefillRouter {
             bail!("Prefill router output missing disaggregated_params");
         };
 
-        Ok(disaggregated_params)
+        Ok(PrefillResult {
+            disaggregated_params,
+            prompt_tokens_details,
+        })
     }
 }
 
@@ -232,12 +248,12 @@ impl
 
         // Attempt prefill and handle results
         match self.call_prefill(prefill_request).await {
-            Ok(disaggregated_params) => {
+            Ok(prefill_result) => {
                 tracing::debug!("Prefill succeeded, using disaggregated params for decode");
 
-                // Update request with disaggregated_params and router config
                 let mut decode_req = req;
-                decode_req.disaggregated_params = Some(disaggregated_params);
+                // Update request with prefill result
+                decode_req.prefill_result = Some(prefill_result.clone());
                 // Restore original max_tokens for decode
                 decode_req.stop_conditions.max_tokens = original_max_tokens;
 

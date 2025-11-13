@@ -220,6 +220,14 @@ impl DeltaGenerator {
     pub fn is_usage_enabled(&self) -> bool {
         self.options.enable_usage
     }
+
+    /// Set prompt_tokens_details from prefill
+    pub fn set_prompt_tokens_details(
+        &mut self,
+        details: dynamo_async_openai::types::PromptTokensDetails,
+    ) {
+        self.usage.prompt_tokens_details = Some(details);
+    }
 }
 
 impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for DeltaGenerator {
@@ -238,6 +246,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
                 .expect("token_ids length exceeds u32::MAX");
 
             self.usage.completion_tokens += token_length;
+
+            // If backend provides completion_usage with prompt token details,
+            // propagate the entire details struct to usage tracking
+            if let Some(prompt_details) = delta
+                .completion_usage
+                .as_ref()
+                .and_then(|usage| usage.prompt_tokens_details.as_ref())
+            {
+                self.usage.prompt_tokens_details = Some(prompt_details.clone());
+            }
         }
 
         let logprobs = self.create_logprobs(
