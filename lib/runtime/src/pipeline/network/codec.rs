@@ -77,7 +77,7 @@ impl TcpRequestMessage {
         Ok(buf.freeze())
     }
 
-    /// Decode message from bytes (zero-copy when possible)
+    /// Decode message from bytes (for backward compatibility, zero-copy when possible)
     pub fn decode(bytes: &Bytes) -> Result<Self, std::io::Error> {
         if bytes.len() < 2 {
             return Err(std::io::Error::new(
@@ -144,6 +144,143 @@ impl TcpRequestMessage {
     }
 }
 
+/// Codec for encoding/decoding TcpRequestMessage
+/// Supports max_message_size enforcement
+#[derive(Clone, Default)]
+pub struct TcpRequestCodec {
+    max_message_size: Option<usize>,
+}
+
+impl TcpRequestCodec {
+    pub fn new(max_message_size: Option<usize>) -> Self {
+        Self { max_message_size }
+    }
+}
+
+impl Decoder for TcpRequestCodec {
+    type Item = TcpRequestMessage;
+    type Error = std::io::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // Need at least 2 bytes for endpoint_path_len
+        if src.len() < 2 {
+            return Ok(None);
+        }
+
+        // Peek at endpoint path length without consuming
+        let endpoint_len = u16::from_be_bytes([src[0], src[1]]) as usize;
+        let header_size = 2 + endpoint_len + 4; // path_len + path + payload_len
+
+        if src.len() < header_size {
+            return Ok(None);
+        }
+
+        // Peek at payload length
+        let payload_len_offset = 2 + endpoint_len;
+        let payload_len = u32::from_be_bytes([
+            src[payload_len_offset],
+            src[payload_len_offset + 1],
+            src[payload_len_offset + 2],
+            src[payload_len_offset + 3],
+        ]) as usize;
+
+        let total_len = header_size + payload_len;
+
+        // Check max message size
+        if let Some(max_size) = self.max_message_size {
+            if total_len > max_size {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Request too large: {} bytes (max: {} bytes)",
+                        total_len, max_size
+                    ),
+                ));
+            }
+        }
+
+        // Check if we have the full message
+        if src.len() < total_len {
+            return Ok(None);
+        }
+
+        // We have a complete message, advance past length prefix
+        src.advance(2);
+
+        // Read endpoint path
+        let endpoint_bytes = src.split_to(endpoint_len);
+        let endpoint_path = String::from_utf8(endpoint_bytes.to_vec()).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid UTF-8 in endpoint path: {}", e),
+            )
+        })?;
+
+        // Advance past payload length
+        src.advance(4);
+
+        // Read payload
+        let payload = src.split_to(payload_len).freeze();
+
+        Ok(Some(TcpRequestMessage {
+            endpoint_path,
+            payload,
+        }))
+    }
+}
+
+impl Encoder<TcpRequestMessage> for TcpRequestCodec {
+    type Error = std::io::Error;
+
+    fn encode(&mut self, item: TcpRequestMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        let endpoint_bytes = item.endpoint_path.as_bytes();
+        let endpoint_len = endpoint_bytes.len();
+
+        if endpoint_len > u16::MAX as usize {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Endpoint path too long: {} bytes", endpoint_len),
+            ));
+        }
+
+        if item.payload.len() > u32::MAX as usize {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Payload too large: {} bytes", item.payload.len()),
+            ));
+        }
+
+        let total_len = 2 + endpoint_len + 4 + item.payload.len();
+
+        // Check max message size
+        if let Some(max_size) = self.max_message_size {
+            if total_len > max_size {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Request too large: {} bytes (max: {} bytes)", total_len, max_size),
+                ));
+            }
+        }
+
+        // Reserve space
+        dst.reserve(total_len);
+
+        // Write endpoint path length
+        dst.put_u16(endpoint_len as u16);
+
+        // Write endpoint path
+        dst.put_slice(endpoint_bytes);
+
+        // Write payload length
+        dst.put_u32(item.payload.len() as u32);
+
+        // Write payload
+        dst.put_slice(&item.payload);
+
+        Ok(())
+    }
+}
+
 /// TCP response message (acknowledgment or error)
 ///
 /// Wire format:
@@ -163,7 +300,7 @@ impl TcpResponseMessage {
         Self { data: Bytes::new() }
     }
 
-    /// Encode response to bytes
+    /// Encode response to bytes (for backward compatibility)
     pub fn encode(&self) -> Result<Bytes, std::io::Error> {
         if self.data.len() > u32::MAX as usize {
             return Err(std::io::Error::new(
@@ -185,7 +322,7 @@ impl TcpResponseMessage {
         Ok(buf.freeze())
     }
 
-    /// Decode response from bytes (zero-copy when possible)
+    /// Decode response from bytes (for backward compatibility, zero-copy when possible)
     pub fn decode(bytes: &Bytes) -> Result<Self, std::io::Error> {
         if bytes.len() < 4 {
             return Err(std::io::Error::new(
@@ -212,6 +349,100 @@ impl TcpResponseMessage {
         let data = bytes.slice(4..4 + len);
 
         Ok(Self { data })
+    }
+}
+
+/// Codec for encoding/decoding TcpResponseMessage
+/// Supports max_message_size enforcement
+#[derive(Clone, Default)]
+pub struct TcpResponseCodec {
+    max_message_size: Option<usize>,
+}
+
+impl TcpResponseCodec {
+    pub fn new(max_message_size: Option<usize>) -> Self {
+        Self { max_message_size }
+    }
+}
+
+impl Decoder for TcpResponseCodec {
+    type Item = TcpResponseMessage;
+    type Error = std::io::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // Need at least 4 bytes for length
+        if src.len() < 4 {
+            return Ok(None);
+        }
+
+        // Peek at message length without consuming
+        let data_len = u32::from_be_bytes([src[0], src[1], src[2], src[3]]) as usize;
+        let total_len = 4 + data_len;
+
+        // Check max message size
+        if let Some(max_size) = self.max_message_size {
+            if total_len > max_size {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Response too large: {} bytes (max: {} bytes)",
+                        total_len, max_size
+                    ),
+                ));
+            }
+        }
+
+        // Check if we have the full message
+        if src.len() < total_len {
+            return Ok(None);
+        }
+
+        // Advance past the length prefix
+        src.advance(4);
+
+        // Read data
+        let data = src.split_to(data_len).freeze();
+
+        Ok(Some(TcpResponseMessage { data }))
+    }
+}
+
+impl Encoder<TcpResponseMessage> for TcpResponseCodec {
+    type Error = std::io::Error;
+
+    fn encode(&mut self, item: TcpResponseMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        if item.data.len() > u32::MAX as usize {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Response too large: {} bytes", item.data.len()),
+            ));
+        }
+
+        let total_len = 4 + item.data.len();
+
+        // Check max message size
+        if let Some(max_size) = self.max_message_size {
+            if total_len > max_size {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "Response too large: {} bytes (max: {} bytes)",
+                        total_len, max_size
+                    ),
+                ));
+            }
+        }
+
+        // Reserve space
+        dst.reserve(total_len);
+
+        // Write length
+        dst.put_u32(item.data.len() as u32);
+
+        // Write data
+        dst.put_slice(&item.data);
+
+        Ok(())
     }
 }
 
@@ -306,5 +537,187 @@ mod tests {
         let decoded = TcpRequestMessage::decode(&encoded).unwrap();
 
         assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn test_tcp_request_codec() {
+        use tokio_util::codec::{Decoder, Encoder};
+
+        let msg = TcpRequestMessage::new(
+            "test.endpoint".to_string(),
+            Bytes::from(vec![1, 2, 3, 4, 5]),
+        );
+
+        let mut codec = TcpRequestCodec::new(None);
+        let mut buf = BytesMut::new();
+
+        // Encode
+        codec.encode(msg.clone(), &mut buf).unwrap();
+
+        // Decode
+        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn test_tcp_request_codec_partial() {
+        use tokio_util::codec::Decoder;
+
+        let msg = TcpRequestMessage::new(
+            "test.endpoint".to_string(),
+            Bytes::from(vec![1, 2, 3, 4, 5]),
+        );
+
+        let encoded = msg.encode().unwrap();
+        let mut codec = TcpRequestCodec::new(None);
+
+        // Feed partial data
+        let mut buf = BytesMut::from(&encoded[..5]);
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+
+        // Feed rest of data
+        buf.extend_from_slice(&encoded[5..]);
+        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn test_tcp_request_codec_max_size() {
+        use tokio_util::codec::Encoder;
+
+        let msg = TcpRequestMessage::new("test".to_string(), Bytes::from(vec![1, 2, 3, 4, 5]));
+
+        let mut codec = TcpRequestCodec::new(Some(10)); // Too small
+        let mut buf = BytesMut::new();
+
+        let result = codec.encode(msg, &mut buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tcp_response_codec() {
+        use tokio_util::codec::{Decoder, Encoder};
+
+        let msg = TcpResponseMessage::new(Bytes::from(vec![1, 2, 3, 4, 5]));
+
+        let mut codec = TcpResponseCodec::new(None);
+        let mut buf = BytesMut::new();
+
+        // Encode
+        codec.encode(msg.clone(), &mut buf).unwrap();
+
+        // Decode
+        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn test_tcp_response_codec_partial() {
+        use tokio_util::codec::Decoder;
+
+        let msg = TcpResponseMessage::new(Bytes::from(vec![1, 2, 3, 4, 5]));
+
+        let encoded = msg.encode().unwrap();
+        let mut codec = TcpResponseCodec::new(None);
+
+        // Feed partial data
+        let mut buf = BytesMut::from(&encoded[..3]);
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+
+        // Feed rest of data
+        buf.extend_from_slice(&encoded[3..]);
+        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn test_tcp_response_codec_max_size() {
+        use tokio_util::codec::Encoder;
+
+        let msg = TcpResponseMessage::new(Bytes::from(vec![1, 2, 3, 4, 5]));
+
+        let mut codec = TcpResponseCodec::new(Some(5)); // Too small
+        let mut buf = BytesMut::new();
+
+        let result = codec.encode(msg, &mut buf);
+        assert!(result.is_err());
+    }
+
+    /// Demonstrates how framed codec enables testability without actual TCP connections
+    #[tokio::test]
+    async fn test_framed_codec_integration() {
+        use futures::{SinkExt, StreamExt};
+        use std::io::Cursor;
+        use tokio_util::codec::{FramedRead, FramedWrite};
+
+        // Simulate a duplex connection using in-memory buffer
+        let mut buffer = Vec::new();
+
+        // Writer side: encode requests
+        {
+            let cursor = Cursor::new(&mut buffer);
+            let mut writer = FramedWrite::new(cursor, TcpRequestCodec::new(None));
+
+            let msg1 = TcpRequestMessage::new("endpoint1".to_string(), Bytes::from("data1"));
+            let msg2 = TcpRequestMessage::new("endpoint2".to_string(), Bytes::from("data2"));
+
+            writer.send(msg1).await.unwrap();
+            writer.send(msg2).await.unwrap();
+        }
+
+        // Reader side: decode requests
+        {
+            let cursor = Cursor::new(&buffer[..]);
+            let mut reader = FramedRead::new(cursor, TcpRequestCodec::new(None));
+
+            let decoded1 = reader.next().await.unwrap().unwrap();
+            assert_eq!(decoded1.endpoint_path, "endpoint1");
+            assert_eq!(decoded1.payload, Bytes::from("data1"));
+
+            let decoded2 = reader.next().await.unwrap().unwrap();
+            assert_eq!(decoded2.endpoint_path, "endpoint2");
+            assert_eq!(decoded2.payload, Bytes::from("data2"));
+        }
+    }
+
+    /// Demonstrates testing partial message handling
+    #[tokio::test]
+    async fn test_framed_codec_partial_messages() {
+        use futures::StreamExt;
+        use std::io::Cursor;
+        use tokio_util::codec::FramedRead;
+
+        // Create a message and encode it
+        let msg = TcpRequestMessage::new("test".to_string(), Bytes::from("hello"));
+        let encoded = msg.encode().unwrap();
+
+        // Split the encoded message into chunks
+        let chunk1 = &encoded[..5];
+        let chunk2 = &encoded[5..];
+
+        // Create a buffer that simulates receiving data in chunks
+        let mut full_buffer = Vec::new();
+        full_buffer.extend_from_slice(chunk1);
+
+        // Reader can't decode yet (partial data)
+        {
+            let cursor = Cursor::new(&full_buffer[..]);
+            let _reader = FramedRead::new(cursor, TcpRequestCodec::new(None));
+            // In real async, this would return Ok(None) and wait for more data
+            // For Cursor, it returns None at EOF
+        }
+
+        // Add the rest of the data
+        full_buffer.extend_from_slice(chunk2);
+
+        // Now decoding succeeds
+        {
+            let cursor = Cursor::new(&full_buffer[..]);
+            let mut reader = FramedRead::new(cursor, TcpRequestCodec::new(None));
+
+            let decoded = reader.next().await.unwrap().unwrap();
+            assert_eq!(decoded.endpoint_path, "test");
+            assert_eq!(decoded.payload, Bytes::from("hello"));
+        }
     }
 }

@@ -9,6 +9,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
+use futures::StreamExt;
 use std::io::IoSlice;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_util::codec::FramedRead;
 
 /// Default timeout for TCP request acknowledgment
 const DEFAULT_TCP_REQUEST_TIMEOUT_SECS: u64 = 5;
@@ -100,9 +102,11 @@ impl TcpRequestConfig {
     }
 }
 
-/// Request to be sent over TCP (pre-encoded on caller's thread)
+/// Request to be sent over TCP
+/// Pre-encoded on caller's thread for optimal write performance (hot path optimization)
 struct TcpRequest {
     /// Pre-encoded request data ready to send (zero-copy Bytes)
+    /// Encoding happens on caller thread to parallelize across multiple request handlers
     encoded_data: Bytes,
     /// Oneshot channel to send response back to caller
     response_tx: oneshot::Sender<Result<Bytes>>,
@@ -111,9 +115,13 @@ struct TcpRequest {
 /// TCP connection with split read/write tasks
 ///
 /// Design: One writer task + one reader task per connection
-/// - Writer task receives pre-encoded requests via bounded channel and writes to socket
-/// - Reader task reads responses and forwards them via oneshot channels
+/// - Writer task receives pre-encoded requests and writes directly (hot path optimized)
+/// - Reader task uses framed codec for robust protocol handling
 /// - FIFO ordering ensures request/response correlation without explicit IDs
+///
+/// Performance: Hybrid approach optimizes each path independently:
+/// - Write path: Pre-encode on caller thread → direct write (minimal overhead, parallel encoding)
+/// - Read path: Framed codec handles partial reads and protocol complexity automatically
 struct TcpConnection {
     addr: SocketAddr,
     /// Channel to send requests to the writer task
@@ -227,16 +235,19 @@ impl TcpConnection {
         Ok(())
     }
 
-    /// Writer task: receives pre-encoded requests and writes to socket
-    /// Uses vectored I/O for single syscall where possible
+    /// Writer task: receives pre-encoded requests and writes directly to socket
+    ///
+    /// Performance optimization: Pre-encoding happens on caller's thread to enable
+    /// parallel encoding across multiple request handlers, while this task focuses
+    /// on sequential socket writes with minimal overhead.
     async fn writer_task(
         mut write_half: tokio::io::WriteHalf<TcpStream>,
         mut request_rx: mpsc::Receiver<TcpRequest>,
         response_tx_channel: mpsc::UnboundedSender<oneshot::Sender<Result<Bytes>>>,
     ) -> Result<()> {
         while let Some(req) = request_rx.recv().await {
-            // Write using vectored I/O (single syscall) - data is already framed
-            // Note: With TCP_NODELAY, no need for explicit flush()
+            // Direct write of pre-encoded data (hot path)
+            // With TCP_NODELAY, no need for explicit flush()
             match write_half.write_all(&req.encoded_data).await {
                 Ok(()) => {
                     // Forward response channel to reader task (FIFO ordering)
@@ -256,75 +267,34 @@ impl TcpConnection {
         Ok(())
     }
 
-    /// Reader task: reads responses and sends them back via oneshot channels
-    /// Uses pre-allocated buffer to avoid allocations
+    /// Reader task: reads responses using framed codec and sends them back via oneshot channels
+    /// Protocol framing handled automatically via TcpResponseCodec
     async fn reader_task(
-        mut read_half: tokio::io::ReadHalf<TcpStream>,
+        read_half: tokio::io::ReadHalf<TcpStream>,
         mut response_rx_channel: mpsc::UnboundedReceiver<oneshot::Sender<Result<Bytes>>>,
     ) -> Result<()> {
-        use crate::pipeline::network::codec::TcpResponseMessage;
+        use crate::pipeline::network::codec::TcpResponseCodec;
 
-        // Pre-allocate read buffer (reused across reads)
-        let mut read_buf = Vec::with_capacity(READ_BUFFER_SIZE);
+        let max_message_size = get_max_message_size();
+        let codec = TcpResponseCodec::new(Some(max_message_size));
+        let mut framed = FramedRead::new(read_half, codec);
 
         while let Some(response_tx) = response_rx_channel.recv().await {
-            // Read response length (4 bytes)
-            let mut len_buf = [0u8; 4];
-            match read_half.read_exact(&mut len_buf).await {
-                Ok(_) => {}
-                Err(e) => {
-                    let err_msg = format!("Read failed: {}", e);
-                    let _ = response_tx.send(Err(anyhow::anyhow!("{}", err_msg)));
-                    return Err(anyhow::anyhow!("{}", err_msg));
-                }
-            }
-
-            let response_len = u32::from_be_bytes(len_buf) as usize;
-
-            // Sanity check - enforce maximum message size
-            let max_message_size = get_max_message_size();
-            if response_len > max_message_size {
-                let err_msg = format!(
-                    "Response too large: {} bytes (max: {} bytes)",
-                    response_len, max_message_size
-                );
-                let _ = response_tx.send(Err(anyhow::anyhow!("{}", err_msg)));
-                return Err(anyhow::anyhow!("{}", err_msg));
-            }
-
-            // Reuse buffer if possible (avoid allocation)
-            if read_buf.capacity() < response_len {
-                read_buf.reserve(response_len - read_buf.capacity());
-            }
-            unsafe {
-                read_buf.set_len(response_len);
-            }
-
-            // Read response data
-            match read_half.read_exact(&mut read_buf[..response_len]).await {
-                Ok(_) => {}
-                Err(e) => {
-                    let err_msg = format!("Read response data failed: {}", e);
-                    let _ = response_tx.send(Err(anyhow::anyhow!("{}", err_msg)));
-                    return Err(anyhow::anyhow!("{}", err_msg));
-                }
-            }
-
-            // Reconstruct full message for decoding using BytesMut
-            let mut full_msg = tokio_util::bytes::BytesMut::with_capacity(4 + response_len);
-            full_msg.extend_from_slice(&len_buf);
-            full_msg.extend_from_slice(&read_buf[..response_len]);
-
-            // Decode response (zero-copy conversion)
-            let full_msg_bytes = full_msg.freeze();
-            match TcpResponseMessage::decode(&full_msg_bytes) {
-                Ok(response_msg) => {
+            // Read the next response message from the framed stream
+            // The codec handles all protocol framing and size checks automatically
+            match framed.next().await {
+                Some(Ok(response_msg)) => {
                     let _ = response_tx.send(Ok(response_msg.data));
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     let err = anyhow::anyhow!("Failed to decode response: {}", e);
                     let _ = response_tx.send(Err(err));
                     return Err(anyhow::anyhow!("Failed to decode response"));
+                }
+                None => {
+                    let err = anyhow::anyhow!("Connection closed by peer");
+                    let _ = response_tx.send(Err(err));
+                    return Err(anyhow::anyhow!("Connection closed"));
                 }
             }
         }
@@ -333,7 +303,10 @@ impl TcpConnection {
     }
 
     /// Send a request and wait for response
-    /// Encoding happens on caller's thread (hot path optimization)
+    ///
+    /// Performance: Encoding happens on caller's thread (hot path optimization)
+    /// to enable parallel encoding across multiple request handlers. The writer
+    /// task then performs sequential writes with minimal overhead.
     async fn send_request(&self, payload: Bytes, headers: &Headers) -> Result<Bytes> {
         use crate::pipeline::network::codec::TcpRequestMessage;
 
@@ -348,7 +321,9 @@ impl TcpConnection {
             .ok_or_else(|| anyhow::anyhow!("Missing x-endpoint-path header for TCP request"))?
             .to_string();
 
-        // Encode request on caller's thread (hot path optimization, zero-copy)
+        // Encode request on caller's thread (hot path optimization)
+        // This allows multiple concurrent callers to encode in parallel
+        // rather than serializing through the writer task
         let request_msg = TcpRequestMessage::new(endpoint_path, payload);
         let encoded_data = request_msg.encode()?;
 

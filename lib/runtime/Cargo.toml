@@ -101,3 +101,7 @@ tempfile = { workspace = true }
 [[bench]]
 name = "compute_pool_overhead"
 harness = false
+
+[[bench]]
+name = "tcp_codec_perf"
+harness = false
