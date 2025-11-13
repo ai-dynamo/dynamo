@@ -25,7 +25,9 @@ Determine your cluster environment:
 
 **Shared/Multi-Tenant Cluster** (K8s cluster with existing Dynamo artifacts):
 - CRDs already installed cluster-wide - skip CRD installation step
-- Must use namespace-restricted installation (see note in installation steps)
+- A cluster-wide Dynamo operator is likely already running
+- **Do NOT install another operator** - use the existing cluster-wide operator
+- Only install a namespace-restricted operator if you specifically need to prevent the cluster-wide operator from managing your namespace (e.g., testing operator features you're developing)
 
 **Dedicated Cluster** (full cluster admin access):
 - You install CRDs yourself
@@ -38,6 +40,17 @@ To check if CRDs already exist:
 ```bash
 kubectl get crd | grep dynamo
 # If you see dynamographdeployments, dynamocomponentdeployments, etc., CRDs are already installed
+```
+
+To check if a cluster-wide operator already exists:
+```bash
+# Check for cluster-wide operator and show its namespace
+kubectl get clusterrolebinding -o json | \
+  jq -r '.items[] | select(.metadata.name | contains("dynamo-operator-manager")) |
+  "Cluster-wide operator found in namespace: \(.subjects[0].namespace)"'
+
+# If a cluster-wide operator exists: Do NOT install another operator
+# Only install namespace-restricted mode if you specifically need namespace isolation
 ```
 
 ## Installation Paths

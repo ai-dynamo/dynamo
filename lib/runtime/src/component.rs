@@ -32,7 +32,7 @@
 use std::fmt;
 
 use crate::{
-    config::HealthStatus,
+    config::{HealthStatus, RequestPlaneMode},
     metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
     service::ServiceSet,
     transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
@@ -69,7 +69,7 @@ mod namespace;
 mod registry;
 pub mod service;
 
-pub use client::{Client, InstanceSource};
+pub use client::Client;
 
 /// The root key-value path where each instance registers itself in.
 /// An instance is namespace+component+endpoint+lease_id and must be unique.
@@ -78,18 +78,22 @@ pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
-    NatsTcp(String),
+    #[serde(rename = "nats_tcp")]
+    Nats(String),
+    Http(String),
+    Tcp(String),
 }
 
 #[derive(Default)]
 pub struct RegistryInner {
-    services: HashMap<String, Service>,
-    stats_handlers: HashMap<String, Arc<parking_lot::Mutex<HashMap<String, EndpointStatsHandler>>>>,
+    pub(crate) services: HashMap<String, Service>,
+    pub(crate) stats_handlers:
+        HashMap<String, Arc<parking_lot::Mutex<HashMap<String, EndpointStatsHandler>>>>,
 }
 
 #[derive(Clone)]
 pub struct Registry {
-    inner: Arc<tokio::sync::Mutex<RegistryInner>>,
+    pub(crate) inner: Arc<tokio::sync::Mutex<RegistryInner>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -166,10 +170,6 @@ pub struct Component {
     #[builder(setter(into))]
     namespace: Namespace,
 
-    // A static component's endpoints cannot be discovered via etcd, they are
-    // fixed at startup time.
-    is_static: bool,
-
     /// This hierarchy's own metrics registry
     #[builder(default = "crate::MetricsRegistry::new()")]
     metrics_registry: crate::MetricsRegistry,
@@ -179,15 +179,12 @@ impl Hash for Component {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.namespace.name().hash(state);
         self.name.hash(state);
-        self.is_static.hash(state);
     }
 }
 
 impl PartialEq for Component {
     fn eq(&self, other: &Self) -> bool {
-        self.namespace.name() == other.namespace.name()
-            && self.name == other.name
-            && self.is_static == other.is_static
+        self.namespace.name() == other.namespace.name() && self.name == other.name
     }
 }
 
@@ -271,7 +268,6 @@ impl Component {
         Endpoint {
             component: self.clone(),
             name: endpoint.into(),
-            is_static: self.is_static,
             labels: Vec::new(),
             metrics_registry: crate::MetricsRegistry::new(),
         }
@@ -415,8 +411,25 @@ impl Component {
         }
 
         // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
-        if let Err(err) = self.start_scraping_nats_service_component_metrics() {
-            tracing::debug!(service_name, error = %err, "Metrics registration failed");
+        // Only enable NATS service metrics collection when using NATS request plane mode
+        let request_plane_mode = RequestPlaneMode::get();
+        match request_plane_mode {
+            RequestPlaneMode::Nats => {
+                if let Err(err) = self.start_scraping_nats_service_component_metrics() {
+                    tracing::debug!(
+                        "Metrics registration failed for '{}': {}",
+                        self.service_name(),
+                        err
+                    );
+                }
+            }
+            _ => {
+                tracing::info!(
+                    "Skipping NATS service metrics collection for '{}' - request plane mode is '{}'",
+                    self.service_name(),
+                    request_plane_mode
+                );
+            }
         }
         Ok(())
     }
@@ -436,8 +449,6 @@ pub struct Endpoint {
     /// Endpoint name
     name: String,
 
-    is_static: bool,
-
     /// Additional labels for metrics
     labels: Vec<(String, String)>,
 
@@ -449,15 +460,12 @@ impl Hash for Endpoint {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.component.hash(state);
         self.name.hash(state);
-        self.is_static.hash(state);
     }
 }
 
 impl PartialEq for Endpoint {
     fn eq(&self, other: &Self) -> bool {
-        self.component == other.component
-            && self.name == other.name
-            && self.is_static == other.is_static
+        self.component == other.component && self.name == other.name
     }
 }
 
@@ -554,27 +562,19 @@ impl Endpoint {
         format!("{ns}/{cp}/{ep}/{lease_id:x}")
     }
 
-    /// The endpoint as an EtcdPath object with lease ID
-    pub fn etcd_path_object_with_lease_id(&self, lease_id: i64) -> EtcdPath {
-        if self.is_static {
-            self.etcd_path()
-        } else {
-            EtcdPath::new_endpoint_with_lease(
-                &self.component.namespace().name(),
-                self.component.name(),
-                &self.name,
-                lease_id,
-            )
-            .expect("Endpoint name and component name should be valid")
-        }
+    /// The endpoint as an EtcdPath object with instance ID
+    pub fn etcd_path_object_with_lease_id(&self, instance_id: i64) -> EtcdPath {
+        EtcdPath::new_endpoint_with_lease(
+            &self.component.namespace().name(),
+            self.component.name(),
+            &self.name,
+            instance_id,
+        )
+        .expect("Endpoint name and component name should be valid")
     }
 
-    pub fn name_with_id(&self, lease_id: u64) -> String {
-        if self.is_static {
-            self.name.clone()
-        } else {
-            format!("{}-{:x}", self.name, lease_id)
-        }
+    pub fn name_with_id(&self, instance_id: u64) -> String {
+        format!("{}-{:x}", self.name, instance_id)
     }
 
     pub fn subject(&self) -> String {
@@ -591,11 +591,7 @@ impl Endpoint {
     }
 
     pub async fn client(&self) -> anyhow::Result<client::Client> {
-        if self.is_static {
-            client::Client::new_static(self.clone()).await
-        } else {
-            client::Client::new_dynamic(self.clone()).await
-        }
+        client::Client::new(self.clone()).await
     }
 
     pub fn endpoint_builder(&self) -> endpoint::EndpointConfigBuilder {
@@ -611,8 +607,6 @@ pub struct Namespace {
 
     #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
-
-    is_static: bool,
 
     #[builder(default = "None")]
     parent: Option<Arc<Namespace>>,
@@ -636,8 +630,8 @@ impl std::fmt::Debug for Namespace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Namespace {{ name: {}; is_static: {}; parent: {:?} }}",
-            self.name, self.is_static, self.parent
+            "Namespace {{ name: {}; parent: {:?} }}",
+            self.name, self.parent
         )
     }
 }
@@ -655,15 +649,10 @@ impl std::fmt::Display for Namespace {
 }
 
 impl Namespace {
-    pub(crate) fn new(
-        runtime: DistributedRuntime,
-        name: String,
-        is_static: bool,
-    ) -> anyhow::Result<Self> {
+    pub(crate) fn new(runtime: DistributedRuntime, name: String) -> anyhow::Result<Self> {
         Ok(NamespaceBuilder::default()
             .runtime(Arc::new(runtime))
             .name(name)
-            .is_static(is_static)
             .build()?)
     }
 
@@ -672,7 +661,6 @@ impl Namespace {
         Ok(ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
-            .is_static(self.is_static)
             .build()?)
     }
 
@@ -681,7 +669,6 @@ impl Namespace {
         Ok(NamespaceBuilder::default()
             .runtime(self.runtime.clone())
             .name(name.into())
-            .is_static(self.is_static)
             .parent(Some(Arc::new(self.clone())))
             .build()?)
     }

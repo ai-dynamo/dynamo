@@ -106,7 +106,7 @@ async def worker():
     config = cmd_line_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv, False)
+    runtime = DistributedRuntime(loop, config.store_kv)
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
@@ -332,12 +332,12 @@ async def init(runtime: DistributedRuntime, config: Config):
                 logging.info("TensorRT-LLM MetricsCollector initialized")
 
                 # Register callback to expose TRT-LLM metrics via Dynamo endpoint
-                # Filter out python_/process_ metrics and add trtllm: prefix to remaining metrics
+                # Filter out python_/process_ metrics and add trtllm_ prefix to remaining metrics
                 register_engine_metrics_callback(
                     endpoint=endpoint,
                     registry=REGISTRY,
                     exclude_prefixes=["python_", "process_"],
-                    add_prefix="trtllm:",
+                    add_prefix="trtllm_",
                 )
                 logging.info("TensorRT-LLM Prometheus metrics registered")
             except Exception as e:

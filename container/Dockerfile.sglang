@@ -46,9 +46,8 @@ ARG BUILD_TYPE=all
 ARG DEEPEP_COMMIT=9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
 ARG DEEPEP_GB_COMMIT=1b14ad661c7640137fcfe93cccb2694ede1220b0
 ARG CMAKE_BUILD_PARALLEL_LEVEL=2
-ARG FLASHMLA_COMMIT=1408756a88e52a25196b759eaf8db89d2b51b5a1
-ARG SGL_KERNEL_VERSION=0.3.15
-ARG SGLANG_COMMIT=0.5.3.post2
+ARG SGL_KERNEL_VERSION=0.3.16.post5
+ARG SGLANG_COMMIT=0.5.4.post3
 ARG GDRCOPY_COMMIT=v2.4.4
 ARG NVSHMEM_VERSION=3.3.9
 ARG GRACE_BLACKWELL=false
@@ -275,19 +274,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /sgl-workspace/DeepEP && \
     NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install --no-build-isolation .
 
-# Install flashmla
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
-    if [ "${ARCH}" = "amd64" ]; then \
-        git clone https://github.com/deepseek-ai/FlashMLA.git flash-mla \
-        && cd flash-mla \
-        && git checkout ${FLASHMLA_COMMIT} \
-        && git submodule update --init --recursive \
-        && export FLASH_MLA_DISABLE_SM100=1 \
-        && pip install --no-build-isolation -v . ;\
-    fi
-
 # Copy rust installation from dynamo_base to avoid duplication efforts
 COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
 COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
@@ -303,14 +289,6 @@ RUN python3 -m pip install --no-cache-dir \
     mooncake-transfer-engine==0.3.6.post1 \
     scikit-build-core==0.11.6 \
     setuptools-rust==1.12.0
-
-# Build and install sgl-router
-RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} \
-    && cd /sgl-workspace/sglang/sgl-router \
-    && cargo build --release \
-    && python3 -m pip install --no-cache-dir .
 
 ##################################################
 ########## Runtime Image ########################

@@ -16,7 +16,7 @@ const DISK_CACHE: &str = "DYN_KVBM_DISK_CACHE_GB";
 const DISK_CACHE_OVERRIDE: &str = "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS";
 
 const LEADER_WORKER_INIT_TIMEOUT_SECS: &str = "DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS";
-const DEFAULT_INIT_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_INIT_TIMEOUT_SECS: u64 = 1800;
 
 fn read_env_usize(key: &str) -> Option<usize> {
     std::env::var(key).ok()?.trim().parse::<usize>().ok()

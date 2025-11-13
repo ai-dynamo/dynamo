@@ -4,11 +4,13 @@
 
 prefill_workers=$1
 decode_workers=$2
-total_gpus=$3
+prefill_gpus=$3
+decode_gpus=$4
+total_gpus=$((prefill_gpus+decode_gpus))
 
-chosen_isl=$4
-chosen_osl=$5
-chosen_concurrencies=$6
+chosen_isl=$5
+chosen_osl=$6
+chosen_concurrencies=$7
 
 echo "Profiling for model with PrefillDP=${prefill_workers}, DecodeDP=${decode_workers}"
 
