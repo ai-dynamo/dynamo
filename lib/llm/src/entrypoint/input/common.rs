@@ -7,7 +7,7 @@ use crate::{
     backend::{Backend, ExecutionContext},
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
-    entrypoint::{self, EngineConfig},
+    entrypoint::{self, EngineConfig, RouterConfig},
     kv_router::{KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
     model_card::ModelDeploymentCard,
@@ -63,9 +63,7 @@ pub async fn prepare_engine(
             let watch_obj = Arc::new(ModelWatcher::new(
                 distributed_runtime.clone(),
                 model_manager.clone(),
-                dynamo_runtime::pipeline::RouterMode::RoundRobin,
-                None,
-                None,
+                RouterConfig::default(),
             ));
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery
@@ -133,7 +131,8 @@ pub async fn prepare_engine(
                 None,
                 kv_chooser.clone(),
                 hf_tokenizer,
-                None, // No prefill chooser in static mode
+                None,  // No prefill chooser in static mode
+                false, // No enforce_disagg in static mode
             )
             .await?;
 
@@ -215,6 +214,7 @@ where
         .link(frontend)?)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn build_routed_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
@@ -223,6 +223,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     chooser: Option<Arc<KvRouter>>,
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
+    enforce_disagg: bool,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -246,6 +247,7 @@ where
         preprocessor,
         hf_tokenizer,
         prefill_chooser,
+        enforce_disagg,
     )
     .await
 }
@@ -260,6 +262,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     preprocessor: Arc<OpenAIPreprocessor>,
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
+    enforce_disagg: bool,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -307,7 +310,8 @@ where
     };
 
     // Use the provided prefill chooser, or create a disabled one if not provided
-    let prefill_chooser = prefill_chooser.unwrap_or_else(|| PrefillRouter::disabled(router_mode));
+    let prefill_chooser =
+        prefill_chooser.unwrap_or_else(|| PrefillRouter::disabled(router_mode, enforce_disagg));
     let prefill_op = prefill_chooser.into_operator();
 
     // Link with prefill chooser including backward edge for response flow
