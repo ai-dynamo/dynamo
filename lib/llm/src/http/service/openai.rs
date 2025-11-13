@@ -417,13 +417,13 @@ async fn completions_single(
         });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
-        Ok(if let Some(keep_alive) = state.sse_keep_alive() {
-            Sse::new(stream)
-                .keep_alive(KeepAlive::default().interval(keep_alive))
-                .into_response()
-        } else {
-            Sse::new(stream).into_response()
-        })
+        let mut sse_stream = Sse::new(stream);
+
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+
+        Ok(sse_stream.into_response())
     } else {
         // Tap the stream to collect metrics for non-streaming requests without altering items
         let mut http_queue_guard = Some(http_queue_guard);
@@ -573,13 +573,13 @@ async fn completions_batch(
         });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
-        Ok(if let Some(keep_alive) = state.sse_keep_alive() {
-            Sse::new(stream)
-                .keep_alive(KeepAlive::default().interval(keep_alive))
-                .into_response()
-        } else {
-            Sse::new(stream).into_response()
-        })
+        let mut sse_stream = Sse::new(stream);
+
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+
+        Ok(sse_stream.into_response())
     } else {
         // Tap the stream to collect metrics for non-streaming requests without altering items
         let mut http_queue_guard = Some(http_queue_guard);
@@ -834,13 +834,13 @@ async fn chat_completions(
         });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
-        Ok(if let Some(keep_alive) = state.sse_keep_alive() {
-            Sse::new(stream)
-                .keep_alive(KeepAlive::default().interval(keep_alive))
-                .into_response()
-        } else {
-            Sse::new(stream).into_response()
-        })
+        let mut sse_stream = Sse::new(stream);
+
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+
+        Ok(sse_stream.into_response())
     } else {
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.inspect(move |response| {
