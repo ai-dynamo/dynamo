@@ -91,6 +91,7 @@ impl KvConnectorLeaderRecorder {
         leader_py: PyKvbmLeader,
         consolidator_vllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
+        offload_filter: Option<Arc<dyn OffloadFilter>>,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeaderRecorder initialized with worker_id: {}",
@@ -168,6 +169,7 @@ impl KvConnectorLeaderRecorder {
                     block_manager.get_block_manager().clone(),
                     leader.clone(),
                     kvbm_metrics_clone.clone(),
+                    offload_filter,
                 );
 
                 let _ = slot_manager_cell.set(sm);

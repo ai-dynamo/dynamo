@@ -9,6 +9,7 @@ use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
 use slot::{ConnectorSlotManager, SlotError, SlotManager, SlotState};
 
 use crate::block_manager::BlockManagerBuilder;
+use crate::block_manager::vllm::offload_filter::PyOffloadFilter;
 use crate::block_manager::{
     VllmBlockManager, distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest,
     vllm::connector::leader::slot::VllmConnectorSlot,
@@ -22,6 +23,7 @@ use dynamo_llm::block_manager::{
         locality::Logical,
     },
     connector::*,
+    offload::filter::OffloadFilter,
 };
 use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
 use std::sync::{Arc, OnceLock};
@@ -92,6 +94,7 @@ impl KvConnectorLeader {
         leader_py: PyKvbmLeader,
         consolidator_vllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
+        offload_filter: Option<Arc<dyn OffloadFilter>>,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
@@ -159,6 +162,7 @@ impl KvConnectorLeader {
                     block_manager.get_block_manager().clone(),
                     leader.clone(),
                     kvbm_metrics_clone.clone(),
+                    offload_filter,
                 );
 
                 let _ = slot_manager_cell.set(sm);
@@ -215,7 +219,7 @@ impl Leader for KvConnectorLeader {
         );
 
         // the number of device matched tokens should be less than or equal to the number of tokens in the request
-        debug_assert!(num_computed_tokens % self.block_size == 0);
+        debug_assert!(num_computed_tokens.is_multiple_of(self.block_size));
 
         let shared_slot = self.slot_manager().get_slot(&request_id)?;
         let mut slot = shared_slot
@@ -256,7 +260,7 @@ impl Leader for KvConnectorLeader {
         // return the number of external tokens that are ready for onboarding
         // we always return true here as we always asynchronously onboard matched blocks
         if let SlotState::OnboardStaged(num_external_tokens) = slot.state() {
-            debug_assert!((num_computed_tokens + num_external_tokens) % self.block_size == 0);
+            debug_assert!((num_computed_tokens + num_external_tokens).is_multiple_of(self.block_size));
             tracing::debug!(
                 request_id = request_id,
                 "scheduling onboarding for {} external tokens",
@@ -562,7 +566,7 @@ pub struct PyKvConnectorLeader {
 #[pymethods]
 impl PyKvConnectorLeader {
     #[new]
-    #[pyo3(signature = (worker_id, drt, page_size, leader, consolidator_vllm_endpoint=None, consolidator_output_endpoint=None))]
+    #[pyo3(signature = (worker_id, drt, page_size, leader, consolidator_vllm_endpoint=None, consolidator_output_endpoint=None, offload_filter=None))]
     pub fn new(
         worker_id: String,
         drt: Option<PyObject>,
@@ -570,8 +574,16 @@ impl PyKvConnectorLeader {
         leader: PyKvbmLeader,
         consolidator_vllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
+        offload_filter: Option<PyObject>,
     ) -> PyResult<Self> {
         let _ = &drt; // drt is currently un-used in leader
+
+        let offload_filter: Option<Arc<dyn OffloadFilter>> =
+            if let Some(offload_filter) = offload_filter {
+                Some(Arc::new(PyOffloadFilter::new(offload_filter)))
+            } else {
+                None
+            };
 
         // Initialize logging for the vLLM connector
         dynamo_runtime::logging::init();
@@ -587,6 +599,7 @@ impl PyKvConnectorLeader {
                 leader,
                 consolidator_vllm_endpoint,
                 consolidator_output_endpoint,
+                offload_filter,
             ))
         } else {
             Box::new(KvConnectorLeader::new(
@@ -595,6 +608,7 @@ impl PyKvConnectorLeader {
                 leader,
                 consolidator_vllm_endpoint,
                 consolidator_output_endpoint,
+                offload_filter,
             ))
         };
         Ok(Self { connector_leader })

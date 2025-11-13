@@ -30,6 +30,7 @@ use crate::to_pyerr;
 
 mod block_list;
 mod connector;
+mod offload_filter;
 mod request;
 mod slot;
 

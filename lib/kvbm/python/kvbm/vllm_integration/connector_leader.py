@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 # from kvbm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
 
 from kvbm import KvbmLeader
-from kvbm.utils import is_dyn_runtime_enabled
+from kvbm.utils import is_dyn_runtime_enabled, maybe_import_offload_filter
 from kvbm.vllm_integration.rust import KvbmRequest
 from kvbm.vllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
@@ -74,6 +74,8 @@ class KvConnectorLeader:
         consolidator_output_endpoint = None
         self._consolidator_output_port = None
 
+        offload_filter = maybe_import_offload_filter()
+
         if (
             hasattr(vllm_config, "consolidator_endpoints")
             and vllm_config.consolidator_endpoints
@@ -99,6 +101,7 @@ class KvConnectorLeader:
                 leader,
                 consolidator_vllm_endpoint=consolidator_vllm_endpoint,
                 consolidator_output_endpoint=consolidator_output_endpoint,
+                offload_filter=offload_filter,
             )
         else:
             # No kv event consolidator - pass None to Rust
@@ -109,6 +112,7 @@ class KvConnectorLeader:
                 leader,
                 consolidator_vllm_endpoint=None,
                 consolidator_output_endpoint=None,
+                offload_filter=offload_filter,
             )
 
     # KV Connector

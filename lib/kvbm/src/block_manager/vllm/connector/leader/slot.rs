@@ -10,6 +10,7 @@ use dynamo_llm::{
         config::should_bypass_cpu_cache,
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
         distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader},
+        offload::filter::OffloadFilter,
     },
     tokens::TokenBlock,
 };
@@ -180,6 +181,7 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     block_manager: VllmBlockManager,
     /// use this to issue [`LocalTransferRequest`]s to the transfer engine
     xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
+    offload_filter: Option<Arc<dyn OffloadFilter>>,
     _transfer_engine_handle: Option<CriticalTaskExecutionHandle>,
 }
 
@@ -194,6 +196,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         block_manager: VllmBlockManager,
         leader: Arc<KvbmLeader>,
         kvbm_metrics: KvbmMetrics,
+        offload_filter: Option<Arc<dyn OffloadFilter>>,
     ) -> Self {
         tracing::debug!(
             "creating slot manager with block size: {}",
@@ -230,6 +233,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             block_manager,
             xfer_tx,
             _transfer_engine_handle: Some(xfer_engine_task),
+            offload_filter,
         }
     }
 }
@@ -258,6 +262,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
             salt_hash,
             self.block_manager.clone(),
             self.xfer_tx.clone(),
+            self.offload_filter.clone(),
         );
         self.slots
             .lock()
@@ -341,6 +346,9 @@ pub struct VllmConnectorSlot {
     /// The number of blocks that have been evaluated by the policy.
     /// Each policy evaluation will skip the already evaluated blocks.
     evaluated_blocks: usize,
+
+    /// The offload filter to use for offloading blocks.
+    offload_filter: Option<Arc<dyn OffloadFilter>>,
 }
 
 impl VllmConnectorSlot {
@@ -350,6 +358,7 @@ impl VllmConnectorSlot {
         salt_hash: SaltHash,
         block_manager: VllmBlockManager,
         xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
+        offload_filter: Option<Arc<dyn OffloadFilter>>,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
@@ -374,6 +383,7 @@ impl VllmConnectorSlot {
             tokens_cached_from_device: 0,
             tokens_cached_from_host: 0,
             tokens_cached_from_disk: 0,
+            offload_filter,
         }
     }
 
@@ -780,7 +790,7 @@ impl Slot for VllmConnectorSlot {
 
         let block_size = self.block_manager.block_size();
         let num_computed_blocks = num_computed_tokens / block_size;
-        debug_assert!(num_computed_tokens % block_size == 0);
+        debug_assert!(num_computed_tokens.is_multiple_of(block_size));
 
         let sequence_hashes = self
             .sequence()
@@ -1019,10 +1029,25 @@ impl VllmConnectorSlot {
         assert!(block_ids.len() == token_blocks.len());
         let operation_id = uuid::Uuid::new_v4();
 
+        let (block_ids_vec, token_blocks_vec) =
+            if let Some(offload_filter) = self.offload_filter.as_ref() {
+                let blocks_to_offload = block_ids
+                    .iter()
+                    .zip(token_blocks.iter())
+                    .filter(|(_, token_block)| {
+                        offload_filter.should_offload(token_block.sequence_hash())
+                    })
+                    .map(|(block_id, token_block)| (*block_id, token_block.clone()));
+
+                blocks_to_offload.unzip()
+            } else {
+                (block_ids.to_vec(), token_blocks.to_vec())
+            };
+
         let xfer_req = LocalTransferRequest::Offload(LocalOffloadRequest::new(
             self.request_id.clone(),
-            block_ids.to_vec(),
-            token_blocks.to_vec(),
+            block_ids_vec,
+            token_blocks_vec,
             operation_id,
         ));
 

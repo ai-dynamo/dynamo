@@ -10,10 +10,14 @@ use crate::block_manager::vllm::connector::leader::slot::{
 use crate::block_manager::vllm::connector::leader::{
     kvbm_metrics_endpoint_enabled, parse_kvbm_metrics_port,
 };
+use crate::block_manager::vllm::offload_filter::PyOffloadFilter;
 use crate::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};
 use crate::get_current_tokio_handle;
 use anyhow;
-use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
+use dynamo_llm::block_manager::{
+    metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry},
+    offload::filter::OffloadFilter,
+};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Handle;
@@ -63,7 +67,12 @@ pub struct KvConnectorLeader {
 }
 
 impl KvConnectorLeader {
-    fn new(worker_id: u64, page_size: usize, leader_py: PyKvbmLeader) -> Self {
+    fn new(
+        worker_id: u64,
+        page_size: usize,
+        leader_py: PyKvbmLeader,
+        offload_filter: Option<Arc<dyn OffloadFilter>>,
+    ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
             worker_id
@@ -115,6 +124,7 @@ impl KvConnectorLeader {
                     block_manager.get_block_manager().clone(),
                     leader.clone(),
                     kvbm_metrics_clone.clone(),
+                    offload_filter,
                 );
 
                 let _ = slot_manager_cell.set(sm);
@@ -162,7 +172,7 @@ impl Leader for KvConnectorLeader {
 
         // TRTLLM could match partial blocks if enable_partial_reuse = True,
         // immediately return 0 to simplify things.
-        if num_computed_tokens % self.block_size != 0 {
+        if !num_computed_tokens.is_multiple_of(self.block_size) {
             return Ok((0, false));
         }
 
@@ -187,7 +197,7 @@ impl Leader for KvConnectorLeader {
         // return the number of external tokens that are ready for onboarding
         // we always return true here as we always asynchronously onboard matched blocks
         if let SlotState::OnboardStaged(num_external_tokens) = slot.state() {
-            debug_assert!((num_computed_tokens + num_external_tokens) % self.block_size == 0);
+            debug_assert!((num_computed_tokens + num_external_tokens).is_multiple_of(self.block_size));
             tracing::debug!(
                 request_id = request_id,
                 "scheduling onboarding for {} external tokens",
@@ -438,16 +448,29 @@ pub struct PyTrtllmKvConnectorLeader {
 #[pymethods]
 impl PyTrtllmKvConnectorLeader {
     #[new]
-    #[pyo3(signature = (worker_id, drt, page_size, leader))]
+    #[pyo3(signature = (worker_id, drt, page_size, leader, offload_filter=None))]
     pub fn new(
         worker_id: u64,
         drt: Option<PyObject>,
         page_size: usize,
         leader: PyKvbmLeader,
+        offload_filter: Option<PyObject>,
     ) -> PyResult<Self> {
         let _ = &drt; // drt is currently un-used in leader
-        let connector_leader: Box<dyn Leader> =
-            Box::new(KvConnectorLeader::new(worker_id, page_size, leader));
+
+        let offload_filter: Option<Arc<dyn OffloadFilter>> =
+            if let Some(offload_filter) = offload_filter {
+                Some(Arc::new(PyOffloadFilter::new(offload_filter)))
+            } else {
+                None
+            };
+
+        let connector_leader: Box<dyn Leader> = Box::new(KvConnectorLeader::new(
+            worker_id,
+            page_size,
+            leader,
+            offload_filter,
+        ));
         Ok(Self { connector_leader })
     }
 

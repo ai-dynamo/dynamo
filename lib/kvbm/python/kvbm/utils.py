@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import importlib
 import os
+from typing import Callable, Optional
 
 
 def is_dyn_runtime_enabled() -> bool:
@@ -18,3 +20,21 @@ def is_dyn_runtime_enabled() -> bool:
     """
     val = os.environ.get("DYN_RUNTIME_ENABLED_KVBM", "").strip().lower()
     return val in {"1", "true"}
+
+
+def maybe_import_offload_filter() -> Optional[Callable[[int], bool]]:
+    if "DYN_KVBM_CONNECTOR_OFFLOAD_FILTER_CLASS" not in os.environ:
+        return None
+
+    cls_str = os.environ["DYN_KVBM_CONNECTOR_OFFLOAD_FILTER_CLASS"]
+    try:
+        filter_class = importlib.import_module(cls_str)
+    except ImportError as e:
+        raise ImportError(f"Failed to import offload filter class {cls_str}") from e
+
+    try:
+        filter_instance = filter_class()
+    except Exception as e:
+        raise ValueError(f"Failed to instantiate offload filter class {cls_str}") from e
+
+    return filter_instance

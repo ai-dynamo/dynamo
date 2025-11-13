@@ -8,7 +8,7 @@ from kvbm import KvbmLeader
 from kvbm.trtllm_integration.rust import KvbmRequest
 from kvbm.trtllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.trtllm_integration.rust import SchedulerOutput as RustSchedulerOutput
-from kvbm.utils import is_dyn_runtime_enabled
+from kvbm.utils import is_dyn_runtime_enabled, maybe_import_offload_filter
 from tensorrt_llm._torch.pyexecutor.kv_cache_connector import (
     KvCacheConnectorScheduler,
     SchedulerOutput,
@@ -39,9 +39,15 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         # Set bytes_per_block to 0, because we will retrieve the actual value from the worker side.
         leader = KvbmLeader(world_size, drt=self.drt)
 
+        offload_filter = maybe_import_offload_filter()
+
         print(f"KvConnectorLeader initialized with rank: {mappings.rank}")
         self._connector = RustKvConnectorLeader(
-            mappings.rank, self.drt, self.block_size, leader
+            mappings.rank,
+            self.drt,
+            self.block_size,
+            leader,
+            offload_filter=offload_filter,
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
