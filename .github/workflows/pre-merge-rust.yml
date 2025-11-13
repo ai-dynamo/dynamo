@@ -39,7 +39,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run', "lib/bindings/kvbm"] }
     permissions:
       contents: read
     steps:
