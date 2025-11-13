@@ -46,7 +46,7 @@ To check if a cluster-wide operator already exists:
 ```bash
 # Check for cluster-wide operator and show its namespace
 kubectl get clusterrolebinding -o json | \
-  jq -r '.items[] | select(.metadata.name | contains("dynamo-operator-manager")) | 
+  jq -r '.items[] | select(.metadata.name | contains("dynamo-operator-manager")) |
   "Cluster-wide operator found in namespace: \(.subjects[0].namespace)"'
 
 # If a cluster-wide operator exists: Do NOT install another operator
