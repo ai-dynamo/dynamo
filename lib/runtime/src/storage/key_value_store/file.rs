@@ -301,12 +301,21 @@ impl KeyValueBucket for Directory {
                 continue;
             }
 
-            let key = match entry.path().strip_prefix(&self.root) {
+            // Canonicalize paths to handle symlinks (e.g., /var -> /private/var on macOS)
+            let canonical_entry_path = match entry.path().canonicalize() {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::warn!(error = %err, path = %entry.path().display(), "Failed to canonicalize path. Using original path.");
+                    entry.path()
+                }
+            };
+
+            let key = match canonical_entry_path.strip_prefix(&self.root) {
                 Ok(p) => p.to_string_lossy().to_string().replace("_", "/"),
                 Err(err) => {
                     tracing::error!(
                         error = %err,
-                        path = %entry.path().display(),
+                        path = %canonical_entry_path.display(),
                         root = %self.root.display(),
                         "FileStore path not in root. Should be impossible. Skipping entry."
                     );

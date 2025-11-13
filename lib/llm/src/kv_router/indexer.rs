@@ -326,6 +326,16 @@ impl RadixTree {
 
         tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
 
+        // Populate tree sizes for all workers that have scores
+        for worker in scores.scores.keys() {
+            let tree_size = self
+                .lookup
+                .get(worker)
+                .expect("worker in scores must exist in lookup table")
+                .len();
+            scores.tree_sizes.insert(*worker, tree_size);
+        }
+
         scores
     }
 
@@ -680,6 +690,8 @@ pub struct OverlapScores {
     pub scores: HashMap<WorkerWithDpRank, u32>,
     // List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
     pub frequencies: Vec<usize>,
+    // Map of worker to their tree size (number of blocks in the tree for that worker)
+    pub tree_sizes: HashMap<WorkerWithDpRank, usize>,
 }
 
 impl Default for OverlapScores {
@@ -698,6 +710,7 @@ impl OverlapScores {
         Self {
             scores: HashMap::new(),
             frequencies: Vec::with_capacity(32),
+            tree_sizes: HashMap::new(),
         }
     }
 
@@ -1225,6 +1238,7 @@ impl KvIndexerInterface for KvIndexerSharded {
                 match match_rx.recv().await {
                     Some(response) => {
                         scores.scores.extend(response.scores);
+                        scores.tree_sizes.extend(response.tree_sizes);
 
                         if response_num == 0 {
                             scores.frequencies = response.frequencies;
