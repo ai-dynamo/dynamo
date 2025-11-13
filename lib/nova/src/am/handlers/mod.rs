@@ -459,7 +459,9 @@ where
                     send_nack(backend, response_id, error_msg).await
                 }
                 // Unary path
-                (ResponseType::Unary, Ok(None)) => send_response_ok(backend, response_id, headers.clone()).await,
+                (ResponseType::Unary, Ok(None)) => {
+                    send_response_ok(backend, response_id, headers.clone()).await
+                }
                 (ResponseType::Unary, Ok(Some(bytes))) => {
                     send_response(backend, response_id, headers.clone(), bytes).await
                 }
@@ -532,7 +534,8 @@ where
                     let send_result = match response_type {
                         ResponseType::AckNack => send_nack(backend, response_id, error_msg).await,
                         ResponseType::Unary => {
-                            send_response_error(backend, response_id, headers.clone(), error_msg).await
+                            send_response_error(backend, response_id, headers.clone(), error_msg)
+                                .await
                         }
                         ResponseType::FireAndForget => Ok(()),
                     };

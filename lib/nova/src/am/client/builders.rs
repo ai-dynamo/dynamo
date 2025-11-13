@@ -402,7 +402,7 @@ impl MessageBuilder {
             // Determine response type based on expectation
             let metadata = match expectation {
                 Some(_) => MessageMetadata::new_unary(response_id, self.handler, self.headers), // unary or typed unary
-                None => MessageMetadata::new_sync(response_id, self.handler, self.headers),     // sync
+                None => MessageMetadata::new_sync(response_id, self.handler, self.headers), // sync
             };
 
             let message = ActiveMessage {

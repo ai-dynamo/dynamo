@@ -377,7 +377,11 @@ mod tests {
         headers.insert("span-id".to_string(), "def456".to_string());
 
         let message = ActiveMessage {
-            metadata: MessageMetadata::new_unary(response_id, handler_name.clone(), Some(headers.clone())),
+            metadata: MessageMetadata::new_unary(
+                response_id,
+                handler_name.clone(),
+                Some(headers.clone()),
+            ),
             payload: Bytes::from_static(b"test payload"),
         };
 
@@ -389,7 +393,10 @@ mod tests {
 
         // Verify
         assert_eq!(decoded.metadata.handler_name, handler_name);
-        assert_eq!(decoded.metadata.response_id.as_u128(), response_id.as_u128());
+        assert_eq!(
+            decoded.metadata.response_id.as_u128(),
+            response_id.as_u128()
+        );
         assert!(decoded.metadata.headers.is_some());
         let decoded_headers = decoded.metadata.headers.unwrap();
         assert_eq!(decoded_headers.len(), 2);
@@ -534,7 +541,11 @@ mod tests {
         headers.insert("special".to_string(), "a\nb\tc\"d'e".to_string());
 
         let message = ActiveMessage {
-            metadata: MessageMetadata::new_unary(response_id, handler_name.clone(), Some(headers.clone())),
+            metadata: MessageMetadata::new_unary(
+                response_id,
+                handler_name.clone(),
+                Some(headers.clone()),
+            ),
             payload: Bytes::from_static(b"test payload"),
         };
 
@@ -562,7 +573,11 @@ mod tests {
         }
 
         let message = ActiveMessage {
-            metadata: MessageMetadata::new_unary(response_id, handler_name.clone(), Some(headers.clone())),
+            metadata: MessageMetadata::new_unary(
+                response_id,
+                handler_name.clone(),
+                Some(headers.clone()),
+            ),
             payload: Bytes::from_static(b"test payload"),
         };
 
@@ -586,7 +601,11 @@ mod tests {
 
         // FireAndForget
         let msg_fire = ActiveMessage {
-            metadata: MessageMetadata::new_fire(response_id, handler_name.clone(), Some(headers.clone())),
+            metadata: MessageMetadata::new_fire(
+                response_id,
+                handler_name.clone(),
+                Some(headers.clone()),
+            ),
             payload: Bytes::from_static(b"test"),
         };
         let (h, p, _) = msg_fire.encode().unwrap();
@@ -596,7 +615,11 @@ mod tests {
 
         // AckNack
         let msg_sync = ActiveMessage {
-            metadata: MessageMetadata::new_sync(response_id, handler_name.clone(), Some(headers.clone())),
+            metadata: MessageMetadata::new_sync(
+                response_id,
+                handler_name.clone(),
+                Some(headers.clone()),
+            ),
             payload: Bytes::from_static(b"test"),
         };
         let (h, p, _) = msg_sync.encode().unwrap();
@@ -606,7 +629,11 @@ mod tests {
 
         // Unary
         let msg_unary = ActiveMessage {
-            metadata: MessageMetadata::new_unary(response_id, handler_name.clone(), Some(headers.clone())),
+            metadata: MessageMetadata::new_unary(
+                response_id,
+                handler_name.clone(),
+                Some(headers.clone()),
+            ),
             payload: Bytes::from_static(b"test"),
         };
         let (h, p, _) = msg_unary.encode().unwrap();
