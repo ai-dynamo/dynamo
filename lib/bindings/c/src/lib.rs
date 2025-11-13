@@ -943,14 +943,15 @@ pub async fn create_worker_selection_pipeline_chat(
     >,
 > {
     let runtime = Runtime::from_settings()?;
-    let dst_config = DistributedConfig::from_settings(false);
+    let dst_config = DistributedConfig::from_settings();
     let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
     let distributed_runtime: &'static DistributedRuntime = Box::leak(Box::new(drt_owned));
 
     let component = distributed_runtime
         .namespace(namespace)?
         .component(component_name)?;
-    let client = component.endpoint(GENERATE_ENDPOINT).client().await?;
+    let endpoint = component.endpoint(GENERATE_ENDPOINT);
+    let client = endpoint.client().await?;
 
     // Discover the model card by searching all instances with this model name
     tracing::debug!("Looking for model: {}", model_name);
@@ -980,7 +981,7 @@ pub async fn create_worker_selection_pipeline_chat(
     let chooser = if router_mode == RouterMode::KV {
         Some(
             model_manager
-                .kv_chooser_for(&component, card.kv_cache_block_size, kv_router_config)
+                .kv_chooser_for(&endpoint, card.kv_cache_block_size, kv_router_config)
                 .await?,
         )
     } else {

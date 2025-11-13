@@ -26,6 +26,7 @@
 
    kubernetes/api_reference.md
    kubernetes/deployment/create_deployment.md
+   kubernetes/deployment/dynamomodel-guide.md
 
    kubernetes/fluxcd.md
    kubernetes/grove.md

@@ -79,7 +79,6 @@ cd $DYNAMO_HOME
 
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2-VL-7B-Instruct"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen2-VL-7B-Instruct"}
-export DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"decode_first"}
 export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"recipes/qwen2-vl-7b-instruct/trtllm/prefill.yaml"}
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"recipes/qwen2-vl-7b-instruct/trtllm/decode.yaml"}
 export MODALITY=${MODALITY:-"multimodal"}

@@ -49,7 +49,7 @@ jobs:
           docker compose up -d nats-server etcd-server
       - name: Run Rust checks (block-manager + integration tests)
         run: |
-          docker run --rm -v ${{ github.workspace }}:/workspace -w /workspace/lib/llm \
+          docker run --rm -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
             ${{ steps.define_image_tag.outputs.image_tag }} \
             bash -ec 'rustup component add rustfmt clippy && \
@@ -66,7 +66,7 @@ jobs:
         env:
           PYTEST_MARKS: "pre_merge or mypy"
         run: |
-          docker run -v ${{ github.workspace }}:/workspace -w /workspace \
+          docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ steps.define_image_tag.outputs.image_tag }} \
             bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\" "

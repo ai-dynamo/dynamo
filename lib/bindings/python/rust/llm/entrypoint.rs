@@ -24,7 +24,6 @@ pub enum EngineType {
     Echo = 1,
     Dynamic = 2,
     Mocker = 3,
-    Static = 4,
 }
 
 #[pyclass]
@@ -246,11 +245,9 @@ async fn select_engine(
             RsEngineConfig::StaticFull {
                 model: Box::new(local_model),
                 engine: dynamo_llm::engines::make_echo_engine(),
-                is_static: false,
             }
         }
         EngineType::Dynamic => RsEngineConfig::Dynamic(Box::new(local_model)),
-        EngineType::Static => RsEngineConfig::StaticRemote(Box::new(local_model)),
         EngineType::Mocker => {
             let mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
                 MockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
@@ -279,7 +276,6 @@ async fn select_engine(
             RsEngineConfig::StaticCore {
                 engine,
                 model: Box::new(local_model),
-                is_static: false,
                 is_prefill: args.is_prefill,
             }
         }
@@ -299,7 +295,7 @@ pub fn run_input<'p>(
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         dynamo_llm::entrypoint::input::run_input(
-            either::Either::Right(distributed_runtime.inner.clone()),
+            distributed_runtime.inner.clone(),
             input_enum,
             engine_config.inner,
         )
