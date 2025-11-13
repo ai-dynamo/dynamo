@@ -245,7 +245,6 @@ async fn handle_shared_request(
     (StatusCode::ACCEPTED, "")
 }
 
-
 /// Extension trait for TraceParent to support Axum headers
 impl TraceParent {
     pub fn from_axum_headers(headers: &HeaderMap) -> Self {

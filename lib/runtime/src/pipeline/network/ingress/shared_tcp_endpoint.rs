@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
 use tokio_util::bytes::BytesMut;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 /// Default maximum message size for TCP server (32 MB)
@@ -243,9 +243,10 @@ impl SharedTcpServer {
                 None => {
                     tracing::warn!("No handler found for endpoint: {}", endpoint_path);
                     // Send error response using codec
-                    let error_response = TcpResponseMessage::new(
-                        Bytes::from(format!("Unknown endpoint: {}", endpoint_path)),
-                    );
+                    let error_response = TcpResponseMessage::new(Bytes::from(format!(
+                        "Unknown endpoint: {}",
+                        endpoint_path
+                    )));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
                     }

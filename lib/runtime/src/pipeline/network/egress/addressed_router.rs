@@ -168,7 +168,10 @@ where
         inject_trace_headers_into_map(&mut headers);
 
         // Send request (works for all transport types)
-        let _response = self.req_client.send_request(address, buffer, headers).await?;
+        let _response = self
+            .req_client
+            .send_request(address, buffer, headers)
+            .await?;
 
         tracing::trace!(request_id, "awaiting transport handshake");
         let response_stream = response_stream_provider

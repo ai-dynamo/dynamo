@@ -85,4 +85,3 @@ impl RequestPlaneClient for NatsRequestClient {
         Ok(())
     }
 }
-

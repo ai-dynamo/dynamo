@@ -117,4 +117,3 @@ pub trait RequestPlaneServer: Send + Sync {
     /// - Server encountered a fatal error
     fn is_healthy(&self) -> bool;
 }
-

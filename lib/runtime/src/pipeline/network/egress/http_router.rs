@@ -4,7 +4,7 @@
 //! HTTP/2 client for request plane
 
 use super::unified_client::{Headers, RequestPlaneClient};
-use crate::{Result};
+use crate::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::sync::Arc;

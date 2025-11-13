@@ -107,7 +107,13 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         let service_endpoint = service_group
             .endpoint(&endpoint_with_id)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create NATS endpoint '{}': {}", endpoint_with_id, e))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create NATS endpoint '{}': {}",
+                    endpoint_with_id,
+                    e
+                )
+            })?;
 
         tracing::info!(
             endpoint_name = %endpoint_name,
@@ -208,4 +214,3 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         true
     }
 }
-

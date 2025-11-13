@@ -371,7 +371,8 @@ impl DistributedRuntime {
     /// This is a shortcut for `network_manager().await?.server().await`.
     pub async fn request_plane_server(
         &self,
-    ) -> Result<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>> {
+    ) -> Result<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>>
+    {
         let manager = self.network_manager().await?;
         manager.server().await
     }
@@ -385,7 +386,9 @@ impl DistributedRuntime {
         let _server = self.request_plane_server().await?;
         // This will only work if we're actually in HTTP mode
         // For now, just return an error suggesting the new API
-        anyhow::bail!("http_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types.")
+        anyhow::bail!(
+            "http_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
+        )
     }
 
     /// DEPRECATED: Use network_manager().server() instead
@@ -397,7 +400,9 @@ impl DistributedRuntime {
         let _server = self.request_plane_server().await?;
         // This will only work if we're actually in TCP mode
         // For now, just return an error suggesting the new API
-        anyhow::bail!("shared_tcp_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types.")
+        anyhow::bail!(
+            "shared_tcp_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
+        )
     }
 
     pub fn nats_client(&self) -> Option<&nats::Client> {

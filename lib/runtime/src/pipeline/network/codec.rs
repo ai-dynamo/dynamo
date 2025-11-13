@@ -100,7 +100,10 @@ impl TcpRequestMessage {
         // Read endpoint path (requires copy for UTF-8 validation)
         let endpoint_path = String::from_utf8(bytes[offset..offset + endpoint_len].to_vec())
             .map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Invalid UTF-8: {}", e))
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Invalid UTF-8: {}", e),
+                )
             })?;
         offset += endpoint_len;
 
@@ -218,7 +221,10 @@ mod tests {
 
     #[test]
     fn test_tcp_request_encode_decode() {
-        let msg = TcpRequestMessage::new("test.endpoint".to_string(), Bytes::from(vec![1, 2, 3, 4, 5]));
+        let msg = TcpRequestMessage::new(
+            "test.endpoint".to_string(),
+            Bytes::from(vec![1, 2, 3, 4, 5]),
+        );
 
         let encoded = msg.encode().unwrap();
         let decoded = TcpRequestMessage::decode(&encoded).unwrap();

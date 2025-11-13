@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 /// Default timeout for TCP request acknowledgment
@@ -142,7 +142,8 @@ impl TcpConnection {
         let (request_tx, request_rx) = mpsc::channel::<TcpRequest>(channel_buffer);
 
         // Channel for writer to forward response channels to reader (FIFO correlation)
-        let (response_tx_channel, response_rx_channel) = mpsc::unbounded_channel::<oneshot::Sender<Result<Bytes>>>();
+        let (response_tx_channel, response_rx_channel) =
+            mpsc::unbounded_channel::<oneshot::Sender<Result<Bytes>>>();
 
         let healthy = Arc::new(AtomicBool::new(true));
 
@@ -150,7 +151,8 @@ impl TcpConnection {
         let writer_handle = {
             let healthy = healthy.clone();
             tokio::spawn(async move {
-                if let Err(e) = Self::writer_task(write_half, request_rx, response_tx_channel).await {
+                if let Err(e) = Self::writer_task(write_half, request_rx, response_tx_channel).await
+                {
                     tracing::debug!("Writer task failed for {}: {}", addr, e);
                     healthy.store(false, Ordering::Relaxed);
                 }
@@ -179,7 +181,7 @@ impl TcpConnection {
 
     /// Configure socket for ultra-low latency based on dyn-transports patterns
     fn configure_socket(stream: &TcpStream) -> Result<()> {
-        use socket2::{Socket, SockRef};
+        use socket2::{SockRef, Socket};
 
         let sock_ref = SockRef::from(stream);
 
@@ -284,8 +286,7 @@ impl TcpConnection {
             if response_len > max_message_size {
                 let err_msg = format!(
                     "Response too large: {} bytes (max: {} bytes)",
-                    response_len,
-                    max_message_size
+                    response_len, max_message_size
                 );
                 let _ = response_tx.send(Err(anyhow::anyhow!("{}", err_msg)));
                 return Err(anyhow::anyhow!("{}", err_msg));
@@ -411,7 +412,12 @@ impl TcpConnectionPool {
 
         // Create new connection with configured channel buffer
         tracing::debug!("Creating new TCP connection to {}", addr);
-        TcpConnection::connect(addr, self.config.connect_timeout, self.config.channel_buffer).await
+        TcpConnection::connect(
+            addr,
+            self.config.connect_timeout,
+            self.config.channel_buffer,
+        )
+        .await
     }
 
     /// Return a connection to the pool if it's healthy and there's space
@@ -645,7 +651,8 @@ mod tests {
         let (addr2, _) = TcpRequestClient::parse_address("tcp://127.0.0.1:9090").unwrap();
         assert_eq!(addr2.port(), 9090);
 
-        let (addr3, endpoint) = TcpRequestClient::parse_address("127.0.0.1:8080/test_endpoint").unwrap();
+        let (addr3, endpoint) =
+            TcpRequestClient::parse_address("127.0.0.1:8080/test_endpoint").unwrap();
         assert_eq!(addr3.port(), 8080);
         assert_eq!(endpoint, Some("test_endpoint".to_string()));
 
@@ -711,7 +718,10 @@ mod tests {
         assert!(result.is_ok(), "Request should succeed");
         assert_eq!(result.unwrap(), Bytes::from("pong"));
 
-        assert!(conn.is_healthy(), "Connection should remain healthy after successful request");
+        assert!(
+            conn.is_healthy(),
+            "Connection should remain healthy after successful request"
+        );
     }
 
     #[tokio::test]
@@ -769,7 +779,7 @@ mod tests {
         let conn = Arc::new(
             TcpConnection::connect(addr, Duration::from_secs(5), 10)
                 .await
-                .unwrap()
+                .unwrap(),
         );
 
         // Send 5 concurrent requests
@@ -799,7 +809,11 @@ mod tests {
         assert_eq!(results.len(), 5);
 
         // Verify server received all requests
-        assert_eq!(request_count.load(Ordering::SeqCst), 5, "Server should have received 5 requests");
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            5,
+            "Server should have received 5 requests"
+        );
     }
 
     #[tokio::test]
@@ -879,7 +893,11 @@ mod tests {
         pool.return_connection(conn2).await;
 
         // Should have created only 1 TCP connection since we reused
-        assert_eq!(connection_count.load(Ordering::SeqCst), 1, "Should reuse connection from pool");
+        assert_eq!(
+            connection_count.load(Ordering::SeqCst),
+            1,
+            "Should reuse connection from pool"
+        );
     }
 
     #[tokio::test]
@@ -904,7 +922,8 @@ mod tests {
         let pool = TcpConnectionPool::new(config.clone());
 
         // Try to get a connection - it will become unhealthy quickly
-        let result = TcpConnection::connect(addr, config.connect_timeout, config.channel_buffer).await;
+        let result =
+            TcpConnection::connect(addr, config.connect_timeout, config.channel_buffer).await;
 
         if let Ok(conn) = result {
             // Mark as unhealthy by trying to use it

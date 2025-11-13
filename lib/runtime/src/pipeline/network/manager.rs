@@ -47,9 +47,7 @@ impl NetworkConfig {
     /// Load configuration from environment variables
     ///
     /// This is the ONLY place where network-related environment variables are read.
-    fn from_env(
-        nats_client: Option<async_nats::Client>,
-    ) -> Self {
+    fn from_env(nats_client: Option<async_nats::Client>) -> Self {
         Self {
             // HTTP server configuration
             http_host: std::env::var("DYN_HTTP_RPC_HOST")
@@ -327,4 +325,3 @@ impl NetworkManager {
         Ok(Arc::new(NatsRequestClient::new(nats_client.clone())))
     }
 }
-
