@@ -10,7 +10,7 @@ Install a pre-built wheel from PyPI.
    source venv/bin/activate
 
    # Install Dynamo from PyPI (choose one backend extra)
-   uv pip install "ai-dynamo[sglang]==my-tag"  # or [vllm], [trtllm]
+   uv pip install --prerelease=allow "ai-dynamo[sglang]==my-tag"  # or [vllm], [trtllm]
 
 
 Pip from source

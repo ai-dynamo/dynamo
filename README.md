@@ -119,7 +119,7 @@ source venv/bin/activate
 uv pip install pip
 
 # Choose one
-uv pip install "ai-dynamo[sglang]"  #replace with [vllm], [trtllm], etc.
+uv pip install --prerelease=allow "ai-dynamo[sglang]"  #replace with [vllm], [trtllm], etc.
 ```
 
 ## 3. Run Dynamo
@@ -211,7 +211,7 @@ To specify which GPUs to use set environment variable `CUDA_VISIBLE_DEVICES`.
 # Install libnuma
 apt install -y libnuma-dev
 
-uv pip install "ai-dynamo[sglang]"
+uv pip install --prerelease=allow "ai-dynamo[sglang]"
 ```
 
 Run the backend/worker like this:

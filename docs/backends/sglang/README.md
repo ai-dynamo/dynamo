@@ -97,7 +97,7 @@ We suggest using uv to install the latest release of ai-dynamo[sglang]. You can 
 # create a virtual env
 uv venv --python 3.12 --seed
 # install the latest release (which comes bundled with a stable sglang version)
-uv pip install "ai-dynamo[sglang]"
+uv pip install --prerelease=allow "ai-dynamo[sglang]"
 ```
 
 </details>
