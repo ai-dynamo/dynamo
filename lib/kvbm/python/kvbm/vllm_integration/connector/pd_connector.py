@@ -53,8 +53,11 @@ class PdConnector(MultiConnector):
             allowed_first_types.append(LMCacheConnectorV1)
 
         if not isinstance(self._connectors[0], tuple(allowed_first_types)):
+            allowed_names = ["DynamoConnector"]
+            if LMCacheConnectorV1 is not None:
+                allowed_names.append("LMCacheConnectorV1")
             raise TypeError(
-                f"Expected first connector to be DynamoConnector or LMCacheConnector, "
+                f"Expected first connector to be {' or '.join(allowed_names)}, "
                 f"got {type(self._connectors[0]).__name__}"
             )
         if not isinstance(self._connectors[1], NixlConnector):
