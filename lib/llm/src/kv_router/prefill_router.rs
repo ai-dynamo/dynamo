@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use futures::StreamExt;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -22,6 +22,23 @@ use crate::{
     kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
 };
+
+/// Errors that can occur during prefill routing
+#[derive(Debug, thiserror::Error)]
+pub enum PrefillError {
+    /// Prefill router has not been activated yet
+    #[error("Prefill router not yet activated")]
+    NotActivated,
+
+    /// Error during prefill execution
+    /// TODO: Separate prefill worker error from prefill router error
+    #[error("Prefill execution failed: {0}")]
+    PrefillError(String),
+
+    /// Disaggregated params not found in prefill response
+    #[error("No disaggregated params in prefill response: {0}")]
+    NoDisaggregatedParams(String),
+}
 
 /// The inner router used by PrefillRouter
 enum InnerPrefillRouter {
@@ -154,34 +171,48 @@ impl PrefillRouter {
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<serde_json::Value, PrefillError> {
         // Get the prefill router, error if not activated
         let Some(prefill_router) = self.prefill_router.get() else {
-            bail!("Prefill router not yet activated");
+            return Err(PrefillError::NotActivated);
         };
 
         // Call the appropriate router based on the type
         let mut prefill_response = match prefill_router {
-            InnerPrefillRouter::KvRouter(router) => router.generate(request).await?,
-            InnerPrefillRouter::SimpleRouter(router) => router.generate(request).await?,
+            InnerPrefillRouter::KvRouter(router) => router
+                .generate(request)
+                .await
+                .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
+            InnerPrefillRouter::SimpleRouter(router) => router
+                .generate(request)
+                .await
+                .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
         };
 
         let Some(first_output) = prefill_response.next().await else {
-            bail!("Prefill router returned no output (stream ended)");
+            return Err(PrefillError::PrefillError(
+                "Prefill router returned no output (stream ended)".to_string(),
+            ));
         };
 
         while prefill_response.next().await.is_some() {}
 
         if let Some(err) = first_output.err() {
-            bail!("Prefill router returned error in output: {err:?}");
+            return Err(PrefillError::PrefillError(format!(
+                "Prefill router returned error in output: {err:?}"
+            )));
         }
 
         let Some(output) = &first_output.data else {
-            bail!("Prefill router output has no data field");
+            return Err(PrefillError::NoDisaggregatedParams(
+                "Prefill router output has no data field".to_string(),
+            ));
         };
 
         let Some(disaggregated_params) = output.disaggregated_params.clone() else {
-            bail!("Prefill router output missing disaggregated_params");
+            return Err(PrefillError::NoDisaggregatedParams(
+                "Prefill router output missing disaggregated_params".to_string(),
+            ));
         };
 
         Ok(disaggregated_params)
@@ -247,6 +278,10 @@ impl
                 // Map the modified request through with preserved context
                 let decode_request = context.map(|_| decode_req);
                 next.generate(decode_request).await
+            }
+            Err(PrefillError::NotActivated) => {
+                tracing::debug!("Prefill router not activated, falling back to decode-only");
+                next.generate(context.map(|_| req)).await
             }
             Err(e) => {
                 tracing::warn!(
