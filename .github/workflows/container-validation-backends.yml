@@ -708,7 +708,19 @@ jobs:
         export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
         echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
         # Wait for all pods with the deployment label to be ready
-        kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1300s
+        if ! kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1300s 2>&1; then
+          ERROR_MSG="Pod readiness check failed. kubectl wait timed out or found no matching resources."
+          echo "$ERROR_MSG"
+          
+          # Capture diagnostics
+          echo "=== Pod Status ==="
+          kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} -o wide || echo "No pods found"
+          echo "=== Recent Events ==="
+          kubectl get events -n ${KUBE_NS} --sort-by='.lastTimestamp' | tail -20 || true
+          
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          bash .github/scripts/create_error_annotation.sh "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }})" "777" "test-output.log" "$ERROR_MSG" "$NAMESPACE"
+        fi
 
         # Debug: Show final pod statuses for the deployment
         echo "=== FINAL POD STATUSES ==="
@@ -717,6 +729,21 @@ jobs:
 
         kubectl get all -n $KUBE_NS
         export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} | tail -n1 | awk '{print $1}')
+        
+        if [ -z "$FRONTEND_POD" ] || [ "$FRONTEND_POD" == "NAME" ]; then
+          ERROR_MSG="Failed to find frontend pod with label nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}"
+          echo "$ERROR_MSG"
+          
+          # Capture diagnostics
+          echo "=== All Pods in Namespace ==="
+          kubectl get pods -n ${KUBE_NS} -o wide || true
+          echo "=== Events ==="
+          kubectl get events -n ${KUBE_NS} --sort-by='.lastTimestamp' | tail -20 || true
+          
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          bash .github/scripts/create_error_annotation.sh "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }})" "777" "test-output.log" "$ERROR_MSG" "$NAMESPACE"
+        fi
+        
         export CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${KUBE_NS} -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
         echo "Container port is ${CONTAINER_PORT}"
         kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${KUBE_NS} &
@@ -740,8 +767,15 @@ jobs:
         if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
           ERROR_MSG="Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts. Last response: $MODELS_RESPONSE"
           echo "$ERROR_MSG"
-          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
-          exit 1
+          
+          # Capture diagnostics
+          echo "=== Pod Status ==="
+          kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} -o wide || true
+          echo "=== Pod Logs (Frontend) ==="
+          kubectl logs -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} -n ${KUBE_NS} --tail=50 || true
+          
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          bash .github/scripts/create_error_annotation.sh "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }})" "777" "test-output.log" "$ERROR_MSG" "$NAMESPACE"
         fi
         RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused -X POST "${LLM_URL}/v1/chat/completions" \
           -H 'accept: text/event-stream' \
