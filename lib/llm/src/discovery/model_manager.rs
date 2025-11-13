@@ -324,7 +324,7 @@ impl ModelManager {
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
         let chooser = KvRouter::new(
             endpoint.clone(),
-            Some(client),
+            client,
             kv_cache_block_size,
             Some(selector),
             kv_router_config,

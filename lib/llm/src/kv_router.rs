@@ -220,7 +220,7 @@ pub struct KvRouter {
 impl KvRouter {
     pub async fn new(
         endpoint: Endpoint,
-        client: Option<Client>,
+        client: Client,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
@@ -229,11 +229,6 @@ impl KvRouter {
         let kv_router_config = kv_router_config.unwrap_or_default();
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
-
-        let client = match client {
-            Some(c) => c,
-            None => endpoint.client().await?,
-        };
 
         let instance_ids_rx = client.instance_avail_watcher();
 
