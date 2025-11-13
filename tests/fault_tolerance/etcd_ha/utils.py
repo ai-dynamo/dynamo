@@ -121,6 +121,20 @@ class EtcdReplicaServer(ManagedProcess):
             logger.warning(f"Failed to get status for {self.name}: {e}")
         return {}
 
+    def is_leader(self) -> Optional[bool]:
+        """
+        Check if this node is the current leader.
+
+        Returns: True/False on is leader or None if status cannot be retrieved.
+        """
+        status = self.get_status()
+        # In etcd v3 API, we check if this member ID matches the leader ID
+        if status:
+            member_id = status.get("header", {}).get("member_id", "")
+            leader_id = status.get("leader", "")
+            return member_id == leader_id
+        return None
+
 
 class EtcdCluster:
     """Manager for an ETCD cluster with configurable number of replicas"""
@@ -192,7 +206,37 @@ class EtcdCluster:
         replica.__enter__()
         return replica
 
-    def _replace_member(self, idx: int) -> bool:
+    def _wait_for_healthy_cluster(self, timeout: int = 30):
+        """Wait for cluster to be healthy and elected leader."""
+        logger.info("Waiting for cluster to become healthy...")
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            # Check if a leader is elected indicating cluster health
+            is_healthy = True
+            leader_id = None
+            for i, replica in enumerate(self.replicas):
+                if replica:
+                    is_leader = replica.is_leader()
+                    if is_leader is None:
+                        is_healthy = False
+                        break
+                    if is_leader is True:
+                        if leader_id is not None:
+                            raise RuntimeError(
+                                f"Multiple leaders detected in ETCD cluster etcd-{leader_id} and etcd-{i}"
+                            )
+                        leader_id = i
+
+            if is_healthy and leader_id is not None:
+                logger.info(f"Cluster is healthy with leader at etcd-{leader_id}")
+                return
+
+            time.sleep(1)
+
+        raise RuntimeError(f"ETCD cluster failed to become healthy within {timeout}s")
+
+    def _replace_member(self, idx: int):
         """Remove old member and add new member to the cluster using etcdctl"""
         # Find a healthy replica to perform member operations
         healthy_replica = None
@@ -202,8 +246,7 @@ class EtcdCluster:
                 break
 
         if not healthy_replica:
-            logger.error("No healthy replica found to perform member operations")
-            return False
+            raise RuntimeError("No healthy replica found to perform member operations")
 
         name = f"etcd-{idx}"
         peer_port = self.base_port + (2 * idx) + 1
@@ -248,14 +291,12 @@ class EtcdCluster:
                         timeout=5,
                     )
                     if remove_result.returncode != 0:
-                        logger.error(
+                        raise RuntimeError(
                             f"Failed to remove old member: {remove_result.stderr}"
                         )
-                        return False
                     logger.info(f"Successfully removed old member {name}")
         except Exception as e:
-            logger.error(f"Error during member removal: {e}")
-            # Continue anyway - member might already be removed
+            raise RuntimeError(f"Error during member removal: {e}")
 
         # Add the new member to the cluster
         logger.info(f"Adding new member {name} to cluster with peer URL {peer_url}")
@@ -268,14 +309,10 @@ class EtcdCluster:
                 timeout=5,
             )
             if add_result.returncode != 0:
-                logger.error(f"Failed to add new member: {add_result.stderr}")
-                return False
+                raise RuntimeError(f"Failed to add new member: {add_result.stderr}")
             logger.info(f"Successfully added new member {name}")
         except Exception as e:
-            logger.error(f"Error adding new member: {e}")
-            return False
-
-        return True
+            raise RuntimeError(f"Error adding new member: {e}")
 
     def start(self):
         """Start ETCD cluster with configured number of replicas"""
@@ -289,80 +326,7 @@ class EtcdCluster:
         logger.info(f"All {self.num_replicas} ETCD replicas started successfully")
 
         # Wait for cluster to stabilize
-        logger.info("Waiting for all replicas to be healthy...")
-
-        start_time = time.time()
-        while time.time() - start_time < 30:  # 30s timeout
-            all_healthy = True
-            for i, r in enumerate(self.replicas):
-                if r:
-                    status = r.get_status()
-                    if not status:
-                        logger.debug(f"etcd-{i} not yet responsive")
-                        all_healthy = False
-                        break
-
-            if all_healthy:
-                logger.info("All replicas are healthy")
-                return
-
-            time.sleep(1)
-
-        raise RuntimeError("ETCD cluster failed to become healthy within 30s")
-
-    def terminate_replica(self, idx: int) -> Optional[int]:
-        """Terminate a specific replica by index.
-
-        Args:
-            idx: Index of replica to terminate.
-
-        Returns:
-            Index of terminated replica, or None if termination failed
-        """
-        # Use modulo to wrap around
-        actual_idx = idx % self.num_replicas
-        logger.info(f"Terminating replica: etcd-{actual_idx}")
-
-        replica = self.replicas[actual_idx]
-        if not replica:
-            logger.error(f"Replica etcd-{actual_idx} is already terminated")
-            return None
-
-        replica.__exit__(None, None, None)
-        self.replicas[actual_idx] = None
-        logger.info(f"Replica etcd-{actual_idx} has been terminated")
-        return actual_idx
-
-    def restart_replica(self, idx: int) -> bool:
-        """Restart a terminated replica"""
-        if idx < 0 or idx >= self.num_replicas:
-            logger.error(f"Invalid replica index: {idx}")
-            return False
-
-        if self.replicas[idx] is not None:
-            logger.error(f"Replica etcd-{idx} is already running")
-            return False
-
-        # Remove old member and add new member
-        if not self._replace_member(idx):
-            logger.error(f"Failed to replace member etcd-{idx}")
-            return False
-
-        # Start the replica with existing cluster state
-        replica = self._start_replica(idx, cluster_state="existing")
-        self.replicas[idx] = replica
-
-        # Wait for the replica to become healthy
-        name = f"etcd-{idx}"
-        logger.info(f"Waiting for {name} to become healthy...")
-        for _ in range(30):
-            time.sleep(1)
-            if replica.get_status():
-                logger.info(f"{name} is now healthy")
-                return True
-
-        logger.error(f"{name} failed to become healthy")
-        return False
+        self._wait_for_healthy_cluster()
 
     def get_client_endpoints(self) -> List[str]:
         """Get list of active client endpoints"""
@@ -372,6 +336,41 @@ class EtcdCluster:
                 client_port = self.base_port + (2 * i)
                 endpoints.append(f"http://127.0.0.1:{client_port}")
         return endpoints
+
+    def terminate_replica(self, idx: int):
+        """Terminate a specific replica by index."""
+        if idx < 0 or idx >= self.num_replicas:
+            raise RuntimeError(f"Invalid replica index: {idx}")
+
+        replica = self.replicas[idx]
+        if not replica:
+            raise RuntimeError(f"Replica etcd-{idx} is already terminated")
+
+        replica.__exit__(None, None, None)
+        self.replicas[idx] = None
+
+        logger.info(f"Terminated replica etcd-{idx}")
+
+    def restart_replica(self, idx: int):
+        """Restart a terminated replica"""
+        if idx < 0 or idx >= self.num_replicas:
+            raise RuntimeError(f"Invalid replica index: {idx}")
+
+        if self.replicas[idx] is not None:
+            raise RuntimeError(f"Replica etcd-{idx} is already running")
+
+        # Make sure the cluster is healthy before restarting
+        self._wait_for_healthy_cluster()
+
+        # Remove old member and add new member
+        self._replace_member(idx)
+
+        # Start the replica with existing cluster state
+        replica = self._start_replica(idx, cluster_state="existing")
+        self.replicas[idx] = replica
+
+        # Wait for cluster to stabilize
+        self._wait_for_healthy_cluster()
 
     def stop(self):
         """Clean up all replicas and temporary directories"""
@@ -429,10 +428,10 @@ def send_inference_request(prompt: str, max_tokens: int = 50) -> str:
             return text
         else:
             pytest.fail(
-                f"Inference request failed with code {response.status_code}: {response.text}"
+                f"[ETCD HA regression?] Inference request failed with code {response.status_code}: {response.text}"
             )
     except Exception as e:
-        pytest.fail(f"Inference request failed: {e}")
+        pytest.fail(f"[ETCD HA regression?] Inference request failed: {e}")
 
 
 def wait_for_processes_to_terminate(
