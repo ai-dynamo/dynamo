@@ -64,9 +64,7 @@ impl FileStore {
 
             thread::sleep(keep_alive_interval);
 
-            if let Err(err) = self.keep_alive() {
-                tracing::error!(error = %err, "FileStore keep_alive");
-            };
+            self.keep_alive();
             if let Err(err) = self.delete_expired_files() {
                 tracing::error!(error = %err, "FileStore delete_expired_files");
             }
@@ -84,13 +82,11 @@ impl FileStore {
         ttl
     }
 
-    fn keep_alive(&self) -> anyhow::Result<()> {
+    fn keep_alive(&self) {
         let active_dirs = self.active_dirs.lock().clone();
-        for (path, dir) in active_dirs {
-            dir.keep_alive()
-                .with_context(|| path.display().to_string())?;
+        for (_, dir) in active_dirs {
+            dir.keep_alive();
         }
-        Ok(())
     }
 
     fn delete_expired_files(&self) -> anyhow::Result<()> {
@@ -183,6 +179,11 @@ impl Directory {
     fn new(root: PathBuf, p: PathBuf, ttl: Duration) -> Self {
         // Canonicalize root to handle symlinks (e.g., /var -> /private/var on macOS)
         let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        if ttl < MIN_KEEP_ALIVE {
+            let h_ttl = humantime::format_duration(ttl);
+            tracing::warn!(path = %p.display(), ttl = %h_ttl, "ttl is too short, increasing to {}", humantime::format_duration(MIN_KEEP_ALIVE));
+        }
+        let ttl = cmp::max(ttl, MIN_KEEP_ALIVE);
         Directory {
             root: canonical_root,
             p,
@@ -192,22 +193,28 @@ impl Directory {
     }
 
     /// touch the files we own so they don't get deleted by a different FileStore
-    fn keep_alive(&self) -> anyhow::Result<()> {
+    fn keep_alive(&self) {
         let owned_files = self.owned_files.lock().clone();
         for path in owned_files {
-            let file = OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .with_context(|| path.display().to_string())?;
-            file.set_modified(SystemTime::now())
-                .with_context(|| path.display().to_string())?;
+            let file = match OpenOptions::new().write(true).open(&path) {
+                Ok(f) => f,
+                Err(err) => {
+                    tracing::error!(path = %path.display(), error = %err, "FileStore::keep_alive failed opening owned file");
+                    continue;
+                }
+            };
+            if let Err(err) = file.set_modified(SystemTime::now()) {
+                tracing::error!(path = %path.display(), error = %err, "FileStore::keep_alive failed set_modified on owned file");
+                continue;
+            }
             tracing::trace!("FileStore keep_alive set {}", path.display());
         }
-        Ok(())
     }
 
     /// Remove any files not touched for longer than TTL.
     /// This looks at all files in the directory to catch orphaned files from processes that didn't stop cleanly.
+    /// Returns an error if we cannot open the directory. Errors inside the directory are logged
+    /// but non-fatal.
     fn delete_expired_files(&self) -> anyhow::Result<()> {
         let deadline = SystemTime::now() - self.ttl;
         let dirname = self.p.display().to_string();
