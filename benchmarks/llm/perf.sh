@@ -212,6 +212,11 @@ echo "Concurrency levels: ${concurrency_array[@]}"
 for concurrency in "${concurrency_array[@]}"; do
   echo "Run concurrency: $concurrency"
 
+  # Create a subdirectory for this concurrency level
+  # The plot script expects subdirectories named -concurrency<number>
+  concurrency_dir="${artifact_dir}/-concurrency${concurrency}"
+  mkdir -p "${concurrency_dir}"
+
   # NOTE: For Dynamo HTTP OpenAI frontend, use `nvext` for fields like
   # `ignore_eos` since they are not in the official OpenAI spec.
   aiperf profile \
@@ -234,7 +239,7 @@ for concurrency in "${concurrency_array[@]}"; do
     --warmup-request-count $(($concurrency*2)) \
     --num-dataset-entries $(($concurrency*12)) \
     --random-seed 100 \
-    --artifact-dir ${artifact_dir} \
+    --artifact-dir ${concurrency_dir} \
     --ui simple \
     -v \
     -H 'Authorization: Bearer NOT USED' \
