@@ -39,7 +39,7 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 # - Develop or debug framework-level components
 # - Create custom builds with specific optimization flags
 #
-FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS framework
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04 AS framework
 
 # Declare all ARGs
 ARG BUILD_TYPE=all
@@ -104,6 +104,7 @@ RUN apt-get update \
         unzip \
         # Network utilities
         netcat-openbsd \
+        openssh-server \
         # SSL and pkg-config
         libssl-dev \
         pkg-config \
