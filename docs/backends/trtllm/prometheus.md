@@ -1,88 +1,73 @@
-# TensorRT-LLM Prometheus Metrics
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
-This document describes how TensorRT-LLM Prometheus metrics are exposed in Dynamo, as well as where to find non-Prometheus metrics.
+# TensorRT-LLM Prometheus Metrics
 
 ## Overview
 
 When running TensorRT-LLM through Dynamo, TensorRT-LLM's Prometheus metrics are automatically passed through and exposed on Dynamo's `/metrics` endpoint (default port 8081). This allows you to access both TensorRT-LLM engine metrics (prefixed with `trtllm:`) and Dynamo runtime metrics (prefixed with `dynamo_*`) from a single worker backend endpoint.
 
-Additional performance metrics are available via non-Prometheus APIs in the RequestPerfMetrics section below.
-
 As of the date of this documentation, the included TensorRT-LLM version 1.1.0rc5 exposes **5 basic Prometheus metrics**. Note that the `trtllm:` prefix is added by Dynamo.
 
-Dynamo runtime metrics are documented in [docs/observability/metrics.md](../../observability/metrics.md).
+Additional performance metrics are available via non-Prometheus APIs (see [Non-Prometheus Performance Metrics](#non-prometheus-performance-metrics) below).
 
-## Metric Reference
+**For Dynamo runtime metrics**, see the [Dynamo Metrics Guide](../../observability/metrics.md).
 
-TensorRT-LLM provides Prometheus metrics through the `MetricsCollector` class (see [tensorrt_llm/metrics/collector.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py)), which includes:
-- Counter and Histogram metrics
-- Metric labels (e.g., `model_name`, `engine_type`, `finished_reason`) - note that TensorRT-LLM uses `model_name` instead of Dynamo's standard `model` label convention
+**For visualization setup instructions**, see the [Prometheus and Grafana Setup Guide](../../observability/prometheus-grafana.md).
 
-### Current Prometheus Metrics (TensorRT-LLM 1.1.0rc5)
+## Environment Variables
 
-The following metrics are exposed via Dynamo's `/metrics` endpoint (with the `trtllm:` prefix added by Dynamo):
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `DYN_SYSTEM_PORT` | System metrics/health port | `-1` (disabled) | `8081` |
 
-- `trtllm:request_success_total` (Counter) — Count of successfully processed requests by finish reason
-  - Labels: `model_name`, `engine_type`, `finished_reason`
-- `trtllm:e2e_request_latency_seconds` (Histogram) — End-to-end request latency (seconds)
-  - Labels: `model_name`, `engine_type`
-- `trtllm:time_to_first_token_seconds` (Histogram) — Time to first token, TTFT (seconds)
-  - Labels: `model_name`, `engine_type`
-- `trtllm:time_per_output_token_seconds` (Histogram) — Time per output token, TPOT (seconds)
-  - Labels: `model_name`, `engine_type`
-- `trtllm:request_queue_time_seconds` (Histogram) — Time a request spends waiting in the queue (seconds)
-  - Labels: `model_name`, `engine_type`
+## Getting Started Quickly
 
-These metric names and availability are subject to change with TensorRT-LLM version updates.
+This is a single machine example.
 
-## Metric Categories
+### Start Observability Stack
 
-TensorRT-LLM provides metrics in the following categories (all prefixed with `trtllm:`):
-- Request metrics (latency, throughput)
-- Performance metrics (TTFT, TPOT, queue time)
+For visualizing metrics with Prometheus and Grafana, start the observability stack. See [Observability Getting Started](../../observability/README.md#getting-started-quickly) for instructions.
 
-**Note:** Metrics may change between TensorRT-LLM versions. Always inspect the `/metrics` endpoint for your version.
+### Launch Dynamo Components
 
-## Enabling Metrics in Dynamo
-
-TensorRT-LLM Prometheus metrics are automatically exposed when running TensorRT-LLM through Dynamo with the `--publish-events-and-metrics` flag.
-
-### Required Configuration
-```bash
-python -m dynamo.trtllm --model <model_name> --publish-events-and-metrics
-```
-
-### Backend Requirement
-- `backend`: Must be set to `"pytorch"` for metrics collection (enforced in `components/src/dynamo/trtllm/main.py`)
-- TensorRT-LLM's `MetricsCollector` integration has only been tested/validated with the PyTorch backend
-
-## Inspecting Metrics
-
-To see the actual metrics available in your TensorRT-LLM version:
-
-### 1. Launch TensorRT-LLM with Metrics Enabled
+Launch a frontend and TensorRT-LLM backend to test metrics:
 
 ```bash
-# Set system metrics port (automatically enables metrics server)
-export DYN_SYSTEM_PORT=8081
+# Start frontend (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
+$ python -m dynamo.frontend
 
-# Start TensorRT-LLM worker with metrics enabled
-python -m dynamo.trtllm --model <model_name> --publish-events-and-metrics
-
-# Wait for engine to initialize
+# Enable system metrics server on port 8081 and enable metrics collection
+$ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model <model_name> --publish-events-and-metrics
 ```
 
-Metrics will be available at: `http://localhost:8081/metrics`
+**Note:** The `backend` must be set to `"pytorch"` for metrics collection (enforced in `components/src/dynamo/trtllm/main.py`). TensorRT-LLM's `MetricsCollector` integration has only been tested/validated with the PyTorch backend.
 
-### 2. Fetch Metrics via curl
+Wait for the TensorRT-LLM worker to start, then send requests and check metrics:
 
 ```bash
-curl http://localhost:8081/metrics | grep "^trtllm:"
+# Send a request
+curl -H 'Content-Type: application/json' \
+-d '{
+  "model": "<model_name>",
+  "max_completion_tokens": 100,
+  "messages": [{"role": "user", "content": "Hello"}]
+}' \
+http://localhost:8000/v1/chat/completions
+
+# Check metrics from the worker
+curl -s localhost:8081/metrics | grep "^trtllm:"
 ```
 
-### 3. Example Output
+## Exposed Metrics
 
-**Note:** The specific metrics shown below are examples and may vary depending on your TensorRT-LLM version. Always inspect your actual `/metrics` endpoint for the current list.
+TensorRT-LLM exposes metrics in Prometheus Exposition Format text at the `/metrics` HTTP endpoint. All TensorRT-LLM engine metrics use the `trtllm:` prefix and include labels (e.g., `model_name`, `engine_type`, `finished_reason`) to identify the source.
+
+**Note:** TensorRT-LLM uses `model_name` instead of Dynamo's standard `model` label convention.
+
+**Example Prometheus Exposition Format text:**
 
 ```
 # HELP trtllm:request_success_total Count of successfully processed requests.
@@ -102,38 +87,50 @@ trtllm:time_to_first_token_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type=
 trtllm:e2e_request_latency_seconds_bucket{le="0.5",model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 25.0
 trtllm:e2e_request_latency_seconds_count{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 150.0
 trtllm:e2e_request_latency_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 45.2
-
-# HELP trtllm:time_per_output_token_seconds Histogram of time per output token in seconds.
-# TYPE trtllm:time_per_output_token_seconds histogram
-trtllm:time_per_output_token_seconds_bucket{le="0.1",model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 120.0
-trtllm:time_per_output_token_seconds_count{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 150.0
-trtllm:time_per_output_token_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 12.5
-
-# HELP trtllm:request_queue_time_seconds Histogram of time spent in WAITING phase for request.
-# TYPE trtllm:request_queue_time_seconds histogram
-trtllm:request_queue_time_seconds_bucket{le="1.0",model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 140.0
-trtllm:request_queue_time_seconds_count{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 150.0
-trtllm:request_queue_time_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 32.1
 ```
 
-## Implementation Details
+**Note:** The specific metrics shown above are examples and may vary depending on your TensorRT-LLM version. Always inspect your actual `/metrics` endpoint for the current list.
 
-- **Prometheus Integration**: Uses the `MetricsCollector` class from `tensorrt_llm.metrics` (see [collector.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py))
-- **Dynamo Integration**: Uses `register_engine_metrics_callback()` function with `add_prefix="trtllm:"`
-- **Engine Configuration**: `return_perf_metrics` set to `True` when `--publish-events-and-metrics` is enabled
-- **Initialization**: Metrics appear after TensorRT-LLM engine initialization completes
-- **Metadata**: `MetricsCollector` initialized with model metadata (model name, engine type)
+### Metric Categories
 
-## TensorRT-LLM Specific: Non-Prometheus Performance Metrics
+TensorRT-LLM provides metrics in the following categories (all prefixed with `trtllm:`):
 
-TensorRT-LLM provides extensive performance data beyond the basic Prometheus metrics. These are **not exposed to Prometheus**.
+- **Request metrics** - Request success tracking and latency measurements
+- **Performance metrics** - Time to first token (TTFT), time per output token (TPOT), and queue time
 
-### Available via Code References:
+**Note:** Metrics may change between TensorRT-LLM versions. Always inspect the `/metrics` endpoint for your version.
+
+## Available Metrics
+
+The following metrics are exposed via Dynamo's `/metrics` endpoint (with the `trtllm:` prefix added by Dynamo) for TensorRT-LLM version 1.1.0rc5:
+
+- `trtllm:request_success_total` (Counter) — Count of successfully processed requests by finish reason
+  - Labels: `model_name`, `engine_type`, `finished_reason`
+- `trtllm:e2e_request_latency_seconds` (Histogram) — End-to-end request latency (seconds)
+  - Labels: `model_name`, `engine_type`
+- `trtllm:time_to_first_token_seconds` (Histogram) — Time to first token, TTFT (seconds)
+  - Labels: `model_name`, `engine_type`
+- `trtllm:time_per_output_token_seconds` (Histogram) — Time per output token, TPOT (seconds)
+  - Labels: `model_name`, `engine_type`
+- `trtllm:request_queue_time_seconds` (Histogram) — Time a request spends waiting in the queue (seconds)
+  - Labels: `model_name`, `engine_type`
+
+These metric names and availability are subject to change with TensorRT-LLM version updates.
+
+TensorRT-LLM provides Prometheus metrics through the `MetricsCollector` class (see [tensorrt_llm/metrics/collector.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py)).
+
+## Non-Prometheus Performance Metrics
+
+TensorRT-LLM provides extensive performance data beyond the basic Prometheus metrics. These are not currently exposed to Prometheus.
+
+### Available via Code References
+
 - **RequestPerfMetrics Structure**: [tensorrt_llm/executor/result.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/executor/result.py) - KV cache, timing, speculative decoding metrics
 - **Engine Statistics**: `engine.llm.get_stats_async()` - System-wide aggregate statistics
 - **KV Cache Events**: `engine.llm.get_kv_cache_events_async()` - Real-time cache operations
 
-### Example RequestPerfMetrics JSON Structure:
+### Example RequestPerfMetrics JSON Structure
+
 ```json
 {
   "timing_metrics": {
@@ -159,17 +156,26 @@ TensorRT-LLM provides extensive performance data beyond the basic Prometheus met
 }
 ```
 
-**Note**: These structures are valid as of the date of this documentation but are subject to change with TensorRT-LLM version updates.
+**Note:** These structures are valid as of the date of this documentation but are subject to change with TensorRT-LLM version updates.
 
-## See Also
+## Implementation Details
+
+- **Prometheus Integration**: Uses the `MetricsCollector` class from `tensorrt_llm.metrics` (see [collector.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py))
+- **Dynamo Integration**: Uses `register_engine_metrics_callback()` function with `add_prefix="trtllm:"`
+- **Engine Configuration**: `return_perf_metrics` set to `True` when `--publish-events-and-metrics` is enabled
+- **Initialization**: Metrics appear after TensorRT-LLM engine initialization completes
+- **Metadata**: `MetricsCollector` initialized with model metadata (model name, engine type)
+
+## Related Documentation
 
 ### TensorRT-LLM Metrics
-- See the "TensorRT-LLM Specific: Non-Prometheus Performance Metrics" section above for detailed performance data and source code references
+- See the [Non-Prometheus Performance Metrics](#non-prometheus-performance-metrics) section above for detailed performance data and source code references
+- [TensorRT-LLM Metrics Collector](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py) - Source code reference
 
 ### Dynamo Metrics
-- **Dynamo Metrics Guide**: See [docs/observability/metrics.md](../../observability/metrics.md) for complete documentation on Dynamo runtime metrics
-- **Dynamo Runtime Metrics**: Metrics prefixed with `dynamo_*` for runtime, components, endpoints, and namespaces
+- [Dynamo Metrics Guide](../../observability/metrics.md) - Complete documentation on Dynamo runtime metrics
+- [Prometheus and Grafana Setup](../../observability/prometheus-grafana.md) - Visualization setup instructions
+- Dynamo runtime metrics (prefixed with `dynamo_*`) are available at the same `/metrics` endpoint alongside TensorRT-LLM metrics
   - Implementation: `lib/runtime/src/metrics.rs` (Rust runtime metrics)
   - Metric names: `lib/runtime/src/metrics/prometheus_names.rs` (metric name constants)
-  - Available at the same `/metrics` endpoint alongside TensorRT-LLM metrics
-- **Integration Code**: `components/src/dynamo/common/utils/prometheus.py` - Prometheus utilities and callback registration
+  - Integration code: `components/src/dynamo/common/utils/prometheus.py` - Prometheus utilities and callback registration

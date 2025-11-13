@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_runtime::{
-    component::Component,
+    component::{Client, Endpoint},
     discovery::{DiscoveryQuery, watch_and_extract_field},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
@@ -36,6 +36,7 @@ pub use prefill_router::PrefillRouter;
 use crate::{
     kv_router::{
         approx::ApproxKvIndexer,
+        approx::PruneConfig,
         indexer::{
             KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent,
             compute_block_hash_for_seq, compute_seq_hash_for_block,
@@ -181,6 +182,7 @@ impl Indexer {
             Indexer::None => Ok(OverlapScores {
                 scores: HashMap::new(),
                 frequencies: Vec::new(),
+                tree_sizes: HashMap::new(),
             }),
         }
     }
@@ -211,29 +213,32 @@ pub struct KvRouter {
     kv_router_config: KvRouterConfig,
 
     cancellation_token: tokio_util::sync::CancellationToken,
+
+    client: Client,
 }
 
 impl KvRouter {
     pub async fn new(
-        component: Component,
+        endpoint: Endpoint,
+        client: Client,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
         consumer_uuid: String,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
+        let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
-        let generate_endpoint = component.endpoint("generate");
-        let client = generate_endpoint.client().await?;
 
-        let instances_rx = client.instance_source.as_ref().clone();
+        let instance_ids_rx = client.instance_avail_watcher();
 
         // Watch for runtime config updates via discovery interface
         let discovery = component.drt().discovery();
+        let endpoint_id = endpoint.id();
         let discovery_key = DiscoveryQuery::EndpointModels {
-            namespace: component.namespace().name().to_string(),
-            component: component.name().to_string(),
-            endpoint: "generate".to_string(),
+            namespace: endpoint_id.namespace.clone(),
+            component: endpoint_id.component.clone(),
+            endpoint: endpoint_id.name.clone(),
         };
         let discovery_stream = discovery
             .list_and_watch(discovery_key, Some(cancellation_token.clone()))
@@ -247,7 +252,7 @@ impl KvRouter {
             // When overlap_score_weight is zero, we don't need to track prefixes
             Indexer::None
         } else if kv_router_config.use_kv_events {
-            let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(&component);
+            let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
             Indexer::KvIndexer(KvIndexer::new(
                 cancellation_token.clone(),
                 block_size,
@@ -259,13 +264,17 @@ impl KvRouter {
                 cancellation_token.clone(),
                 block_size,
                 Duration::from_secs(120),
+                Some(PruneConfig {
+                    max_tree_size: 2usize.pow(14), // 2** 14 = 16384
+                    prune_target_ratio: 0.8,
+                }),
             ))
         };
 
         let scheduler = KvScheduler::start(
             component.clone(),
             block_size,
-            instances_rx,
+            instance_ids_rx,
             runtime_configs_rx,
             selector,
             kv_router_config.router_replica_sync,
@@ -300,7 +309,13 @@ impl KvRouter {
             block_size,
             kv_router_config,
             cancellation_token,
+            client,
         })
+    }
+
+    /// Get a reference to the client used by this KvRouter
+    pub fn client(&self) -> &Client {
+        &self.client
     }
 
     /// Give these tokens, find the worker with the best match in it's KV cache.

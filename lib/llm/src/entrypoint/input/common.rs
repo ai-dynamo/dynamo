@@ -224,17 +224,27 @@ where
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
     let migration = Migration::from_mdc(card).into_operator();
 
+    // For KV routing, use the client from the chooser to ensure shared state
+    let router_client = if router_mode == RouterMode::KV {
+        let Some(ref chooser) = chooser else {
+            anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
+        };
+        chooser.client().clone()
+    } else {
+        client.clone()
+    };
+
     // Create worker monitor only if busy_threshold is set
     let worker_monitor = busy_threshold.map(|threshold| {
         Arc::new(crate::discovery::KvWorkerMonitor::new(
-            Arc::new(client.clone()),
+            Arc::new(router_client.clone()),
             threshold,
         )) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>
     });
 
     let router =
         PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
-            client.clone(),
+            router_client,
             router_mode,
             busy_threshold,
             worker_monitor,
