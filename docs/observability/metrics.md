@@ -17,7 +17,8 @@ Dynamo provides built-in metrics capabilities through the Dynamo metrics API, wh
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_SYSTEM_PORT` | System metrics/health port | `-1` (disabled) | `8081` |
+| `DYN_SYSTEM_PORT` | Backend component metrics/health port | `-1` (disabled) | `8081` |
+| `DYN_HTTP_PORT` | Frontend HTTP port (also configurable via `--http-port` flag) | `8000` | `8000` |
 
 ## Getting Started Quickly
 
@@ -35,7 +36,7 @@ Launch a frontend and vLLM backend to test metrics:
 ```bash
 $ python -m dynamo.frontend --http-port 8000
 
-# Enable system metrics server on port 8081
+# Enable backend worker's system metrics on port 8081
 $ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
    --enforce-eager --no-enable-prefix-caching --max-num-seqs 3
 ```
@@ -52,7 +53,7 @@ curl -H 'Content-Type: application/json' \
 }' \
 http://localhost:8000/v1/chat/completions
 
-# Check metrics from the worker
+# Check metrics from the backend worker
 curl -s localhost:8081/metrics | grep dynamo_component
 ```
 
@@ -100,6 +101,8 @@ This hierarchical structure allows you to create metrics at the appropriate leve
 
 ### Backend Component Metrics
 
+**Backend workers** (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.) expose `dynamo_component_*` metrics on port 8081 by default (configurable via `DYN_SYSTEM_PORT`).
+
 The core Dynamo backend system automatically exposes metrics on the system status port (default: 8081, configurable via `DYN_SYSTEM_PORT`) at the `/metrics` endpoint with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework:
 
 - `dynamo_component_inflight_requests`: Requests currently being processed (gauge)
@@ -140,11 +143,9 @@ Some components expose additional metrics specific to their functionality:
 
 ### Frontend Metrics
 
-**Important:** The frontend and backend workers are separate components that expose metrics on different ports:
-- **Frontend** (`python -m dynamo.frontend`): Exposes `dynamo_frontend_*` metrics on port 8000
-- **Backend workers** (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.): Expose `dynamo_component_*` metrics on port 8081
+**Important:** The frontend and backend workers are separate components that expose metrics on different ports. See [Backend Component Metrics](#backend-component-metrics) for backend metrics.
 
-When using Dynamo HTTP Frontend (`python -m dynamo.frontend`), these metrics are automatically exposed on the frontend's HTTP port (default: 8000) at the `/metrics` endpoint with the `dynamo_frontend_*` prefix and include `model` labels containing the model name:
+The Dynamo HTTP Frontend (`python -m dynamo.frontend`) exposes `dynamo_frontend_*` metrics on port 8000 by default (configurable via `--http-port` or `DYN_HTTP_PORT`) at the `/metrics` endpoint. Most metrics include `model` labels containing the model name:
 
 - `dynamo_frontend_inflight_requests`: Inflight requests (gauge)
 - `dynamo_frontend_queued_requests`: Number of requests in HTTP processing queue (gauge)
