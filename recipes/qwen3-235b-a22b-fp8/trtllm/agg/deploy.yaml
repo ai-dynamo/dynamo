@@ -13,7 +13,7 @@ data:
     moe_tensor_parallel_size: 1
     enable_attention_dp: false
     enable_chunked_prefill: true
-    build_config: 
+    build_config:
       max_batch_size: 128
       max_num_tokens: 8192
       max_seq_len: 8192
@@ -56,9 +56,9 @@ spec:
               topologyKey: kubernetes.io/hostname
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
-          args: 
+          args:
             - python3 -m dynamo.frontend --router-mode kv --http-port 8000
-          command: 
+          command:
             - /bin/sh
             - -c
     TrtllmWorker:
@@ -78,7 +78,7 @@ spec:
                   values:
                   - "true"
         mainContainer:
-          env: 
+          env:
             - name: MODEL_PATH
               value: /mnt/model-cache/hub/models--Qwen--Qwen3-235B-A22B-FP8/snapshots/39eb2b067ea6b8e3e1dd97d3cd0c7ffeaf3e1a35
             - name: ENGINE_ARGS
@@ -110,5 +110,5 @@ spec:
       resources:
         limits:
           gpu: "4"
-        requests: 
+        requests:
           gpu: "4"
