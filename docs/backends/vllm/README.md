@@ -87,6 +87,7 @@ This includes the specific commit [vllm-project/vllm#19790](https://github.com/v
 This figure shows an overview of the major components to deploy:
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'fontSize':'10px'}}}%%
 graph TD
     %% Node Definitions with custom shapes
     HTTP[HTTP]
