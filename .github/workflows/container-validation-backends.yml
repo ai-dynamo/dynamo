@@ -112,7 +112,7 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: dynamo-operator:latest
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
           aws_push: 'false'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -161,7 +161,7 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
@@ -228,7 +228,7 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
@@ -295,7 +295,7 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'

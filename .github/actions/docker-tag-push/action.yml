@@ -4,8 +4,8 @@ inputs:
   local_image:
     description: 'Local Image Name:Tag'
     required: true
-  push_tag:
-    description: 'Target Name:Tag'
+  push_tags:
+    description: 'Target Name:Tag (newline-separated list for multiple tags)'
     required: true
   aws_push:
     description: 'Push to AWS Boolean'
@@ -38,9 +38,9 @@ inputs:
     required: false
 
 outputs:
-  image_tag:
-    description: 'Image Tag'
-    value: ${{ inputs.push_tag }}
+  image_tags:
+    description: 'Image Tags'
+    value: ${{ inputs.push_tags }}
 
 runs:
   using: "composite"
@@ -95,45 +95,58 @@ runs:
       if: ${{ inputs.aws_push == 'true' }}
       env:
         LOCAL_IMAGE: ${{ inputs.local_image }}
-        PUSH_TAG: ${{ inputs.push_tag }}
+        PUSH_TAGS: ${{ inputs.push_tags }}
         AWS_ACCOUNT_ID: ${{ inputs.aws_account_id || env.AWS_ACCOUNT_ID }}
         AWS_DEFAULT_REGION: ${{ inputs.aws_default_region || env.AWS_DEFAULT_REGION }}
       run: |
         ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-        docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${PUSH_TAG}"
-        retry=0
-        until [ $retry -ge 3 ]; do
-          if docker push "${ECR_HOSTNAME}/${PUSH_TAG}"; then
-            break
+
+        while IFS= read -r TAG; do
+          if [ -z "$TAG" ]; then
+            continue
           fi
-          retry=$((retry+1))
-          echo "ECR push failed (attempt ${retry}/3). Retrying in 15s..."
-          sleep 15
-        done
-        if [ $retry -ge 3 ]; then
-          echo "ECR push failed after 3 attempts" >&2
-          exit 1
-        fi
+          echo "Tagging and pushing: ${ECR_HOSTNAME}/${TAG}"
+          docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${TAG}"
+          retry=0
+          until [ $retry -ge 3 ]; do
+            if docker push "${ECR_HOSTNAME}/${TAG}"; then
+              break
+            fi
+            retry=$((retry+1))
+            echo "ECR push failed (attempt ${retry}/3). Retrying in 15s..."
+            sleep 15
+          done
+          if [ $retry -ge 3 ]; then
+            echo "ECR push failed after 3 attempts" >&2
+            exit 1
+          fi
+        done <<< "$PUSH_TAGS"
 
     - name: ACR Tag and Push
       shell: bash
       if: ${{ inputs.azure_push == 'true' }}
       env:
         LOCAL_IMAGE: ${{ inputs.local_image }}
-        PUSH_TAG: ${{ inputs.push_tag }}
+        PUSH_TAGS: ${{ inputs.push_tags }}
         AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname || env.AZURE_ACR_HOSTNAME }}
       run: |
-        docker tag "${LOCAL_IMAGE}" "${AZURE_ACR_HOSTNAME}/${PUSH_TAG}"
-        retry=0
-        until [ $retry -ge 3 ]; do
-          if docker push "${AZURE_ACR_HOSTNAME}/${PUSH_TAG}"; then
-            break
+        while IFS= read -r TAG; do
+          if [ -z "$TAG" ]; then
+            continue
           fi
-          retry=$((retry+1))
-          echo "ACR push failed (attempt ${retry}/3). Retrying in 15s..."
-          sleep 15
-        done
-        if [ $retry -ge 3 ]; then
-          echo "ACR push failed after 3 attempts" >&2
-          exit 1
-        fi
+          echo "Tagging and pushing: ${AZURE_ACR_HOSTNAME}/${TAG}"
+          docker tag "${LOCAL_IMAGE}" "${AZURE_ACR_HOSTNAME}/${TAG}"
+          retry=0
+          until [ $retry -ge 3 ]; do
+            if docker push "${AZURE_ACR_HOSTNAME}/${TAG}"; then
+              break
+            fi
+            retry=$((retry+1))
+            echo "ACR push failed (attempt ${retry}/3). Retrying in 15s..."
+            sleep 15
+          done
+          if [ $retry -ge 3 ]; then
+            echo "ACR push failed after 3 attempts" >&2
+            exit 1
+          fi
+        done <<< "$PUSH_TAGS"
