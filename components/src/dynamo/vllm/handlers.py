@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import os
+import tempfile
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
@@ -73,6 +74,7 @@ class BaseWorkerHandler(ABC):
         self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
         self.image_loader = ImageLoader()
+        self.temp_dirs: list[tempfile.TemporaryDirectory] = []
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -115,9 +117,18 @@ class BaseWorkerHandler(ABC):
         except Exception as e:
             yield {"status": "error", "message": str(e)}
 
+    def add_temp_dir(self, temp_dir: tempfile.TemporaryDirectory) -> None:
+        """Add a temporary directory to be cleaned up later."""
+        if temp_dir is not None:
+            self.temp_dirs.append(temp_dir)
+
     def cleanup(self):
-        """Override in subclasses if cleanup is needed."""
-        pass
+        """Clean up resources including temporary directories."""
+        for temp_dir in self.temp_dirs:
+            try:
+                temp_dir.cleanup()
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp directory: {e}")
 
     async def _extract_multimodal_data(
         self, request: Dict[str, Any]
