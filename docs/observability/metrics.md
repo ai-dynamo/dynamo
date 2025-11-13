@@ -33,7 +33,8 @@ For visualizing metrics with Prometheus and Grafana, start the observability sta
 Launch a frontend and vLLM backend to test metrics:
 
 ```bash
-$ python -m dynamo.frontend --http-port 8000
+# Start frontend (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
+$ python -m dynamo.frontend
 
 # Enable system metrics server on port 8081
 $ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
@@ -83,7 +84,7 @@ Dynamo exposes several categories of metrics:
 - **Frontend Metrics** (`dynamo_frontend_*`) - Request handling, token processing, and latency measurements
 - **Component Metrics** (`dynamo_component_*`) - Request counts, processing times, byte transfers, and system uptime
 - **Specialized Component Metrics** (e.g., `dynamo_preprocessor_*`) - Component-specific metrics
-- **Engine Metrics** (Pass-through) - Backend engines expose their own metrics: [vLLM](../backends/vllm/prometheus.md) (`vllm:*`), [SGLang](../backends/sglang/prometheus.md) (`sglang:*`), [TensorRT-LLM](../backends/trtllm/prometheus.md) (`trtllm:*`)
+- **Engine Metrics** (Pass-through) - Backend engines expose their own metrics: [vLLM](../backends/vllm/prometheus.md) (`vllm:*`), [SGLang](../backends/sglang/prometheus.md) (`sglang:*`), [TensorRT-LLM](../backends/trtllm/prometheus.md) (`trtllm_*`)
 
 ## Runtime Hierarchy
 

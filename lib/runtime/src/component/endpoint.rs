@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     component::{Endpoint, Instance, TransportType, service::EndpointStatsHandler},
+    config::RequestPlaneMode,
     pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint},
     storage::key_value_store,
     traits::DistributedRuntimeProvider,
@@ -87,8 +88,9 @@ impl EndpointConfigBuilder {
 
         let registry = endpoint.drt().component_registry().inner.lock().await;
 
-        // get the group
-        let group = registry
+        // Note: NATS service group is no longer needed here as the NetworkManager
+        // handles all transport-specific initialization internally
+        let _group = registry
             .services
             .get(&service_name)
             .map(|service| service.group(endpoint.component.service_name()))
@@ -110,11 +112,12 @@ impl EndpointConfigBuilder {
                 .insert(endpoint.subject_to(connection_id), stats_handler);
         }
 
-        // creates an endpoint for the service
-        let service_endpoint = group
-            .endpoint(&endpoint.name_with_id(connection_id))
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to start endpoint: {e}"))?;
+        // Determine request plane mode
+        let request_plane_mode = RequestPlaneMode::get();
+        tracing::info!(
+            "Endpoint starting with request plane mode: {:?}",
+            request_plane_mode
+        );
 
         // This creates a child token of the runtime's endpoint_shutdown_token. That token is
         // cancelled first as part of graceful shutdown. See Runtime::shutdown.
@@ -129,12 +132,20 @@ impl EndpointConfigBuilder {
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
+            // Build transport based on request plane mode
+            let transport = build_transport_type(
+                request_plane_mode,
+                &endpoint_name,
+                &subject,
+                TransportContext::HealthCheck,
+            );
+
             let instance = Instance {
                 component: component_name.clone(),
                 endpoint: endpoint_name.clone(),
                 namespace: namespace_name.clone(),
                 instance_id: connection_id,
-                transport: TransportType::NatsTcp(subject.clone()),
+                transport,
             };
             tracing::debug!(endpoint_name = %endpoint_name, "Registering endpoint health check target");
             let guard = system_health.lock();
@@ -160,13 +171,7 @@ impl EndpointConfigBuilder {
             tracing::debug!("Endpoint '{}' has graceful_shutdown=false", endpoint.name);
         }
 
-        let push_endpoint = PushEndpoint::builder()
-            .service_handler(handler)
-            .cancellation_token(endpoint_shutdown_token.clone())
-            .graceful_shutdown(graceful_shutdown)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
-
+        // Launch endpoint based on request plane mode
         let tracker_clone = if graceful_shutdown {
             Some(endpoint.drt().graceful_shutdown_tracker())
         } else {
@@ -178,25 +183,59 @@ impl EndpointConfigBuilder {
         let component_name_for_task = component_name.clone();
         let endpoint_name_for_task = endpoint_name.clone();
 
-        let task = tokio::spawn(async move {
-            let result = push_endpoint
-                .start(
-                    service_endpoint,
-                    namespace_name_for_task,
-                    component_name_for_task,
-                    endpoint_name_for_task,
-                    connection_id,
-                    system_health,
-                )
-                .await;
+        // Get the unified request plane server (works for all transport types)
+        let server = endpoint.drt().request_plane_server().await?;
+
+        tracing::info!(
+            endpoint = %endpoint_name_for_task,
+            transport = server.transport_name(),
+            "Registering endpoint with request plane server"
+        );
+
+        // Register endpoint with the server (unified interface)
+        server
+            .register_endpoint(
+                endpoint_name_for_task.clone(),
+                handler,
+                connection_id,
+                namespace_name_for_task.clone(),
+                component_name_for_task.clone(),
+                system_health.clone(),
+            )
+            .await?;
+
+        // Create cleanup task that unregisters on cancellation
+        let endpoint_name_for_cleanup = endpoint_name_for_task.clone();
+        let server_for_cleanup = server.clone();
+        let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
+
+        let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+            cancel_token_for_cleanup.cancelled().await;
+
+            tracing::debug!(
+                endpoint = %endpoint_name_for_cleanup,
+                "Unregistering endpoint from request plane server"
+            );
+
+            // Unregister from server
+            if let Err(e) = server_for_cleanup
+                .unregister_endpoint(&endpoint_name_for_cleanup)
+                .await
+            {
+                tracing::warn!(
+                    endpoint = %endpoint_name_for_cleanup,
+                    error = %e,
+                    "Failed to unregister endpoint"
+                );
+            }
 
             // Unregister from graceful shutdown tracker
             if let Some(tracker) = tracker_clone {
-                tracing::debug!("Unregistering endpoint from graceful shutdown tracker");
+                tracing::debug!("Unregister endpoint from graceful shutdown tracker");
                 tracker.unregister_endpoint();
             }
 
-            result
+            anyhow::Ok(())
         });
 
         // Register this endpoint instance in the discovery plane
@@ -204,11 +243,19 @@ impl EndpointConfigBuilder {
         // consistent registration/discovery across the system.
         let discovery = endpoint.drt().discovery();
 
+        // Build transport for discovery service based on request plane mode
+        let transport = build_transport_type(
+            request_plane_mode,
+            &endpoint_name,
+            &subject,
+            TransportContext::Discovery,
+        );
+
         let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
             namespace: namespace_name.clone(),
             component: component_name.clone(),
             endpoint: endpoint_name.clone(),
-            transport: TransportType::NatsTcp(subject.clone()),
+            transport,
         };
 
         if let Err(e) = discovery.register(discovery_spec).await {
@@ -227,5 +274,68 @@ impl EndpointConfigBuilder {
         task.await??;
 
         Ok(())
+    }
+}
+
+/// Context for building transport type - determines port and formatting differences
+enum TransportContext {
+    /// For health check targets
+    HealthCheck,
+    /// For discovery service registration
+    Discovery,
+}
+
+/// Build transport type based on request plane mode and context
+///
+/// This unified function handles both health check and discovery transport building,
+/// with context-specific differences:
+/// - HTTP: Both use the same port (default 8888, configurable via DYN_HTTP_RPC_PORT)
+/// - TCP: Health check omits endpoint suffix, discovery includes it for routing
+/// - NATS: Identical for both contexts
+fn build_transport_type(
+    mode: RequestPlaneMode,
+    endpoint_name: &str,
+    subject: &str,
+    context: TransportContext,
+) -> TransportType {
+    match mode {
+        RequestPlaneMode::Http => {
+            let http_host = crate::utils::get_http_rpc_host_from_env();
+            // Both health check and discovery use the same port (8888) where the HTTP server binds
+            let http_port = std::env::var("DYN_HTTP_RPC_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(8888);
+            let rpc_root =
+                std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
+
+            let http_endpoint = format!(
+                "http://{}:{}{}/{}",
+                http_host, http_port, rpc_root, endpoint_name
+            );
+
+            TransportType::Http(http_endpoint)
+        }
+        RequestPlaneMode::Tcp => {
+            let tcp_host = crate::utils::get_tcp_rpc_host_from_env();
+            let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(9999);
+
+            let tcp_endpoint = match context {
+                TransportContext::HealthCheck => {
+                    // Health check uses simple host:port format
+                    format!("{}:{}", tcp_host, tcp_port)
+                }
+                TransportContext::Discovery => {
+                    // Discovery includes endpoint name for routing
+                    format!("{}:{}/{}", tcp_host, tcp_port, endpoint_name)
+                }
+            };
+
+            TransportType::Tcp(tcp_endpoint)
+        }
+        RequestPlaneMode::Nats => TransportType::Nats(subject.to_string()),
     }
 }

@@ -26,8 +26,8 @@ orchestration frameworks such as Kubernetes.
 Enable health checks and query endpoints:
 
 ```bash
-# Start your Dynamo components
-python -m dynamo.frontend --http-port 8000 &
+# Start your Dynamo components (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
+python -m dynamo.frontend &
 
 # Enable system status server on port 8081
 DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
