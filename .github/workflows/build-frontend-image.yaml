@@ -113,7 +113,7 @@ jobs:
             --build-arg DYNAMO_BASE_IMAGE=${{ steps.build-image.outputs.image_tag }} \
             --build-arg EPP_IMAGE=${{ env.EPP_IMAGE }} \
             --build-arg PYTHON_VERSION=3.12 \
-            -f ${DYNAMO_DIR}/container/Dockerfile.frontend \
+            -f container/Dockerfile.frontend \
             -t ${FRONTEND_IMAGE_TAG} \
             .
           echo "FRONTEND_IMAGE_TAG=${FRONTEND_IMAGE_TAG}" >> $GITHUB_ENV
