@@ -1125,6 +1125,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			labelValue = LabelValueAICProfiler
 		}
 
+		// Set fsGroup to 0 to ensure the emptyDir volume has correct permissions
+		// The runtime images run as user 'dynamo' (UID 1000, GID 0), so fsGroup 0 allows write access
+		fsGroup := int64(0)
+
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      jobName,
@@ -1141,8 +1145,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 					Spec: corev1.PodSpec{
 						ServiceAccountName: ServiceAccountProfilingJob,
 						RestartPolicy:      corev1.RestartPolicyNever,
-						Containers:         []corev1.Container{profilerContainer, sidecarContainer},
-						Volumes:            volumes,
+						SecurityContext: &corev1.PodSecurityContext{
+							FSGroup: &fsGroup,
+						},
+						Containers: []corev1.Container{profilerContainer, sidecarContainer},
+						Volumes:    volumes,
 						ImagePullSecrets: []corev1.LocalObjectReference{
 							{Name: "nvcr-imagepullsecret"},
 						},
