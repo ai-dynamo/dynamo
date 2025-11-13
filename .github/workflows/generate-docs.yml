@@ -28,7 +28,7 @@
 # Required Configuration:
 # - Repository variable: DOCS_PUBLISH_S3_TARGET_PATH (prefix under S3 bucket)
 # - Secrets: AWS credentials (DOCS_AWS_ACCESS_KEY_ID, DOCS_AWS_SECRET_ACCESS_KEY, DOCS_AWS_S3_BUCKET)
-# - Secrets (optional): AKAMAI_* EdgeGrid credentials for cache flush
+# - Secrets (optional): DOCS_AKAMAI_* EdgeGrid credentials for cache flush
 #
 # Commit message flags:
 # - '/skip-dev': skip publishing 'dev' on main branch
@@ -443,11 +443,11 @@ jobs:
           REQUEST_NAME: ${{ steps.publish.outputs.request_name }}
           # Use repository variable or secret for notification emails
           # Format: JSON array of email addresses, e.g., '["email1@example.com", "email2@example.com"]'
-          EMAILS_JSON: ${{ secrets.AKAMAI_NOTIFICATION_EMAILS }}
-          AKAMAI_CLIENT_SECRET: ${{ secrets.AKAMAI_CLIENT_SECRET }}
-          AKAMAI_HOST: ${{ secrets.AKAMAI_HOST }}
-          AKAMAI_ACCESS_TOKEN: ${{ secrets.AKAMAI_ACCESS_TOKEN }}
-          AKAMAI_CLIENT_TOKEN: ${{ secrets.AKAMAI_CLIENT_TOKEN }}
+          EMAILS_JSON: ${{ secrets.DOCS_AKAMAI_NOTIFICATION_EMAILS }}
+          AKAMAI_CLIENT_SECRET: ${{ secrets.DOCS_AKAMAI_CLIENT_SECRET }}
+          AKAMAI_HOST: ${{ secrets.DOCS_AKAMAI_HOST }}
+          AKAMAI_ACCESS_TOKEN: ${{ secrets.DOCS_AKAMAI_ACCESS_TOKEN }}
+          AKAMAI_CLIENT_TOKEN: ${{ secrets.DOCS_AKAMAI_CLIENT_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
