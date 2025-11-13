@@ -51,8 +51,7 @@ async def _handle_non_leader_node(
         generate_endpoint: The Dynamo endpoint for generation requests.
     """
     logging.info(
-        f"Non-leader node detected (node_rank={engine.server_args.node_rank}). "
-        "Setting up metrics-only mode."
+        f"Non-leader node detected (node_rank={engine.server_args.node_rank})."
     )
 
     # Only setup Prometheus registry to expose SGLang metrics from shared memory
