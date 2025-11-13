@@ -169,7 +169,7 @@ where
                             let message = message.replace(['\r', '\n'], "");
                             return Err(http_error::HttpError { code, message })?;
                         }
-                        Err(error!("Python Error: {}", py_err.to_string()))
+                        Err(error!("Python Error: {}", py_err))
                     })
                 } else {
                     Err(e)

@@ -218,7 +218,7 @@ mod tests {
             namespace: "test-ns".to_string(),
             component: "test-comp".to_string(),
             endpoint: "test-ep".to_string(),
-            transport: crate::component::TransportType::NatsTcp("test-subject".to_string()),
+            transport: crate::component::TransportType::Nats("test-subject".to_string()),
         };
 
         let query = DiscoveryQuery::Endpoint {
