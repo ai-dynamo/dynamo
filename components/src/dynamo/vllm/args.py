@@ -269,35 +269,35 @@ def parse_args() -> Config:
                 f"Please ensure the file exists and the path is correct."
             )
 
-    # Check for conflicting flags
+    # args.connector can never be None or an empty list, since it's defaulted to ["nixl"]
+    normalized = [c.lower() for c in args.connector]
+
+    invalid = [c for c in normalized if c not in VALID_CONNECTORS]
+    if invalid:
+        raise ValueError(
+            f"Invalid connector(s): {', '.join(invalid)}. Valid options are: {', '.join(sorted(VALID_CONNECTORS))}"
+        )
+
+    # Check for custom kv_transfer_config
     has_kv_transfer_config = (
         hasattr(engine_args, "kv_transfer_config")
         and engine_args.kv_transfer_config is not None
     )
-    has_connector_flag = args.connector is not None
 
-    if has_kv_transfer_config and has_connector_flag:
-        raise ValueError(
-            "Cannot specify both --kv-transfer-config and --connector flags"
-        )
-
-    if has_connector_flag:
-        normalized = [c.lower() for c in args.connector]
-
-        invalid = [c for c in normalized if c not in VALID_CONNECTORS]
-        if invalid:
+    if "none" in normalized or "null" in normalized:
+        if len(normalized) > 1:
             raise ValueError(
-                f"Invalid connector(s): {', '.join(invalid)}. Valid options are: {', '.join(sorted(VALID_CONNECTORS))}"
+                "'none' and 'null' cannot be combined with other connectors"
+            )
+        config.connector_list = []
+    else:
+        # Check for conflicting flags
+        if has_kv_transfer_config:
+            raise ValueError(
+                "Cannot specify both --kv-transfer-config and --connector flags"
             )
 
-        if "none" in normalized or "null" in normalized:
-            if len(normalized) > 1:
-                raise ValueError(
-                    "'none' and 'null' cannot be combined with other connectors"
-                )
-            config.connector_list = []
-        else:
-            config.connector_list = normalized
+        config.connector_list = normalized
 
     if config.engine_args.block_size is None:
         config.engine_args.block_size = 16
@@ -316,7 +316,12 @@ async def configure_ports(config: Config):
     if config.engine_args.enable_prefix_caching:
         config.kv_port = envs.DYN_VLLM_KV_EVENT_PORT
 
-    if config.has_connector("nixl"):
+    if config.has_connector("nixl") or (
+        # Check if the user provided their own kv_transfer_config
+        config.engine_args.kv_transfer_config is not None
+        # and the connector is NixlConnector
+        and config.engine_args.kv_transfer_config.kv_connector == "NixlConnector"
+    ):
         ensure_side_channel_host()
 
 
