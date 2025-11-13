@@ -57,7 +57,7 @@ use crate::{
     metrics::prometheus_names::distributed_runtime, storage::key_value_store::KeyValueStore,
 };
 
-use component::{Endpoint, InstanceSource};
+use component::Endpoint;
 use utils::GracefulShutdownTracker;
 
 use config::HealthStatus;
