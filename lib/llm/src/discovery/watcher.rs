@@ -370,10 +370,11 @@ impl ModelWatcher {
             // A model that expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle whatever the model supports.
 
+            let endpoint = component.endpoint(&endpoint_id.name);
             let kv_chooser = if self.router_mode == RouterMode::KV {
                 Some(
                     self.manager
-                        .kv_chooser_for(&component, card.kv_cache_block_size, self.kv_router_config)
+                        .kv_chooser_for(&endpoint, card.kv_cache_block_size, self.kv_router_config)
                         .await?,
                 )
             } else {

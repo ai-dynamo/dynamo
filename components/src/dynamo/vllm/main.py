@@ -75,7 +75,7 @@ async def worker():
     config = parse_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv, False)
+    runtime = DistributedRuntime(loop, config.store_kv)
 
     await configure_ports(config)
     overwrite_args(config)
@@ -151,6 +151,9 @@ def setup_kv_event_publisher(
     # Skip KV event publishing for decode workers
     if config.is_decode_worker:
         logger.info("Skipping KV event publisher setup for decode worker")
+        return None
+
+    if config.engine_args.kv_events_config is None:
         return None
 
     # Get data_parallel_size to create publishers for all dp_ranks
