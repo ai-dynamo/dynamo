@@ -165,10 +165,10 @@ def get_prometheus_expfmt(
                         if match:
                             comment_type, metric_name, rest = match.groups()
                             # Remove existing prefix if present
-                            if metric_prefix_filter and metric_name.startswith(
-                                metric_prefix_filter
-                            ):
-                                metric_name = metric_name[len(metric_prefix_filter) :]
+                            if metric_prefix_filter:
+                                metric_name = metric_name.removeprefix(
+                                    metric_prefix_filter
+                                )
                             # Only add prefix if it doesn't already exist
                             if not metric_name.startswith(add_prefix):
                                 metric_name = add_prefix + metric_name
@@ -182,12 +182,10 @@ def get_prometheus_expfmt(
                             rest_of_line = parts[1] if len(parts) > 1 else ""
 
                             # Remove existing prefix if present
-                            if metric_prefix_filter and metric_name_part.startswith(
-                                metric_prefix_filter
-                            ):
-                                metric_name_part = metric_name_part[
-                                    len(metric_prefix_filter) :
-                                ]
+                            if metric_prefix_filter:
+                                metric_name_part = metric_name_part.removeprefix(
+                                    metric_prefix_filter
+                                )
 
                             # Only add prefix if it doesn't already exist
                             if not metric_name_part.startswith(add_prefix):
