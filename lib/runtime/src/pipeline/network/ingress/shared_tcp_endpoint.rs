@@ -60,6 +60,7 @@ impl SharedTcpServer {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn register_endpoint(
         &self,
         endpoint_path: String,
@@ -279,7 +280,7 @@ impl SharedTcpServer {
                 tracing::trace!(instance_id, "handling TCP request");
 
                 let result = service_handler
-                    .handle_payload(Bytes::from(payload))
+                    .handle_payload(payload)
                     .instrument(tracing::info_span!(
                         "handle_payload",
                         component = component_name.as_str(),

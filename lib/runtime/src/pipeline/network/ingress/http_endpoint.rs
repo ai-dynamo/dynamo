@@ -63,6 +63,7 @@ impl SharedHttpServer {
     }
 
     /// Register an endpoint handler with this server
+    #[allow(clippy::too_many_arguments)]
     pub async fn register_endpoint(
         &self,
         subject: String,
@@ -250,28 +251,28 @@ impl TraceParent {
     pub fn from_axum_headers(headers: &HeaderMap) -> Self {
         let mut traceparent = TraceParent::default();
 
-        if let Some(value) = headers.get("traceparent") {
-            if let Ok(s) = value.to_str() {
-                traceparent.trace_id = Some(s.to_string());
-            }
+        if let Some(value) = headers.get("traceparent")
+            && let Ok(s) = value.to_str()
+        {
+            traceparent.trace_id = Some(s.to_string());
         }
 
-        if let Some(value) = headers.get("tracestate") {
-            if let Ok(s) = value.to_str() {
-                traceparent.tracestate = Some(s.to_string());
-            }
+        if let Some(value) = headers.get("tracestate")
+            && let Ok(s) = value.to_str()
+        {
+            traceparent.tracestate = Some(s.to_string());
         }
 
-        if let Some(value) = headers.get("x-request-id") {
-            if let Ok(s) = value.to_str() {
-                traceparent.x_request_id = Some(s.to_string());
-            }
+        if let Some(value) = headers.get("x-request-id")
+            && let Ok(s) = value.to_str()
+        {
+            traceparent.x_request_id = Some(s.to_string());
         }
 
-        if let Some(value) = headers.get("x-dynamo-request-id") {
-            if let Ok(s) = value.to_str() {
-                traceparent.x_dynamo_request_id = Some(s.to_string());
-            }
+        if let Some(value) = headers.get("x-dynamo-request-id")
+            && let Ok(s) = value.to_str()
+        {
+            traceparent.x_dynamo_request_id = Some(s.to_string());
         }
 
         traceparent

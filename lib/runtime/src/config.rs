@@ -525,7 +525,7 @@ impl RequestPlaneMode {
     /// The cached request plane mode, initialized from `DYN_REQUEST_PLANE` environment variable
     /// or defaulting to NATS if not set or invalid.
     pub fn get() -> Self {
-        *REQUEST_PLANE_MODE.get_or_init(|| Self::from_env())
+        *REQUEST_PLANE_MODE.get_or_init(Self::from_env)
     }
 
     /// Get the request plane mode from environment variable (uncached)

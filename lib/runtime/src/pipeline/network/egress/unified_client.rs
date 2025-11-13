@@ -184,8 +184,10 @@ mod tests {
         stats.requests_sent = 1;
         assert!(stats.is_available());
 
-        let mut stats2 = ClientStats::default();
-        stats2.active_connections = 1;
+        let stats2 = ClientStats {
+            active_connections: 1,
+            ..Default::default()
+        };
         assert!(stats2.is_available());
     }
 }

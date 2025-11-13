@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(config.max_concurrent_streams, 2000);
         assert_eq!(config.pool_max_idle_per_host, 200);
         assert_eq!(config.keep_alive_interval, Duration::from_secs(60));
-        assert_eq!(config.adaptive_window, false);
+        assert!(!config.adaptive_window);
 
         // Clean up
         unsafe {
@@ -528,7 +528,6 @@ mod tests {
         let mut handles = vec![];
         for _ in 0..10 {
             let client = client.clone();
-            let addr = addr;
             let handle = tokio::spawn(async move {
                 client
                     .send_request(
@@ -645,7 +644,6 @@ mod tests {
         for _ in 0..num_requests {
             let client = client.clone();
             let payload = payload.clone();
-            let addr = addr;
 
             let handle = tokio::spawn(async move {
                 let headers = std::collections::HashMap::new();
