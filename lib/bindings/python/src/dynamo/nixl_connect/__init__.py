@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ctypes
 import logging
 import socket
 import uuid
@@ -828,8 +829,7 @@ class Descriptor:
 
         # Data is `bytes`.
         elif isinstance(data, bytes):
-            self._data_ptr = id(data)
-            self._data_size = len(data)
+            (self._data_ptr, self._data_size) = self._bytes_to_data_tuple(data)
             self._data_ref = data
 
             logger.debug(
@@ -971,6 +971,48 @@ class Descriptor:
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Registered {self.__repr__()} with NIXL."
         )
+
+    def _bytes_to_data_tuple(
+        self,  # Adding a comment here to satisfy the character requirements.
+        data: bytes | bytearray,
+    ) -> tuple[int, int]:
+        """
+        Returns the memory address of the underlying data of a bytes or bytearray object as well as its size.
+
+        Parameters
+        ----------
+        data : bytes | bytearray
+            The bytes or bytearray object to get the data pointer and size from.
+
+        Returns
+        -------
+        tuple[int, int]
+            A tuple containing the memory address of the underlying data and its size.
+        """
+        if not (isinstance(data, bytes) or isinstance(data, bytearray)):
+            raise TypeError("Argument `data` must be `bytes` or `bytearray`.")
+
+        try:
+            cptr = ctypes.c_char_p()
+            size = ctypes.c_size_t()
+            # Request the pointer to the underlying data and the buffer's size from ctypes.
+            ctypes.pythonapi.PyObject_AsCharBuffer(
+                ctypes.py_object(data),
+                ctypes.byref(cptr),
+                ctypes.byref(size),
+            )
+            # The resulting pointer is a `char*`, cast it to a `void*` to that ctypes will provide the address.
+            # `c_char_p.value` returns a `bytes`` object instead of the pointer address;
+            # whereas `c_void_p.value` returns the actual pointer address as an `int`.
+            vptr = ctypes.cast(cptr, ctypes.c_void_p)
+
+            return (0, 0) if vptr.value is None else (vptr.value, size.value)
+        except Exception as e:
+            logger.warning(
+                f"dynamo.nixl_connect.{self.__class__.__name__}: Failed to get data pointer from bytes object: {e}"
+            )
+            # Fallback to the original method to get the data pointer and size of the bytes object.
+            return (id(data), len(data))
 
 
 class Device:
