@@ -106,8 +106,10 @@ jobs:
         run: |
           set -euo pipefail
           cd ${{ github.workspace }}
+          pwd
           FRONTEND_IMAGE_TAG="dynamo:${{ github.sha }}-frontend-${{ matrix.platform.arch }}"
-          docker build \
+          docker buildx build --load \
+            --platform 'linux/${{ matrix.platform.arch }}' \
             --build-arg DYNAMO_BASE_IMAGE=${{ steps.build-image.outputs.image_tag }} \
             --build-arg EPP_IMAGE=${{ env.EPP_IMAGE }} \
             --build-arg PYTHON_VERSION=3.12 \
