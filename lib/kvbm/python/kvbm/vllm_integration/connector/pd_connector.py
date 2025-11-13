@@ -5,14 +5,19 @@ from typing import TYPE_CHECKING
 
 from kvbm.vllm_integration.connector.dynamo_connector import DynamoConnector
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
-    LMCacheConnectorV1,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnector
+
+# Optional import for LMCache support
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
+        LMCacheConnectorV1,
+    )
+except ImportError:
+    LMCacheConnectorV1 = None  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -41,7 +46,13 @@ class PdConnector(MultiConnector):
             raise ValueError(
                 f"PdConnector requires exactly two connectors (got {len(self._connectors)})"
             )
-        if not isinstance(self._connectors[0], (DynamoConnector, LMCacheConnectorV1)):
+
+        # Build allowed types for first connector
+        allowed_first_types = [DynamoConnector]
+        if LMCacheConnectorV1 is not None:
+            allowed_first_types.append(LMCacheConnectorV1)
+
+        if not isinstance(self._connectors[0], tuple(allowed_first_types)):
             raise TypeError(
                 f"Expected first connector to be DynamoConnector or LMCacheConnector, "
                 f"got {type(self._connectors[0]).__name__}"
