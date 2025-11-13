@@ -155,6 +155,14 @@ class BaseWorkerHandler(ABC):
                     rid=sglang_request_id, abort_all=False
                 )
                 logging.info(f"Aborted Request ID: {context.id()}")
+                
+                # Add grace period to allow SGLang to process the cancellation gracefully
+                # This prevents the race condition where Rust runtime drops the stream
+                # before SGLang can properly clean up the request
+                grace_period_ms = 300  # 300ms recommended by project leaders for reliable cancellation
+                logging.debug(f"Waiting {grace_period_ms}ms for SGLang graceful cleanup...")
+                await asyncio.sleep(grace_period_ms / 1000.0)
+                logging.debug(f"Grace period completed for Request ID: {context.id()}")
             else:
                 logging.error(
                     f"SGLang tokenizer_manager not found for abort request: {context.id()}"
