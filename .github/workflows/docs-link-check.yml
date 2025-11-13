@@ -230,9 +230,9 @@ jobs:
                   print(f'{step_num}. Review and fix problematic symbolic links')
                   print(f'{step_num + 1}. Consider replacing broken symlinks with actual files or fixing targets')
                   print(f'{step_num + 2}. Evaluate if suspicious symlinks with many traversals are necessary')
-              final_step = (7 if has_broken_links and has_problematic_symlinks 
-                           else 4 if has_broken_links 
-                           else 4 if has_problematic_symlinks 
+              final_step = (7 if has_broken_links and has_problematic_symlinks
+                           else 4 if has_broken_links
+                           else 4 if has_problematic_symlinks
                            else 1)
               print(f'{final_step}. Re-run this workflow to verify fixes')
 
