@@ -85,8 +85,18 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
+          set -x
+          exec > >(tee -a tester-${{ matrix.platform.arch }}.log) 2>&1
+          
           cd deploy/cloud/operator
-          docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          if ! docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .; then
+            export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+            bash ../../.github/scripts/create_error_annotation.sh \
+              "Tester: operator (${{ matrix.platform.arch }})" \
+              "83" \
+              "tester-${{ matrix.platform.arch }}.log" \
+              "Tester build failed for operator on ${{ matrix.platform.arch }}"
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
@@ -97,9 +107,19 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
+          set -x
+          exec > >(tee -a check-uncommitted-${{ matrix.platform.arch }}.log) 2>&1
+          
           sudo apt-get update && sudo apt-get install -y make
           cd deploy/cloud/operator
-          make check
+          if ! make check; then
+            export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+            bash ../../.github/scripts/create_error_annotation.sh \
+              "Check Uncommitted Changes: operator (${{ matrix.platform.arch }})" \
+              "105" \
+              "check-uncommitted-${{ matrix.platform.arch }}.log" \
+              "Uncommitted changes detected for operator on ${{ matrix.platform.arch }}"
+          fi
       - name: Build Container
         id: build-image
         shell: bash

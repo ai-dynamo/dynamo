@@ -119,6 +119,12 @@ runs:
           ERROR_TESTS=0
         fi
 
+        # Create error annotation if tests failed
+        if [ ${TEST_EXIT_CODE} -ne 0 ]; then
+          ERROR_MSG="Pytest failed for ${{ inputs.framework }} (${{ inputs.test_type }}): ${FAILED_TESTS} failed, ${ERROR_TESTS} errors out of ${TOTAL_TESTS} tests"
+          echo "::error file=.github/actions/pytest/action.yml,line=46,title=Pytest Failed: ${{ inputs.framework }} (${{ inputs.test_type }})::${ERROR_MSG}"
+        fi
+        
         # Exit with original test result to maintain workflow behavior
         exit ${TEST_EXIT_CODE}
 

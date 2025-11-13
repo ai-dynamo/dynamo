@@ -116,14 +116,21 @@ runs:
           EXTRA_ARGS+=" --build-arg TORCH_BACKEND=${{ inputs.torch_backend }}"
         fi
 
-        ./container/build.sh --tag "$IMAGE_TAG" \
+        set -x
+        exec > >(tee -a build-${{ inputs.framework }}-${{ inputs.platform }}.log) 2>&1
+        
+        if ! ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \
           --platform ${{ inputs.platform }} \
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
-          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS
+          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS; then
+          
+          echo "::error file=.github/actions/docker-build/action.yml,line=119,title=Build Failed: ${{ inputs.framework }} (${{ inputs.platform }})::Docker build failed for ${{ inputs.framework }} on platform ${{ inputs.platform }}"
+          exit 1
+        fi
 
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         echo "🕐 Build ended at: ${BUILD_END_TIME}"
