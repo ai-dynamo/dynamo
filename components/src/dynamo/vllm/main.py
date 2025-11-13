@@ -338,8 +338,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         handler.kv_publishers = kv_publishers
 
     if config.engine_args.disable_log_stats is False:
+        # Register vLLM and Dynamo component metrics, exclude Python internal metrics
         register_engine_metrics_callback(
-            endpoint=generate_endpoint, registry=REGISTRY, metric_prefix_filter="vllm:"
+            endpoint=generate_endpoint,
+            registry=REGISTRY,
+            exclude_prefixes=["python_", "process_"],
         )
 
     # Register prefill model with ModelType.Prefill
@@ -395,6 +398,16 @@ async def init(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
+    # Initialize GPU info metric for DCGM correlation
+    from dynamo.common.utils.gpu import initialize_gpu_info_metric
+
+    initialize_gpu_info_metric(
+        extra_labels={
+            "dynamo_component": config.component,
+            "dynamo_namespace": config.namespace,
+        }
+    )
+
     factory = StatLoggerFactory(
         component,
         config.engine_args.data_parallel_rank or 0,
@@ -444,8 +457,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.kv_publishers = kv_publishers
 
     if config.engine_args.disable_log_stats is False:
+        # Register vLLM and Dynamo component metrics, exclude Python internal metrics
         register_engine_metrics_callback(
-            endpoint=generate_endpoint, registry=REGISTRY, metric_prefix_filter="vllm:"
+            endpoint=generate_endpoint,
+            registry=REGISTRY,
+            exclude_prefixes=["python_", "process_"],
         )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register

@@ -21,6 +21,53 @@ Dynamo automatically exposes metrics with the `dynamo_` name prefixes. It also a
 
 **Kubernetes Integration**: For comprehensive Kubernetes deployment and monitoring setup, see the [Kubernetes Metrics Guide](../kubernetes/observability/metrics.md). This includes Prometheus Operator setup, metrics collection configuration, and visualization in Grafana.
 
+## GPU Hardware Metadata
+
+Dynamo workers automatically expose GPU hardware metadata via the `dynamo_component_gpu_info` metric. This metric uses the Prometheus info pattern (gauge with value=1) where metadata is exposed as labels.
+
+Each GPU visible to a worker exposes one metric series with the following labels:
+
+**GPU Identification:** `gpu_uuid`, `gpu_index`, `pci_bus_id`
+**Hardware Specifications:** `gpu_model`, `gpu_memory_gb`, `compute_capability`
+**Software Environment:** `driver_version`, `cuda_version`
+**Configuration:** `power_limit_w`, `mig_mode`
+**Standard Dynamo Labels:** `model`, `dynamo_component`, `dynamo_namespace`
+
+### Example Output
+
+```prometheus
+# Single GPU worker
+dynamo_component_gpu_info{
+    gpu_uuid="GPU-ef6ef310-6bb8-8bfa-1b66-9fb6e8479ee8",
+    gpu_index="0",
+    gpu_model="NVIDIA RTX 6000 Ada Generation",
+    gpu_memory_gb="48.0",
+    compute_capability="8.9",
+    pci_bus_id="00000000:01:00.0",
+    driver_version="535.129.03",
+    cuda_version="12.2",
+    power_limit_w="300",
+    mig_mode="Disabled",
+    model="Qwen/Qwen3-0.6B",
+    dynamo_component="backend",
+    dynamo_namespace="dynamo"
+} 1.0
+
+# Multi-GPU worker (tensor parallel) - one series per GPU
+dynamo_component_gpu_info{gpu_index="0", gpu_uuid="GPU-abc...", ...} 1.0
+dynamo_component_gpu_info{gpu_index="1", gpu_uuid="GPU-def...", ...} 1.0
+```
+
+### Use Cases
+
+- **Hardware Inventory:** Query GPU models, memory, and compute capabilities across your cluster
+- **DCGM Correlation:** Use `gpu_uuid` label to join with DCGM GPU telemetry metrics
+- **Version Verification:** Check driver and CUDA version consistency across workers
+- **Capacity Planning:** Aggregate GPU memory and power limits per model
+
+> [!NOTE]
+> GPU metadata collection requires the `nvidia-ml-py` package (pynvml) to query NVML. If unavailable, workers will start normally but the metric will not be populated.
+
 ## Metrics Hierarchy
 
 The `MetricsRegistry` trait is implemented by `DistributedRuntime`, `Namespace`, `Component`, and `Endpoint`, providing a hierarchical approach to metric collection that matches Dynamo's distributed architecture:

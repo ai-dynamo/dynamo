@@ -88,6 +88,12 @@ vllm:time_to_first_token_seconds_sum{model_name="meta-llama/Llama-3.1-8B"} 89.38
 - Metrics appear after vLLM engine initialization completes
 - vLLM v1 metrics are different from v0 - see the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) for migration details
 
+## GPU Hardware Metadata
+
+In addition to vLLM engine metrics, Dynamo vLLM workers automatically expose GPU hardware metadata via the `dynamo_component_gpu_info` metric. This metric provides GPU identification (UUID, index), hardware specifications (model, memory, compute capability), and software environment information (driver version, CUDA version).
+
+The `gpu_uuid` label can be used to correlate vLLM worker metrics with DCGM GPU telemetry data. For complete details on available labels and use cases, see the [GPU Hardware Metadata section](../../observability/metrics.md#gpu-hardware-metadata) in the main metrics guide.
+
 ## See Also
 
 ### vLLM Metrics

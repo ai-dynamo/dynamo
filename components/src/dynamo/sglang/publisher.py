@@ -215,10 +215,19 @@ def setup_prometheus_registry(
     """
     registry = CollectorRegistry()
     multiprocess.MultiProcessCollector(registry)
+    # Register SGLang and Dynamo component metrics, exclude Python internal metrics
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
         registry=registry,
-        metric_prefix_filter="sglang:",
+        exclude_prefixes=["python_", "process_"],
+    )
+    # Also register from default REGISTRY for non-multiprocess metrics (like GPU info)
+    from prometheus_client import REGISTRY
+
+    register_engine_metrics_callback(
+        endpoint=generate_endpoint,
+        registry=REGISTRY,
+        metric_prefix_filter="dynamo_",
     )
     return registry
 
@@ -240,6 +249,17 @@ async def setup_sgl_metrics(
     Returns:
         Tuple of (publisher instance, running asyncio task, metrics labels).
     """
+    # Initialize GPU info metric for DCGM correlation
+    from dynamo.common.utils.gpu import initialize_gpu_info_metric
+
+    initialize_gpu_info_metric(
+        extra_labels={
+            "model": engine.server_args.served_model_name,
+            "dynamo_component": config.dynamo_args.component,
+            "dynamo_namespace": config.dynamo_args.namespace,
+        }
+    )
+
     metrics_labels = [("model", engine.server_args.served_model_name)]
     publisher = DynamoSglangPublisher(
         engine, config, component, generate_endpoint, metrics_labels

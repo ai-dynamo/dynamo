@@ -125,6 +125,12 @@ trtllm:request_queue_time_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type="
 - **Initialization**: Metrics appear after TensorRT-LLM engine initialization completes
 - **Metadata**: `MetricsCollector` initialized with model metadata (model name, engine type)
 
+## GPU Hardware Metadata
+
+In addition to TensorRT-LLM engine metrics, Dynamo TensorRT-LLM workers automatically expose GPU hardware metadata via the `dynamo_component_gpu_info` metric. This metric provides GPU identification (UUID, index), hardware specifications (model, memory, compute capability), and software environment information (driver version, CUDA version).
+
+The `gpu_uuid` label can be used to correlate TensorRT-LLM worker metrics with DCGM GPU telemetry data. For complete details on available labels and use cases, see the [GPU Hardware Metadata section](../../observability/metrics.md#gpu-hardware-metadata) in the main metrics guide.
+
 ## TensorRT-LLM Specific: Non-Prometheus Performance Metrics
 
 TensorRT-LLM provides extensive performance data beyond the basic Prometheus metrics. These are **not exposed to Prometheus**.

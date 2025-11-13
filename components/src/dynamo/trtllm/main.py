@@ -355,13 +355,20 @@ async def init(runtime: DistributedRuntime, config: Config):
                 )
                 logging.info("TensorRT-LLM MetricsCollector initialized")
 
-                # Register callback to expose TRT-LLM metrics via Dynamo endpoint
-                # Filter out python_/process_ metrics and add trtllm: prefix to remaining metrics
+                # Register callback to expose TRT-LLM and Dynamo component metrics
+                # Filter out python_/process_ metrics, add trtllm: prefix to TRT-LLM metrics
+                # Note: dynamo_ metrics keep their prefix
                 register_engine_metrics_callback(
                     endpoint=endpoint,
                     registry=REGISTRY,
-                    exclude_prefixes=["python_", "process_"],
+                    exclude_prefixes=["python_", "process_", "dynamo_"],
                     add_prefix="trtllm:",
+                )
+                # Register Dynamo component metrics separately (no prefix transformation)
+                register_engine_metrics_callback(
+                    endpoint=endpoint,
+                    registry=REGISTRY,
+                    metric_prefix_filter="dynamo_",
                 )
                 logging.info("TensorRT-LLM Prometheus metrics registered")
             except Exception as e:
@@ -417,7 +424,19 @@ async def init(runtime: DistributedRuntime, config: Config):
             )
             # Use model_path as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model_path
+
+            # Initialize GPU info metric for DCGM correlation
+            from dynamo.common.utils.gpu import initialize_gpu_info_metric
+
+            initialize_gpu_info_metric(
+                extra_labels={
+                    "dynamo_component": config.component,
+                    "dynamo_namespace": config.namespace,
+                }
+            )
+
             metrics_labels = [("model", model_name_for_metrics)]
+
             async with get_publisher(
                 component,
                 engine,

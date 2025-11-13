@@ -280,6 +280,16 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     logging.info("Waiting for Encoder Worker Instances ...")
     await encode_worker_client.wait_for_instances()
 
+    # Initialize GPU info metric for DCGM correlation
+    from dynamo.common.utils.gpu import initialize_gpu_info_metric
+
+    initialize_gpu_info_metric(
+        extra_labels={
+            "dynamo_component": dynamo_args.component,
+            "dynamo_namespace": dynamo_args.namespace,
+        }
+    )
+
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -327,6 +337,16 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
 
     await pd_worker_client.wait_for_instances()
 
+    # Initialize GPU info metric for DCGM correlation
+    from dynamo.common.utils.gpu import initialize_gpu_info_metric
+
+    initialize_gpu_info_metric(
+        extra_labels={
+            "dynamo_component": dynamo_args.component,
+            "dynamo_namespace": dynamo_args.namespace,
+        }
+    )
+
     tasks = [
         generate_endpoint.serve_endpoint(
             handler.generate,
@@ -371,6 +391,16 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
 
     await handler.async_init()
 
+    # Initialize GPU info metric for DCGM correlation
+    from dynamo.common.utils.gpu import initialize_gpu_info_metric
+
+    initialize_gpu_info_metric(
+        extra_labels={
+            "dynamo_component": dynamo_args.component,
+            "dynamo_namespace": dynamo_args.namespace,
+        }
+    )
+
     try:
         await generate_endpoint.serve_endpoint(
             handler.generate,
@@ -401,6 +431,16 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
     await handler.async_init()
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
+
+    # Initialize GPU info metric for DCGM correlation
+    from dynamo.common.utils.gpu import initialize_gpu_info_metric
+
+    initialize_gpu_info_metric(
+        extra_labels={
+            "dynamo_component": dynamo_args.component,
+            "dynamo_namespace": dynamo_args.namespace,
+        }
+    )
 
     try:
         await asyncio.gather(

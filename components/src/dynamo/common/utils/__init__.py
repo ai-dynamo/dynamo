@@ -10,8 +10,9 @@ Dynamo backends and components.
 Submodules:
     - paths: Workspace directory detection and path utilities
     - prometheus: Prometheus metrics collection and logging utilities
+    - gpu: GPU device information and metadata utilities
 """
 
-from dynamo.common.utils import paths, prometheus
+from dynamo.common.utils import gpu, paths, prometheus
 
-__all__ = ["paths", "prometheus"]
+__all__ = ["gpu", "paths", "prometheus"]

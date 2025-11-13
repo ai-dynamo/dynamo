@@ -84,6 +84,12 @@ sglang:cache_hit_rate{model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0075
 - The integration uses Dynamo's `register_engine_metrics_callback()` function
 - Metrics appear after SGLang engine initialization completes
 
+## GPU Hardware Metadata
+
+In addition to SGLang engine metrics, Dynamo SGLang workers automatically expose GPU hardware metadata via the `dynamo_component_gpu_info` metric. This metric provides GPU identification (UUID, index), hardware specifications (model, memory, compute capability), and software environment information (driver version, CUDA version).
+
+The `gpu_uuid` label can be used to correlate SGLang worker metrics with DCGM GPU telemetry data. For complete details on available labels and use cases, see the [GPU Hardware Metadata section](../../observability/metrics.md#gpu-hardware-metadata) in the main metrics guide.
+
 ## See Also
 
 ### SGLang Metrics
