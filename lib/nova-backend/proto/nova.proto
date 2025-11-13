@@ -23,5 +23,7 @@ service NovaStreaming
 // [u16: version][u8: msg_type][u32: header_len][u32: payload_len][header][payload]
 message FramedData
 {
-  bytes data = 1;
+  bytes preamble = 1;
+  bytes header = 2;
+  bytes payload = 3;
 }

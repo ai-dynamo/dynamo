@@ -11,7 +11,6 @@ use std::pin::Pin;
 
 use futures::Stream;
 use tokio::net::TcpListener;
-use tokio_util::codec::Decoder;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
@@ -100,18 +99,17 @@ impl NovaStreaming for NovaStreamingImpl {
 
         // Spawn task to handle incoming messages
         tokio::spawn(async move {
-            let mut decoder = TcpFrameCodec::new();
-
             while let Some(result) = futures::StreamExt::next(&mut in_stream).await {
                 match result {
                     Ok(framed_data) => {
-                        // Extract the TCP-framed data from the protobuf wrapper
-                        let tcp_frame_bytes = framed_data.data;
+                        // Extract the 3 separate blobs from protobuf
+                        let preamble = framed_data.preamble;
+                        let header = framed_data.header;
+                        let payload = framed_data.payload;
 
-                        // Decode the TCP frame
-                        let mut buf = bytes::BytesMut::from(&tcp_frame_bytes[..]);
-                        match decoder.decode(&mut buf) {
-                            Ok(Some((message_type, header, payload))) => {
+                        // Parse message type from preamble
+                        match TcpFrameCodec::parse_message_type_from_preamble(&preamble) {
+                            Ok(message_type) => {
                                 debug!(
                                     "Received message: type={:?}, header_len={}, payload_len={}",
                                     message_type,
@@ -126,15 +124,16 @@ impl NovaStreaming for NovaStreamingImpl {
                                     MessageType::Ack | MessageType::Event => &channels.event_stream,
                                 };
 
+                                // Convert Vec<u8> to Bytes
+                                let header = bytes::Bytes::from(header);
+                                let payload = bytes::Bytes::from(payload);
+
                                 if let Err(e) = channel.try_send((header, payload)) {
                                     error!("Failed to route message to channel: {}", e);
                                 }
                             }
-                            Ok(None) => {
-                                error!("Incomplete TCP frame received");
-                            }
                             Err(e) => {
-                                error!("Failed to decode TCP frame: {}", e);
+                                error!("Failed to parse message type from preamble: {}", e);
                             }
                         }
                     }

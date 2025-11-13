@@ -11,9 +11,10 @@
 //! The codec uses `BytesMut` for receiving and `Bytes` for output, enabling
 //! zero-copy buffer slicing where header and payload share the underlying buffer.
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::io;
-use tokio_util::codec::{Decoder, Encoder};
+use bytes::{Buf, Bytes, BytesMut};
+use std::io::{self, IoSlice};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio_util::codec::Decoder;
 
 use crate::MessageType;
 
@@ -56,42 +57,118 @@ impl TcpFrameCodec {
         }
     }
 
-    /// Encode a frame into a Bytes buffer (zero-copy)
+    /// Build the frame preamble (metadata header)
     ///
-    /// This method pre-encodes a complete frame with the wire format:
-    /// [schema_version][msg_type][header_len][payload_len][header][payload]
-    ///
-    /// # Arguments
-    /// * `msg_type` - The message type (Message, Response, Ack, Event)
-    /// * `header` - Header bytes (ownership transferred)
-    /// * `payload` - Payload bytes (ownership transferred)
-    ///
-    /// # Returns
-    /// Pre-encoded frame as Bytes ready for sending
+    /// Returns a fixed-size preamble containing version, message type, and lengths.
     #[inline]
-    pub fn encode_frame(msg_type: MessageType, header: Bytes, payload: Bytes) -> io::Result<Bytes> {
-        let header_len = header.len() as u32;
-        let payload_len = payload.len() as u32;
-
-        // Validate lengths before allocation
+    pub fn build_preamble(
+        msg_type: MessageType,
+        header_len: u32,
+        payload_len: u32,
+    ) -> io::Result<[u8; MIN_HEADER_SIZE]> {
+        // Validate lengths before building preamble
         Self::validate_lengths(header_len, payload_len)?;
 
-        // Pre-allocate exact capacity
-        let capacity = MIN_HEADER_SIZE + header_len as usize + payload_len as usize;
-        let mut buf = BytesMut::with_capacity(capacity);
+        let mut preamble = [0u8; MIN_HEADER_SIZE];
 
-        // Write frame header
-        buf.put_u16(SCHEMA_VERSION_V1);
-        buf.put_u8(msg_type.as_u8());
-        buf.put_u32(header_len);
-        buf.put_u32(payload_len);
+        // Layout:
+        // [0..2) = version
+        // [2]    = msg_type
+        // [3..7) = header_len
+        // [7..11)= payload_len  (total 11 bytes)
+        preamble[0..2].copy_from_slice(&SCHEMA_VERSION_V1.to_be_bytes());
+        preamble[2] = msg_type.as_u8();
+        preamble[3..7].copy_from_slice(&header_len.to_be_bytes());
+        preamble[7..11].copy_from_slice(&payload_len.to_be_bytes());
 
-        // Append header and payload (zero-copy via put)
-        buf.put(header);
-        buf.put(payload);
+        Ok(preamble)
+    }
 
-        // Convert to immutable Bytes (zero-cost)
-        Ok(buf.freeze())
+    /// Parse message type from a preamble
+    ///
+    /// Validates the schema version and extracts the message type from the preamble.
+    #[inline]
+    pub fn parse_message_type_from_preamble(preamble: &[u8]) -> io::Result<MessageType> {
+        if preamble.len() < MIN_HEADER_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Preamble too short",
+            ));
+        }
+
+        // Validate schema version
+        let schema_version = u16::from_be_bytes([preamble[0], preamble[1]]);
+        if schema_version != SCHEMA_VERSION_V1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Unsupported schema version: {} (expected {})",
+                    schema_version, SCHEMA_VERSION_V1
+                ),
+            ));
+        }
+
+        // Extract and validate message type
+        MessageType::from_u8(preamble[2]).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid message type: {}", preamble[2]),
+            )
+        })
+    }
+
+    /// Encode and write a frame asynchronously
+    #[inline]
+    pub async fn encode_frame<W: AsyncWrite + Unpin>(
+        writer: &mut W,
+        msg_type: MessageType,
+        header: &[u8],
+        payload: &[u8],
+    ) -> tokio::io::Result<()> {
+        let preamble = Self::build_preamble(msg_type, header.len() as u32, payload.len() as u32)?;
+
+        let bufs = [
+            IoSlice::new(&preamble),
+            IoSlice::new(header),
+            IoSlice::new(payload),
+        ];
+
+        let total_len = preamble.len() + header.len() + payload.len();
+        let written = writer.write_vectored(&bufs).await?;
+        if written != total_len {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                format!("incomplete write: wrote {} of {} bytes", written, total_len),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Encode and write a frame synchronously
+    #[inline]
+    pub fn encode_frame_sync<W: std::io::Write>(
+        writer: &mut W,
+        msg_type: MessageType,
+        header: &[u8],
+        payload: &[u8],
+    ) -> std::io::Result<()> {
+        let preamble = Self::build_preamble(msg_type, header.len() as u32, payload.len() as u32)?;
+
+        let bufs = [
+            IoSlice::new(&preamble),
+            IoSlice::new(header),
+            IoSlice::new(payload),
+        ];
+
+        let total_len = preamble.len() + header.len() + payload.len();
+        let written = writer.write_vectored(&bufs)?;
+        if written != total_len {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                format!("incomplete write: wrote {} of {} bytes", written, total_len),
+            ));
+        }
+        Ok(())
     }
 
     /// Validate that lengths are reasonable
@@ -199,29 +276,37 @@ impl Decoder for TcpFrameCodec {
     }
 }
 
-impl Encoder<Bytes> for TcpFrameCodec {
-    type Error = io::Error;
-
-    /// Encode pre-framed bytes into the output buffer
-    ///
-    /// This encoder assumes the input `Bytes` is already framed via `encode_frame()`.
-    /// It simply appends the pre-framed bytes to the output buffer for zero-copy sending.
-    #[inline]
-    fn encode(&mut self, item: Bytes, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        dst.extend_from_slice(&item);
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test helper to encode a frame into a Vec<u8> for verification (async)
+    async fn encode_frame_to_bytes(
+        msg_type: MessageType,
+        header: &[u8],
+        payload: &[u8],
+    ) -> io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        TcpFrameCodec::encode_frame(&mut buf, msg_type, header, payload).await?;
+        Ok(buf)
+    }
+
+    /// Test helper to encode a frame into a Vec<u8> for verification (sync)
+    fn encode_frame_to_bytes_sync(
+        msg_type: MessageType,
+        header: &[u8],
+        payload: &[u8],
+    ) -> io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        TcpFrameCodec::encode_frame_sync(&mut buf, msg_type, header, payload)?;
+        Ok(buf)
+    }
 
     /// Helper to create raw frames with arbitrary parameters for negative testing.
     ///
     /// This function bypasses normal validation and encoding logic to create
     /// intentionally invalid frames (wrong schema version, oversized frames, etc.)
-    /// for testing error handling paths. Use `TcpFrameCodec::encode_frame()` for
+    /// for testing error handling paths. Use `encode_frame_to_bytes()` for
     /// testing valid frame construction.
     fn create_unsafe_frame(
         schema_version: u16,
@@ -242,12 +327,10 @@ mod tests {
     #[test]
     fn test_decode_message_frame() {
         let mut codec = TcpFrameCodec::new();
-        let header = Bytes::from(&b"test-header"[..]);
-        let payload = Bytes::from(&b"test-payload-data"[..]);
+        let header = b"test-header";
+        let payload = b"test-payload-data";
 
-        let framed =
-            TcpFrameCodec::encode_frame(MessageType::Message, header.clone(), payload.clone())
-                .unwrap();
+        let framed = encode_frame_to_bytes_sync(MessageType::Message, header, payload).unwrap();
         let mut buf = BytesMut::from(&framed[..]);
 
         let result = codec.decode(&mut buf).unwrap();
@@ -255,8 +338,8 @@ mod tests {
 
         let (msg_type, decoded_header, decoded_payload) = result.unwrap();
         assert_eq!(msg_type, MessageType::Message);
-        assert_eq!(decoded_header, header);
-        assert_eq!(decoded_payload, payload);
+        assert_eq!(decoded_header, Bytes::from(header.as_ref()));
+        assert_eq!(decoded_payload, Bytes::from(payload.as_ref()));
     }
 
     #[test]
@@ -270,10 +353,10 @@ mod tests {
 
         for frame_type in &frame_types {
             let mut codec = TcpFrameCodec::new();
-            let header = Bytes::from(&b"header"[..]);
-            let payload = Bytes::from(&b"payload"[..]);
+            let header = b"header";
+            let payload = b"payload";
 
-            let framed = TcpFrameCodec::encode_frame(*frame_type, header, payload).unwrap();
+            let framed = encode_frame_to_bytes_sync(*frame_type, header, payload).unwrap();
             let mut buf = BytesMut::from(&framed[..]);
 
             let result = codec.decode(&mut buf).unwrap();
@@ -287,11 +370,10 @@ mod tests {
     #[test]
     fn test_decode_empty_payload() {
         let mut codec = TcpFrameCodec::new();
-        let header = Bytes::from(&b"ack-header"[..]);
-        let payload = Bytes::new();
+        let header = b"ack-header";
+        let payload = b"";
 
-        let framed =
-            TcpFrameCodec::encode_frame(MessageType::Ack, header.clone(), payload.clone()).unwrap();
+        let framed = encode_frame_to_bytes_sync(MessageType::Ack, header, payload).unwrap();
         let mut buf = BytesMut::from(&framed[..]);
 
         let result = codec.decode(&mut buf).unwrap();
@@ -299,19 +381,17 @@ mod tests {
 
         let (msg_type, decoded_header, decoded_payload) = result.unwrap();
         assert_eq!(msg_type, MessageType::Ack);
-        assert_eq!(decoded_header, header);
+        assert_eq!(&decoded_header[..], header);
         assert_eq!(decoded_payload.len(), 0);
     }
 
     #[test]
     fn test_decode_partial_frame() {
         let mut codec = TcpFrameCodec::new();
-        let header = Bytes::from(&b"test-header"[..]);
-        let payload = Bytes::from(&b"test-payload"[..]);
+        let header = b"test-header";
+        let payload = b"test-payload";
 
-        let full_frame =
-            TcpFrameCodec::encode_frame(MessageType::Message, header.clone(), payload.clone())
-                .unwrap();
+        let full_frame = encode_frame_to_bytes_sync(MessageType::Message, header, payload).unwrap();
 
         // Send only first 5 bytes (partial header)
         let mut buf = BytesMut::from(&full_frame[..5]);
@@ -330,8 +410,8 @@ mod tests {
 
         let (msg_type, decoded_header, decoded_payload) = result.unwrap();
         assert_eq!(msg_type, MessageType::Message);
-        assert_eq!(decoded_header, header);
-        assert_eq!(decoded_payload, payload);
+        assert_eq!(&decoded_header[..], header);
+        assert_eq!(&decoded_payload[..], payload);
     }
 
     #[test]
@@ -395,18 +475,10 @@ mod tests {
         let mut buf = BytesMut::new();
 
         // Add two frames to buffer
-        let frame1 = TcpFrameCodec::encode_frame(
-            MessageType::Message,
-            Bytes::from(&b"header1"[..]),
-            Bytes::from(&b"payload1"[..]),
-        )
-        .unwrap();
-        let frame2 = TcpFrameCodec::encode_frame(
-            MessageType::Response,
-            Bytes::from(&b"header2"[..]),
-            Bytes::from(&b"payload2"[..]),
-        )
-        .unwrap();
+        let frame1 =
+            encode_frame_to_bytes_sync(MessageType::Message, b"header1", b"payload1").unwrap();
+        let frame2 =
+            encode_frame_to_bytes_sync(MessageType::Response, b"header2", b"payload2").unwrap();
         buf.extend_from_slice(&frame1);
         buf.extend_from_slice(&frame2);
 
@@ -433,20 +505,18 @@ mod tests {
     #[test]
     fn test_zero_copy_bytes_share_buffer() {
         let mut codec = TcpFrameCodec::new();
-        let header = Bytes::from(&b"shared-header"[..]);
-        let payload = Bytes::from(&b"shared-payload"[..]);
+        let header = b"shared-header";
+        let payload = b"shared-payload";
 
-        let framed =
-            TcpFrameCodec::encode_frame(MessageType::Message, header.clone(), payload.clone())
-                .unwrap();
+        let framed = encode_frame_to_bytes_sync(MessageType::Message, header, payload).unwrap();
         let mut buf = BytesMut::from(&framed[..]);
 
         let result = codec.decode(&mut buf).unwrap().unwrap();
         let (_, decoded_header, decoded_payload) = result;
 
         // Verify the slices contain correct data
-        assert_eq!(decoded_header, header);
-        assert_eq!(decoded_payload, payload);
+        assert_eq!(&decoded_header[..], header);
+        assert_eq!(&decoded_payload[..], payload);
 
         // Clone should be cheap (just RC increment)
         let header_clone = decoded_header.clone();
@@ -458,12 +528,10 @@ mod tests {
 
     #[test]
     fn test_encode_frame() {
-        let header = Bytes::from(&b"test-header"[..]);
-        let payload = Bytes::from(&b"test-payload"[..]);
+        let header = b"test-header";
+        let payload = b"test-payload";
 
-        let framed =
-            TcpFrameCodec::encode_frame(MessageType::Message, header.clone(), payload.clone())
-                .unwrap();
+        let framed = encode_frame_to_bytes_sync(MessageType::Message, header, payload).unwrap();
 
         // Verify frame structure
         assert_eq!(framed.len(), MIN_HEADER_SIZE + header.len() + payload.len());
@@ -486,15 +554,15 @@ mod tests {
         // Verify data
         assert_eq!(
             &framed[MIN_HEADER_SIZE..MIN_HEADER_SIZE + header.len()],
-            &header[..]
+            header
         );
-        assert_eq!(&framed[MIN_HEADER_SIZE + header.len()..], &payload[..]);
+        assert_eq!(&framed[MIN_HEADER_SIZE + header.len()..], payload);
     }
 
     #[test]
     fn test_encode_all_message_types() {
-        let header = Bytes::from(&b"header"[..]);
-        let payload = Bytes::from(&b"payload"[..]);
+        let header = b"header";
+        let payload = b"payload";
 
         for msg_type in &[
             MessageType::Message,
@@ -502,19 +570,17 @@ mod tests {
             MessageType::Ack,
             MessageType::Event,
         ] {
-            let framed =
-                TcpFrameCodec::encode_frame(*msg_type, header.clone(), payload.clone()).unwrap();
+            let framed = encode_frame_to_bytes_sync(*msg_type, header, payload).unwrap();
             assert_eq!(framed[2], msg_type.as_u8());
         }
     }
 
     #[test]
     fn test_encode_empty_payload() {
-        let header = Bytes::from(&b"ack-header"[..]);
-        let payload = Bytes::new();
+        let header = b"ack-header";
+        let payload = b"";
 
-        let framed =
-            TcpFrameCodec::encode_frame(MessageType::Ack, header.clone(), payload.clone()).unwrap();
+        let framed = encode_frame_to_bytes_sync(MessageType::Ack, header, payload).unwrap();
 
         assert_eq!(framed.len(), MIN_HEADER_SIZE + header.len());
         assert_eq!(
@@ -525,10 +591,10 @@ mod tests {
 
     #[test]
     fn test_encode_frame_too_large() {
-        let header = Bytes::from(vec![0u8; (MAX_FRAME_SIZE / 2 + 1) as usize]);
-        let payload = Bytes::from(vec![0u8; (MAX_FRAME_SIZE / 2 + 1) as usize]);
+        let header = vec![0u8; (MAX_FRAME_SIZE / 2 + 1) as usize];
+        let payload = vec![0u8; (MAX_FRAME_SIZE / 2 + 1) as usize];
 
-        let result = TcpFrameCodec::encode_frame(MessageType::Message, header, payload);
+        let result = encode_frame_to_bytes_sync(MessageType::Message, &header, &payload);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
     }
@@ -536,13 +602,11 @@ mod tests {
     #[test]
     fn test_round_trip_encode_decode() {
         let mut codec = TcpFrameCodec::new();
-        let header = Bytes::from(&b"round-trip-header"[..]);
-        let payload = Bytes::from(&b"round-trip-payload-data"[..]);
+        let header = b"round-trip-header";
+        let payload = b"round-trip-payload-data";
 
         // Encode
-        let framed =
-            TcpFrameCodec::encode_frame(MessageType::Response, header.clone(), payload.clone())
-                .unwrap();
+        let framed = encode_frame_to_bytes_sync(MessageType::Response, header, payload).unwrap();
 
         // Decode
         let mut buf = BytesMut::from(&framed[..]);
@@ -551,8 +615,8 @@ mod tests {
 
         let (msg_type, decoded_header, decoded_payload) = result.unwrap();
         assert_eq!(msg_type, MessageType::Response);
-        assert_eq!(decoded_header, header);
-        assert_eq!(decoded_payload, payload);
+        assert_eq!(&decoded_header[..], header);
+        assert_eq!(&decoded_payload[..], payload);
     }
 
     #[test]
@@ -566,18 +630,73 @@ mod tests {
 
         for msg_type in &types {
             let mut codec = TcpFrameCodec::new();
-            let header = Bytes::from(&b"header"[..]);
-            let payload = Bytes::from(&b"payload"[..]);
+            let header = b"header";
+            let payload = b"payload";
 
-            let framed =
-                TcpFrameCodec::encode_frame(*msg_type, header.clone(), payload.clone()).unwrap();
+            let framed = encode_frame_to_bytes_sync(*msg_type, header, payload).unwrap();
 
             let mut buf = BytesMut::from(&framed[..]);
             let result = codec.decode(&mut buf).unwrap().unwrap();
 
             assert_eq!(result.0, *msg_type);
-            assert_eq!(result.1, header);
-            assert_eq!(result.2, payload);
+            assert_eq!(&result.1[..], header);
+            assert_eq!(&result.2[..], payload);
         }
+    }
+
+    #[test]
+    fn test_encode_frame_sync() {
+        let header = b"sync-header";
+        let payload = b"sync-payload";
+
+        let framed = encode_frame_to_bytes_sync(MessageType::Message, header, payload).unwrap();
+
+        // Verify frame structure
+        assert_eq!(framed.len(), MIN_HEADER_SIZE + header.len() + payload.len());
+
+        // Verify preamble fields
+        assert_eq!(
+            u16::from_be_bytes([framed[0], framed[1]]),
+            SCHEMA_VERSION_V1
+        );
+        assert_eq!(framed[2], MessageType::Message.as_u8());
+        assert_eq!(
+            u32::from_be_bytes([framed[3], framed[4], framed[5], framed[6]]),
+            header.len() as u32
+        );
+        assert_eq!(
+            u32::from_be_bytes([framed[7], framed[8], framed[9], framed[10]]),
+            payload.len() as u32
+        );
+
+        // Verify data
+        assert_eq!(
+            &framed[MIN_HEADER_SIZE..MIN_HEADER_SIZE + header.len()],
+            header
+        );
+        assert_eq!(&framed[MIN_HEADER_SIZE + header.len()..], payload);
+    }
+
+    #[test]
+    fn test_sync_async_produce_same_output() {
+        let header = b"test-header";
+        let payload = b"test-payload";
+
+        // Encode with sync version
+        let sync_framed =
+            encode_frame_to_bytes_sync(MessageType::Response, header, payload).unwrap();
+
+        // Encode with async version (using tokio runtime)
+        let async_framed = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(encode_frame_to_bytes(
+                MessageType::Response,
+                header,
+                payload,
+            ))
+            .unwrap();
+
+        // Both should produce identical output
+        assert_eq!(sync_framed, async_framed);
     }
 }

@@ -17,8 +17,8 @@ pub enum TransportError {
     #[error("Invalid endpoint format")]
     InvalidEndpoint,
 
-    #[error("Peer not registered")]
-    PeerNotRegistered,
+    #[error("Peer not registered: {0}")]
+    PeerNotRegistered(InstanceId),
 
     #[error("Transport not started")]
     NotStarted,

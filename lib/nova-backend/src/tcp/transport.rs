@@ -9,12 +9,10 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
-use futures::SinkExt;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio_util::codec::Framed;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -44,6 +42,9 @@ pub struct TcpTransport {
 
     // Shutdown coordination
     cancel_token: CancellationToken,
+
+    // Send channel capacity for backpressure
+    channel_capacity: usize,
 }
 
 /// Handle to a connection's writer task
@@ -54,15 +55,27 @@ struct ConnectionHandle {
 
 /// Task sent to writer task containing pre-encoded frame
 struct SendTask {
-    framed_bytes: Bytes,
-    on_error: Arc<dyn TransportErrorHandler>,
+    msg_type: MessageType,
     header: Bytes,
     payload: Bytes,
+    on_error: Arc<dyn TransportErrorHandler>,
+}
+
+impl SendTask {
+    fn on_error(self, error: impl Into<String>) {
+        self.on_error
+            .on_error(self.header, self.payload, error.into());
+    }
 }
 
 impl TcpTransport {
     /// Create a new TCP transport
-    pub fn new(bind_addr: SocketAddr, key: TransportKey, local_address: WorkerAddress) -> Self {
+    pub fn new(
+        bind_addr: SocketAddr,
+        key: TransportKey,
+        local_address: WorkerAddress,
+        channel_capacity: usize,
+    ) -> Self {
         Self {
             key,
             bind_addr,
@@ -71,6 +84,7 @@ impl TcpTransport {
             connections: Arc::new(DashMap::new()),
             runtime: OnceLock::new(),
             cancel_token: CancellationToken::new(),
+            channel_capacity,
         }
     }
 
@@ -93,15 +107,17 @@ impl TcpTransport {
             return Ok(handle.clone());
         }
 
+        let rt = self.runtime.get().ok_or(TransportError::NotStarted)?;
+
         // Slow path: create new connection
         let addr = *self
             .peers
             .get(&instance_id)
-            .ok_or_else(|| anyhow::anyhow!("peer not registered: {}", instance_id))?
+            .ok_or(TransportError::PeerNotRegistered(instance_id))?
             .value();
 
         // Create channel (bounded for backpressure)
-        let (tx, rx) = flume::bounded(256);
+        let (tx, rx) = flume::bounded(self.channel_capacity);
 
         let handle = ConnectionHandle { tx };
 
@@ -110,80 +126,11 @@ impl TcpTransport {
 
         // Spawn writer task using stored runtime handle
         let cancel = self.cancel_token.clone();
-        if let Some(rt) = self.runtime.get() {
-            rt.spawn(connection_writer_task(addr, rx, cancel));
-        } else {
-            // Fallback to tokio::spawn if runtime not yet set (shouldn't happen)
-            tokio::spawn(connection_writer_task(addr, rx, cancel));
-        }
+        rt.spawn(connection_writer_task(addr, rx, cancel));
 
         debug!("Created new connection to {} ({})", instance_id, addr);
 
         Ok(handle)
-    }
-
-    /// Slow path for send_message when fast path fails
-    #[cold]
-    fn send_slow_path(
-        &self,
-        instance_id: dynamo_identity::InstanceId,
-        framed: Bytes,
-        header: Bytes,
-        payload: Bytes,
-        on_error: Arc<dyn TransportErrorHandler>,
-    ) {
-        // Get or create connection
-        let handle = match self.get_or_create_connection(instance_id) {
-            Ok(h) => h,
-            Err(e) => {
-                error!("Failed to create connection: {}", e);
-                on_error.on_error(header, payload, e.to_string());
-                return;
-            }
-        };
-
-        let task = SendTask {
-            framed_bytes: framed,
-            on_error,
-            header: header.clone(),
-            payload: payload.clone(),
-        };
-
-        // Spawn task to send (avoid blocking current task) using stored runtime handle
-        if let Some(rt) = self.runtime.get() {
-            rt.spawn(async move {
-                match tokio::time::timeout(Duration::from_millis(100), handle.tx.send_async(task))
-                    .await
-                {
-                    Ok(Ok(())) => { /* Success */ }
-                    Ok(Err(_)) => {
-                        // Channel closed - writer task exited
-                        error!("Connection channel closed for {}", instance_id);
-                    }
-                    Err(_) => {
-                        // Timeout - backpressure
-                        warn!("Send timeout for {}", instance_id);
-                    }
-                }
-            });
-        } else {
-            // Fallback to tokio::spawn if runtime not yet set (shouldn't happen)
-            tokio::spawn(async move {
-                match tokio::time::timeout(Duration::from_millis(100), handle.tx.send_async(task))
-                    .await
-                {
-                    Ok(Ok(())) => { /* Success */ }
-                    Ok(Err(_)) => {
-                        // Channel closed - writer task exited
-                        error!("Connection channel closed for {}", instance_id);
-                    }
-                    Err(_) => {
-                        // Timeout - backpressure
-                        warn!("Send timeout for {}", instance_id);
-                    }
-                }
-            });
-        }
     }
 }
 
@@ -231,37 +178,48 @@ impl Transport for TcpTransport {
         let header = Bytes::from(header);
         let payload = Bytes::from(payload);
 
-        // Pre-encode frame (off critical path)
-        let framed =
-            match TcpFrameCodec::encode_frame(message_type, header.clone(), payload.clone()) {
-                Ok(f) => f,
-                Err(e) => {
-                    // Early return on encoding error
-                    on_error.on_error(header, payload, e.to_string());
+        let send_msg = SendTask {
+            msg_type: message_type,
+            header,
+            payload,
+            on_error,
+        };
+
+        // Fast path: try to send on existing connection
+        let send_msg = match self.connections.get(&instance_id) {
+            Some(handle) => match handle.tx.try_send(send_msg) {
+                Ok(()) => return,
+                Err(flume::TrySendError::Full(send_msg)) => send_msg,
+                Err(flume::TrySendError::Disconnected(send_msg)) => {
+                    send_msg.on_error("Connection closed");
                     return;
                 }
-            };
+            },
+            None => send_msg,
+        };
 
-        // Fast path: connection exists
-        let tx = self.connections.get(&instance_id).map(|h| h.tx.clone());
-
-        if let Some(tx) = tx {
-            let task = SendTask {
-                framed_bytes: framed.clone(),
-                on_error: on_error.clone(),
-                header: header.clone(),
-                payload: payload.clone(),
-            };
-
-            // Try non-blocking send
-            if tx.try_send(task).is_ok() {
-                return; // Fast path success
+        // Slow path: create new connection
+        let rt = match self.runtime.get() {
+            Some(rt) => rt,
+            None => {
+                send_msg.on_error("Transport not started");
+                return;
             }
-            // Fall through to slow path if channel full
-        }
+        };
 
-        // Slow path: establish connection or handle full channel
-        self.send_slow_path(instance_id, framed, header, payload, on_error);
+        let handle = match self.get_or_create_connection(instance_id) {
+            Ok(h) => h,
+            Err(e) => {
+                send_msg.on_error(format!("Failed to create connection: {}", e));
+                return;
+            }
+        };
+
+        rt.spawn(async move {
+            if let Err(flume::SendError(send_msg)) = handle.tx.send_async(send_msg).await {
+                send_msg.on_error("Connection closed");
+            }
+        });
     }
 
     fn start(
@@ -366,12 +324,12 @@ impl Transport for TcpTransport {
 async fn connection_writer_task(
     addr: SocketAddr,
     rx: flume::Receiver<SendTask>,
-    cancel_token: CancellationToken,
+    _cancel_token: CancellationToken,
 ) -> Result<()> {
     debug!("Connecting to {}", addr);
 
     // Connect to remote peer
-    let stream = TcpStream::connect(addr).await.context("connect failed")?;
+    let mut stream = TcpStream::connect(addr).await.context("connect failed")?;
 
     // Configure socket for low latency
     if let Err(e) = stream.set_nodelay(true) {
@@ -392,46 +350,20 @@ async fn connection_writer_task(
     }
 
     // Create framed writer
-    let mut framed = Framed::new(stream, TcpFrameCodec::new());
 
     debug!("Connected to {}", addr);
 
     // Main send loop
-    loop {
-        tokio::select! {
-            Ok(task) = rx.recv_async() => {
-                // Send pre-framed bytes
-                match framed.send(task.framed_bytes).await {
-                    Ok(()) => {
-                        // Success - continue
-                    }
-                    Err(e) => {
-                        // Network error - invoke callback and exit
-                        error!("TCP write error to {}: {}", addr, e);
-                        task.on_error.on_error(
-                            task.header,
-                            task.payload,
-                            format!("TCP write failed: {}", e)
-                        );
-                        break;
-                    }
-                }
-            }
-            _ = cancel_token.cancelled() => {
-                debug!("Writer task for {} cancelled, draining queue", addr);
-                // Graceful shutdown: drain channel
-                while let Ok(task) = rx.try_recv() {
-                    if framed.send(task.framed_bytes).await.is_err() {
-                        break;
-                    }
-                }
-                break;
-            }
+    while let Ok(msg) = rx.recv_async().await {
+        // Send pre-framed bytes
+        if let Err(e) =
+            TcpFrameCodec::encode_frame(&mut stream, msg.msg_type, &msg.header, &msg.payload).await
+        {
+            msg.on_error(format!("Failed to write to stream: {}", e));
         }
     }
 
     // Flush and close
-    let _ = framed.flush().await;
     debug!("Connection to {} closed", addr);
 
     Ok(())
@@ -506,7 +438,12 @@ impl TcpTransportBuilder {
         addr_builder.add_entry(key.clone(), local_endpoint.as_bytes().to_vec())?;
         let local_address = addr_builder.build()?;
 
-        Ok(TcpTransport::new(bind_addr, key, local_address))
+        Ok(TcpTransport::new(
+            bind_addr,
+            key,
+            local_address,
+            self.channel_capacity,
+        ))
     }
 }
 

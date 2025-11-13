@@ -239,9 +239,9 @@ impl ResponseAwaiter {
         if self.consumed {
             return Err("response awaiter already consumed".to_string());
         }
-        self.consumed = true;
 
         let result = self.slot.wait_and_take().await;
+        self.consumed = true;
         self.recycle();
 
         match result {
@@ -1341,7 +1341,11 @@ mod tests {
         let response_id = ResponseId::from_u128(0x1234_5678_9ABC_DEF0_1234_5678_9ABC_DEF0);
         let encoded = encode_response_header(response_id, None).unwrap();
 
-        assert_eq!(encoded.len(), 18, "Encoded header should be 18 bytes (16 response_id + 2 headers_len)");
+        assert_eq!(
+            encoded.len(),
+            18,
+            "Encoded header should be 18 bytes (16 response_id + 2 headers_len)"
+        );
 
         let (decoded_id, decoded_headers) = decode_response_header(encoded).unwrap();
         assert_eq!(decoded_id.as_u128(), response_id.as_u128());

@@ -151,22 +151,11 @@ impl Transport for GrpcTransport {
             }
         };
 
-        // Pre-encode frame using TCP framing
-        let framed_bytes = match crate::tcp::TcpFrameCodec::encode_frame(
-            message_type,
-            header.clone(),
-            payload.clone(),
-        ) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                on_error.on_error(header, payload, format!("failed to encode frame: {}", e));
-                return;
-            }
-        };
-
         // Try to get existing connection first (fast path)
         if let Some(handle) = self.connections.get(&instance_id)
-            && handle.try_send(framed_bytes.clone()).is_ok()
+            && handle
+                .try_send(message_type, header.clone(), payload.clone())
+                .is_ok()
         {
             return; // Success on fast path
         }
@@ -181,7 +170,10 @@ impl Transport for GrpcTransport {
                 match super::client::establish_connection(url, instance_id, cancel_token).await {
                     Ok(handle) => {
                         connections.insert(instance_id, handle.clone());
-                        if let Err(e) = handle.send(framed_bytes).await {
+                        if let Err(e) = handle
+                            .send(message_type, header.clone(), payload.clone())
+                            .await
+                        {
                             error!("Failed to send on new connection: {}", e);
                             on_error.on_error(header, payload, format!("send failed: {}", e));
                         }

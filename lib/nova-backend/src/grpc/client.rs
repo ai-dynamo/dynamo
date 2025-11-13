@@ -14,6 +14,8 @@ use tonic::transport::Channel;
 use tracing::{debug, error};
 
 use super::server::proto::{FramedData, nova_streaming_client::NovaStreamingClient};
+use crate::MessageType;
+use crate::tcp::TcpFrameCodec;
 
 /// Handle to a gRPC connection
 #[derive(Clone)]
@@ -23,28 +25,66 @@ pub struct ConnectionHandle {
 
 impl ConnectionHandle {
     /// Try to send a framed message (non-blocking)
-    pub fn try_send(&self, frame: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
-        // Wrap the TCP frame in protobuf
+    pub fn try_send(
+        &self,
+        msg_type: MessageType,
+        header: Bytes,
+        payload: Bytes,
+    ) -> Result<(), mpsc::error::SendError<(MessageType, Bytes, Bytes)>> {
+        // Build preamble
+        let preamble = match TcpFrameCodec::build_preamble(
+            msg_type,
+            header.len() as u32,
+            payload.len() as u32,
+        ) {
+            Ok(p) => p,
+            Err(_e) => {
+                return Err(mpsc::error::SendError((msg_type, header, payload)));
+            }
+        };
+
+        // Construct FramedData with 3 separate fields
         let framed_data = FramedData {
-            data: frame.to_vec(),
+            preamble: preamble.to_vec(),
+            header: header.to_vec(),
+            payload: payload.to_vec(),
         };
 
         self.tx
             .try_send(framed_data)
-            .map_err(|_| mpsc::error::SendError(frame))
+            .map_err(|_| mpsc::error::SendError((msg_type, header, payload)))
     }
 
     /// Send a framed message (async, waits if channel is full)
-    pub async fn send(&self, frame: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
-        // Wrap the TCP frame in protobuf
+    pub async fn send(
+        &self,
+        msg_type: MessageType,
+        header: Bytes,
+        payload: Bytes,
+    ) -> Result<(), mpsc::error::SendError<(MessageType, Bytes, Bytes)>> {
+        // Build preamble
+        let preamble = match TcpFrameCodec::build_preamble(
+            msg_type,
+            header.len() as u32,
+            payload.len() as u32,
+        ) {
+            Ok(p) => p,
+            Err(_e) => {
+                return Err(mpsc::error::SendError((msg_type, header, payload)));
+            }
+        };
+
+        // Construct FramedData with 3 separate fields
         let framed_data = FramedData {
-            data: frame.to_vec(),
+            preamble: preamble.to_vec(),
+            header: header.to_vec(),
+            payload: payload.to_vec(),
         };
 
         self.tx
             .send(framed_data)
             .await
-            .map_err(|_| mpsc::error::SendError(frame))
+            .map_err(|_| mpsc::error::SendError((msg_type, header, payload)))
     }
 }
 

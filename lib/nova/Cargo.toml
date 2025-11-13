@@ -14,7 +14,7 @@ keywords.workspace = true
 
 [features]
 default = ["ucx", "http", "nats", "grpc"]
-ucx = []
+ucx = ["dynamo-nova-backend/ucx"]
 http = ["dynamo-nova-backend/http"]
 grpc = ["dynamo-nova-backend/grpc"]
 nats = ["dynamo-nova-backend/nats"]
