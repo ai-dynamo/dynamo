@@ -1171,50 +1171,52 @@ jobs:
           path: results.md
           retention-days: 7
 
-  notify-slack:
-    name: Notify Slack
-    runs-on: ubuntu-latest
-    if: always() && github.event_name == 'schedule' && !github.event.repository.fork && secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL != ''
-    needs: results-summary
-    permissions:
-      contents: read
-    steps:
-      - name: Send Slack notification
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          JOBS_JSON=$(mktemp)
-          gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs --paginate > "$JOBS_JSON"
+  # notify-slack:
+  #   name: Notify Slack
+  #   runs-on: ubuntu-latest
+  #   if: always() && github.event_name == 'schedule' && !github.event.repository.fork
+  #   needs: results-summary
+  #   permissions:
+  #     contents: read
+  #   env:
+  #     HAS_SLACK_WEBHOOK: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL != '' }}
+  #   steps:
+  #     - name: Send Slack notification
+  #       env:
+  #         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+  #         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  #       run: |
+  #         set -euo pipefail
+  #         JOBS_JSON=$(mktemp)
+  #         gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs --paginate > "$JOBS_JSON"
 
-          FAIL_BLOCK=$(jq -r '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != null) |
-             "• " + .name + " (status: " + (.conclusion // "unknown") + ")"' "$JOBS_JSON")
+  #         FAIL_BLOCK=$(jq -r '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != null) |
+  #            "• " + .name + " (status: " + (.conclusion // "unknown") + ")"' "$JOBS_JSON")
 
-          SUMMARY="Nightly CI results: ${RUN_URL}\n\n"
-          if [ -z "${FAIL_BLOCK}" ]; then
-            SUMMARY+="All jobs succeeded."
-          else
-            SUMMARY+="Failing jobs:\n${FAIL_BLOCK}"
-          fi
+  #         SUMMARY="Nightly CI results: ${RUN_URL}\n\n"
+  #         if [ -z "${FAIL_BLOCK}" ]; then
+  #           SUMMARY+="All jobs succeeded."
+  #         else
+  #           SUMMARY+="Failing jobs:\n${FAIL_BLOCK}"
+  #         fi
 
-          PAYLOAD=$(jq -n --arg text "$SUMMARY" '{text: $text}')
+  #         PAYLOAD=$(jq -n --arg text "$SUMMARY" '{text: $text}')
 
-          send_slack() {
-            retry=0
-            until [ $retry -ge 3 ]; do
-              if curl -sSf -X POST -H "Content-Type: application/json" -d="$PAYLOAD" "$SLACK_WEBHOOK_URL" > /dev/null; then
-                echo "Slack notification sent"
-                return 0
-              fi
-              retry=$((retry+1))
-              echo "Slack notification failed (attempt ${retry}/3). Retrying in 10s..."
-              sleep 10
-            done
-            echo "Warning: Slack notification failed after 3 attempts" >&2
-            return 0
-          }
+  #         send_slack() {
+  #           retry=0
+  #           until [ $retry -ge 3 ]; do
+  #             if curl -sSf -X POST -H "Content-Type: application/json" -d="$PAYLOAD" "$SLACK_WEBHOOK_URL" > /dev/null; then
+  #               echo "Slack notification sent"
+  #               return 0
+  #             fi
+  #             retry=$((retry+1))
+  #             echo "Slack notification failed (attempt ${retry}/3). Retrying in 10s..."
+  #             sleep 10
+  #           done
+  #           echo "Warning: Slack notification failed after 3 attempts" >&2
+  #           return 0
+  #         }
 
-          set +x
-          send_slack
+  #         set +x
+  #         send_slack
