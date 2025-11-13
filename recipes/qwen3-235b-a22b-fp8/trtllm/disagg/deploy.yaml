@@ -95,7 +95,7 @@ spec:
       subComponentType: prefill
       dynamoNamespace: qwen3-235b-a22b-disagg
       envFromSecret: hf-token-secret
-      replicas: 1
+      replicas: 6
       resources:
         limits:
           gpu: "2"

@@ -106,7 +106,7 @@ spec:
           - name: model-cache
             persistentVolumeClaim:
               claimName: model-cache
-      replicas: 1
+      replicas: 4
       resources:
         limits:
           gpu: "4"

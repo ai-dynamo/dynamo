@@ -115,11 +115,11 @@ spec:
         - name: CONCURRENCY_PER_GPU
           value: "2"
         - name: DEPLOYMENT_GPU_COUNT
-          value: "2"
+          value: "16"
         - name: ISL
           value: "4000"
         - name: OSL
-          value: "500"
+          value: "200"
         - name: DEPLOYMENT_MODE
           value: agg
         - name: AIPERF_HTTP_CONNECTION_LIMIT
