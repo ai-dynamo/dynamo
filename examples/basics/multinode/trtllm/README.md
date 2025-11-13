@@ -17,4 +17,4 @@ limitations under the License.
 
 # Example: Multi-node TRTLLM Workers with Dynamo on Slurm
 
-See [here](docs/backends/trtllm/multinode) for how to setup this example.
+See [here](/docs/backends/trtllm/multinode) for how to setup this example.
