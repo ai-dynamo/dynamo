@@ -228,6 +228,8 @@ pub struct Context {
     pub message_id: crate::am::common::MessageId,
     /// The message payload
     pub payload: Bytes,
+    /// Optional user headers (for tracing, metadata, etc.)
+    pub headers: Option<std::collections::HashMap<String, String>>,
     /// The Nova active message system API
     pub nova: Arc<crate::am::Nova>,
 }
@@ -239,6 +241,8 @@ pub struct TypedContext<I> {
     pub message_id: crate::am::common::MessageId,
     /// The deserialized input
     pub input: I,
+    /// Optional user headers (for tracing, metadata, etc.)
+    pub headers: Option<std::collections::HashMap<String, String>>,
     /// The Nova active message system API
     pub nova: Arc<crate::am::Nova>,
 }
@@ -385,6 +389,7 @@ where
         let am_ctx = Context {
             message_id: crate::am::common::MessageId::new(ctx.message_id),
             payload: ctx.payload,
+            headers: ctx.headers.clone(),
             nova: ctx.system.clone(),
         };
 
@@ -427,6 +432,7 @@ where
         let unary_ctx = Context {
             message_id: crate::am::common::MessageId::new(ctx.message_id),
             payload: ctx.payload,
+            headers: ctx.headers.clone(),
             nova: ctx.system.clone(),
         };
 
@@ -435,6 +441,7 @@ where
         let backend = ctx.system.backend().clone();
         let response_id = ctx.message_id;
         let response_type = ctx.response_type;
+        let headers = ctx.headers.clone();
 
         Box::pin(async move {
             let result = executor.execute(unary_ctx).await;
@@ -452,13 +459,13 @@ where
                     send_nack(backend, response_id, error_msg).await
                 }
                 // Unary path
-                (ResponseType::Unary, Ok(None)) => send_response_ok(backend, response_id).await,
+                (ResponseType::Unary, Ok(None)) => send_response_ok(backend, response_id, headers.clone()).await,
                 (ResponseType::Unary, Ok(Some(bytes))) => {
-                    send_response(backend, response_id, bytes).await
+                    send_response(backend, response_id, headers.clone(), bytes).await
                 }
                 (ResponseType::Unary, Err(err)) => {
                     let error_msg = err.to_string();
-                    send_response_error(backend, response_id, error_msg).await
+                    send_response_error(backend, response_id, headers.clone(), error_msg).await
                 }
                 // FireAndForget shouldn't call unary handlers
                 (ResponseType::FireAndForget, _) => {
@@ -505,6 +512,7 @@ where
         let payload = ctx.payload;
         let system = ctx.system.clone();
         let msg_id = crate::am::common::MessageId::new(ctx.message_id);
+        let headers = ctx.headers.clone();
         // Keep internal plumbing for response handling
         let backend = ctx.system.backend().clone();
         let response_id = ctx.message_id;
@@ -524,7 +532,7 @@ where
                     let send_result = match response_type {
                         ResponseType::AckNack => send_nack(backend, response_id, error_msg).await,
                         ResponseType::Unary => {
-                            send_response_error(backend, response_id, error_msg).await
+                            send_response_error(backend, response_id, headers.clone(), error_msg).await
                         }
                         ResponseType::FireAndForget => Ok(()),
                     };
@@ -539,6 +547,7 @@ where
             let typed_ctx = TypedContext {
                 message_id: msg_id,
                 input,
+                headers: headers.clone(),
                 nova: system,
             };
 
@@ -557,16 +566,16 @@ where
                 (ResponseType::Unary, Ok(output)) => match serde_json::to_vec(&output) {
                     Ok(response_bytes) => {
                         let bytes = Bytes::from(response_bytes);
-                        send_response(backend, response_id, bytes).await
+                        send_response(backend, response_id, headers.clone(), bytes).await
                     }
                     Err(e) => {
                         let error_msg = format!("Failed to serialize output: {}", e);
-                        send_response_error(backend, response_id, error_msg).await
+                        send_response_error(backend, response_id, headers.clone(), error_msg).await
                     }
                 },
                 (ResponseType::Unary, Err(err)) => {
                     let error_msg = err.to_string();
-                    send_response_error(backend, response_id, error_msg).await
+                    send_response_error(backend, response_id, headers.clone(), error_msg).await
                 }
                 // FireAndForget shouldn't call typed unary handlers
                 (ResponseType::FireAndForget, _) => {
@@ -683,8 +692,13 @@ async fn send_nack(
 // --- Unary path (unary/typed_unary) - uses Response channel with encode_response_header ---
 
 /// Send an OK response with empty payload for unary (uses Response channel)
-async fn send_response_ok(backend: Arc<NovaBackend>, response_id: ResponseId) -> Result<()> {
-    let header = encode_response_header(response_id);
+async fn send_response_ok(
+    backend: Arc<NovaBackend>,
+    response_id: ResponseId,
+    headers: Option<std::collections::HashMap<String, String>>,
+) -> Result<()> {
+    let header = encode_response_header(response_id, headers)
+        .map_err(|e| anyhow::anyhow!("Failed to encode response header: {}", e))?;
 
     backend.send_message_to_worker(
         WorkerId::from_u64(response_id.worker_id()),
@@ -701,9 +715,11 @@ async fn send_response_ok(backend: Arc<NovaBackend>, response_id: ResponseId) ->
 async fn send_response(
     backend: Arc<NovaBackend>,
     response_id: ResponseId,
+    headers: Option<std::collections::HashMap<String, String>>,
     payload: Bytes,
 ) -> Result<()> {
-    let header = encode_response_header(response_id);
+    let header = encode_response_header(response_id, headers)
+        .map_err(|e| anyhow::anyhow!("Failed to encode response header: {}", e))?;
 
     backend.send_message_to_worker(
         WorkerId::from_u64(response_id.worker_id()),
@@ -720,9 +736,11 @@ async fn send_response(
 async fn send_response_error(
     backend: Arc<NovaBackend>,
     response_id: ResponseId,
+    headers: Option<std::collections::HashMap<String, String>>,
     error_message: String,
 ) -> Result<()> {
-    let header = encode_response_header(response_id);
+    let header = encode_response_header(response_id, headers)
+        .map_err(|e| anyhow::anyhow!("Failed to encode response header: {}", e))?;
     let payload = Bytes::from(error_message.into_bytes());
 
     backend.send_message_to_worker(

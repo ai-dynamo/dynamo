@@ -26,8 +26,8 @@ pub(crate) fn encode_event_header(event_type: EventType) -> Bytes {
     match event_type {
         EventType::Ack(response_id, outcome) => {
             let type_byte = match outcome {
-                Outcome::Error => 0b01, // Ack + Error
-                Outcome::Ok => 0b00,    // Ack + Ok
+                Outcome::Error => 0b10, // Ack + Error (bit 0=0 for Ack, bit 1=1 for Error)
+                Outcome::Ok => 0b00,    // Ack + Ok (bit 0=0 for Ack, bit 1=0 for Ok)
             };
             let mut bytes = BytesMut::with_capacity(
                 1 + match outcome {
@@ -43,8 +43,8 @@ pub(crate) fn encode_event_header(event_type: EventType) -> Bytes {
         }
         EventType::Event(event_handle, outcome) => {
             let type_byte = match outcome {
-                Outcome::Error => 0b11, // Event + Error
-                Outcome::Ok => 0b10,    // Event + Ok
+                Outcome::Error => 0b11, // Event + Error (bit 0=1 for Event, bit 1=1 for Error)
+                Outcome::Ok => 0b01,    // Event + Ok (bit 0=1 for Event, bit 1=0 for Ok)
             };
             let mut bytes = BytesMut::with_capacity(
                 1 + match outcome {
@@ -146,7 +146,7 @@ mod tests {
 
         // Verify length (1 byte only, no u128 for error)
         assert_eq!(encoded.len(), 1);
-        assert_eq!(encoded[0], 0b01); // Ack + Error
+        assert_eq!(encoded[0], 0b10); // Ack + Error
 
         // Decode
         let decoded = decode_event_header(encoded).expect("should decode successfully");
@@ -170,7 +170,7 @@ mod tests {
 
         // Verify length (1 byte type + 16 bytes u128)
         assert_eq!(encoded.len(), 1 + size_of::<u128>());
-        assert_eq!(encoded[0], 0b10); // Event + Ok
+        assert_eq!(encoded[0], 0b01); // Event + Ok
 
         // Decode
         let decoded = decode_event_header(encoded).expect("should decode successfully");
@@ -223,7 +223,7 @@ mod tests {
         assert!(decode_event_header(empty_bytes).is_none());
 
         // For Error cases, single byte is valid
-        let error_ack = Bytes::from_static(&[0b01]); // Ack + Error
+        let error_ack = Bytes::from_static(&[0b10]); // Ack + Error
         assert!(decode_event_header(error_ack).is_some());
 
         let error_event = Bytes::from_static(&[0b11]); // Event + Error
@@ -240,18 +240,18 @@ mod tests {
         let decoded = decode_event_header(bytes.freeze()).expect("0b00 should decode");
         assert!(matches!(decoded, EventType::Ack(_, Outcome::Ok)));
 
-        // 0b01: Ack + Error
-        bytes = BytesMut::with_capacity(1);
-        bytes.put_u8(0b01);
-        let decoded = decode_event_header(bytes.freeze()).expect("0b01 should decode");
-        assert!(matches!(decoded, EventType::Ack(_, Outcome::Error)));
-
-        // 0b10: Event + Ok
+        // 0b01: Event + Ok
         bytes = BytesMut::with_capacity(1 + size_of::<u128>());
-        bytes.put_u8(0b10);
+        bytes.put_u8(0b01);
         bytes.extend_from_slice(&[0u8; 16]);
-        let decoded = decode_event_header(bytes.freeze()).expect("0b10 should decode");
+        let decoded = decode_event_header(bytes.freeze()).expect("0b01 should decode");
         assert!(matches!(decoded, EventType::Event(_, Outcome::Ok)));
+
+        // 0b10: Ack + Error
+        bytes = BytesMut::with_capacity(1);
+        bytes.put_u8(0b10);
+        let decoded = decode_event_header(bytes.freeze()).expect("0b10 should decode");
+        assert!(matches!(decoded, EventType::Ack(_, Outcome::Error)));
 
         // 0b11: Event + Error
         bytes = BytesMut::with_capacity(1);
@@ -333,8 +333,8 @@ mod tests {
         let handle = EventHandle::new(42, 100, 5).expect("should create");
         let encoded = encode_event_header(EventType::Event(handle, Outcome::Ok));
 
-        // First byte should be 0b10 (Event + Ok)
-        assert_eq!(encoded[0], 0b10);
+        // First byte should be 0b01 (Event + Ok)
+        assert_eq!(encoded[0], 0b01);
 
         // Remaining bytes should be the u128 in little-endian
         let mut bytes_array = [0u8; 16];
@@ -348,9 +348,9 @@ mod tests {
         let response_id = ResponseId::from_u128(Uuid::new_v4().as_u128());
         let ack_error = encode_event_header(EventType::Ack(response_id, Outcome::Error));
 
-        // Should be just 1 byte with value 0b01 (Ack + Error)
+        // Should be just 1 byte with value 0b10 (Ack + Error)
         assert_eq!(ack_error.len(), 1);
-        assert_eq!(ack_error[0], 0b01);
+        assert_eq!(ack_error[0], 0b10);
 
         let handle = EventHandle::new(42, 100, 5).expect("should create");
         let event_error = encode_event_header(EventType::Event(handle, Outcome::Error));

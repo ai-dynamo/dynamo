@@ -42,16 +42,17 @@
 //! permanently retired and will not be returned to the free list. This prevents
 //! generation counter wraparound issues.
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use dashmap::DashSet;
 use parking_lot::Mutex;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::mem::size_of;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use thiserror::Error;
 use tokio::sync::Notify;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -61,21 +62,79 @@ type WorkerId = u64;
 const RESPONSE_SLOT_CAPACITY: usize = u16::MAX as usize;
 const MAX_GENERATION: u64 = (1u64 << 48) - 1;
 
+#[derive(Debug, Error)]
+pub(crate) enum DecodeError {
+    #[error("Response header too short: expected at least 18 bytes, got {0}")]
+    HeaderTooShort(usize),
+
+    #[error("Invalid headers length")]
+    InvalidHeadersLength,
+
+    #[error("Failed to deserialize headers: {0}")]
+    HeaderDeserializationError(#[from] rmp_serde::decode::Error),
+}
+
 // TODO: implement this
 // - the response header should contain the response id and the message_id its responding to
-pub(crate) fn decode_response_header(header: Bytes) -> ResponseId {
-    // Read 16 bytes (size of u128) and convert from little-endian
-    let mut bytes_array = [0u8; 16];
-    bytes_array.copy_from_slice(&header[..16]);
-    let value = u128::from_le_bytes(bytes_array);
-    ResponseId::from_u128(value)
+pub(crate) fn decode_response_header(
+    header: Bytes,
+) -> Result<(ResponseId, Option<HashMap<String, String>>), DecodeError> {
+    let mut header = header;
+
+    // Validate minimum header length (16 bytes response_id + 2 bytes headers_len)
+    if header.len() < 18 {
+        return Err(DecodeError::HeaderTooShort(header.len()));
+    }
+
+    // Read response_id (16 bytes / u128)
+    let response_id_value = header.get_u128_le();
+    let response_id = ResponseId::from_u128(response_id_value);
+
+    // Read headers
+    let headers_len = header.get_u16_le() as usize;
+    let headers = if headers_len > 0 {
+        // Validate headers length
+        if header.remaining() < headers_len {
+            return Err(DecodeError::InvalidHeadersLength);
+        }
+
+        let headers_bytes = header.copy_to_bytes(headers_len);
+        let headers_map: HashMap<String, String> = rmp_serde::from_slice(&headers_bytes)?;
+        Some(headers_map)
+    } else {
+        None
+    };
+
+    Ok((response_id, headers))
 }
 
 #[inline]
-pub(crate) fn encode_response_header(response_id: ResponseId) -> Bytes {
-    let mut bytes = BytesMut::with_capacity(size_of::<u128>());
+pub(crate) fn encode_response_header(
+    response_id: ResponseId,
+    headers: Option<HashMap<String, String>>,
+) -> Result<Bytes, rmp_serde::encode::Error> {
+    // Encode headers to MessagePack if present
+    let headers_bytes = if let Some(ref h) = headers {
+        let msgpack_bytes = rmp_serde::to_vec(h)?;
+        Some(msgpack_bytes)
+    } else {
+        None
+    };
+
+    let headers_len = headers_bytes.as_ref().map(|b| b.len()).unwrap_or(0);
+    let capacity = size_of::<u128>() + 2 + headers_len; // response_id + headers_len + msgpack
+    let mut bytes = BytesMut::with_capacity(capacity);
+
+    // Encode response_id
     bytes.extend_from_slice(&response_id.as_u128().to_le_bytes());
-    bytes.freeze()
+
+    // Encode headers_len and headers
+    bytes.extend_from_slice(&(headers_len as u16).to_le_bytes());
+    if let Some(hbytes) = headers_bytes {
+        bytes.extend_from_slice(&hbytes);
+    }
+
+    Ok(bytes.freeze())
 }
 
 /// Encodes a response key from worker_id, slot_index, and generation.
@@ -1200,5 +1259,193 @@ mod tests {
         for handle in handles {
             assert!(!handle.await.unwrap());
         }
+    }
+
+    // ============================================================================
+    // Category 7: Header Decode Error Handling
+    // ============================================================================
+
+    #[test]
+    fn test_decode_response_header_too_short() {
+        // Test with header shorter than 16 bytes
+        let short_header = Bytes::from_static(&[1, 2, 3, 4, 5]);
+        let result = decode_response_header(short_header);
+
+        assert!(result.is_err(), "Should error on short header");
+        match result {
+            Err(DecodeError::HeaderTooShort(len)) => {
+                assert_eq!(len, 5);
+            }
+            _ => panic!("Expected HeaderTooShort error"),
+        }
+    }
+
+    #[test]
+    fn test_decode_response_header_empty() {
+        // Test with empty header
+        let empty_header = Bytes::new();
+        let result = decode_response_header(empty_header);
+
+        assert!(result.is_err(), "Should error on empty header");
+        match result {
+            Err(DecodeError::HeaderTooShort(len)) => {
+                assert_eq!(len, 0);
+            }
+            _ => panic!("Expected HeaderTooShort error"),
+        }
+    }
+
+    #[test]
+    fn test_decode_response_header_exactly_18_bytes() {
+        // Test with exactly 18 bytes (16 response_id + 2 headers_len with no headers)
+        let valid_header = Bytes::from(vec![0u8; 18]);
+        let result = decode_response_header(valid_header);
+
+        assert!(result.is_ok(), "Should succeed with exactly 18 bytes");
+        let (_response_id, headers) = result.unwrap();
+        assert!(headers.is_none(), "Should have no headers");
+    }
+
+    #[test]
+    fn test_decode_response_header_more_than_18_bytes() {
+        // Test with more than 18 bytes (extra bytes should be headers)
+        let mut data = vec![0u8; 18];
+        data.extend_from_slice(&[1, 2, 3, 4]); // Extra bytes
+        let long_header = Bytes::from(data);
+        let result = decode_response_header(long_header);
+
+        // This should fail since headers_len is 0 but there are extra bytes
+        // Or succeed if those bytes happen to be valid empty MessagePack
+        // Let's make this test more explicit
+        assert!(result.is_ok(), "Should handle extra bytes");
+    }
+
+    #[test]
+    fn test_decode_response_header_17_bytes() {
+        // Test with 17 bytes (one byte short)
+        let short_header = Bytes::from(vec![0u8; 17]);
+        let result = decode_response_header(short_header);
+
+        assert!(result.is_err(), "Should error with 17 bytes");
+        match result {
+            Err(DecodeError::HeaderTooShort(len)) => {
+                assert_eq!(len, 17);
+            }
+            _ => panic!("Expected HeaderTooShort error"),
+        }
+    }
+
+    #[test]
+    fn test_decode_response_header_round_trip() {
+        // Test encoding and decoding a response ID (without headers)
+        let response_id = ResponseId::from_u128(0x1234_5678_9ABC_DEF0_1234_5678_9ABC_DEF0);
+        let encoded = encode_response_header(response_id, None).unwrap();
+
+        assert_eq!(encoded.len(), 18, "Encoded header should be 18 bytes (16 response_id + 2 headers_len)");
+
+        let (decoded_id, decoded_headers) = decode_response_header(encoded).unwrap();
+        assert_eq!(decoded_id.as_u128(), response_id.as_u128());
+        assert!(decoded_headers.is_none(), "Headers should be None");
+    }
+
+    // ============================================================================
+    // Response Headers Tests
+    // ============================================================================
+
+    #[test]
+    fn test_response_headers_encode_decode_round_trip() {
+        // Test encoding and decoding response with headers
+        let response_id = ResponseId::from_u128(0x1234_5678_9ABC_DEF0_1234_5678_9ABC_DEF0);
+        let mut headers = HashMap::new();
+        headers.insert("trace-id".to_string(), "abc123".to_string());
+        headers.insert("span-id".to_string(), "def456".to_string());
+
+        let encoded = encode_response_header(response_id, Some(headers.clone())).unwrap();
+
+        // Should be larger than 18 bytes due to headers
+        assert!(encoded.len() > 18, "Should be larger with headers");
+
+        let (decoded_id, decoded_headers) = decode_response_header(encoded).unwrap();
+
+        assert_eq!(decoded_id.as_u128(), response_id.as_u128());
+        assert!(decoded_headers.is_some());
+
+        let decoded_headers = decoded_headers.unwrap();
+        assert_eq!(decoded_headers.len(), 2);
+        assert_eq!(decoded_headers.get("trace-id").unwrap(), "abc123");
+        assert_eq!(decoded_headers.get("span-id").unwrap(), "def456");
+    }
+
+    #[test]
+    fn test_response_headers_empty_map() {
+        // Test with empty headers map
+        let response_id = ResponseId::from_u128(12345);
+        let headers = HashMap::new();
+
+        let encoded = encode_response_header(response_id, Some(headers)).unwrap();
+        let (decoded_id, decoded_headers) = decode_response_header(encoded).unwrap();
+
+        assert_eq!(decoded_id.as_u128(), response_id.as_u128());
+        assert!(decoded_headers.is_some());
+        assert_eq!(decoded_headers.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_response_headers_with_unicode() {
+        // Test headers with unicode characters
+        let response_id = ResponseId::from_u128(12345);
+        let mut headers = HashMap::new();
+        headers.insert("emoji".to_string(), "🚀".to_string());
+        headers.insert("chinese".to_string(), "你好".to_string());
+
+        let encoded = encode_response_header(response_id, Some(headers.clone())).unwrap();
+        let (decoded_id, decoded_headers) = decode_response_header(encoded).unwrap();
+
+        assert_eq!(decoded_id.as_u128(), response_id.as_u128());
+        let decoded_headers = decoded_headers.unwrap();
+        assert_eq!(decoded_headers.get("emoji").unwrap(), "🚀");
+        assert_eq!(decoded_headers.get("chinese").unwrap(), "你好");
+    }
+
+    #[test]
+    fn test_response_headers_many_entries() {
+        // Test with many header entries
+        let response_id = ResponseId::from_u128(12345);
+        let mut headers = HashMap::new();
+
+        for i in 0..50 {
+            headers.insert(format!("key-{}", i), format!("value-{}", i));
+        }
+
+        let encoded = encode_response_header(response_id, Some(headers.clone())).unwrap();
+        let (decoded_id, decoded_headers) = decode_response_header(encoded).unwrap();
+
+        assert_eq!(decoded_id.as_u128(), response_id.as_u128());
+        let decoded_headers = decoded_headers.unwrap();
+        assert_eq!(decoded_headers.len(), 50);
+        assert_eq!(decoded_headers.get("key-25").unwrap(), "value-25");
+    }
+
+    #[test]
+    fn test_response_headers_none_vs_empty() {
+        // Test that None and Some(empty) are different
+        let response_id = ResponseId::from_u128(12345);
+
+        // None case
+        let encoded_none = encode_response_header(response_id, None).unwrap();
+        let none_len = encoded_none.len();
+        let (_, headers_none) = decode_response_header(encoded_none).unwrap();
+        assert!(headers_none.is_none());
+
+        // Empty map case
+        let empty_map = HashMap::new();
+        let encoded_empty = encode_response_header(response_id, Some(empty_map)).unwrap();
+        let empty_len = encoded_empty.len();
+        let (_, headers_empty) = decode_response_header(encoded_empty).unwrap();
+        assert!(headers_empty.is_some());
+        assert_eq!(headers_empty.unwrap().len(), 0);
+
+        // Sizes should be different
+        assert!(empty_len > none_len, "Empty map should be larger than None");
     }
 }

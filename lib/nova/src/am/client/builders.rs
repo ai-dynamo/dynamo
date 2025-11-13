@@ -6,6 +6,7 @@
 //! These wrappers delegate to [`MessageBuilder`] while keeping the ergonomic
 //! `client.am_*()` APIs.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -53,6 +54,11 @@ impl AmSendBuilder {
         self
     }
 
+    pub fn headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.inner = self.inner.headers(headers);
+        self
+    }
+
     pub fn send(self) -> impl Future<Output = Result<()>> {
         self.inner.fire()
     }
@@ -94,6 +100,11 @@ impl AmSyncBuilder {
         self
     }
 
+    pub fn headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.inner = self.inner.headers(headers);
+        self
+    }
+
     pub fn send(self) -> impl Future<Output = Result<()>> {
         self.inner.sync()
     }
@@ -132,6 +143,11 @@ impl UnaryBuilder {
 
     pub fn worker(mut self, worker_id: WorkerId) -> Self {
         self.inner = self.inner.worker(worker_id);
+        self
+    }
+
+    pub fn headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.inner = self.inner.headers(headers);
         self
     }
 
@@ -181,6 +197,11 @@ where
         self
     }
 
+    pub fn headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.inner = self.inner.headers(headers);
+        self
+    }
+
     pub fn send(self) -> impl Future<Output = Result<R>> {
         self.inner.typed()
     }
@@ -197,6 +218,7 @@ pub struct MessageBuilder {
     payload: Option<Bytes>,
     target_instance: Option<InstanceId>,
     target_worker: Option<WorkerId>,
+    headers: Option<HashMap<String, String>>,
 }
 
 impl MessageBuilder {
@@ -212,6 +234,7 @@ impl MessageBuilder {
             payload: None,
             target_instance: None,
             target_worker: None,
+            headers: None,
         }
     }
 
@@ -234,6 +257,11 @@ impl MessageBuilder {
 
     pub fn worker(mut self, worker_id: WorkerId) -> Self {
         self.target_worker = Some(worker_id);
+        self
+    }
+
+    pub fn headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.headers = Some(headers);
         self
     }
 
@@ -263,7 +291,11 @@ impl MessageBuilder {
         if self.client.can_send_directly(target, &self.handler) {
             let outcome = self.client.register_outcome().await?;
             let message = ActiveMessage {
-                metadata: MessageMetadata::new_fire(outcome.response_id(), self.handler),
+                metadata: MessageMetadata::new_fire(
+                    outcome.response_id(),
+                    self.handler,
+                    self.headers,
+                ),
                 payload: self.payload.unwrap_or_default(),
             };
             return self.client.send_message(target, message).await;
@@ -274,13 +306,18 @@ impl MessageBuilder {
         let client = self.client.clone();
         let handler = self.handler.clone();
         let payload = self.payload.clone();
+        let headers = self.headers.clone();
 
         tokio::spawn(async move {
             match client.ensure_peer_ready(target, &handler).await {
                 Ok(_) => match client.register_outcome().await {
                     Ok(outcome) => {
                         let message = ActiveMessage {
-                            metadata: MessageMetadata::new_fire(outcome.response_id(), handler),
+                            metadata: MessageMetadata::new_fire(
+                                outcome.response_id(),
+                                handler,
+                                headers,
+                            ),
                             payload: payload.unwrap_or_default(),
                         };
                         if let Err(e) = client.send_message(target, message).await {
@@ -364,8 +401,8 @@ impl MessageBuilder {
 
             // Determine response type based on expectation
             let metadata = match expectation {
-                Some(_) => MessageMetadata::new_unary(response_id, self.handler), // unary or typed unary
-                None => MessageMetadata::new_sync(response_id, self.handler),     // sync
+                Some(_) => MessageMetadata::new_unary(response_id, self.handler, self.headers), // unary or typed unary
+                None => MessageMetadata::new_sync(response_id, self.handler, self.headers),     // sync
             };
 
             let message = ActiveMessage {
@@ -387,8 +424,8 @@ impl MessageBuilder {
 
         // Determine response type based on expectation
         let metadata = match expectation {
-            Some(_) => MessageMetadata::new_unary(response_id, self.handler), // unary or typed unary
-            None => MessageMetadata::new_sync(response_id, self.handler),     // sync
+            Some(_) => MessageMetadata::new_unary(response_id, self.handler, self.headers), // unary or typed unary
+            None => MessageMetadata::new_sync(response_id, self.handler, self.headers),     // sync
         };
 
         let message = ActiveMessage {

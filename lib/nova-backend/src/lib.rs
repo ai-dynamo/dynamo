@@ -4,8 +4,7 @@
 //! Nova Backend: transport-specific address types and helpers.
 
 mod address;
-//mod message;
-//mod response;
+
 pub mod tcp;
 
 #[cfg(feature = "ucx")]

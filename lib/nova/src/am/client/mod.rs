@@ -43,7 +43,7 @@ impl ActiveMessageClient {
         target: InstanceId,
         message: ActiveMessage,
     ) -> Result<()> {
-        let (header, payload, message_type) = message.encode();
+        let (header, payload, message_type) = message.encode()?;
         self.backend.send_message(
             target,
             header.to_vec(),
@@ -111,6 +111,7 @@ impl ActiveMessageClient {
             metadata: crate::am::common::messages::MessageMetadata::new_unary(
                 response_id,
                 "_hello".to_string(),
+                None, // System message, no headers
             ),
             payload: bytes::Bytes::from(payload),
         };
