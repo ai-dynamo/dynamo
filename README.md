@@ -192,7 +192,7 @@ Dynamo is designed to be inference engine agnostic. To use any engine with Dynam
 ## vLLM
 
 ```
-uv pip install ai-dynamo[vllm]
+uv pip install "ai-dynamo[vllm]"
 ```
 
 Run the backend/worker like this:
@@ -211,7 +211,7 @@ To specify which GPUs to use set environment variable `CUDA_VISIBLE_DEVICES`.
 # Install libnuma
 apt install -y libnuma-dev
 
-uv pip install ai-dynamo[sglang]
+uv pip install "ai-dynamo[sglang]"
 ```
 
 Run the backend/worker like this:
@@ -252,7 +252,7 @@ sudo apt-get -y install libopenmpi-dev
 ### After installing the pre-requisites above, install Dynamo
 
 ```
-uv pip install ai-dynamo[trtllm]
+uv pip install "ai-dynamo[trtllm]"
 ```
 
 Run the backend/worker like this:
