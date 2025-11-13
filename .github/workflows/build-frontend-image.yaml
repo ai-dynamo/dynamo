@@ -87,7 +87,7 @@ jobs:
           docker tag us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty ${EPP_IMAGE}
           docker push ${EPP_IMAGE}
           echo "EPP_IMAGE=${EPP_IMAGE}" >> $GITHUB_ENV
-      - name: Build Dynamo Base Conntainer
+      - name: Build Dynamo Base Container
         id: build-image
         uses: ./.github/actions/docker-build
         with:
@@ -105,6 +105,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd ${{ github.workspace }}
+          pwd
           FRONTEND_IMAGE_TAG="dynamo:${{ github.sha }}-frontend-${{ matrix.platform.arch }}"
           docker buildx build --load \
             --platform 'linux/${{ matrix.platform.arch }}' \
