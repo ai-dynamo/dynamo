@@ -31,6 +31,8 @@ The main KV-aware routing arguments:
 
 - `--no-track-active-blocks`: Disables tracking of active blocks (blocks being used for ongoing generation/decode phases). By default, the router tracks active blocks for load balancing. Disable this when routing to workers that only perform prefill (no decode phase), as tracking decode load is not relevant. This reduces router overhead and simplifies state management.
 
+- `--router-with-cascade-attention`: Enables KV reuse tracking during the decode phase. By default (when this flag is not provided), the router does not account for KV reuse during decoding load estimation, as normal decoding attention mechanisms do not make maximal use of KV reuse during decoding (aside from implicit L2 caching). However, cascade attention does benefit from KV reuse during decode. If your backend engine uses cascade attention, enable this flag to optimize routing decisions by tracking sequence hashes for decode-time KV reuse.
+
 - `--busy-threshold`: Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines emit `ForwardPassMetrics`.
 
 >[!Note]
