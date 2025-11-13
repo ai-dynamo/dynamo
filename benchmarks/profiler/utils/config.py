@@ -35,11 +35,6 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-class VolumeMount(BaseModel):
-    name: str = "dynamo-pvc"
-    mountPoint: str = "/data"
-
-
 class Container(BaseModel):
     image: Optional[str] = None
     workingDir: Optional[str] = None
@@ -71,15 +66,8 @@ class Services(BaseModel):
     model_config = {"extra": "allow"}
 
 
-class PVCConfig(BaseModel):
-    name: str = "dynamo-pvc"
-    create: Optional[bool] = False
-    model_config = {"extra": "allow"}
-
-
 class Spec(BaseModel):
     services: dict[str, Service]
-    pvcs: Optional[list[PVCConfig]] = None
     model_config = {"extra": "allow"}
 
 
@@ -99,11 +87,15 @@ class MultinodeConfig(BaseModel):
 
 
 class DgdPlannerServiceConfig(BaseModel):
+    """Planner service configuration.
+
+    Planner reads profiling data from a ConfigMap (planner-profile-data)
+    automatically created and mounted by the profiler; no PVC dependencies
+    """
+
     dynamoNamespace: str = "dynamo"  # placeholder
     componentType: str = "planner"
     replicas: int = 1
-    # Do not attach PVC; we'll mount a ConfigMap for planner data instead.
-    volumeMounts: list[VolumeMount] = []
     extraPodSpec: PodSpec = PodSpec(
         mainContainer=Container(
             image="my-registry/dynamo-runtime:my-tag",  # placeholder

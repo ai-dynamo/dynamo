@@ -22,7 +22,10 @@ from dataclasses import dataclass, field
 import numpy as np
 import yaml
 
-from benchmarks.profiler.utils.aiperf import benchmark_decode, benchmark_prefill
+from benchmarks.profiler.utils.aiperf import (
+    get_decode_itl_and_thpt_per_gpu,
+    get_prefill_ttft,
+)
 from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
     ParallelizationMapping,
@@ -135,17 +138,14 @@ async def run_profile(args):
         # Log MoE model support
         if args.model_info.is_moe:
             logger.info(
-                "MoE (Mixture of Experts) model profiling, sweeping TEP size for prefill and DEP size for decode"
+                "MoE (Mixture of Experts) model profiling, sweeping TEP/DEP size for prefill and decode"
             )
             assert args.backend in [
                 "sglang"
             ], "MoE model support is only available for SGLang"
-            assert (
-                not args.use_ai_configurator
-            ), "MoE model is not supported in ai-configurator"
         else:
             logger.info(
-                "Standard dense model profiling, sweeping TP size for both prefill and decode"
+                "Dense model profiling, sweeping TP size for prefill and decode"
             )
 
         config_modifier = CONFIG_MODIFIERS[args.backend]
@@ -155,7 +155,7 @@ async def run_profile(args):
 
         if args.dgd_image:
             config = config_modifier.update_image(config, args.dgd_image)
-            logger.info(f"Using DGD image: {args.dgd_image}")
+            logger.debug(f"Using DGD image: {args.dgd_image}")
 
         profile_num_gpus = [
             2**i
@@ -201,26 +201,30 @@ async def run_profile(args):
                 raise ValueError(
                     "Must provide --aic-system when using --use-ai-configurator."
                 )
-            if not args.aic_model_name:
-                raise ValueError(
-                    "Must provide --aic-model-name when using --use-ai-configurator."
-                )
-            if not args.aic_backend_version:
-                raise ValueError(
-                    "Must provide --aic-backend-version when using --use-ai-configurator."
-                )
 
-            logger.info("Will use aiconfigurator to estimate perf.")
+            # Fallback to args.model if aic_hf_id is not provided
+            if not args.aic_hf_id:
+                if args.model:
+                    logger.info(
+                        f"--aic-hf-id not provided, using --model ({args.model}) as HuggingFace ID for AI configurator"
+                    )
+                    args.aic_hf_id = args.model
+                else:
+                    raise ValueError(
+                        "Must provide --aic-hf-id or --model when using --use-ai-configurator."
+                    )
+
+            logger.info("Using aiconfigurator to estimate performance...")
             ai_configurator_perf_estimator = AIConfiguratorPerfEstimator(
-                args.aic_model_name,
+                args.aic_hf_id,
                 args.aic_system.lower(),
                 args.aic_backend,
                 args.aic_backend_version,
             )
         else:
-            if args.aic_system or args.aic_model_name or args.aic_backend_version:
+            if args.aic_system or args.aic_hf_id or args.aic_backend_version:
                 logger.warning(
-                    "Will ignore --aic-system, --aic-model-name, and/or --backend-version "
+                    "Ignoring --aic-system, --aic-hf-id, and/or --backend-version "
                     "when not using --use-ai-configurator."
                 )
 
@@ -248,7 +252,7 @@ async def run_profile(args):
                     config_modifier,
                     args.num_gpus_per_node,
                 )
-                logger.info(f"Dynamo config: {prefill_config}")
+                logger.debug(f"Dynamo config: {prefill_config}")
 
                 # Work dir includes mapping label (safe chars only)
                 parallel_mapping_tag = (
@@ -267,10 +271,10 @@ async def run_profile(args):
                 if args.dry_run:
                     logger.info("Skipping deployment creation in dry run mode")
                 elif args.use_ai_configurator:
-                    logger.info("Using ai-configurator to estimate prefill latency.")
+                    logger.info("Using ai-configurator to estimate prefill latency")
                     perf_dict = ai_configurator_perf_estimator.estimate_prefill_perf(
                         args.isl,
-                        tp_size=(mapping.tp or num_gpus),
+                        tp_size=mapping.get_tp_size(),
                     )
                     ttft = perf_dict["context_latency"]
                     logger.info(f"Estimated prefill TTFT: {ttft:.2f}ms")
@@ -301,15 +305,14 @@ async def run_profile(args):
                     # run ai-perf
                     base_url = client.get_service_url()
                     ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{args.isl}"
-                    aiperf_result = benchmark_prefill(
+                    ttft = get_prefill_ttft(
                         args.isl,
                         ai_perf_artifact_dir,
                         model_name,
                         model_name,
-                        base_url=base_url,
+                        base_url,
+                        attention_dp_size=mapping.get_attn_dp_size(),
                     )
-                    if aiperf_result is not None:
-                        ttft = aiperf_result["time_to_first_token"]["avg"]
 
                     logger.info("Cleaning up deployment...")
                     await client.delete_deployment()
@@ -320,7 +323,11 @@ async def run_profile(args):
                     prefill_data.add_data(
                         num_gpus=num_gpus,
                         ttft=ttft,
-                        thpt_per_gpu=args.isl / ttft / num_gpus * 1000,
+                        thpt_per_gpu=args.isl
+                        / ttft
+                        / num_gpus
+                        * 1000
+                        * mapping.get_attn_dp_size(),
                         parallel_mapping_label=mapping.label(),
                         parallel_mapping=mapping,
                     )
@@ -350,7 +357,7 @@ async def run_profile(args):
                     config_modifier,
                     args.num_gpus_per_node,
                 )
-                logger.info(f"Dynamo config: {decode_config}")
+                logger.debug(f"Dynamo config: {decode_config}")
 
                 parallel_mapping_tag = (
                     mapping.label()
@@ -373,7 +380,7 @@ async def run_profile(args):
                     # Compute max_concurrency and max_kv_tokens to know which
                     # num_request to sweep over.
                     max_concurrency = ai_configurator_perf_estimator.get_max_batch_size(
-                        args.isl, args.osl, tp_size=(mapping.tp or num_gpus)
+                        args.isl, args.osl, tp_size=mapping.get_tp_size()
                     )
                     max_kv_tokens = max_concurrency * (args.isl + args.osl)
 
@@ -400,7 +407,7 @@ async def run_profile(args):
 
                     # Compute max_concurrency and max_kv_tokens to know which
                     # num_request to sweep over.
-                    attention_dp_size = mapping.get_attn_dp_size(num_gpus)
+                    attention_dp_size = mapping.get_attn_dp_size()
                     max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
                         f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
                         attention_dp_size=attention_dp_size,
@@ -408,7 +415,7 @@ async def run_profile(args):
                     max_concurrency = max_kv_tokens // (args.isl + args.osl)
 
                 if not args.dry_run:
-                    attention_dp_size = mapping.get_attn_dp_size(num_gpus)
+                    attention_dp_size = mapping.get_attn_dp_size()
                     sweep_num_request = get_num_request_range(
                         attention_dp_size,
                         max_concurrency,
@@ -429,7 +436,7 @@ async def run_profile(args):
                                 args.osl,
                                 num_request,
                                 mode=EngineType.DECODE,
-                                tp_size=(mapping.tp or num_gpus),
+                                tp_size=mapping.get_tp_size(),
                             )
 
                             itl = perf_dict["tpot"]
@@ -441,7 +448,7 @@ async def run_profile(args):
                         else:
                             base_url = client.get_service_url()
                             ai_perf_artifact_dir = f"{work_dir}/aiperf_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
-                            aiperf_result = benchmark_decode(
+                            itl, thpt_per_gpu = get_decode_itl_and_thpt_per_gpu(
                                 args.isl,
                                 args.osl,
                                 num_request,
@@ -449,13 +456,8 @@ async def run_profile(args):
                                 model_name,
                                 model_name,
                                 base_url=base_url,
+                                num_gpus=num_gpus,
                             )
-                            if aiperf_result is not None:
-                                itl = aiperf_result["inter_token_latency"]["avg"]
-                                thpt_per_gpu = (
-                                    aiperf_result["output_token_throughput"]["avg"]
-                                    / num_gpus
-                                )
 
                         if itl is not None and thpt_per_gpu is not None:
                             decode_data.add_data(
@@ -493,8 +495,8 @@ async def run_profile(args):
 
             # select best parallel mapping for prefill
             if min(prefill_data.ttft) > args.ttft:
-                logger.info(
-                    "No TP size satisfies the TTFT requirement, please try a smaller model or a more powerful GPU SKU"
+                logger.warning(
+                    "No engine configuration satisfies the TTFT requirement, please try a smaller model or more powerful hardware"
                 )
                 selected_prefill_idx = int(np.argmin(np.array(prefill_data.ttft)))
             else:
@@ -514,8 +516,8 @@ async def run_profile(args):
                 logger.error("No decode results produced; skipping recommendations.")
                 return
             if min(decode_data.itl) > args.itl:
-                logger.info(
-                    "No TP size satisfies the ITL requirement, please try a smaller model or a more powerful GPU SKU"
+                logger.warning(
+                    "No engine configuration satisfies the ITL requirement, please try a smaller model or more powerful hardware"
                 )
                 selected_decode_idx = int(np.argmin(np.array(decode_data.itl)))
             else:
@@ -559,7 +561,7 @@ async def run_profile(args):
             config_modifier,
             args.num_gpus_per_node,
         )
-        logger.info(f"Dynamo config: {prefill_config}")
+        logger.debug(f"Dynamo config: {prefill_config}")
 
         work_dir = f"{args.output_dir}/selected_prefill_interpolation"
         os.makedirs(work_dir, exist_ok=True)
@@ -577,7 +579,7 @@ async def run_profile(args):
                 sweep_max_context_length,
                 args.prefill_interpolation_granularity,
                 ai_configurator_perf_estimator,
-                tp_size=(best_prefill_mapping.tp or best_prefill_gpus),
+                tp_size=best_prefill_mapping.get_tp_size(),
             )
         else:
             client = DynamoDeploymentClient(
@@ -619,6 +621,7 @@ async def run_profile(args):
                 best_prefill_gpus,
                 sweep_max_context_length,
                 args.prefill_interpolation_granularity,
+                attention_dp_size=best_prefill_mapping.get_attn_dp_size(),
             )
 
             logger.info("Cleaning up deployment...")
@@ -642,7 +645,7 @@ async def run_profile(args):
             config_modifier,
             args.num_gpus_per_node,
         )
-        logger.info(f"Dynamo config: {decode_config}")
+        logger.debug(f"Dynamo config: {decode_config}")
 
         work_dir = f"{args.output_dir}/selected_decode_interpolation"
         os.makedirs(work_dir, exist_ok=True)
@@ -654,9 +657,9 @@ async def run_profile(args):
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
         elif args.use_ai_configurator:
-            attention_dp_size = best_decode_mapping.get_attn_dp_size(best_decode_gpus)
+            attention_dp_size = best_decode_mapping.get_attn_dp_size()
             max_kv_tokens = ai_configurator_perf_estimator.get_max_kv_tokens(
-                args.isl, args.osl, tp_size=(best_decode_mapping.tp or best_decode_gpus)
+                args.isl, args.osl, tp_size=best_decode_mapping.get_tp_size()
             )
             profile_decode_aiconfigurator(
                 work_dir,
@@ -666,7 +669,7 @@ async def run_profile(args):
                 args.decode_interpolation_granularity,
                 ai_configurator_perf_estimator,
                 attention_dp_size,
-                tp_size=(best_decode_mapping.tp or best_decode_gpus),
+                tp_size=best_decode_mapping.get_tp_size(),
             )
         else:
             client = DynamoDeploymentClient(
@@ -689,7 +692,7 @@ async def run_profile(args):
                 f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
             )
 
-            attention_dp_size = best_decode_mapping.get_attn_dp_size(best_decode_gpus)
+            attention_dp_size = best_decode_mapping.get_attn_dp_size()
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
                 f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
                 attention_dp_size=attention_dp_size,
@@ -725,7 +728,7 @@ async def run_profile(args):
             is_moe_model=args.model_info.is_moe,
             num_gpus_per_node=args.num_gpus_per_node,
         )
-        logger.info(f"Final DGD config with planner: {config}")
+        logger.debug(f"Final DGD config with planner: {config}")
 
         # save DGD config with planner; support multi-document output when a ConfigMap is included
         with open(f"{args.output_dir}/config_with_planner.yaml", "w") as f:
