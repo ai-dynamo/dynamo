@@ -39,6 +39,7 @@ humantime = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
 rand = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -74,6 +75,10 @@ rayon = { version = "1.10" }
 regex = { version = "1" }
 socket2 = { version = "0.5.8" }
 tokio-rayon = { version = "2.1" }
+
+# Kubernetes discovery backend
+kube = { version = "2.0.1", default-features = false, features = ["runtime", "derive", "client", "rustls-tls", "aws-lc-rs"] }
+k8s-openapi = { version = "0.26.0", features = ["v1_32"] }
 
 [dev-dependencies]
 assert_matches = { version = "1.5.0" }
