@@ -115,7 +115,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes only run scheduler processes and expose metrics
     if server_args.node_rank >= 1:
-        await _handle_non_leader_node(engine, config, component, generate_endpoint)
+        await _handle_non_leader_node(engine, generate_endpoint)
         return
 
     prefill_client = None
@@ -202,7 +202,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     # Handle non-leader nodes (multi-node tensor parallelism)
     # Non-leader nodes only run scheduler processes and expose metrics
     if server_args.node_rank >= 1:
-        await _handle_non_leader_node(engine, config, component, generate_endpoint)
+        await _handle_non_leader_node(engine, generate_endpoint)
         return
 
     # Perform dummy warmup for prefill worker to avoid initial TTFT hit
