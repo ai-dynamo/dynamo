@@ -32,7 +32,7 @@ commit_id=$(git rev-parse --short HEAD)
 current_tag=$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//') || true
 
 # Get latest TAG and add COMMIT_ID for dev
-latest_tag=$(git describe --tags --abbrev=0 "$(git rev-list --tags --max-count=1 main)" | sed 's/^v//') || true
+latest_tag=$(git describe --tags --abbrev=0 "$(git rev-list --tags --max-count=1)" | sed 's/^v//') || true
 if [[ -z ${latest_tag} ]]; then
     latest_tag="0.0.1"
     echo "No git release tag found, setting to unknown version: ${latest_tag}"

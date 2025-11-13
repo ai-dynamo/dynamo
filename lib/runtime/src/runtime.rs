@@ -27,7 +27,7 @@ use tokio::{signal, sync::Mutex, task::JoinHandle};
 pub use tokio_util::sync::CancellationToken;
 
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum RuntimeType {
     Shared(Arc<tokio::runtime::Runtime>),
     External(tokio::runtime::Handle),
@@ -324,6 +324,8 @@ impl Runtime {
                 "Phase 3: All endpoints ended gracefully. Connections to NATS/ETCD will now be disconnected"
             );
             main_token.cancel();
+
+            // TODO: We should likely call shutdown_background on tokio rt to stop it cleanly.
         });
     }
 }
@@ -334,15 +336,6 @@ impl RuntimeType {
         match self {
             RuntimeType::External(rt) => rt.clone(),
             RuntimeType::Shared(rt) => rt.handle().clone(),
-        }
-    }
-}
-
-impl std::fmt::Debug for RuntimeType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RuntimeType::External(_) => write!(f, "RuntimeType::External"),
-            RuntimeType::Shared(_) => write!(f, "RuntimeType::Shared"),
         }
     }
 }

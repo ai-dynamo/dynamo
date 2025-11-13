@@ -325,7 +325,6 @@ mod integration_tests {
         let engine_config = EngineConfig::StaticFull {
             engine: make_echo_engine(),
             model: Box::new(local_model.clone()),
-            is_static: false, // This enables MDC registration!
         };
 
         let service = HttpService::builder()

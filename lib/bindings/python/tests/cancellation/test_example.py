@@ -97,9 +97,12 @@ def stop_process(name, process):
 
 
 @pytest.mark.asyncio
-async def test_direct_connection_cancellation(example_dir, server_process):
+async def test_direct_connection_cancellation(
+    temp_file_store, example_dir, server_process
+):
     """Test cancellation with direct client-server connection"""
     # Run the client (direct connection)
+    print(f"Key-value store dir: {temp_file_store}")
     client_output = run_client(example_dir, use_middle=False)
 
     # Wait for server to print cancellation message
@@ -119,10 +122,11 @@ async def test_direct_connection_cancellation(example_dir, server_process):
 
 @pytest.mark.asyncio
 async def test_middle_server_cancellation(
-    example_dir, server_process, middle_server_process
+    temp_file_store, example_dir, server_process, middle_server_process
 ):
     """Test cancellation with middle server proxy"""
     # Run the client (through middle server)
+    print(f"Key-value store dir: {temp_file_store}")
     client_output = run_client(example_dir, use_middle=True)
 
     # Wait for server to print cancellation message
