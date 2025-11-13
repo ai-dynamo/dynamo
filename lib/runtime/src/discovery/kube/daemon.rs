@@ -195,27 +195,28 @@ impl DiscoveryDaemon {
 
         // Concurrent fetch: Fetch metadata for all endpoints in parallel
         let default_system_port = self.pod_info.system_port;
-        let fetch_futures = all_endpoints
-            .into_iter()
-            .map(|(instance_id, pod_name, pod_ip, system_port)| {
-                let daemon = self.clone();
-                // Use system_port from EndpointSlice, fall back to default from PodInfo
-                let port = system_port.unwrap_or(default_system_port);
-                async move {
-                    match daemon.fetch_metadata(&pod_name, &pod_ip, port).await {
-                        Ok(metadata) => Some((instance_id, metadata)),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to fetch metadata for pod {} (instance_id={:x}): {}",
-                                pod_name,
-                                instance_id,
-                                e
-                            );
-                            None
+        let fetch_futures =
+            all_endpoints
+                .into_iter()
+                .map(|(instance_id, pod_name, pod_ip, system_port)| {
+                    let daemon = self.clone();
+                    // Use system_port from EndpointSlice, fall back to default from PodInfo
+                    let port = system_port.unwrap_or(default_system_port);
+                    async move {
+                        match daemon.fetch_metadata(&pod_name, &pod_ip, port).await {
+                            Ok(metadata) => Some((instance_id, metadata)),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to fetch metadata for pod {} (instance_id={:x}): {}",
+                                    pod_name,
+                                    instance_id,
+                                    e
+                                );
+                                None
+                            }
                         }
                     }
-                }
-            });
+                });
 
         // Execute fetches concurrently with bounded parallelism
         let results: Vec<_> = futures::stream::iter(fetch_futures)
@@ -244,7 +245,12 @@ impl DiscoveryDaemon {
     }
 
     /// Fetch metadata for a single pod (with caching)
-    async fn fetch_metadata(&self, pod_name: &str, pod_ip: &str, system_port: u16) -> Result<Arc<DiscoveryMetadata>> {
+    async fn fetch_metadata(
+        &self,
+        pod_name: &str,
+        pod_ip: &str,
+        system_port: u16,
+    ) -> Result<Arc<DiscoveryMetadata>> {
         let instance_id = hash_pod_name(pod_name);
 
         // Check cache

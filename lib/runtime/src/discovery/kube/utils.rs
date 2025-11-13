@@ -23,17 +23,15 @@ fn extract_system_port(slice: &EndpointSlice) -> Option<u16> {
             .find(|p| p.name.as_deref() == Some("system"))
             .and_then(|p| p.port.map(|port| port as u16))
             // Fall back to first port if "system" not found
-            .or_else(|| {
-                ports
-                    .first()
-                    .and_then(|p| p.port.map(|port| port as u16))
-            })
+            .or_else(|| ports.first().and_then(|p| p.port.map(|port| port as u16)))
     })
 }
 
 /// Extract endpoint information from an EndpointSlice
 /// Returns (instance_id, pod_name, pod_ip, system_port) tuples for ready endpoints
-pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String, String, Option<u16>)> {
+pub(super) fn extract_endpoint_info(
+    slice: &EndpointSlice,
+) -> Vec<(u64, String, String, Option<u16>)> {
     let mut result = Vec::new();
 
     // Extract system port from EndpointSlice ports
