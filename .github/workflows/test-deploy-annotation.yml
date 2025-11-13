@@ -27,6 +27,9 @@ jobs:
       
       - name: Simulate Deploy Test Failure
         id: deploy-test
+        env:
+          FRAMEWORK: sglang
+          NAMESPACE: gh-id-19340987020-pr-4284-dt
         run: |
           set -x
           exec > >(tee -a test-output.log) 2>&1
@@ -36,58 +39,60 @@ jobs:
           echo "/runner/_work/dynamo/dynamo"
           echo "+ export KUBECONFIG=/runner/_work/dynamo/dynamo/.kubeconfig"
           echo "+ KUBECONFIG=/runner/_work/dynamo/dynamo/.kubeconfig"
-          echo "+ kubectl config set-context --current --namespace=gh-id-19315413755-pr-4196-dt"
+          echo "+ kubectl config set-context --current --namespace=gh-id-19340987020-pr-4284-dt"
           echo 'Context "github-ci" modified.'
-          echo "+ exec"
-          echo "++ tee -a test-output.log"
-          echo "+ cd examples/backends/trtllm"
-          echo "+ export FRAMEWORK_RUNTIME_IMAGE=***/ai-dynamo/dynamo:38aae36591811e79795f10ab987fb0e797bdb60b-trtllm-amd64"
-          echo "+ FRAMEWORK_RUNTIME_IMAGE=***/ai-dynamo/dynamo:38aae36591811e79795f10ab987fb0e797bdb60b-trtllm-amd64"
-          echo "+ export KUBE_NS=gh-id-19315413755-pr-4196-dt"
-          echo "+ KUBE_NS=gh-id-19315413755-pr-4196-dt"
-          echo "++ yq e .metadata.name deploy/agg_router.yaml"
-          echo "+ export GRAPH_NAME=trtllm-agg-router"
-          echo "+ GRAPH_NAME=trtllm-agg-router"
-          echo "+ echo GRAPH_NAME=trtllm-agg-router"
-          echo "GRAPH_NAME=trtllm-agg-router"
-          echo "+ yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' deploy/agg_router.yaml"
+          echo "+ cd examples/backends/sglang"
+          echo "+ export FRAMEWORK_RUNTIME_IMAGE=***/ai-dynamo/dynamo:38aae36591811e79795f10ab987fb0e797bdb60b-sglang-amd64"
+          echo "+ FRAMEWORK_RUNTIME_IMAGE=***/ai-dynamo/dynamo:38aae36591811e79795f10ab987fb0e797bdb60b-sglang-amd64"
+          echo "+ export KUBE_NS=gh-id-19340987020-pr-4284-dt"
+          echo "+ KUBE_NS=gh-id-19340987020-pr-4284-dt"
+          echo "++ yq e .metadata.name deploy/agg.yaml"
+          echo "+ export GRAPH_NAME=sglang-agg"
+          echo "+ GRAPH_NAME=sglang-agg"
+          echo "+ echo GRAPH_NAME=sglang-agg"
+          echo "GRAPH_NAME=sglang-agg"
+          echo "+ yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' deploy/agg.yaml"
           echo "+ echo '=== UPDATED DEPLOYMENT FILE ==='"
           echo "=== UPDATED DEPLOYMENT FILE ==="
-          echo "+ cat deploy/agg_router.yaml"
-          echo "# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved."
-          echo "# SPDX-License-Identifier: Apache-2.0"
-          echo ""
+          echo "+ cat deploy/agg.yaml"
           echo "apiVersion: nvidia.com/v1alpha1"
           echo "kind: DynamoGraphDeployment"
           echo "metadata:"
-          echo "  name: trtllm-agg-router"
-          echo "spec:"
-          echo "  services:"
-          echo "    Frontend:"
-          echo "      dynamoNamespace: trtllm-agg-router"
-          echo "      componentType: frontend"
-          echo "      replicas: 1"
-          echo "+ kubectl apply -n gh-id-19315413755-pr-4196-dt -f deploy/agg_router.yaml"
-          echo "dynamographdeployment.nvidia.com/trtllm-agg-router created"
+          echo "  name: sglang-agg"
+          echo "+ kubectl apply -n gh-id-19340987020-pr-4284-dt -f deploy/agg.yaml"
+          echo "dynamographdeployment.nvidia.com/sglang-agg created"
           echo "+ sleep 20"
-          echo "++ yq e .metadata.name deploy/agg_router.yaml"
-          echo "+ export GRAPH_NAME=trtllm-agg-router"
-          echo "+ GRAPH_NAME=trtllm-agg-router"
-          echo "+ echo 'Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: trtllm-agg-router'"
-          echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: trtllm-agg-router"
-          echo "+ kubectl wait --for=condition=ready pod -l nvidia.com/dynamo-graph-deployment-name=trtllm-agg-router -n gh-id-19315413755-pr-4196-dt --timeout=1300s"
-          echo "error: no matching resources found"
+          echo "++ yq e .metadata.name deploy/agg.yaml"
+          echo "+ export GRAPH_NAME=sglang-agg"
+          echo "+ GRAPH_NAME=sglang-agg"
+          echo "+ echo 'Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: sglang-agg'"
+          echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: sglang-agg"
+          echo "+ kubectl wait --for=condition=ready pod -l nvidia.com/dynamo-graph-deployment-name=sglang-agg -n gh-id-19340987020-pr-4284-dt --timeout=1300s"
+          echo "pod/sglang-agg-0-decode-nm947 condition met"
+          echo "error: timed out waiting for the condition on pods/sglang-agg-0-frontend-t2sb8"
           
-          # Now trigger the actual error handling
-          export ERROR_MSG="Test failed: error: no matching resources found"
-          export NAMESPACE="gh-id-19315413755-pr-4196-dt"
-          export GRAPH_NAME="trtllm-agg-router"
-          TEST_RESULT=1
+          # Simulate the kubectl wait failure using the new error handling
+          export GRAPH_NAME="sglang-agg"
+          export KUBE_NS="gh-id-19340987020-pr-4284-dt"
           
-          if [ $TEST_RESULT -ne 0 ]; then
-            # Test failed - use common annotation script
+          # Simulate the kubectl wait command failing (mimics the actual code at line 711)
+          if ! echo "error: timed out waiting for the condition on pods/sglang-agg-0-frontend-t2sb8" | grep -q "error:"; then
+            echo "No error detected"
+          else
+            ERROR_MSG="Pod readiness check failed. kubectl wait timed out or found no matching resources."
+            echo "$ERROR_MSG"
+            
+            # Capture diagnostics (simulated)
+            echo "=== Pod Status ==="
+            echo "NAME                                READY   STATUS    RESTARTS   AGE"
+            echo "sglang-agg-0-decode-nm947          1/1     Running   0          45s"
+            echo "sglang-agg-0-frontend-t2sb8        0/1     Pending   0          45s"
+            echo "=== Recent Events ==="
+            echo "LAST SEEN   TYPE      REASON              OBJECT                           MESSAGE"
+            echo "30s         Warning   FailedScheduling    pod/sglang-agg-0-frontend-t2sb8  0/3 nodes are available: 3 Insufficient nvidia.com/gpu"
+            
             export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
-            bash .github/scripts/create_error_annotation.sh "Deploy Test: trtllm (agg-router)" "50" "test-output.log" "$ERROR_MSG" "$NAMESPACE"
+            bash .github/scripts/create_error_annotation.sh "Deploy Test: $FRAMEWORK (agg)" "777" "test-output.log" "$ERROR_MSG" "$NAMESPACE"
           fi
       
       - name: Show Log Output
