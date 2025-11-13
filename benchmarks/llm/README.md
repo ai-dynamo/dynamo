@@ -42,7 +42,7 @@ The benchmarking tools in this directory help you:
 1. **Dynamo installed** - Follow the [installation guide](../../README.md#installation) to set up Dynamo
 2. **Model downloaded** - Download the model you want to benchmark:
    ```bash
-   huggingface-cli download neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
+   huggingface-cli download Qwen/Qwen3-0.6B
    ```
 3. **NATS and etcd running** - Start the required services:
 
@@ -72,7 +72,7 @@ The benchmarking tools in this directory help you:
 > - **NVLink**: NVLink 4th Generation, 900 GB/s (GPU to GPU NVLink bidirectional bandwidth), 18 Links per GPU
 > - **InfiniBand**: 8x400Gbit/s (Compute Links), 2x400Gbit/s (Storage Links)
 >
-> Benchmarking with a different hardware configuration may yield suboptimal results.
+> Benchmarking with a different hardware configuration may yield different results.
 
 ## Deployment Options
 
@@ -138,19 +138,19 @@ In this setup, we compare Dynamo disaggregated vLLM performance to native vLLM a
 
    ```bash
    CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
-     --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+     --model Qwen/Qwen3-0.6B \
      --is-prefill-worker > prefill_0.log 2>&1 &
 
    CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm \
-     --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+     --model Qwen/Qwen3-0.6B \
      --is-prefill-worker > prefill_1.log 2>&1 &
 
    CUDA_VISIBLE_DEVICES=2 python -m dynamo.vllm \
-     --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+     --model Qwen/Qwen3-0.6B \
      --is-prefill-worker > prefill_2.log 2>&1 &
 
    CUDA_VISIBLE_DEVICES=3 python -m dynamo.vllm \
-     --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+     --model Qwen/Qwen3-0.6B \
      --is-prefill-worker > prefill_3.log 2>&1 &
    ```
 
@@ -158,7 +158,7 @@ In this setup, we compare Dynamo disaggregated vLLM performance to native vLLM a
 
    ```bash
    CUDA_VISIBLE_DEVICES=4,5,6,7 python -m dynamo.vllm \
-     --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic > decode.log 2>&1 &
+     --model Qwen/Qwen3-0.6B > decode.log 2>&1 &
    ```
 
 4. **Wait for services to be ready** - Check the logs to ensure all services are fully started before benchmarking.
@@ -224,7 +224,7 @@ Deploy a multi-node DynamoGraphDeployment following the [multinode deployment gu
 
    # Start decode worker (TP=8, using all 8 GPUs)
    python -m dynamo.vllm \
-     --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic > decode.log 2>&1 &
+     --model Qwen/Qwen3-0.6B > decode.log 2>&1 &
    ```
 
 2. **On Node 1** - Start prefill workers:
@@ -237,7 +237,7 @@ Deploy a multi-node DynamoGraphDeployment following the [multinode deployment gu
    # Start 8 prefill workers (one per GPU)
    for i in {0..7}; do
      CUDA_VISIBLE_DEVICES=$i python -m dynamo.vllm \
-       --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+       --model Qwen/Qwen3-0.6B \
        --is-prefill-worker > prefill_${i}.log 2>&1 &
    done
    ```
@@ -266,7 +266,7 @@ This section shows how to benchmark native vLLM aggregated serving for compariso
 1. **Start vLLM servers** (2 instances, each with TP=4):
 
    ```bash
-   CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+   CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve Qwen/Qwen3-0.6B \
      --block-size 128 \
      --max-model-len 3500 \
      --max-num-batched-tokens 3500 \
@@ -275,7 +275,7 @@ This section shows how to benchmark native vLLM aggregated serving for compariso
      --disable-log-requests \
      --port 8001 > vllm_0.log 2>&1 &
 
-   CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+   CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve Qwen/Qwen3-0.6B \
      --block-size 128 \
      --max-model-len 3500 \
      --max-num-batched-tokens 3500 \
@@ -327,7 +327,7 @@ Options:
   --prefill-data-parallelism, --prefill-dp <int>     Prefill data parallelism (for disaggregated mode)
   --decode-tensor-parallelism, --decode-tp <int>     Decode tensor parallelism (for disaggregated mode)
   --decode-data-parallelism, --decode-dp <int>       Decode data parallelism (for disaggregated mode)
-  --model <model_id>                         Hugging Face model ID to benchmark (default: neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic)
+  --model <model_id>                         Hugging Face model ID to benchmark (default: Qwen/Qwen3-0.6B)
   --input-sequence-length, --isl <int>       Input sequence length (default: 3000)
   --output-sequence-length, --osl <int>      Output sequence length (default: 150)
   --url <http://host:port>                   Target URL for inference requests (default: http://localhost:8000)
