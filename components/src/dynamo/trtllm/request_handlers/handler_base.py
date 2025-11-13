@@ -263,7 +263,6 @@ class HandlerBase:
             adapters = create_trtllm_adapters(processors)
             sampling_params.logits_processor = adapters
 
-        # Extract prompt_tokens_details from structured prefill_result for usage override
         prefill_result = request.get("prefill_result")
         prefill_prompt_tokens_details = (
             prefill_result.get("prompt_tokens_details") if prefill_result else None

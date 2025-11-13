@@ -149,6 +149,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             bootstrap_info = None
             async for info in prefill_stream:
                 bootstrap_info = info.data()
+                break
 
             if not bootstrap_info:
                 raise RuntimeError("No bootstrap info received from prefill worker")

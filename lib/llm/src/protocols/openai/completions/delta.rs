@@ -220,14 +220,6 @@ impl DeltaGenerator {
     pub fn is_usage_enabled(&self) -> bool {
         self.options.enable_usage
     }
-
-    /// Set prompt_tokens_details from prefill
-    pub fn set_prompt_tokens_details(
-        &mut self,
-        details: dynamo_async_openai::types::PromptTokensDetails,
-    ) {
-        self.usage.prompt_tokens_details = Some(details);
-    }
 }
 
 impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for DeltaGenerator {

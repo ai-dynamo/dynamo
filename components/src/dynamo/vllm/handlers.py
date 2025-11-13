@@ -343,10 +343,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 async for res in gen:
                     logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
-                    token_ids = list(res.outputs[0].token_ids if res.outputs else [])
+                    token_ids = res.outputs[0].token_ids if res.outputs else []
 
                     output: Dict[str, Any] = {
-                        "token_ids": token_ids,
+                        "token_ids": list(token_ids),
                         "disaggregated_params": (
                             {"kv_transfer_params": res.kv_transfer_params}
                             if res.kv_transfer_params
