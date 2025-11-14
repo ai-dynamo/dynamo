@@ -24,6 +24,11 @@ const (
 
 	MpiRunSshPort = 2222
 
+	// Default security context values
+	// These provide secure defaults for running containers as non-root
+	// Users can override these via extraPodSpec.securityContext in their DynamoGraphDeployment
+	DefaultSecurityContextFSGroup = 1000
+
 	EnvDynamoServicePort = "DYNAMO_PORT"
 
 	KubeLabelDynamoSelector = "nvidia.com/selector"

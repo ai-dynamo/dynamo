@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/trtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:my-tag
           workingDir: /workspace/examples/backends/trtllm
           command:
             - python3
@@ -38,7 +38,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/trtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:my-tag
           workingDir: /workspace/components/src/dynamo/planner
           ports:
             - name: metrics
@@ -89,7 +89,7 @@ spec:
       extraPodSpec:
         terminationGracePeriodSeconds: 600
         mainContainer:
-          image: my-registry/trtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:my-tag
           workingDir: /workspace/
           command:
             - python3
@@ -116,7 +116,7 @@ spec:
       extraPodSpec:
         terminationGracePeriodSeconds: 600
         mainContainer:
-          image: my-registry/trtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:my-tag
           workingDir: /workspace/
           command:
             - python3

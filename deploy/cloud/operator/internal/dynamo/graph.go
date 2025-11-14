@@ -697,6 +697,25 @@ func addStandardEnvVars(container *corev1.Container, controllerConfig controller
 	container.Env = MergeEnvs(standardEnvVars, container.Env)
 }
 
+// applyDefaultSecurityContext sets secure defaults for pod security context.
+// Currently only sets fsGroup to solve volume permission issues.
+// Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
+// with images that may expect to run as root.
+// User-provided security context values (via extraPodSpec) will override these defaults.
+func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
+	// Initialize SecurityContext if not present
+	if podSpec.SecurityContext == nil {
+		podSpec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+
+	// Only set fsGroup by default
+	// This fixes volume permission issues without forcing a specific UID/GID
+	// which maintains compatibility with both root and non-root images
+	if podSpec.SecurityContext.FSGroup == nil {
+		podSpec.SecurityContext.FSGroup = ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup))
+	}
+}
+
 // GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
 // Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS)
 // Deployment-specific environment merging should be handled by the caller
@@ -856,12 +875,24 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("failed to get base podspec: %w", err)
 	}
 
+	// Check if user provided their own security context before merging
+	userProvidedSecurityContext := component.ExtraPodSpec != nil &&
+		component.ExtraPodSpec.PodSpec != nil &&
+		component.ExtraPodSpec.PodSpec.SecurityContext != nil
+
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
 		// merge extraPodSpec PodSpec with base podspec
 		err := mergo.Merge(&podSpec, component.ExtraPodSpec.PodSpec.DeepCopy(), mergo.WithOverride)
 		if err != nil {
 			return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 		}
+	}
+
+	// Apply default security context ONLY if user didn't provide any security context
+	// If user provides ANY securityContext (even partial), they get full control with no defaults injected
+	// This allows users to intentionally set fields to nil (e.g., to run as root)
+	if !userProvidedSecurityContext {
+		applyDefaultSecurityContext(&podSpec)
 	}
 
 	if controllerConfig.IsK8sDiscoveryEnabled(component.Annotations) {
