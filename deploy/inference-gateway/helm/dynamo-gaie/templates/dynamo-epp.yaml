@@ -91,7 +91,7 @@ spec:
             value: "{{ $platformName }}-etcd.{{ $platformNs }}:2379"
           - name: NATS_SERVER
             value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
-          - name: DYN_NAMESPACE
+          - name: DYNAMO_NAMESPACE
             value: "{{ $ns }}"
           - name: DYNAMO_KV_BLOCK_SIZE
             value: "{{ $kv }}"
