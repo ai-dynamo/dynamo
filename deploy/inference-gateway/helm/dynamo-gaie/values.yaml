@@ -17,8 +17,8 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-# This is the Dynamo namespace where the dynamo model is deployed
-dynamoNamespace: "vllm-agg"
+# Name of the DynamoGraphDeployment (DGD) that backs this gateway integration
+dynamoGraphDeploymentName: "vllm-agg"
 
 # This is the port on which the model is exposed
 model:
@@ -72,7 +72,6 @@ epp:
   # Dynamo-specific settings (only used when useDynamo: true)
   configFile: "/etc/epp/epp-config-dynamo.yaml"
   dynamo:
-    namespace: "vllm-agg" # Required when useDynamo: true.
     kvBlockSize: "16"
 
 # Platform configuration (for Dynamo mode)
