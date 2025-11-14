@@ -396,7 +396,7 @@ func getCliqueStartupDependencies(
 	return nil
 }
 
-func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec, componentName string) (*corev1.Service, error) {
+func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec, componentName string, isK8sDiscoveryEnabled bool) (*corev1.Service, error) {
 	if component.DynamoNamespace == nil {
 		return nil, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", componentName)
 	}
@@ -430,6 +430,15 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 			},
 			Ports: []corev1.ServicePort{servicePort},
 		},
+	}
+	if isK8sDiscoveryEnabled {
+		service.Labels = map[string]string{
+			commonconsts.KubeLabelDynamoDiscoveryBackend: "kubernetes",
+		}
+		// Discovery is enabled for non frontend components
+		if component.ComponentType != commonconsts.ComponentTypeFrontend {
+			service.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+		}
 	}
 	return service, nil
 }
