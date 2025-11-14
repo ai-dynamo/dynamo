@@ -583,6 +583,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let (mut backend_input, context) = request.into_parts();
         backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
         backend_input.dp_rank = Some(dp_rank);
+
+        // Check if worker_id is requested in extra_fields
+        let should_populate_worker_id = backend_input
+            .extra_fields
+            .as_ref()
+            .map(|fields| fields.contains(&"worker_id".to_string()))
+            .unwrap_or(false);
+        
+        // Get prefill worker ID if available (stored by PrefillRouter)
+        // In aggregated mode, prefill_worker_id is None, so we use decode_worker_id for both
+        let decode_worker_id = instance_id;
+        let prefill_worker_id = context.get::<u64>("prefill_worker_id")
+            .ok()
+            .map(|arc| *arc)
+            .or(Some(decode_worker_id)); // Use decode_worker_id if no separate prefill worker
+        
         let updated_request = context.map(|_| backend_input);
 
         let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
@@ -592,6 +608,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
+            let mut first_item = true;
 
             loop {
                 tokio::select! {
@@ -603,7 +620,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     }
 
                     item = response_stream.next() => {
-                        let Some(item) = item else {
+                        let Some(mut item) = item else {
                             break;
                         };
 
@@ -613,6 +630,28 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             }
                             prefill_marked = true;
                         }
+                        
+                        // Inject worker_id in first item's disaggregated_params if requested
+                        if first_item && should_populate_worker_id {
+                            if let Some(ref mut data) = item.data {
+                                use serde_json::json;
+                                // Add worker_id to disaggregated_params
+                                let worker_id_json = json!({
+                                    "prefill_worker_id": prefill_worker_id,
+                                    "decode_worker_id": decode_worker_id,
+                                });
+                                
+                                if let Some(ref mut params) = data.disaggregated_params {
+                                    if let Some(obj) = params.as_object_mut() {
+                                        obj.insert("worker_id".to_string(), worker_id_json);
+                                    }
+                                } else {
+                                    data.disaggregated_params = Some(json!({"worker_id": worker_id_json}));
+                                }
+                            }
+                            first_item = false;
+                        }
+                        
                         yield item;
                     }
                 }

@@ -242,6 +242,7 @@ impl
                     finish_reason: data.finish_reason,
                     //mdcsum: mdcsum.clone(),
                     index: data.index,
+                    disaggregated_params: data.disaggregated_params,
                 })
             })
         });
