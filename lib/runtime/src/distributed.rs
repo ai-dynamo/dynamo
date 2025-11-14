@@ -42,11 +42,12 @@ pub struct DistributedRuntime {
     // local runtime
     runtime: Runtime,
 
-    // we might consider a unifed transport manager here
+    // Unified transport manager
     etcd_client: Option<transports::etcd::Client>,
     nats_client: Option<transports::nats::Client>,
     store: KeyValueStoreManager,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    network_manager: Arc<OnceCell<Arc<crate::pipeline::network::manager::NetworkManager>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
 
     // Service discovery client
@@ -174,6 +175,7 @@ impl DistributedRuntime {
             store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            network_manager: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             discovery_metadata,
@@ -335,6 +337,72 @@ impl DistributedRuntime {
             })
             .await?
             .clone())
+    }
+
+    /// Get the network manager (lazy initialization)
+    ///
+    /// The network manager consolidates all network configuration and provides
+    /// unified access to request plane servers and clients.
+    pub async fn network_manager(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::manager::NetworkManager>> {
+        use crate::pipeline::network::manager::NetworkManager;
+
+        let manager = self
+            .network_manager
+            .get_or_try_init(async {
+                // Get NATS client if available
+                let nats_client = self.nats_client().map(|c| c.client().clone());
+
+                // NetworkManager handles all config reading and mode selection
+                anyhow::Ok(NetworkManager::new(
+                    self.child_token(),
+                    nats_client,
+                    self.component_registry.clone(),
+                ))
+            })
+            .await?;
+
+        Ok(manager.clone())
+    }
+
+    /// Get the request plane server (convenience method)
+    ///
+    /// This is a shortcut for `network_manager().await?.server().await`.
+    pub async fn request_plane_server(
+        &self,
+    ) -> Result<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>>
+    {
+        let manager = self.network_manager().await?;
+        manager.server().await
+    }
+
+    /// DEPRECATED: Use network_manager().server() instead
+    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
+    pub async fn http_server(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>> {
+        // For backward compatibility, try to downcast
+        let _server = self.request_plane_server().await?;
+        // This will only work if we're actually in HTTP mode
+        // For now, just return an error suggesting the new API
+        anyhow::bail!(
+            "http_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
+        )
+    }
+
+    /// DEPRECATED: Use network_manager().server() instead
+    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
+    pub async fn shared_tcp_server(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer>> {
+        // For backward compatibility, try to downcast
+        let _server = self.request_plane_server().await?;
+        // This will only work if we're actually in TCP mode
+        // For now, just return an error suggesting the new API
+        anyhow::bail!(
+            "shared_tcp_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
+        )
     }
 
     pub fn nats_client(&self) -> Option<&nats::Client> {

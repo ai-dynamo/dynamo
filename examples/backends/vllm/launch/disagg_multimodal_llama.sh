@@ -15,9 +15,20 @@ while [[ $# -gt 0 ]]; do
             ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Disaggregated multimodal serving with separate Prefill/Decode workers for Llama 4"
+            echo ""
             echo "Options:"
             echo "  --head-node          Run as head node. Head node will run the HTTP server, processor and prefill worker."
             echo "  -h, --help           Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  # On head node:"
+            echo "  $0 --head-node"
+            echo ""
+            echo "  # On worker node (requires NATS_SERVER and ETCD_ENDPOINTS pointing to head node):"
+            echo "  $0"
+            echo ""
             exit 0
             ;;
         *)
@@ -37,14 +48,15 @@ if [[ $HEAD_NODE -eq 1 ]]; then
     python -m dynamo.frontend --http-port=8000 &
 
     # run processor
-    python3 components/processor.py --model $MODEL_NAME --prompt-template "<|image|>\n<prompt>" &
-    # LLama 4 doesn't support image embedding input, so the prefill worker will also
-    # handle image encoding.
-    # run EP/D workers
-    VLLM_NIXL_SIDE_CHANNEL_PORT=20097 python3 components/worker.py --model $MODEL_NAME --worker-type encode_prefill --enable-disagg --tensor-parallel-size=8 --max-model-len=208960 &
+    python -m dynamo.vllm --multimodal-processor --model $MODEL_NAME --mm-prompt-template "<|image|>\n<prompt>" &
+
+    # Llama 4 doesn't support image embedding input, so the prefill worker will also
+    # handle image encoding inline.
+    # run prefill worker
+    VLLM_NIXL_SIDE_CHANNEL_PORT=20097 python -m dynamo.vllm --multimodal-encode-prefill-worker --is-prefill-worker --model $MODEL_NAME --tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization 0.80 &
 else
     # run decode worker on non-head node
-    VLLM_NIXL_SIDE_CHANNEL_PORT=20098 python3 components/worker.py --model $MODEL_NAME --worker-type decode --enable-disagg --tensor-parallel-size=8 --max-model-len=208960 &
+    VLLM_NIXL_SIDE_CHANNEL_PORT=20098 python -m dynamo.vllm --multimodal-decode-worker --model $MODEL_NAME --tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization 0.80 &
 fi
 
 # Wait for all background processes to complete

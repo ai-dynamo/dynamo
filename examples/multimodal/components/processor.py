@@ -238,9 +238,20 @@ class Processor(ProcessMixIn):
                     if multimodal_input.image_url is not None:
                         raise ValueError("Cannot provide both image and video URLs")
                     multimodal_input.video_url = item.video_url.url
+                elif item.type == "audio_url":
+                    if (
+                        multimodal_input.image_url is not None
+                        or multimodal_input.video_url is not None
+                    ):
+                        raise ValueError("Cannot mix image, video and audio URLs")
+                    multimodal_input.audio_url = item.audio_url.url
 
-        if multimodal_input.image_url is None and multimodal_input.video_url is None:
-            raise ValueError("Either image URL or video URL is required")
+        if (
+            multimodal_input.image_url is None
+            and multimodal_input.video_url is None
+            and multimodal_input.audio_url is None
+        ):
+            raise ValueError("Either image URL or video URL or audio URL is required")
 
         async for response in self._generate(
             chat_request, multimodal_input, RequestType.CHAT

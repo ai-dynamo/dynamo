@@ -15,11 +15,14 @@ spec:
       dynamoNamespace: llama3-70b-agg
       volumeMounts:
         - name: model-cache
-          mountPoint: /root/.cache/huggingface
+          mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
+      envs:
+        - name: HF_HOME
+          value: /opt/models
       replicas: 1
     VllmPrefillWorker:
       componentType: worker
@@ -27,7 +30,7 @@ spec:
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
-          mountPoint: /root/.cache/huggingface
+          mountPoint: /opt/models
       sharedMemory:
         size: 20Gi
       extraPodSpec:
@@ -36,7 +39,9 @@ spec:
             - name: SERVED_MODEL_NAME
               value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
             - name: MODEL_PATH
-              value: "/root/.cache/huggingface/hub/models--RedHatAI--Llama-3.3-70B-Instruct-FP8-dynamic/snapshots/ddb4128556dfcff99e0c41aee159ea6c3e655dcd"
+              value: "/opt/models/hub/models--RedHatAI--Llama-3.3-70B-Instruct-FP8-dynamic/snapshots/ddb4128556dfcff99e0c41aee159ea6c3e655dcd"
+            - name: HF_HOME
+              value: /opt/models
           args:
           - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 4 --data-parallel-size 1 --disable-log-requests --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
           command:

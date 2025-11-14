@@ -61,7 +61,7 @@ vllm = [
 sglang = [
     "uvloop",
     "nixl<=0.7.0",
-    "sglang[all]==0.5.4.post3",
+    "sglang==0.5.4.post3",
 ]
 
 [dependency-groups]

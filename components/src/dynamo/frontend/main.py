@@ -163,6 +163,12 @@ def parse_args():
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing.",
     )
     parser.add_argument(
+        "--enforce-disagg",
+        action="store_true",
+        default=False,
+        help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
+    )
+    parser.add_argument(
         "--busy-threshold",
         type=float,
         default=None,
@@ -278,7 +284,7 @@ async def async_main():
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
         "router_config": RouterConfig(
-            router_mode, kv_router_config, flags.busy_threshold
+            router_mode, kv_router_config, flags.busy_threshold, flags.enforce_disagg
         ),
     }
 

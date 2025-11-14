@@ -959,12 +959,16 @@ pub async fn create_worker_selection_pipeline_chat(
 
     use dynamo_llm::discovery::ModelWatcher;
     let model_manager = std::sync::Arc::new(ModelManager::new());
+    let router_config = dynamo_llm::entrypoint::RouterConfig {
+        router_mode,
+        kv_router_config: kv_router_config.unwrap_or_default(),
+        busy_threshold,
+        enforce_disagg: false,
+    };
     let watcher = ModelWatcher::new(
         component.drt().clone(),
         model_manager.clone(),
-        router_mode,
-        kv_router_config,
-        busy_threshold,
+        router_config,
     );
     let cards = watcher
         .cards_for_model(model_name, Some(namespace), false)
@@ -1031,7 +1035,8 @@ pub async fn create_worker_selection_pipeline_chat(
         busy_threshold,
         chooser,
         hf_tokenizer,
-        None,
+        None,  // prefill_chooser
+        false, // enforce_disagg
     )
     .await?;
 

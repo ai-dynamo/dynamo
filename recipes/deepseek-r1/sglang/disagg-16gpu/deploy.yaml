@@ -23,7 +23,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1800
             failureThreshold: 60
-          image: my-registry/sglang-wideep-runtime:my-tag
+          image: my-registry/sglang-runtime:my-tag
     decode:
       dynamoNamespace: sgl-dsr1-16gpu
       componentType: worker
@@ -47,7 +47,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: my-registry/sglang-wideep-runtime:my-tag
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /sgl-workspace/dynamo
           command:
             - python3
@@ -99,7 +99,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: my-registry/sglang-wideep-runtime:my-tag
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /sgl-workspace/dynamo
           command:
             - python3

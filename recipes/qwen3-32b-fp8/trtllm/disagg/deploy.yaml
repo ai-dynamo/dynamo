@@ -228,7 +228,7 @@ spec:
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
-          mountPoint: /root/.cache/huggingface
+          mountPoint: /opt/models
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -265,6 +265,8 @@ spec:
             value: "/opt/dynamo/configs/config-prefill.yaml"
           - name: MODEL_PATH
             value: "Qwen/Qwen3-32B-FP8"
+          - name: HF_HOME
+            value: "/opt/models"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-prefill
@@ -287,7 +289,7 @@ spec:
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
-          mountPoint: /root/.cache/huggingface
+          mountPoint: /opt/models
       sharedMemory:
         size: 80Gi
       extraPodSpec:
@@ -324,6 +326,8 @@ spec:
             value: "/opt/dynamo/configs/config-decode.yaml"
           - name: MODEL_PATH
             value: "Qwen/Qwen3-32B-FP8"
+          - name: HF_HOME
+            value: "/opt/models"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-decode

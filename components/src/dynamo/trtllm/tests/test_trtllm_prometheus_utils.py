@@ -53,29 +53,29 @@ tokens_per_second 245.7
         dynamo.common.utils.prometheus.generate_latest = original_generate_latest
 
     def test_trtllm_use_case(self, trtllm_registry):
-        """Test TensorRT-LLM use case: exclude python_/process_ and add trtllm: prefix."""
+        """Test TensorRT-LLM use case: exclude python_/process_ and add trtllm_ prefix."""
         result = get_prometheus_expfmt(
             trtllm_registry,
             exclude_prefixes=["python_", "process_"],
-            add_prefix="trtllm:",
+            add_prefix="trtllm_",
         )
 
         # Should not contain excluded metrics
         assert "python_gc_objects_collected_total" not in result
         assert "process_cpu_seconds_total" not in result
 
-        # All remaining metrics should have trtllm: prefix
-        assert "trtllm:request_latency_seconds" in result
-        assert "trtllm:num_requests_running" in result
-        assert "trtllm:tokens_per_second" in result
+        # All remaining metrics should have trtllm_ prefix
+        assert "trtllm_request_latency_seconds" in result
+        assert "trtllm_num_requests_running" in result
+        assert "trtllm_tokens_per_second" in result
 
         # HELP/TYPE comments should have prefix
-        assert "# HELP trtllm:request_latency_seconds" in result
-        assert "# TYPE trtllm:num_requests_running" in result
+        assert "# HELP trtllm_request_latency_seconds" in result
+        assert "# TYPE trtllm_num_requests_running" in result
 
         # Check specific content and structure preservation
-        assert 'trtllm:request_latency_seconds_bucket{le="0.1"} 10.0' in result
-        assert "trtllm:tokens_per_second 245.7" in result
+        assert 'trtllm_request_latency_seconds_bucket{le="0.1"} 10.0' in result
+        assert "trtllm_tokens_per_second 245.7" in result
         assert result.endswith("\n")
 
     def test_no_filtering_all_frameworks(self, trtllm_registry):
@@ -98,6 +98,42 @@ tokens_per_second 245.7
 
         # Should return empty string with newline or just newline
         assert result == "\n" or result == ""
+
+    def test_prefix_already_exists(self):
+        """Test that prefix is not added if it already exists."""
+        registry = Mock()
+
+        # Metrics that already have trtllm_ prefix
+        sample_metrics = """# HELP trtllm_request_success_total Count of successfully processed requests
+# TYPE trtllm_request_success_total counter
+trtllm_request_success_total{model_name="test",finished_reason="stop"} 10.0
+# HELP trtllm_time_to_first_token_seconds Time to first token
+# TYPE trtllm_time_to_first_token_seconds histogram
+trtllm_time_to_first_token_seconds_count 5.0
+"""
+
+        def mock_generate_latest(reg):
+            return sample_metrics.encode("utf-8")
+
+        import dynamo.common.utils.prometheus
+
+        original_generate_latest = dynamo.common.utils.prometheus.generate_latest
+        dynamo.common.utils.prometheus.generate_latest = mock_generate_latest
+
+        try:
+            result = get_prometheus_expfmt(
+                registry,
+                exclude_prefixes=["python_", "process_"],
+                add_prefix="trtllm_",
+            )
+
+            # Should not double-add prefix
+            assert "trtllm_trtllm_request_success_total" not in result
+            assert "trtllm_request_success_total" in result
+            assert "trtllm_time_to_first_token_seconds" in result
+            assert result.endswith("\n")
+        finally:
+            dynamo.common.utils.prometheus.generate_latest = original_generate_latest
 
     def test_error_handling(self):
         """Test error handling when registry fails."""

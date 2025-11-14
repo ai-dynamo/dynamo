@@ -54,6 +54,9 @@ RUN go build \
 ############################
 FROM ${BASE_IMAGE} AS runtime
 
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
 # Minimal runtime deps; include libstdc++ runtime for -lstdc++
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \

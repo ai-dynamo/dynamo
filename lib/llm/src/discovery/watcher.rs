@@ -20,8 +20,8 @@ use dynamo_runtime::{
 
 use crate::{
     backend::Backend,
-    entrypoint,
-    kv_router::{KvRouterConfig, PrefillRouter},
+    entrypoint::{self, RouterConfig},
+    kv_router::PrefillRouter,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
@@ -50,11 +50,9 @@ pub enum ModelUpdate {
 pub struct ModelWatcher {
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
-    router_mode: RouterMode,
+    router_config: RouterConfig,
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
-    kv_router_config: Option<KvRouterConfig>,
-    busy_threshold: Option<f64>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -69,18 +67,14 @@ impl ModelWatcher {
     pub fn new(
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
-        router_mode: RouterMode,
-        kv_router_config: Option<KvRouterConfig>,
-        busy_threshold: Option<f64>,
+        router_config: RouterConfig,
     ) -> ModelWatcher {
         Self {
             manager: model_manager,
             drt: runtime,
-            router_mode,
+            router_config,
             notify_on_model: Notify::new(),
             model_update_tx: None,
-            kv_router_config,
-            busy_threshold,
         }
     }
 
@@ -371,10 +365,14 @@ impl ModelWatcher {
             // handle Chat or Completions requests, so handle whatever the model supports.
 
             let endpoint = component.endpoint(&endpoint_id.name);
-            let kv_chooser = if self.router_mode == RouterMode::KV {
+            let kv_chooser = if self.router_config.router_mode == RouterMode::KV {
                 Some(
                     self.manager
-                        .kv_chooser_for(&endpoint, card.kv_cache_block_size, self.kv_router_config)
+                        .kv_chooser_for(
+                            &endpoint,
+                            card.kv_cache_block_size,
+                            Some(self.router_config.kv_router_config),
+                        )
                         .await?,
                 )
             } else {
@@ -391,15 +389,16 @@ impl ModelWatcher {
                 .register_prefill_router(card.name().to_string())
                 .map(|rx| {
                     // Create prefill-specific config with track_active_blocks disabled
-                    let mut prefill_config = self.kv_router_config.unwrap_or_default();
+                    let mut prefill_config = self.router_config.kv_router_config;
                     prefill_config.router_track_active_blocks = false;
 
                     PrefillRouter::new(
                         rx,
                         self.manager.clone(),
-                        self.router_mode,
+                        self.router_config.router_mode,
                         card.kv_cache_block_size,
                         Some(prefill_config),
+                        self.router_config.enforce_disagg,
                     )
                 });
 
@@ -411,11 +410,12 @@ impl ModelWatcher {
                 >(
                     card,
                     &client,
-                    self.router_mode,
-                    self.busy_threshold,
+                    self.router_config.router_mode,
+                    self.router_config.busy_threshold,
                     kv_chooser.clone(),
                     tokenizer_hf.clone(),
                     prefill_chooser.clone(),
+                    self.router_config.enforce_disagg,
                 )
                 .await
                 .context("build_routed_pipeline")?;
@@ -441,12 +441,13 @@ impl ModelWatcher {
                 >(
                     card,
                     &client,
-                    self.router_mode,
-                    self.busy_threshold,
+                    self.router_config.router_mode,
+                    self.router_config.busy_threshold,
                     kv_chooser,
                     preprocessor,
                     tokenizer_hf,
                     prefill_chooser,
+                    self.router_config.enforce_disagg,
                 )
                 .await
                 .context("build_routed_pipeline_with_preprocessor")?;
@@ -461,7 +462,7 @@ impl ModelWatcher {
                 NvCreateEmbeddingRequest,
                 Annotated<NvCreateEmbeddingResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, None, None
+                client, self.router_config.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
@@ -469,12 +470,13 @@ impl ModelWatcher {
                 .add_embeddings_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case 3: Text + Chat
-            let push_router =
-                PushRouter::<
-                    NvCreateChatCompletionRequest,
-                    Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_threshold(client, self.router_mode, None, None)
-                .await?;
+            let push_router = PushRouter::<
+                NvCreateChatCompletionRequest,
+                Annotated<NvCreateChatCompletionStreamResponse>,
+            >::from_client_with_threshold(
+                client, self.router_config.router_mode, None, None
+            )
+            .await?;
             let engine = Arc::new(push_router);
             self.manager
                 .add_chat_completions_model(card.name(), checksum, engine)?;
@@ -484,7 +486,7 @@ impl ModelWatcher {
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, None, None
+                client, self.router_config.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
@@ -506,7 +508,7 @@ impl ModelWatcher {
                 PreprocessedEmbeddingRequest,
                 Annotated<EmbeddingsEngineOutput>,
             >::from_client_with_threshold(
-                client, self.router_mode, None, None
+                client, self.router_config.router_mode, None, None
             )
             .await?;
 
@@ -531,7 +533,7 @@ impl ModelWatcher {
                 NvCreateTensorRequest,
                 Annotated<NvCreateTensorResponse>,
             >::from_client_with_threshold(
-                client, self.router_mode, None, None
+                client, self.router_config.router_mode, None, None
             )
             .await?;
             let engine = Arc::new(push_router);
