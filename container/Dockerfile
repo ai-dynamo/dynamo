@@ -279,13 +279,17 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd libfabric && \
     git checkout $NIXL_LIBFABRIC_REF && \
     ./autogen.sh && \
-    ./configure --prefix=/usr/local/libfabric \
-            --disable-verbs \
-            --disable-psm3 \
-            --disable-opx \
-            --disable-usnic \
-            --disable-rstream \
-            --enable-efa && \
+    ./configure --prefix="/usr/local/libfabric" \
+                --disable-verbs \
+                --disable-psm3 \
+                --disable-opx \
+                --disable-usnic \
+                --disable-rstream \
+                --enable-efa \
+                --with-cuda=/usr/local/cuda \
+                --enable-cuda-dlopen \
+                --with-gdrcopy \
+                --enable-gdrcopy-dlopen && \
     make -j$(nproc) && \
     make install && \
     /tmp/use-sccache.sh show-stats "LIBFABRIC" && \
