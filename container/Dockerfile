@@ -248,20 +248,21 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
      git clone https://github.com/openucx/ucx.git && \
      cd ucx && 			     \
      git checkout $NIXL_UCX_REF &&	 \
-     ./autogen.sh && ./configure     \
-         --prefix=/usr/local/ucx     \
-         --enable-shared             \
-         --disable-static            \
-         --disable-doxygen-doc       \
-         --enable-optimizations      \
-         --enable-cma                \
-         --enable-devel-headers      \
-         --with-cuda=/usr/local/cuda \
-         --with-verbs                \
-         --with-dm                   \
-         --with-gdrcopy=/usr/local   \
-         --with-efa                  \
-         --enable-mt &&              \
+     ./autogen.sh &&      \
+     ./contrib/configure-release    \
+        --prefix=/usr/local/ucx     \
+        --enable-shared             \
+        --disable-static            \
+        --disable-doxygen-doc       \
+        --enable-optimizations      \
+        --enable-cma                \
+        --enable-devel-headers      \
+        --with-cuda=/usr/local/cuda \
+        --with-verbs                \
+        --with-dm                   \
+        --with-gdrcopy=/usr/local   \
+        --with-efa                  \
+        --enable-mt &&              \
      make -j &&                      \
      make -j install-strip &&        \
      /tmp/use-sccache.sh show-stats "UCX" && \
