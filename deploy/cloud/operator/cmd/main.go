@@ -584,6 +584,14 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoModel")
 		os.Exit(1)
 	}
+	if err = (&nvidiacomv1alpha1.DynamoComponentDeployment{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "DynamoComponentDeployment")
+		os.Exit(1)
+	}
+	if err = (&nvidiacomv1alpha1.DynamoGraphDeployment{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "DynamoGraphDeployment")
+		os.Exit(1)
+	}
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
