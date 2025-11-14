@@ -10,7 +10,11 @@ from typing import Any, Dict, Optional
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.utils import FlexibleArgumentParser
+
+try:
+    from vllm.utils import FlexibleArgumentParser
+except ImportError:
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import add_config_dump_args, register_encoder
