@@ -28,7 +28,7 @@ spec:
 
   # Deployment overrides for the auto-created DGD
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidian/dynamo-dev/vllm-runtime:my-tag"
+    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag"
 
   # Automatically create DynamoGraphDeployment after profiling
   autoApply: true
