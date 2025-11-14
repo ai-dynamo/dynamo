@@ -63,9 +63,9 @@ flowchart LR
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
 # Serve a LLaVA 1.5 7B model:
-bash launch/agg_multimodal_epd --model llava-hf/llava-1.5-7b-hf
+bash launch/agg_multimodal_epd.sh --model llava-hf/llava-1.5-7b-hf
 # Serve a Qwen2.5-VL model:
-bash launch/agg_multimodal_epd --model Qwen/Qwen2.5-VL-7B-Instruct
+bash launch/agg_multimodal_epd.sh --model Qwen/Qwen2.5-VL-7B-Instruct
 ```
 
 ### Client
