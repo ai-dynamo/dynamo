@@ -360,11 +360,11 @@ impl Drop for RuntimeType {
         match self {
             RuntimeType::External(_) => {}
             RuntimeType::Shared(arc) => {
-                if Arc::strong_count(arc) != 1 {
-                    // Only drop if we are the only owner of the shared pointer
+                let Some(md_runtime) = Arc::get_mut(arc) else {
+                    // Only drop if we are the only owner of the shared pointer, meaning
+                    // one strong count and no weak count.
                     return;
-                }
-                let md_runtime = Arc::get_mut(arc).unwrap();
+                };
                 if tokio::runtime::Handle::try_current().is_ok() {
                     // We are inside an async runtime.
                     let tokio_runtime = unsafe { ManuallyDrop::take(md_runtime) };
