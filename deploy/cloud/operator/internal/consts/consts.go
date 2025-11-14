@@ -27,8 +27,6 @@ const (
 	// Default security context values
 	// These provide secure defaults for running containers as non-root
 	// Users can override these via extraPodSpec.securityContext in their DynamoGraphDeployment
-	DefaultSecurityContextUID     = 1000
-	DefaultSecurityContextGID     = 1000
 	DefaultSecurityContextFSGroup = 1000
 
 	EnvDynamoServicePort = "DYNAMO_PORT"
