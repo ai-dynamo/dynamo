@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import logging
 import os
 from dataclasses import dataclass, field
@@ -33,6 +34,17 @@ class VLLMConfig(EngineConfig):
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
+
+BASKETBALL_IMG_B64 = None
+# Encode basketball image for base64 multimodal tests
+with open(
+    os.path.join(os.path.dirname(__file__), "fixtures", "basketball.png"), "rb"
+) as f:
+    BASKETBALL_IMG_B64 = base64.b64encode(f.read()).decode()
+
+# HTTP URL for image (pytest-httpserver will serve this)
+IMAGE_SERVER_PORT = 8765
+BASKETBALL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/basketball.png"
 
 # vLLM test configurations
 vllm_configs = {
@@ -141,13 +153,11 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                        },
+                        "image_url": {"url": BASKETBALL_IMG_URL},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["bus"],
+                expected_response=["basketball"],
                 temperature=0.0,
             )
         ],
@@ -167,13 +177,11 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                        },
+                        "image_url": {"url": BASKETBALL_IMG_URL},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["bus"],
+                expected_response=["basketball"],
             )
         ],
     ),
@@ -187,33 +195,31 @@ vllm_configs = {
         delayed_start=0,
         timeout=360,
         request_payloads=[
-            # HTTP URL test
+            # Base64-encoded image
             chat_payload(
                 [
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                            "url": f"data:image/png;base64,{BASKETBALL_IMG_B64}"
                         },
                     },
                 ],
                 repeat_count=1,
-                expected_response=["bus"],
+                expected_response=["basketball"],
             ),
-            # Base64 data URL test (1x1 PNG inline, avoids network fetch)
+            # HTTP URL test
             chat_payload(
                 [
-                    {"type": "text", "text": "What do you see in this image?"},
+                    {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
-                        },
+                        "image_url": {"url": BASKETBALL_IMG_URL},
                     },
                 ],
                 repeat_count=1,
-                expected_response=[],  # Just validate no error
+                expected_response=["basketball"],
             ),
         ],
     ),
@@ -294,7 +300,7 @@ def vllm_config_test(request):
 @pytest.mark.vllm
 @pytest.mark.e2e
 def test_serve_deployment(
-    vllm_config_test, request, runtime_services, predownload_models
+    vllm_config_test, request, runtime_services, predownload_models, image_server
 ):
     """
     Test dynamo serve deployments with different graph configurations.
