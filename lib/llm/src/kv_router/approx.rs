@@ -354,8 +354,8 @@ impl ApproxKvIndexer {
                                             prune_config.max_tree_size
                                         );
                                         // Send a signal to the pruning receiver to schedule pruning.
-                                        if let Err(e) = prune_tx.try_send(()) {
-                                            tracing::error!("Failed to send prune schedule signal: {:?}", e);
+                                        if let Err(mpsc::error::TrySendError::Closed(_)) = prune_tx.try_send(()) {
+                                            tracing::error!("Failed to send prune schedule signal, prune receiver is closed");
                                         }
                                     }
                                 }
