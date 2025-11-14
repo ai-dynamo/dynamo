@@ -9,6 +9,7 @@ on:
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
+  workflow_dispatch:  # Allow manual triggering for testing
 
 concurrency:
     # The group name is a ternary operation. If the ref_name is 'main',
@@ -43,7 +44,8 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing
+    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -119,7 +121,8 @@ jobs:
 
   vllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing
+    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -184,7 +187,8 @@ jobs:
 
   sglang:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing
+    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -247,7 +251,8 @@ jobs:
 
   trtllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing
+    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -499,7 +504,8 @@ jobs:
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing - run even if dependencies fail
+    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -513,6 +519,9 @@ jobs:
         BRANCH: ${{ github.ref_name }}
       run: |
         set -x
+        
+        # Redirect all output to a log file while still showing it
+        exec > >(tee -a deploy-operator.log) 2>&1
 
         # Set namespace
         # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
@@ -521,6 +530,7 @@ jobs:
         BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
         NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
         echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+        echo "NAMESPACE=${NAMESPACE}" >> $GITHUB_ENV
 
         # Setup kubeconfig
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
@@ -555,23 +565,102 @@ jobs:
         kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
         # Create docker pull secret for operator image
         kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
+        
+        # Function to create inline annotation and exit
+        create_annotation_and_exit() {
+          local ERROR_MSG="$1"
+          echo "=== Deployment failed, creating annotation ==="
+          
+          # Install Python and LogAI inline
+          pip install --upgrade pip logai 2>/dev/null || echo "LogAI installation skipped"
+          chmod +x .github/scripts/extract_log_errors.py 2>/dev/null || true
+          
+          # Extract errors from log
+          if [ -f "deploy-operator.log" ]; then
+            EXTRACTED_ERROR=$(python3 .github/scripts/extract_log_errors.py deploy-operator.log 2>/dev/null || echo "")
+          else
+            EXTRACTED_ERROR=""
+          fi
+          
+          # Use extracted error or fall back to manual error
+          if [ -n "$EXTRACTED_ERROR" ]; then
+            FINAL_ERROR="$EXTRACTED_ERROR"
+          else
+            FINAL_ERROR="$ERROR_MSG"
+          fi
+          
+          # Add pod context if available
+          if [ -n "$NAMESPACE" ]; then
+            POD_STATUS=$(kubectl get pods -n $NAMESPACE -o json 2>/dev/null || echo "{}")
+            POD_ERRORS=$(echo "$POD_STATUS" | jq -r '.items[] | select(.status.phase != "Running") | "Pod: \(.metadata.name), Status: \(.status.phase)"' 2>/dev/null || echo "")
+            if [ -n "$POD_ERRORS" ]; then
+              FINAL_ERROR="${FINAL_ERROR}\n\nPod Status:\n${POD_ERRORS}"
+            fi
+          fi
+          
+          # Create GitHub annotation using workflow command
+          echo "::error file=.github/workflows/container-validation-backends.yml,line=512,title=Deploy Operator Failed::${FINAL_ERROR}"
+          
+          exit 1
+        }
+        
+        # Check if Helm is available
+        echo "Checking Helm availability..."
+        if ! command -v helm &> /dev/null; then
+          create_annotation_and_exit "Helm is not installed or not available in PATH. Helm installation may have failed during runner setup."
+        fi
+        
+        echo "Helm version: $(helm version --short)"
+        
         # Install helm dependencies
-        helm repo add bitnami https://charts.bitnami.com/bitnami
+        echo "Installing Helm dependencies..."
+        if ! helm repo add bitnami https://charts.bitnami.com/bitnami 2>&1; then
+          create_annotation_and_exit "Failed to add Helm bitnami repository"
+        fi
+        
         cd deploy/cloud/helm/platform/
-        helm dep build .
+        
+        if ! helm dep build . 2>&1; then
+          create_annotation_and_exit "Failed to build Helm dependencies"
+        fi
+        
         # Install platform with namespace restriction for single profile testing
-        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+        echo "Installing dynamo-platform Helm chart..."
+        if ! helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
           --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
-          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret 2>&1; then
+          
+          # Capture additional diagnostics
+          echo "=== Pod Status ==="
+          kubectl get pods -n ${NAMESPACE} -o wide || true
+          echo "=== Events ==="
+          kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' | tail -20 || true
+          echo "=== Helm Status ==="
+          helm status dynamo-platform -n ${NAMESPACE} || true
+          
+          create_annotation_and_exit "Failed to install dynamo-platform Helm chart. This may be due to: pre-install hook timeout, image pull failures, or resource constraints."
+        fi
+        
         # Wait for all deployments to be ready
-        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+        echo "Waiting for deployments to be ready..."
+        if ! timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch 2>&1; then
+          # Capture diagnostics
+          echo "=== Pod Status ==="
+          kubectl get pods -n ${NAMESPACE} -o wide || true
+          echo "=== Deployment Status ==="
+          kubectl get deployments -n ${NAMESPACE} || true
+          
+          create_annotation_and_exit "Deployment rollout timed out after 300 seconds"
+        fi
+    
 
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing - run even if dependencies fail
+    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
@@ -604,12 +693,16 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
         kubectl config get-contexts
     - name: Run Tests
+      id: run-tests
       env:
         NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       run: |
         set -x
         export KUBECONFIG=$(pwd)/.kubeconfig
         kubectl config set-context --current --namespace=$NAMESPACE
+
+        # Redirect all output to a log file while still showing it
+        exec > >(tee -a test-output.log) 2>&1
 
         cd examples/backends/$FRAMEWORK
         export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
@@ -662,8 +755,9 @@ jobs:
           ATTEMPT=$((ATTEMPT + 1))
         done
         if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-          echo "Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts"
-          echo "Last response: $MODELS_RESPONSE"
+          ERROR_MSG="Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts. Last response: $MODELS_RESPONSE"
+          echo "$ERROR_MSG"
+          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
           exit 1
         fi
         RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused -X POST "${LLM_URL}/v1/chat/completions" \
@@ -683,26 +777,63 @@ jobs:
           }' 2>&1)
         echo "Response: $RESPONSE"
         TEST_RESULT=0
+        ERROR_MSG=""
         if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
-          echo "Test failed: Response is not valid JSON"
-          echo "Got: $RESPONSE"
+          ERROR_MSG="Test failed: Response is not valid JSON. Got: $RESPONSE"
+          echo "$ERROR_MSG"
           TEST_RESULT=1
         elif ! echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
-          echo "Test failed: Message role is not 'assistant'"
-          echo "Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
+          ERROR_MSG="Test failed: Message role is not 'assistant'. Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
+          echo "$ERROR_MSG"
           TEST_RESULT=1
         elif ! echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
-          echo "Test failed: Model name is incorrect"
-          echo "Got: $(echo "$RESPONSE" | jq '.model')"
+          ERROR_MSG="Test failed: Model name is incorrect. Expected: ${MODEL_NAME}, Got: $(echo "$RESPONSE" | jq '.model')"
+          echo "$ERROR_MSG"
           TEST_RESULT=1
         elif ! echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 100' >/dev/null 2>&1; then
-          echo "Test failed: Response content length is not greater than 100 characters"
-          echo "Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
+          ERROR_MSG="Test failed: Response content length is not greater than 100 characters. Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
+          echo "$ERROR_MSG"
           TEST_RESULT=1
         else
           echo "Test passed: Response matches expected format and content"
         fi
-        exit $TEST_RESULT
+        
+        if [ $TEST_RESULT -ne 0 ]; then
+          # Test failed - extract errors and create annotation inline
+          echo "=== Test failed, extracting errors and creating annotation ==="
+          
+          # Install Python and LogAI inline
+          pip install --upgrade pip logai 2>/dev/null || echo "LogAI installation skipped"
+          chmod +x .github/scripts/extract_log_errors.py 2>/dev/null || true
+          
+          # Extract errors from log
+          if [ -f "test-output.log" ]; then
+            EXTRACTED_ERROR=$(python3 .github/scripts/extract_log_errors.py test-output.log 2>/dev/null || echo "")
+          else
+            EXTRACTED_ERROR=""
+          fi
+          
+          # Use extracted error or fall back to manual error
+          if [ -n "$EXTRACTED_ERROR" ]; then
+            FINAL_ERROR="$EXTRACTED_ERROR"
+          else
+            FINAL_ERROR="$ERROR_MSG"
+          fi
+          
+          # Add pod context if available
+          if [ -n "$GRAPH_NAME" ]; then
+            POD_STATUS=$(kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $NAMESPACE -o json 2>/dev/null || echo "{}")
+            POD_ERRORS=$(echo "$POD_STATUS" | jq -r '.items[] | select(.status.phase != "Running") | "Pod: \(.metadata.name), Status: \(.status.phase)"' 2>/dev/null || echo "")
+            if [ -n "$POD_ERRORS" ]; then
+              FINAL_ERROR="${FINAL_ERROR}\n\nPod Status:\n${POD_ERRORS}"
+            fi
+          fi
+          
+          # Create GitHub annotation using workflow command
+          echo "::error file=.github/workflows/container-validation-backends.yml,line=777,title=Deploy Test Failed: ${{ env.FRAMEWORK }} (${{ matrix.profile }})::${FINAL_ERROR}"
+          
+          exit 1
+        fi
     - name: Cleanup
       if: always()
       timeout-minutes: 5
@@ -721,7 +852,8 @@ jobs:
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing - run even if dependencies fail
+    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
@@ -742,7 +874,8 @@ jobs:
 
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing - run even if dependencies fail
+    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
