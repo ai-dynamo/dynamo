@@ -77,7 +77,7 @@ class DeploymentValidator:
         dgd_docs = [
             (i, doc)
             for i, doc in enumerate(docs)
-            if doc and doc.get("kind") == "DynamoGraphDeployment"
+            if isinstance(doc, dict) and doc.get("kind") == "DynamoGraphDeployment"
         ]
 
         if not dgd_docs:
@@ -259,10 +259,14 @@ class DeploymentValidator:
 
 def has_dgd_resource(yaml_file: Path) -> bool:
     """Check if a YAML file contains DynamoGraphDeployment resources."""
+    # Skip Helm templates (contain {{ }} syntax)
+    if "/templates/" in str(yaml_file) or "/chart/" in str(yaml_file):
+        return False
+
     try:
         with open(yaml_file) as f:
             for doc in yaml.safe_load_all(f):
-                if doc and doc.get("kind") == "DynamoGraphDeployment":
+                if isinstance(doc, dict) and doc.get("kind") == "DynamoGraphDeployment":
                     return True
         return False
     except Exception:
@@ -289,6 +293,9 @@ def find_deploy_files(root_dir: Path, limit_dirs: List[str] = None) -> List[Path
                 continue
             for ext in ["*.yaml", "*.yml"]:
                 for yaml_file in search_dir.glob(f"**/{ext}"):
+                    # Skip Helm template directories
+                    if "/templates/" in str(yaml_file) or "/chart/" in str(yaml_file):
+                        continue
                     if has_dgd_resource(yaml_file):
                         dgd_files.append(yaml_file)
         return sorted(dgd_files)
@@ -304,7 +311,9 @@ def find_deploy_files(root_dir: Path, limit_dirs: List[str] = None) -> List[Path
             timeout=10,
         )
         yaml_files = [
-            root_dir / Path(f) for f in result.stdout.strip().split("\n") if f
+            root_dir / Path(f)
+            for f in result.stdout.strip().split("\n")
+            if f and "/templates/" not in f and "/chart/" not in f
         ]
     except (
         subprocess.CalledProcessError,
@@ -313,7 +322,16 @@ def find_deploy_files(root_dir: Path, limit_dirs: List[str] = None) -> List[Path
     ):
         # Fallback: search entire repo (excluding common directories)
         yaml_files = []
-        exclude_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox"}
+        exclude_dirs = {
+            ".git",
+            "node_modules",
+            "__pycache__",
+            ".venv",
+            "venv",
+            ".tox",
+            "templates",
+            "chart",
+        }
         for ext in ["*.yaml", "*.yml"]:
             for yaml_file in root_dir.glob(f"**/{ext}"):
                 if not any(part in exclude_dirs for part in yaml_file.parts):

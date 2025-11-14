@@ -93,5 +93,6 @@ repos:
     entry: python3 deploy/utils/validate_deployments.py
     language: python
     files: '(recipes|examples|tests|deploy)/.*\.(yaml|yml)$'
+    exclude: '(templates|chart)/.*\.(yaml|yml)$'
     pass_filenames: true
     additional_dependencies: [pyyaml, jsonschema]
