@@ -6,13 +6,16 @@ requires = ["maturin>=1.5,<2"]
 build-backend = "maturin"
 
 [project]
-name = "cuda-tensor-kernels"
-version = "0.1.0"
+name = "kvbm-kernels"
+version = "0.7.0"
 description = "CUDA tensor permutation and packing kernels with Python bindings"
 requires-python = ">=3.8"
 readme = "README.md"
-authors = [{ name = "Ryan", email = "ryan@example.com" }]
-license = { text = "Proprietary" }
+authors = [
+    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
+]
+license = { text = "Apache-2.0" }
+license-files = ["LICENSE"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python",
@@ -23,4 +26,4 @@ classifiers = [
 
 [tool.maturin]
 features = ["python-bindings"]
-module-name = "cuda_tensor_kernels"
+module-name = "kvbm_kernels"

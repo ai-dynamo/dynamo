@@ -48,7 +48,8 @@ pub enum OperationalCopyDirection {
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationalCopyBackend {
-    /// Try cudaMemcpyBatchAsync, fall back to cudaMemcpyAsync, then the kernel.
+    /// Auto-select the best backend based on the available CUDA toolkit version.
+    /// Priortizes kernel, over batch copy, then memcpy async.
     Auto = 0,
     /// Force the custom CUDA kernel path.
     KernelOnly = 1,
