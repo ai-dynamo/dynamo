@@ -115,6 +115,10 @@ class TestProfileSlaAiconfigurator:
             ("trtllm", None),
             ("trtllm", "0.20.0"),
             ("trtllm", "1.0.0rc3"),
+            ("vllm", None),
+            ("vllm", "0.11.0"),
+            ("sglang", None),
+            ("sglang", "0.5.1.post1"),
         ],
     )
     @pytest.mark.parametrize(
@@ -124,7 +128,34 @@ class TestProfileSlaAiconfigurator:
             "meta-llama/Llama-3.1-405B",
         ],
     )
-    async def test_trtllm_aiconfigurator_many(
+    async def test_aiconfigurator_dense_models(
+        self, trtllm_args, hf_model_id, backend, aic_backend_version
+    ):
+        # Test that profile_sla works with a variety of backend versions and model names.
+        trtllm_args.aic_hf_id = hf_model_id
+        trtllm_args.backend = backend
+        trtllm_args.aic_backend_version = aic_backend_version
+        await run_profile(trtllm_args)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "backend, aic_backend_version",
+        [
+            ("trtllm", None),
+            ("trtllm", "0.20.0"),
+            ("trtllm", "1.0.0rc3"),
+            ("sglang", None),
+            ("sglang", "0.5.1.post1"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "hf_model_id",
+        [
+            "Qwen/Qwen3-235B-A22B",
+            "mistralai/Mixtral-8x7B-v0.1",
+        ],
+    )
+    async def test_aiconfigurator_moe_models(
         self, trtllm_args, hf_model_id, backend, aic_backend_version
     ):
         # Test that profile_sla works with a variety of backend versions and model names.
