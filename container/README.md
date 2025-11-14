@@ -420,7 +420,7 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 ./run.sh --image dynamo:latest-vllm-runtime --gpus all -v $HOME/.cache:/home/dynamo/.cache
 ```
 
-### Dev Workflow
+### Testing Workflow
 ```bash
 # 1. Build dev image 
 ./build.sh --framework vllm --no-cache
