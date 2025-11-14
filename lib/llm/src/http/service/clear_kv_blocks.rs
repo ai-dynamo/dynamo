@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use dynamo_runtime::{discovery::DiscoveryQuery, pipeline::PushRouter, stream::StreamExt};
 
-pub const CLEAR_KV_ENDPOINT: &str = "clear_kv_blocks";
+pub const CLEAR_KV_ENDPOINT: &str = "clear-kv-blocks";
 
 pub fn clear_kv_blocks_router(
     state: Arc<service_v2::State>,

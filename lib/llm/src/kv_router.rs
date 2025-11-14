@@ -57,16 +57,16 @@ use crate::{
 // this should be discovered from the component
 
 // for metric scraping (pull-based)
-pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
+pub const KV_METRICS_ENDPOINT: &str = "load-metrics";
 
 // for metric publishing (push-based)
-pub const KV_EVENT_SUBJECT: &str = "kv_events";
+pub const KV_EVENT_SUBJECT: &str = "kv-events";
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
-pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
+pub const KV_METRICS_SUBJECT: &str = "kv-metrics";
 
 // for inter-router comms
-pub const PREFILL_SUBJECT: &str = "prefill_events";
-pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
+pub const PREFILL_SUBJECT: &str = "prefill-events";
+pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active-sequences-events";
 
 // for radix tree snapshot storage
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
