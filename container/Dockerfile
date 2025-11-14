@@ -38,7 +38,7 @@ ARG SCCACHE_REGION=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF=v1.19.0
-ARG NIXL_REF=0.7.0
+ARG NIXL_REF=0.7.1
 ARG NIXL_GDRCOPY_REF=v2.5.1
 
 # Python configuration
@@ -396,6 +396,7 @@ COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_L
 
 # Copy built artifacts
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 COPY --chown=dynamo: --from=wheel_builder $CARGO_HOME $CARGO_HOME
