@@ -247,121 +247,31 @@ async fn resolve_model_path(path: &str) -> anyhow::Result<PathBuf> {
 
 /// Register a model (either base model or LoRA adapter) based on the configuration
 async fn register_model(mut config: ModelConfig) -> anyhow::Result<()> {
-    // Check if this is a LoRA registration
-    if let (Some(lora_name), Some(base_path)) = (&config.lora_name, &config.base_path) {
-        // LoRA registration path
-        use llm_rs::model_card::ModelDeploymentCard;
-
-        // Resolve base model path
-        let base_model_path = resolve_model_path(base_path).await?;
-
-        // Load base model card to inherit configuration
-        let mut card = ModelDeploymentCard::load_from_disk(&base_model_path, None)?;
-
-        // Update card for LoRA
-        card.set_name(lora_name);
-        card.model_type = config.model_type;
-        card.model_input = config.model_input;
-
-        if let Some(block_size) = config.kv_cache_block_size {
-            card.kv_cache_block_size = block_size;
-        }
-
-        if let Some(data) = config.user_data {
-            card.user_data = Some(data);
-        }
-
-        // Register the LoRA model through the discovery client
-        let discovery = config.endpoint.inner.drt().discovery();
-
-        let discovery_spec = dynamo_runtime::discovery::DiscoverySpec::from_model(
-            config
-                .endpoint
-                .inner
-                .component()
-                .namespace()
-                .name()
-                .to_string(),
-            config.endpoint.inner.component().name().to_string(),
-            config.endpoint.inner.name().to_string(),
-            &card,
-        )?;
-
-        discovery.register(discovery_spec).await?;
-    } else {
-        // Base model registration path
-        let model_path = config
-            .model_path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("model_path is required for base model registration"))?;
-
-        // Resolve model path and preserve name for HuggingFace repos
-        let resolved_path = if fs::exists(model_path)? {
-            PathBuf::from(model_path.clone())
-        } else {
-            if config.model_name.is_none() {
-                config.model_name = Some(model_path.clone());
-            }
-            LocalModel::fetch(model_path, false).await?
-        };
-
-        // Build and attach model
-        let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
-        builder
-            .model_path(resolved_path)
-            .model_name(config.model_name)
-            .context_length(config.context_length)
-            .kv_cache_block_size(config.kv_cache_block_size)
-            .router_config(config.router_config)
-            .migration_limit(config.migration_limit)
-            .runtime_config(config.runtime_config.unwrap_or_default().inner)
-            .user_data(config.user_data)
-            .custom_template_path(config.custom_template_path)
-            .media_decoder(config.media_decoder.map(|d| d.inner))
-            .media_fetcher(config.media_fetcher.map(|f| f.inner));
-
-        let mut local_model = builder.build().await?;
-        local_model
-            .attach(
-                &config.endpoint.inner,
-                config.model_type,
-                config.model_input,
-            )
-            .await?;
-    }
+    // Attach the LocalModel to the endpoint
+    // This works for both base models and LoRA adapters since both are represented as LocalModels
+    config
+        .local_model
+        .attach(&config.endpoint.inner, config.model_type, config.model_input)
+        .await?;
 
     Ok(())
 }
 
 /// Configuration for registering models (both base models and LoRA adapters)
 struct ModelConfig {
-    // Common fields for both base models and LoRA
+    // The built LocalModel (contains all model configuration)
+    local_model: LocalModel,
+
+    // Fields needed for registration that LocalModel doesn't store
     endpoint: Endpoint,
     model_type: llm_rs::model_type::ModelType,
     model_input: llm_rs::model_type::ModelInput,
-    kv_cache_block_size: Option<u32>,
-    user_data: Option<serde_json::Value>,
-
-    // Base model specific fields
-    model_path: Option<String>,
-    model_name: Option<String>,
-    context_length: Option<u32>,
-    router_config: Option<RouterConfig>,
-    migration_limit: Option<u32>,
-    runtime_config: Option<ModelRuntimeConfig>,
-    custom_template_path: Option<PathBuf>,
-    media_decoder: Option<MediaDecoder>,
-    media_fetcher: Option<MediaFetcher>,
-
-    // LoRA specific fields
-    lora_name: Option<String>,
-    base_path: Option<String>,
 }
 
 impl ModelConfig {
     /// Create a configuration for a base model
     #[allow(clippy::too_many_arguments)]
-    fn for_base_model(
+    async fn for_base_model(
         model_path: String,
         model_name: Option<String>,
         endpoint: Endpoint,
@@ -376,29 +286,49 @@ impl ModelConfig {
         custom_template_path: Option<PathBuf>,
         media_decoder: Option<MediaDecoder>,
         media_fetcher: Option<MediaFetcher>,
-    ) -> Self {
-        Self {
+    ) -> anyhow::Result<Self> {
+        // Resolve model path and preserve name for HuggingFace repos
+        let resolved_path = if fs::exists(&model_path)? {
+            PathBuf::from(model_path.clone())
+        } else {
+            LocalModel::fetch(&model_path, false).await?
+        };
+
+        let final_model_name = model_name.or_else(|| {
+            if !fs::exists(&model_path).unwrap_or(false) {
+                Some(model_path.clone())
+            } else {
+                None
+            }
+        });
+
+        // Build LocalModel using LocalModelBuilder
+        let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
+        builder
+            .model_path(resolved_path)
+            .model_name(final_model_name)
+            .context_length(context_length)
+            .kv_cache_block_size(kv_cache_block_size)
+            .router_config(Some(router_config))
+            .migration_limit(Some(migration_limit))
+            .runtime_config(runtime_config.unwrap_or_default().inner)
+            .user_data(user_data)
+            .custom_template_path(custom_template_path)
+            .media_decoder(media_decoder.map(|d| d.inner))
+            .media_fetcher(media_fetcher.map(|f| f.inner));
+
+        let local_model = builder.build().await?;
+
+        Ok(Self {
+            local_model,
             endpoint,
             model_type,
             model_input,
-            kv_cache_block_size,
-            user_data,
-            model_path: Some(model_path),
-            model_name,
-            context_length,
-            router_config: Some(router_config),
-            migration_limit: Some(migration_limit),
-            runtime_config,
-            custom_template_path,
-            media_decoder,
-            media_fetcher,
-            lora_name: None,
-            base_path: None,
-        }
+        })
     }
 
     /// Create a configuration for a LoRA adapter
-    fn for_lora(
+    async fn for_lora(
         lora_name: String,
         base_path: String,
         endpoint: Endpoint,
@@ -406,25 +336,26 @@ impl ModelConfig {
         model_input: llm_rs::model_type::ModelInput,
         kv_cache_block_size: Option<u32>,
         user_data: Option<serde_json::Value>,
-    ) -> Self {
-        Self {
+    ) -> anyhow::Result<Self> {
+        // Resolve base model path
+        let base_model_path = resolve_model_path(&base_path).await?;
+
+        // Build a LocalModel from the base model to get proper configuration
+        let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
+        builder
+            .model_path(base_model_path)
+            .model_name(Some(lora_name)) // Use LoRA name as the model name
+            .kv_cache_block_size(kv_cache_block_size)
+            .user_data(user_data);
+
+        let local_model = builder.build().await?;
+
+        Ok(Self {
+            local_model,
             endpoint,
             model_type,
             model_input,
-            kv_cache_block_size,
-            user_data,
-            model_path: None,
-            model_name: None,
-            context_length: None,
-            router_config: None,
-            migration_limit: None,
-            runtime_config: None,
-            custom_template_path: None,
-            media_decoder: None,
-            media_fetcher: None,
-            lora_name: Some(lora_name),
-            base_path: Some(base_path),
-        }
+        })
     }
 }
 
@@ -524,12 +455,12 @@ fn register_llm<'p>(
     };
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let result = match registration_mode {
+        let config = match registration_mode {
             RegistrationMode::Lora {
                 lora_name,
                 base_path,
             } => {
-                register_model(ModelConfig::for_lora(
+                ModelConfig::for_lora(
                     lora_name,
                     base_path,
                     endpoint,
@@ -537,14 +468,15 @@ fn register_llm<'p>(
                     model_input,
                     kv_cache_block_size,
                     user_data_json,
-                ))
+                )
                 .await
+                .map_err(to_pyerr)?
             }
             RegistrationMode::BaseModel {
                 model_path,
                 model_name,
             } => {
-                register_model(ModelConfig::for_base_model(
+                ModelConfig::for_base_model(
                     model_path,
                     model_name,
                     endpoint,
@@ -559,12 +491,13 @@ fn register_llm<'p>(
                     custom_template_path_owned,
                     media_decoder,
                     media_fetcher,
-                ))
+                )
                 .await
+                .map_err(to_pyerr)?
             }
         };
 
-        result.map_err(to_pyerr)?;
+        register_model(config).await.map_err(to_pyerr)?;
         Ok(())
     })
 }
