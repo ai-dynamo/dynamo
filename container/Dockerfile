@@ -317,7 +317,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo/lib/bindings/python && \
     maturin build --release --out /opt/dynamo/dist && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
-        cd /opt/dynamo/lib/kvbm && \
+        cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
@@ -334,6 +334,9 @@ ARG ARCH_ALT
 # Application environment variables
 ENV DYNAMO_HOME=/opt/dynamo \
     CARGO_TARGET_DIR=/opt/dynamo/target
+
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \

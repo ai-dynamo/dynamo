@@ -197,6 +197,22 @@ spec:
             - --no-correction
 ```
 
+Remove `volumes` and `volumeMounts`:
+
+```
+# Remove these lines or any similar lines
+          volumeMounts:
+            - name: planner-profile-data
+              mountPath: /workspace/profiling_results
+              readOnly: true
+        volumes:
+          - name: planner-profile-data
+            configMap:
+              # Must be pre-created before deployment by the profiler
+              # See docs/planner/sla_planner_quickstart.md for more details
+              name: planner-profile-data
+```
+
 3. Update the model in VllmPrefillWorker and VllmDecodeWorker services:
 
 ```yaml

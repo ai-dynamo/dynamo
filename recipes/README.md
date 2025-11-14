@@ -169,7 +169,7 @@ kubectl apply -f hf_hub_secret/hf_hub_secret.yaml -n ${NAMESPACE}
 export DYNAMO_KV_BLOCK_SIZE=128
 export EPP_IMAGE=nvcr.io/you/epp:tag
 # Add --gaie argument to the script i.e.:
-./run.sh --model llama-3-70b --framework vllm --gaie agg
+./run.sh --model llama-3-70b --framework vllm --gaie agg --deployment agg
 ```
 The script will perform gateway checks and apply the manifests.
 
