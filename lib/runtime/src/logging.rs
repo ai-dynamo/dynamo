@@ -414,6 +414,30 @@ pub fn inject_current_trace_into_nats_headers(headers: &mut async_nats::HeaderMa
     inject_otel_context_into_nats_headers(headers, None);
 }
 
+// Inject trace headers into a generic HashMap for HTTP/TCP transports
+pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<String, String>) {
+    if let Some(trace_context) = get_distributed_tracing_context() {
+        // Inject W3C traceparent header
+        headers.insert(
+            "traceparent".to_string(),
+            trace_context.create_traceparent(),
+        );
+
+        // Inject optional tracestate
+        if let Some(tracestate) = trace_context.tracestate {
+            headers.insert("tracestate".to_string(), tracestate);
+        }
+
+        // Inject custom request IDs
+        if let Some(x_request_id) = trace_context.x_request_id {
+            headers.insert("x-request-id".to_string(), x_request_id);
+        }
+        if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
+            headers.insert("x-dynamo-request-id".to_string(), x_dynamo_request_id);
+        }
+    }
+}
+
 /// Create a client_request span linked to the parent trace context
 pub fn make_client_request_span(
     operation: &str,

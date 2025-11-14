@@ -34,7 +34,7 @@ from dynamo.vllm.multimodal_handlers import (
     ProcessorHandler,
 )
 
-from .args import ENABLE_LMCACHE, Config, configure_ports, overwrite_args, parse_args
+from .args import ENABLE_LMCACHE, Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
 from .publisher import StatLoggerFactory
@@ -77,7 +77,6 @@ async def worker():
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(loop, config.store_kv)
 
-    await configure_ports(config)
     overwrite_args(config)
 
     # Set up signal handler for graceful shutdown

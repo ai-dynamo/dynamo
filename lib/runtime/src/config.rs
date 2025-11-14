@@ -9,6 +9,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::OnceLock;
 use validator::Validate;
 
 /// Default system host for health and metrics endpoints
@@ -468,6 +469,75 @@ pub fn use_local_timezone() -> bool {
     env_is_truthy("DYN_LOG_USE_LOCAL_TZ")
 }
 
+/// Request plane transport mode configuration
+///
+/// This determines how requests are distributed from routers to workers:
+/// - `Nats`: Use NATS for request distribution (default, legacy)
+/// - `Http`: Use HTTP/2 for request distribution
+/// - `Tcp`: Use raw TCP for request distribution with msgpack support
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RequestPlaneMode {
+    /// Use NATS for request plane (default for backward compatibility)
+    Nats,
+    /// Use HTTP/2 for request plane
+    Http,
+    /// Use raw TCP for request plane with msgpack support
+    Tcp,
+}
+
+impl Default for RequestPlaneMode {
+    fn default() -> Self {
+        Self::Nats
+    }
+}
+
+impl fmt::Display for RequestPlaneMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Nats => write!(f, "nats"),
+            Self::Http => write!(f, "http"),
+            Self::Tcp => write!(f, "tcp"),
+        }
+    }
+}
+
+impl std::str::FromStr for RequestPlaneMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "nats" => Ok(Self::Nats),
+            "http" => Ok(Self::Http),
+            "tcp" => Ok(Self::Tcp),
+            _ => Err(anyhow::anyhow!(
+                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'http', 'tcp'",
+                s
+            )),
+        }
+    }
+}
+
+/// Global cached request plane mode
+static REQUEST_PLANE_MODE: OnceLock<RequestPlaneMode> = OnceLock::new();
+
+impl RequestPlaneMode {
+    /// The cached request plane mode, initialized from `DYN_REQUEST_PLANE` environment variable
+    /// or defaulting to NATS if not set or invalid.
+    pub fn get() -> Self {
+        *REQUEST_PLANE_MODE.get_or_init(Self::from_env)
+    }
+
+    /// Get the request plane mode from environment variable (uncached)
+    /// Reads from `DYN_REQUEST_PLANE` environment variable.
+    pub fn from_env() -> Self {
+        std::env::var("DYN_REQUEST_PLANE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,5 +740,63 @@ mod tests {
             assert!(!env_is_truthy("TEST_MISSING"));
             assert!(!env_is_falsey("TEST_MISSING"));
         });
+    }
+
+    #[test]
+    fn test_request_plane_mode_from_str() {
+        assert_eq!(
+            "nats".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Nats
+        );
+        assert_eq!(
+            "http".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Http
+        );
+        assert_eq!(
+            "tcp".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Tcp
+        );
+        assert_eq!(
+            "NATS".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Nats
+        );
+        assert_eq!(
+            "HTTP".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Http
+        );
+        assert_eq!(
+            "TCP".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Tcp
+        );
+        assert!("invalid".parse::<RequestPlaneMode>().is_err());
+    }
+
+    #[test]
+    fn test_request_plane_mode_display() {
+        assert_eq!(RequestPlaneMode::Nats.to_string(), "nats");
+        assert_eq!(RequestPlaneMode::Http.to_string(), "http");
+        assert_eq!(RequestPlaneMode::Tcp.to_string(), "tcp");
+    }
+
+    #[test]
+    fn test_request_plane_mode_default() {
+        assert_eq!(RequestPlaneMode::default(), RequestPlaneMode::Nats);
+    }
+
+    #[test]
+    fn test_request_plane_mode_get_cached() {
+        // Test that get() returns a consistent value
+        let mode1 = RequestPlaneMode::get();
+        let mode2 = RequestPlaneMode::get();
+        assert_eq!(mode1, mode2, "Cached mode should be consistent");
+
+        // Verify it's one of the valid modes
+        assert!(
+            matches!(
+                mode1,
+                RequestPlaneMode::Nats | RequestPlaneMode::Http | RequestPlaneMode::Tcp
+            ),
+            "Mode should be a valid variant"
+        );
     }
 }

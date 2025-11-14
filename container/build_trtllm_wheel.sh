@@ -90,15 +90,6 @@ sed -i "s/__version__ = \"\(.*\)\"/__version__ = \"\1+dev${COMMIT_VERSION}\"/" "
 echo "Updated version:"
 grep "__version__" "$VERSION_FILE"
 
-echo "Copying install_nixl.sh from $MAIN_DIR to ${PWD}/docker/common/"
-# Copy install_nixl.sh to docker/common/
-cp $MAIN_DIR/deps/trtllm/install_nixl.sh docker/common/install_nixl.sh
-# Update NIXL_COMMIT in install_nixl.sh to use the parameter passed to this script
-sed -i "s/NIXL_COMMIT=\"[^\"]*\"/NIXL_COMMIT=\"${NIXL_COMMIT}\"/" docker/common/install_nixl.sh
-
-
-
-
 if [ "$ARCH" = "amd64" ]; then
     # Need to build in the Triton Devel Image for NIXL support.
     make -C docker tritondevel_build
