@@ -16,6 +16,7 @@ use dynamo_llm::{
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::block_manager::cache_stats::CacheStatsTracker;
 use crate::get_current_cancel_token;
 
 use super::*;
@@ -181,6 +182,8 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     /// use this to issue [`LocalTransferRequest`]s to the transfer engine
     xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
     _transfer_engine_handle: Option<CriticalTaskExecutionHandle>,
+    /// Cache statistics tracker
+    cache_stats: Arc<CacheStatsTracker>,
 }
 
 impl std::fmt::Debug for ConnectorSlotManager<String> {
@@ -194,6 +197,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         block_manager: VllmBlockManager,
         leader: Arc<KvbmLeader>,
         kvbm_metrics: KvbmMetrics,
+        identifier: Option<String>,
     ) -> Self {
         tracing::debug!(
             "creating slot manager with block size: {}",
@@ -230,6 +234,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             block_manager,
             xfer_tx,
             _transfer_engine_handle: Some(xfer_engine_task),
+            cache_stats: Arc::new(CacheStatsTracker::new(identifier)),
         }
     }
 }
@@ -258,6 +263,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
             salt_hash,
             self.block_manager.clone(),
             self.xfer_tx.clone(),
+            self.cache_stats.clone(),
         );
         self.slots
             .lock()
@@ -341,6 +347,15 @@ pub struct VllmConnectorSlot {
     /// The number of blocks that have been evaluated by the policy.
     /// Each policy evaluation will skip the already evaluated blocks.
     evaluated_blocks: usize,
+
+    /// Whether we actually performed a cache lookup for this request
+    performed_cache_lookup: bool,
+
+    /// Total number of blocks queried from host/disk cache
+    total_blocks_queried: usize,
+
+    /// Cache statistics tracker for this KVBM instance
+    cache_stats: Arc<CacheStatsTracker>,
 }
 
 impl VllmConnectorSlot {
@@ -350,6 +365,7 @@ impl VllmConnectorSlot {
         salt_hash: SaltHash,
         block_manager: VllmBlockManager,
         xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
+        cache_stats: Arc<CacheStatsTracker>,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
@@ -374,6 +390,9 @@ impl VllmConnectorSlot {
             tokens_cached_from_device: 0,
             tokens_cached_from_host: 0,
             tokens_cached_from_disk: 0,
+            performed_cache_lookup: false,
+            total_blocks_queried: 0,
+            cache_stats,
         }
     }
 
@@ -449,6 +468,8 @@ impl Slot for VllmConnectorSlot {
         self.tokens_cached_from_device = 0;
         self.tokens_cached_from_host = 0;
         self.tokens_cached_from_disk = 0;
+        self.performed_cache_lookup = false;
+        self.total_blocks_queried = 0;
     }
 
     fn reset(&mut self) {
@@ -712,6 +733,29 @@ impl Slot for VllmConnectorSlot {
     }
 
     fn mark_as_finished(&mut self, _iteration: u64) -> Result<(), SlotError> {
+        // Report cache statistics if we performed a cache lookup
+        if self.performed_cache_lookup {
+            let block_size = self.block_size;
+
+            // Convert cached tokens to blocks (rounding up)
+            let host_blocks = (self.tokens_cached_from_host + block_size - 1) / block_size;
+            let disk_blocks = (self.tokens_cached_from_disk + block_size - 1) / block_size;
+
+            tracing::debug!(
+                request_id = %self.request_id,
+                "Reporting cache stats: host_blocks={}, disk_blocks={}, total_blocks_queried={}, tokens_from_host={}, tokens_from_disk={}",
+                host_blocks,
+                disk_blocks,
+                self.total_blocks_queried,
+                self.tokens_cached_from_host,
+                self.tokens_cached_from_disk
+            );
+
+            self.cache_stats
+                .record(host_blocks, disk_blocks, self.total_blocks_queried);
+            self.cache_stats.maybe_log();
+        }
+
         // Check if there are any pending operations
         let has_pending_ops = self
             .pending_operations
@@ -792,9 +836,32 @@ impl Slot for VllmConnectorSlot {
         // we start matching non-device blocks after the device blocks
         let search_offset = num_computed_blocks;
 
+        // Calculate how many blocks we're querying from host/disk
+        let blocks_to_lookup = &sequence_hashes[search_offset..];
+
+        tracing::debug!("matching against {} block hashes", blocks_to_lookup.len());
+
+        // If there are no blocks to lookup (GPU has everything), return early
+        if blocks_to_lookup.is_empty() {
+            tracing::debug!(
+                request_id = %self.request_id,
+                "no blocks to lookup from host/disk; GPU has all blocks"
+            );
+            // Still mark that we performed a lookup (even though we didn't need to query)
+            self.performed_cache_lookup = true;
+            self.total_blocks_queried = 0;
+            return Ok(());
+        }
+
+        // Mark that we're performing a cache lookup and track the total blocks
+        self.performed_cache_lookup = true;
+        self.total_blocks_queried = blocks_to_lookup.len();
+
         tracing::debug!(
-            "matching against {} block hashes",
-            sequence_hashes[search_offset..].len()
+            request_id = %self.request_id,
+            "Starting cache lookup: querying {} blocks from host/disk (num_computed_blocks={})",
+            blocks_to_lookup.len(),
+            num_computed_blocks
         );
 
         // we should do this opportunistically after this operation is done
@@ -811,7 +878,7 @@ impl Slot for VllmConnectorSlot {
         let mut host_blocks = self
             .block_manager
             .host()
-            .map(|host| host.match_sequence_hashes_blocking(&sequence_hashes[search_offset..]))
+            .map(|host| host.match_sequence_hashes_blocking(blocks_to_lookup))
             .transpose()?
             .unwrap_or_default();
 
