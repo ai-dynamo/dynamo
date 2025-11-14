@@ -593,6 +593,8 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         libnuma1 \
         librdmacm1 \
         rdma-core \
+        # Libfabric
+        libhwloc15 \
         # OpenMPI dependencies
         openssh-client \
         openssh-server \
@@ -621,6 +623,7 @@ COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libgomp.so* /usr/lib/${ARCH
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 # Copy UCX from framework image as plugin for NIXL
+# Copy Libfabric from framework image
 # Copy NIXL source from framework image
 # Copy dynamo wheels for gitlab artifacts (read-only, no group-write needed)
 COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx /usr/local/ucx
@@ -636,6 +639,7 @@ $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
+/usr/local/libfabric/lib:\
 /opt/hpcx/ompi/lib:\
 /usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13/:\
 $TENSORRT_LIB_DIR:\
