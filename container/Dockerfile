@@ -317,7 +317,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo/lib/bindings/python && \
     maturin build --release --out /opt/dynamo/dist && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
-        cd /opt/dynamo/lib/kvbm && \
+        cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"

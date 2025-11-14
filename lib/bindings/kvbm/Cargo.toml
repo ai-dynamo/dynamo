@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+[workspace]
 
 [package]
 name = "kvbm-py3"
@@ -23,8 +24,8 @@ default = ["block-manager"]
 block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
 
 [dependencies]
-dynamo-llm = { path = "../llm" }
-dynamo-runtime = { path = "../runtime" }
+dynamo-llm = { path = "../../llm" }
+dynamo-runtime = { path = "../../runtime" }
 
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }
