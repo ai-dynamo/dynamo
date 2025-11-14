@@ -74,7 +74,7 @@ Ensure your Kubernetes cluster has:
 
 Ensure access to NVIDIA container registry for runtime images:
 - `nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z`
-- `nvcr.io/nvidia/ai-dynamo/trtllm-runtime:x.y.z`
+- `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:x.y.z`
 - `nvcr.io/nvidia/ai-dynamo/sglang-runtime:x.y.z`
 
 ### 5. HuggingFace Access and Kubernetes Secret Creation
