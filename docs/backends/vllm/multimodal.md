@@ -15,9 +15,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
+# Multimodal Support
+
+Dynamo supports multimodal models with vLLM v1. In general, multimodal models can be served using the aggregated serving setup with [`agg_multimodal.sh`](../../../examples/backends/vllm/launch/agg_multimodal.sh).
+
+> [!WARNING]
+> **LLaVA Model Limitation**: Do not use LLaVA models (e.g., `llava-hf/llava-1.5-7b-hf`) with the standard aggregated serving setup, as they contain keywords that Dynamo cannot yet parse. LLaVA models can still be used with the EPD (Encode-Prefill-Decode) setup described below.
+
 # Multimodal EPD Deployment Examples
 
-This directory provides example workflows and reference implementations for deploying a multimodal model using Dynamo and vLLM v1 with EPD(Encode-Prefill-Decode) pipeline.
+This section provides example workflows and reference implementations for deploying a multimodal model using Dynamo and vLLM v1 with EPD(Encode-Prefill-Decode) pipeline.
 
 ## Use the Latest Release
 
