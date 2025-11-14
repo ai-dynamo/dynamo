@@ -9,7 +9,6 @@ use crate::block_manager::block::{BlockDataProvider, BlockDataProviderMut};
 use anyhow::Result;
 use cudarc::driver::CudaStream;
 use cudarc::driver::result as cuda_result;
-use dynamo_runtime::config::environment_names::build as env_build;
 use dynamo_runtime::config::environment_names::cuda as env_cuda;
 use std::ops::Range;
 use std::sync::Mutex;
