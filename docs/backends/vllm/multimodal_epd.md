@@ -36,7 +36,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 ### Components
 
 - workers: For aggregated serving, we have two workers, [EncodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) for encoding and [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) for prefilling and decoding.
-- processor: Tokenizes the prompt and passes it to the VllmEncodeWorker.
+- processor: Tokenizes the prompt and passes it to the EncodeWorkerHandler.
 - frontend: HTTP endpoint to handle incoming requests.
 
 ### Workflow
