@@ -727,7 +727,7 @@ impl ApproxKvIndexer {
     fn new(component: Component, kv_block_size: usize, ttl_secs: f64) -> PyResult<Self> {
         let ttl = tokio::time::Duration::from_secs_f64(ttl_secs);
         let prune_config = Some(llm_rs::kv_router::approx::PruneConfig {
-            max_tree_size: 2usize.pow(14), // 2** 14 = 16384
+            max_tree_size: 2usize.pow(20), // 2 ** 20 = 1048576
             prune_target_ratio: 0.8,
         });
         let inner = Arc::new(llm_rs::kv_router::approx::ApproxKvIndexer::new(
