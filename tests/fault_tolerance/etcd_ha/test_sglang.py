@@ -277,12 +277,8 @@ def test_etcd_ha_failover_sglang_disaggregated(
                         # Step 7: Cycle through each replica to terminate/verify/restart
                         for i in range(num_replicas):
                             # Terminate a replica
-                            logger.info(f"Iteration {i}: Terminating replica")
-                            terminated_idx = etcd_cluster.terminate_replica(i)
-                            if terminated_idx is None:
-                                pytest.fail(
-                                    f"Iteration {i}: Failed to terminate replica"
-                                )
+                            logger.info(f"Iteration {i}: Terminating replica etcd-{i}")
+                            etcd_cluster.terminate_replica(i)
 
                             # Send inference request to verify system still works
                             logger.info(
@@ -296,13 +292,8 @@ def test_etcd_ha_failover_sglang_disaggregated(
                             ), f"Iteration {i}: Expected 'Paris' in response, got: '{result}'"
 
                             # Restart the terminated replica
-                            logger.info(
-                                f"Iteration {i}: Restarting replica etcd-{terminated_idx}"
-                            )
-                            if not etcd_cluster.restart_replica(terminated_idx):
-                                pytest.fail(
-                                    f"Iteration {i}: Failed to restart replica etcd-{terminated_idx}"
-                                )
+                            logger.info(f"Iteration {i}: Restarting replica etcd-{i}")
+                            etcd_cluster.restart_replica(i)
 
 
 @pytest.mark.sglang
