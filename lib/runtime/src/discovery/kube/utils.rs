@@ -14,16 +14,13 @@ pub fn hash_pod_name(pod_name: &str) -> u64 {
 }
 
 /// Extract the system port from an EndpointSlice's ports
-/// Looks for a port with name "system", falls back to first port if not found
+/// Looks for a port with name "system", returns None if not found
 fn extract_system_port(slice: &EndpointSlice) -> Option<u16> {
     slice.ports.as_ref().and_then(|ports| {
-        // First try to find port named "system"
         ports
             .iter()
             .find(|p| p.name.as_deref() == Some("system"))
             .and_then(|p| p.port.map(|port| port as u16))
-            // Fall back to first port if "system" not found
-            .or_else(|| ports.first().and_then(|p| p.port.map(|port| port as u16)))
     })
 }
 
@@ -31,12 +28,18 @@ fn extract_system_port(slice: &EndpointSlice) -> Option<u16> {
 /// Returns (instance_id, pod_name, pod_ip, system_port) tuples for ready endpoints
 pub(super) fn extract_endpoint_info(
     slice: &EndpointSlice,
-) -> Vec<(u64, String, String, Option<u16>)> {
-    let mut result = Vec::new();
-
+) -> Vec<(u64, String, String, u16)> {
     // Extract system port from EndpointSlice ports
-    let system_port = extract_system_port(slice);
+    let system_port = match extract_system_port(slice) {
+        Some(port) => port,
+        None => {
+            let slice_name = slice.metadata.name.as_deref().unwrap_or("unknown");
+            tracing::warn!("EndpointSlice '{}' did not have a system port defined", slice_name);
+            return Vec::new();
+        }
+    };
 
+    let mut result = Vec::new();
     let endpoints = &slice.endpoints;
 
     for endpoint in endpoints {

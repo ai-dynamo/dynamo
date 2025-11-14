@@ -183,7 +183,7 @@ impl DiscoveryDaemon {
         let start = std::time::Instant::now();
 
         // Extract ALL ready endpoints (instance_id, pod_name, pod_ip, system_port) directly from reflector
-        let all_endpoints: Vec<(u64, String, String, Option<u16>)> = reader
+        let all_endpoints: Vec<(u64, String, String, u16)> = reader
             .state()
             .iter()
             .flat_map(|arc_slice| extract_endpoint_info(arc_slice.as_ref()))
@@ -195,16 +195,13 @@ impl DiscoveryDaemon {
         );
 
         // Concurrent fetch: Fetch metadata for all endpoints in parallel
-        let default_system_port = self.pod_info.system_port;
         let fetch_futures =
             all_endpoints
                 .into_iter()
                 .map(|(instance_id, pod_name, pod_ip, system_port)| {
                     let daemon = self.clone();
-                    // Use system_port from EndpointSlice, fall back to default from PodInfo
-                    let port = system_port.unwrap_or(default_system_port);
                     async move {
-                        match daemon.fetch_metadata(&pod_name, &pod_ip, port).await {
+                        match daemon.fetch_metadata(&pod_name, &pod_ip, system_port).await {
                             Ok(metadata) => Some((instance_id, metadata)),
                             Err(e) => {
                                 tracing::warn!(
