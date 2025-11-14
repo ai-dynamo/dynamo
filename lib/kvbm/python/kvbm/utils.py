@@ -23,18 +23,28 @@ def is_dyn_runtime_enabled() -> bool:
 
 
 def maybe_import_offload_filter() -> Optional[Callable[[int], bool]]:
-    if "DYN_KVBM_CONNECTOR_OFFLOAD_FILTER_CLASS" not in os.environ:
+    have_module_env = "DYN_KVBM_CONNECTOR_OFFLOAD_FILTER_MODULE" in os.environ
+    have_class_env = "DYN_KVBM_CONNECTOR_OFFLOAD_FILTER_CLASS" in os.environ
+    if not have_module_env and not have_class_env:
         return None
+    elif have_module_env != have_class_env:
+        raise ValueError("Either both or neither of DYN_KVBM_CONNECTOR_OFFLOAD_FILTER_MODULE and DYN_KVBM_CONNECTOR_OFFLOAD_FILTER_CLASS must be set")
 
+    module_str = os.environ["DYN_KVBM_CONNECTOR_OFFLOAD_FILTER_MODULE"]
     cls_str = os.environ["DYN_KVBM_CONNECTOR_OFFLOAD_FILTER_CLASS"]
     try:
-        filter_class = importlib.import_module(cls_str)
+        filter_module = importlib.import_module(module_str)
     except ImportError as e:
-        raise ImportError(f"Failed to import offload filter class {cls_str}") from e
+        raise ImportError(f"Failed to import offload filter module {module_str}") from e
+
+    try:
+        filter_class = getattr(filter_module, cls_str)
+    except AttributeError as e:
+        raise AttributeError(f"Failed to get offload filter class {cls_str} from module {module_str}") from e
 
     try:
         filter_instance = filter_class()
     except Exception as e:
-        raise ValueError(f"Failed to instantiate offload filter class {cls_str}") from e
+        raise ValueError(f"Failed to instantiate offload filter class {cls_str} from module {module_str}") from e
 
-    return filter_instance
+    return filter_instance.should_offload
