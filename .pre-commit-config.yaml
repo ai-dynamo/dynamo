@@ -90,7 +90,8 @@ repos:
   hooks:
   - id: validate-deploy-yaml
     name: Validate DynamoGraphDeployment YAMLs
-    entry: python3 deploy/utils/validate_deployments.py --dirs recipes examples tests deploy
+    entry: python3 deploy/utils/validate_deployments.py
     language: python
-    pass_filenames: false
+    files: '(recipes|examples|tests|deploy)/.*\.(yaml|yml)$'
+    pass_filenames: true
     additional_dependencies: [pyyaml, jsonschema]
