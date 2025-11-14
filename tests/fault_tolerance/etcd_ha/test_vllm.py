@@ -116,6 +116,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 @pytest.mark.skip(reason="Broken, temporarily disabled")
 def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
     """

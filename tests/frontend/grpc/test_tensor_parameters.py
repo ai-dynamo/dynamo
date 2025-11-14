@@ -112,6 +112,7 @@ def file_storage_backend():
 
 @pytest.mark.e2e
 @pytest.mark.pre_merge
+@pytest.mark.gpu_1
 @pytest.mark.parametrize(
     "request_params",
     [

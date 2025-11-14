@@ -162,6 +162,7 @@ def send_completion_request(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
 def test_vllm_health_check_active(request, runtime_services):
     """
@@ -218,6 +219,7 @@ def test_vllm_health_check_active(request, runtime_services):
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_vllm_health_check_passive(request, runtime_services, predownload_models):
     """
     End-to-end test for worker fault tolerance with migration support.
