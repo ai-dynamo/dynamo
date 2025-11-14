@@ -5677,24 +5677,20 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 	controllerConfig := controller_common.Config{}
 
 	tests := []struct {
-		name                 string
-		component            *v1alpha1.DynamoComponentDeploymentSharedSpec
-		expectedRunAsNonRoot *bool
-		expectedRunAsUser    *int64
-		expectedRunAsGroup   *int64
-		expectedFSGroup      *int64
-		description          string
+		name                    string
+		component               *v1alpha1.DynamoComponentDeploymentSharedSpec
+		expectedSecurityContext *corev1.PodSecurityContext
+		description             string
 	}{
 		{
 			name: "no security context provided - should apply fsGroup default only",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeFrontend,
 			},
-			expectedRunAsNonRoot: nil, // Not injected - let image decide
-			expectedRunAsUser:    nil, // Not injected - let image decide
-			expectedRunAsGroup:   nil, // Not injected - let image decide
-			expectedFSGroup:      ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
-			description:          "Operator should only inject fsGroup for volume permissions, not UID/GID (backward compatible)",
+			expectedSecurityContext: &corev1.PodSecurityContext{
+				FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+			},
+			description: "Operator should only inject fsGroup for volume permissions, not UID/GID (backward compatible)",
 		},
 		{
 			name: "full security context override - should use user values",
@@ -5711,11 +5707,13 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 					},
 				},
 			},
-			expectedRunAsNonRoot: ptr.To(true),
-			expectedRunAsUser:    ptr.To(int64(5000)),
-			expectedRunAsGroup:   ptr.To(int64(5000)),
-			expectedFSGroup:      ptr.To(int64(5000)),
-			description:          "User-provided security context should completely override defaults",
+			expectedSecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: ptr.To(true),
+				RunAsUser:    ptr.To(int64(5000)),
+				RunAsGroup:   ptr.To(int64(5000)),
+				FSGroup:      ptr.To(int64(5000)),
+			},
+			description: "User-provided security context should completely override defaults",
 		},
 		{
 			name: "partial security context override - user gets full control",
@@ -5726,16 +5724,15 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 						SecurityContext: &corev1.PodSecurityContext{
 							RunAsUser:  ptr.To(int64(2000)),
 							RunAsGroup: ptr.To(int64(3000)),
-							// fsGroup and runAsNonRoot not specified - should remain nil (no defaults injected)
 						},
 					},
 				},
 			},
-			expectedRunAsNonRoot: nil, // User didn't provide, so it's nil
-			expectedRunAsUser:    ptr.To(int64(2000)),
-			expectedRunAsGroup:   ptr.To(int64(3000)),
-			expectedFSGroup:      nil, // User didn't provide, so it's nil
-			description:          "Partial user override gets full control - no defaults injected",
+			expectedSecurityContext: &corev1.PodSecurityContext{
+				RunAsUser:  ptr.To(int64(2000)),
+				RunAsGroup: ptr.To(int64(3000)),
+			},
+			description: "Partial user override gets full control - no defaults injected",
 		},
 		{
 			name: "only fsGroup override - user gets full control",
@@ -5749,11 +5746,10 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 					},
 				},
 			},
-			expectedRunAsNonRoot: nil, // User didn't provide, so it's nil
-			expectedRunAsUser:    nil, // User didn't provide, so it's nil
-			expectedRunAsGroup:   nil, // User didn't provide, so it's nil
-			expectedFSGroup:      ptr.To(int64(7000)),
-			description:          "Only fsGroup override - user gets full control, no defaults injected",
+			expectedSecurityContext: &corev1.PodSecurityContext{
+				FSGroup: ptr.To(int64(7000)),
+			},
+			description: "Only fsGroup override - user gets full control, no defaults injected",
 		},
 		{
 			name: "fsGroup 2000 example - exactly what user requested",
@@ -5767,11 +5763,10 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 					},
 				},
 			},
-			expectedRunAsNonRoot: nil, // Not set by user, remains nil (can run as root if image allows)
-			expectedRunAsUser:    nil, // Not set by user, remains nil (allows image default)
-			expectedRunAsGroup:   nil, // Not set by user, remains nil (allows image default)
-			expectedFSGroup:      ptr.To(int64(2000)),
-			description:          "User sets fsGroup:2000, gets ONLY that - critical for allowing root users",
+			expectedSecurityContext: &corev1.PodSecurityContext{
+				FSGroup: ptr.To(int64(2000)),
+			},
+			description: "User sets fsGroup:2000, gets ONLY that - critical for allowing root users",
 		},
 		{
 			name: "OpenShift-style namespace range - should use user values",
@@ -5788,11 +5783,13 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 					},
 				},
 			},
-			expectedRunAsNonRoot: ptr.To(true),
-			expectedRunAsUser:    ptr.To(int64(1000700001)),
-			expectedRunAsGroup:   ptr.To(int64(1000700001)),
-			expectedFSGroup:      ptr.To(int64(1000700001)),
-			description:          "OpenShift namespace UID/GID ranges should be respected",
+			expectedSecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: ptr.To(true),
+				RunAsUser:    ptr.To(int64(1000700001)),
+				RunAsGroup:   ptr.To(int64(1000700001)),
+				FSGroup:      ptr.To(int64(1000700001)),
+			},
+			description: "OpenShift namespace UID/GID ranges should be respected",
 		},
 	}
 
@@ -5816,78 +5813,9 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 				return
 			}
 
-			// Verify security context exists
-			if podSpec.SecurityContext == nil {
-				t.Errorf("GenerateBasePodSpec() SecurityContext is nil, want non-nil")
-				return
-			}
-
-			// Check RunAsNonRoot
-			if tt.expectedRunAsNonRoot != nil {
-				if podSpec.SecurityContext.RunAsNonRoot == nil {
-					t.Errorf("GenerateBasePodSpec() RunAsNonRoot is nil, want %v (%s)",
-						*tt.expectedRunAsNonRoot, tt.description)
-				} else if *podSpec.SecurityContext.RunAsNonRoot != *tt.expectedRunAsNonRoot {
-					t.Errorf("GenerateBasePodSpec() RunAsNonRoot = %v, want %v (%s)",
-						*podSpec.SecurityContext.RunAsNonRoot, *tt.expectedRunAsNonRoot, tt.description)
-				}
-			} else {
-				// We expect nil
-				if podSpec.SecurityContext.RunAsNonRoot != nil {
-					t.Errorf("GenerateBasePodSpec() RunAsNonRoot = %v, want nil (%s)",
-						*podSpec.SecurityContext.RunAsNonRoot, tt.description)
-				}
-			}
-
-			// Check RunAsUser
-			if tt.expectedRunAsUser != nil {
-				if podSpec.SecurityContext.RunAsUser == nil {
-					t.Errorf("GenerateBasePodSpec() RunAsUser is nil, want %v (%s)",
-						*tt.expectedRunAsUser, tt.description)
-				} else if *podSpec.SecurityContext.RunAsUser != *tt.expectedRunAsUser {
-					t.Errorf("GenerateBasePodSpec() RunAsUser = %v, want %v (%s)",
-						*podSpec.SecurityContext.RunAsUser, *tt.expectedRunAsUser, tt.description)
-				}
-			} else {
-				// We expect nil
-				if podSpec.SecurityContext.RunAsUser != nil {
-					t.Errorf("GenerateBasePodSpec() RunAsUser = %v, want nil (%s)",
-						*podSpec.SecurityContext.RunAsUser, tt.description)
-				}
-			}
-
-			// Check RunAsGroup
-			if tt.expectedRunAsGroup != nil {
-				if podSpec.SecurityContext.RunAsGroup == nil {
-					t.Errorf("GenerateBasePodSpec() RunAsGroup is nil, want %v (%s)",
-						*tt.expectedRunAsGroup, tt.description)
-				} else if *podSpec.SecurityContext.RunAsGroup != *tt.expectedRunAsGroup {
-					t.Errorf("GenerateBasePodSpec() RunAsGroup = %v, want %v (%s)",
-						*podSpec.SecurityContext.RunAsGroup, *tt.expectedRunAsGroup, tt.description)
-				}
-			} else {
-				// We expect nil
-				if podSpec.SecurityContext.RunAsGroup != nil {
-					t.Errorf("GenerateBasePodSpec() RunAsGroup = %v, want nil (%s)",
-						*podSpec.SecurityContext.RunAsGroup, tt.description)
-				}
-			}
-
-			// Check FSGroup
-			if tt.expectedFSGroup != nil {
-				if podSpec.SecurityContext.FSGroup == nil {
-					t.Errorf("GenerateBasePodSpec() FSGroup is nil, want %v (%s)",
-						*tt.expectedFSGroup, tt.description)
-				} else if *podSpec.SecurityContext.FSGroup != *tt.expectedFSGroup {
-					t.Errorf("GenerateBasePodSpec() FSGroup = %v, want %v (%s)",
-						*podSpec.SecurityContext.FSGroup, *tt.expectedFSGroup, tt.description)
-				}
-			} else {
-				// We expect nil
-				if podSpec.SecurityContext.FSGroup != nil {
-					t.Errorf("GenerateBasePodSpec() FSGroup = %v, want nil (%s)",
-						*podSpec.SecurityContext.FSGroup, tt.description)
-				}
+			// Compare the entire SecurityContext using cmp.Diff
+			if diff := cmp.Diff(tt.expectedSecurityContext, podSpec.SecurityContext); diff != "" {
+				t.Errorf("GenerateBasePodSpec() SecurityContext mismatch (-want +got):\n%s\nDescription: %s", diff, tt.description)
 			}
 		})
 	}
