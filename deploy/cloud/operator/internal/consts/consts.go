@@ -43,6 +43,7 @@ const (
 	KubeLabelDynamoBaseModelHash        = "nvidia.com/dynamo-base-model-hash"
 	KubeAnnotationDynamoBaseModel       = "nvidia.com/dynamo-base-model"
 	KubeLabelDynamoDiscoveryBackend     = "nvidia.com/dynamo-discovery-backend"
+	KubeLabelDynamoDiscoveryEnabled     = "nvidia.com/dynamo-discovery-enabled"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
