@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-m3"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[dependencies]
+dynamo-memory = { workspace = true }
+moka = { version = "0.12", features = ["future"] }
+rocksdb = { version = "0.22", default-features = false }
+bytesize = "1"
+derive_builder = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
