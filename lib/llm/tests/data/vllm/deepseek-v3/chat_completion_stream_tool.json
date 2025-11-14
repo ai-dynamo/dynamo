@@ -42,6 +42,6 @@
     {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"```","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
     {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"<｜tool▁call▁end｜>","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
     {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"<｜tool▁calls▁end｜>","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
-    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":null,"function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null},"finish_reason":"tool_calls","index":0}]}}
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":null,"function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null},"finish_reason":"tool_calls"}]}}
   ]
 }

@@ -1034,10 +1034,7 @@ mod tests {
         );
 
         // Verify no tool calls
-        assert_eq!(
-            aggregated.has_tool_calls, false,
-            "Should not have any tool calls"
-        );
+        assert!(!aggregated.has_tool_calls, "Should not have any tool calls");
 
         // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is Stop
         assert!(
@@ -1086,10 +1083,7 @@ mod tests {
         );
 
         // Verify no tool calls
-        assert_eq!(
-            aggregated.has_tool_calls, false,
-            "Should not have any tool calls"
-        );
+        assert!(!aggregated.has_tool_calls, "Should not have any tool calls");
 
         // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is Stop
         assert!(

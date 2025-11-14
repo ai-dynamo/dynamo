@@ -88,16 +88,16 @@ fn parse_single_tool_call_v3(block: &str, separator_tokens: &[String]) -> Option
             }
 
             // Extract JSON arguments from code block
-            let args_str = if args_block.contains("```json") {
-                if let Some(json_start) = args_block.find("```json\n") {
-                    let json_content = &args_block[json_start + 7..]; // Skip "```json\n"
-                    if let Some(json_end) = json_content.find("\n```") {
-                        json_content[..json_end].trim()
-                    } else {
-                        json_content.trim()
-                    }
+            let args_str = if let Some(json_start) = args_block.find("```json") {
+                let after_fence = &args_block[json_start + "```json".len()..];
+                let after_newline = after_fence
+                    .strip_prefix("\r\n")
+                    .or_else(|| after_fence.strip_prefix('\n'))
+                    .unwrap_or(after_fence);
+                if let Some(json_end) = after_newline.find("```") {
+                    after_newline[..json_end].trim()
                 } else {
-                    args_block.trim()
+                    after_newline.trim()
                 }
             } else {
                 args_block.trim()
