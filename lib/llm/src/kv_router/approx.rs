@@ -391,7 +391,7 @@ impl ApproxKvIndexer {
                                     let _ = trie.apply_event(event);
                                 });
                                 // Reset the pruning watcher to false to indicate that pruning is complete.
-                                if let Err(e) = prune_tx.send(true) {
+                                if let Err(e) = prune_tx.send(false) {
                                     tracing::error!("Failed to send prune completion signal: {:?}", e);
                                 }
                             }
