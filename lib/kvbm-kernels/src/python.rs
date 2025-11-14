@@ -22,6 +22,8 @@ use cudarc::runtime::sys as cuda_runtime;
 
 static CUDA_CONTEXT: OnceCell<Arc<CudaContext>> = OnceCell::new();
 
+// TODO: determine the right way to get the CUDA context for the python bindings
+// this is currently disabled, but we'll migrate this to the bindings crate
 fn get_context() -> PyResult<Arc<CudaContext>> {
     let ctx = CUDA_CONTEXT.get_or_try_init(|| {
         CudaContext::new(0).map_err(|err| {
