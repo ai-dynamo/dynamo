@@ -53,6 +53,10 @@ jobs:
     name: operator (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Set up Docker Buildx
@@ -129,6 +133,10 @@ jobs:
     name: vllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Build Container
@@ -194,6 +202,10 @@ jobs:
     name: sglang (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
@@ -257,6 +269,10 @@ jobs:
     name: trtllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
@@ -329,6 +345,10 @@ jobs:
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
     steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Set namespace
@@ -506,6 +526,10 @@ jobs:
     outputs:
       NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
     steps:
+    - name: Output Node Name
+      shell: bash
+      run: |
+        echo ${K8S_NODE_NAME}
     - uses: actions/checkout@v4
     - name: Deploy Operator
       id: deploy-operator-step
@@ -591,6 +615,10 @@ jobs:
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
     steps: &deploy-test-steps
+    - name: Output Node Name
+      shell: bash
+      run: |
+        echo ${K8S_NODE_NAME}
     - uses: actions/checkout@v4
     - name: Setup Kubeconfig
       env:
@@ -768,6 +796,10 @@ jobs:
     if: always()
     needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
     steps:
+    - name: Output Node Name
+      shell: bash
+      run: |
+        echo ${K8S_NODE_NAME}
     - uses: actions/checkout@v4
     - name: Setup Kubeconfig
       env:
