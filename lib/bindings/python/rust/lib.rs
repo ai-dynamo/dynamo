@@ -251,7 +251,11 @@ async fn register_model(mut config: ModelConfig) -> anyhow::Result<()> {
     // This works for both base models and LoRA adapters since both are represented as LocalModels
     config
         .local_model
-        .attach(&config.endpoint.inner, config.model_type, config.model_input)
+        .attach(
+            &config.endpoint.inner,
+            config.model_type,
+            config.model_input,
+        )
         .await?;
 
     Ok(())
@@ -459,42 +463,38 @@ fn register_llm<'p>(
             RegistrationMode::Lora {
                 lora_name,
                 base_path,
-            } => {
-                ModelConfig::for_lora(
-                    lora_name,
-                    base_path,
-                    endpoint,
-                    model_type_obj,
-                    model_input,
-                    kv_cache_block_size,
-                    user_data_json,
-                )
-                .await
-                .map_err(to_pyerr)?
-            }
+            } => ModelConfig::for_lora(
+                lora_name,
+                base_path,
+                endpoint,
+                model_type_obj,
+                model_input,
+                kv_cache_block_size,
+                user_data_json,
+            )
+            .await
+            .map_err(to_pyerr)?,
             RegistrationMode::BaseModel {
                 model_path,
                 model_name,
-            } => {
-                ModelConfig::for_base_model(
-                    model_path,
-                    model_name,
-                    endpoint,
-                    model_type_obj,
-                    model_input,
-                    context_length,
-                    kv_cache_block_size,
-                    router_config,
-                    migration_limit,
-                    runtime_config,
-                    user_data_json,
-                    custom_template_path_owned,
-                    media_decoder,
-                    media_fetcher,
-                )
-                .await
-                .map_err(to_pyerr)?
-            }
+            } => ModelConfig::for_base_model(
+                model_path,
+                model_name,
+                endpoint,
+                model_type_obj,
+                model_input,
+                context_length,
+                kv_cache_block_size,
+                router_config,
+                migration_limit,
+                runtime_config,
+                user_data_json,
+                custom_template_path_owned,
+                media_decoder,
+                media_fetcher,
+            )
+            .await
+            .map_err(to_pyerr)?,
         };
 
         register_model(config).await.map_err(to_pyerr)?;
