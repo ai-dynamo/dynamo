@@ -21,7 +21,7 @@ use dynamo_runtime::{
 use crate::{
     backend::Backend,
     entrypoint::{self, RouterConfig},
-    kv_router::{PrefillRouter},
+    kv_router::PrefillRouter,
     model_card::{ModelDeploymentCard, ROOT_PATH},
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
