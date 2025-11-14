@@ -802,6 +802,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Spec: corev1.PodSpec{
 								SchedulerName:                 "volcano",
 								TerminationGracePeriodSeconds: ptr.To(int64(10)),
+								SecurityContext: &corev1.PodSecurityContext{
+									FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+								},
 								Volumes: []corev1.Volume{
 									{
 										Name: "shared-memory",
@@ -927,6 +930,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Spec: corev1.PodSpec{
 								TerminationGracePeriodSeconds: ptr.To(int64(10)),
 								SchedulerName:                 "volcano",
+								SecurityContext: &corev1.PodSecurityContext{
+									FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+								},
 								Volumes: []corev1.Volume{
 									{
 										Name: "shared-memory",
