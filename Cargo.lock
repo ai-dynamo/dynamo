@@ -2625,6 +2625,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-kvbm-kernels"
+version = "0.7.0"
+dependencies = [
+ "cc",
+ "cudarc 0.17.8",
+ "once_cell",
+]
+
+[[package]]
 name = "dynamo-llm"
 version = "0.7.0"
 dependencies = [
@@ -8800,18 +8809,6 @@ dependencies = [
  "futures",
  "futures-timer",
  "rstest_macros 0.23.0",
- "rustc_version",
-]
-
-[[package]]
-name = "rstest"
-version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fc39292f8613e913f7df8fa892b8944ceb47c247b78e1b1ae2f09e019be789d"
-dependencies = [
- "futures-timer",
- "futures-util",
- "rstest_macros 0.25.0",
  "rustc_version",
 ]
 

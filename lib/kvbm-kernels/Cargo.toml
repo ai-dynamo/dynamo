@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-kvbm-kernels"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[lib]
+name = "kvbm_kernels"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+# python-bindings = ["pyo3"]
+
+[dependencies]
+cudarc = { workspace = true }
+once_cell = "1.19"
+# pyo3 = { version = "0.26", optional = true, features = ["extension-module"] }
+
+[build-dependencies]
+cc = "1.0"
