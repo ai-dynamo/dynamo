@@ -302,6 +302,8 @@ impl ApproxKvIndexer {
                     };
 
                     tokio::select! {
+                        biased;
+
                         _ = cancel_clone.cancelled() => {
                             tracing::debug!("Approximate Indexer progress loop shutting down");
                             return;
@@ -314,6 +316,27 @@ impl ApproxKvIndexer {
                         Some(get_workers_req) = get_workers_rx.recv() => {
                             let workers = trie.get_workers();
                             let _ = get_workers_req.resp.send(workers);
+                        }
+
+                        Some(_) = prune_rx.recv() => {
+                            // The tree has exceeded the max tree size, so proceed with pruning.
+                            if let Ok(pruned) = prune_manager.prune(trie.current_size()) {
+                                pruned.iter().for_each(|p| {
+                                    event_id += 1;
+
+                                    let event = RouterEvent::new(
+                                        p.worker.worker_id,
+                                        KvCacheEvent {
+                                            event_id,
+                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                                block_hashes: vec![p.key],
+                                            }),
+                                            dp_rank: p.worker.dp_rank,
+                                        }
+                                    );
+                                    let _ = trie.apply_event(event);
+                                });
+                            }
                         }
 
                         Some(result) = route_rx.recv() => {
@@ -370,27 +393,6 @@ impl ApproxKvIndexer {
                         Some(request) = match_rx.recv() => {
                             let scores = trie.find_matches(request.sequence, false);
                             request.resp.send(scores).unwrap();
-                        }
-
-                        Some(_) = prune_rx.recv() => {
-                            // The tree has exceeded the max tree size, so proceed with pruning.
-                            if let Ok(pruned) = prune_manager.prune(trie.current_size()) {
-                                pruned.iter().for_each(|p| {
-                                    event_id += 1;
-
-                                    let event = RouterEvent::new(
-                                        p.worker.worker_id,
-                                        KvCacheEvent {
-                                            event_id,
-                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                                block_hashes: vec![p.key],
-                                            }),
-                                            dp_rank: p.worker.dp_rank,
-                                        }
-                                    );
-                                    let _ = trie.apply_event(event);
-                                });
-                            }
                         }
 
                         _ = expiry_fut => {
