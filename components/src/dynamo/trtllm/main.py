@@ -261,9 +261,17 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if modality == "multimodal":
         engine_args["skip_tokenizer_init"] = False
-        model_input = ModelInput.Text
         model_config = AutoConfig.from_pretrained(
             config.model_path, trust_remote_code=True
+        )
+        model_input = ModelInput.Text
+        # Only override model_type for non-prefill workers
+        # Prefill workers must maintain ModelType.Prefill for proper routing
+        if config.disaggregation_mode != DisaggregationMode.PREFILL:
+            model_type = ModelType.Chat | ModelType.Completions
+        logging.info(
+            f"Creating MultimodalRequestProcessor with config.allowed_local_media_path='{config.allowed_local_media_path}', "
+            f"config.max_file_size_mb={config.max_file_size_mb}"
         )
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,

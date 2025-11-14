@@ -357,12 +357,13 @@ impl ModelWatcher {
         }
         let checksum = card.mdcsum();
 
-        if card.model_input == ModelInput::Tokens
+        if (card.model_input == ModelInput::Tokens || card.model_input == ModelInput::Text)
             && (card.model_type.supports_chat() || card.model_type.supports_completions())
         {
-            // Case 1: Tokens + (Chat OR Completions OR Both)
-            // A model that expects pre-processed requests meaning it's up to us whether we
-            // handle Chat or Completions requests, so handle whatever the model supports.
+            // Case 1: (Tokens OR Text) + (Chat OR Completions OR Both)
+            // Tokens: text-only models with pre-processed requests
+            // Text: multimodal models that need raw text for vision/audio processing
+            // In both cases, we handle Chat or Completions requests with prefill routing support.
 
             let endpoint = component.endpoint(&endpoint_id.name);
             let kv_chooser = if self.router_config.router_mode == RouterMode::KV {
@@ -541,16 +542,10 @@ impl ModelWatcher {
                 .add_tensor_model(card.name(), checksum, engine)?;
         } else if card.model_type.supports_prefill() {
             // Case 6: Prefill
-            // Guardrail: Verify model_input is Tokens
-            if card.model_input != ModelInput::Tokens {
-                anyhow::bail!(
-                    "Prefill models must use ModelInput::Tokens, got {}",
-                    card.model_input.as_str()
-                );
-            }
-
+            // Prefill workers can use Tokens (text-only) or Text (multimodal)
             tracing::info!(
                 model_name = card.name(),
+                model_input = card.model_input.as_str(),
                 "Prefill model detected, registering and activating prefill router"
             );
 

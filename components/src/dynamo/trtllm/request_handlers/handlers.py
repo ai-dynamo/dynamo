@@ -59,13 +59,16 @@ class EncodeHandler(HandlerBase):
         super().__init__(config)
 
     async def generate(self, request: dict, context: Context):
-        logging.debug(f"New Request ID: {context.id()}")
+        logging.info(f"=== ENCODE WORKER === Request ID: {context.id()}")
+        logging.info(f"EncodeHandler.generate received request with model: {request.get('model')}")
         if self.connector:
             # Use helper method to process embedding request
             async for response in EncodeHelper.process_embedding_request(
                 request, self.multimodal_processor, self.connector
             ):
+                logging.info(f"EncodeHandler yielding response")
                 yield response
+            logging.info(f"=== ENCODE WORKER === Request {context.id()} completed")
             return
         else:
             logging.error("encode handler: no Dynamo NIXL connector found")
@@ -106,8 +109,13 @@ class PrefillHandler(HandlerBase):
         Prefill worker: process prompt and return disaggregated_params.
         Frontend routes to decode workers automatically.
         """
-        logging.debug(f"Prefill Request ID: {context.id()}")
-        logging.debug(f"PrefillHandler.generate received request: {request}")
+        logging.info(f"=== PREFILL WORKER === Request ID: {context.id()}")
+        logging.info(f"PrefillHandler.generate received request with model: {request.get('model')}")
+        logging.info(f"PrefillHandler request keys: {list(request.keys())}")
+        logging.info(f"PrefillHandler has 'messages': {'messages' in request}")
+        logging.info(f"PrefillHandler has 'token_ids': {'token_ids' in request}")
+        logging.info(f"PrefillHandler has 'extra_args': {'extra_args' in request}")
+        logging.debug(f"Full request: {request}")
         embeddings_tensor = None
 
         if self.multimodal_processor:
@@ -116,10 +124,11 @@ class PrefillHandler(HandlerBase):
             )
             if embedding_paths:
                 if self.encode_client and self.connector:
-                    logging.debug(
+                    logging.info(
                         "PrefillHandler calling Encode Worker via remote_encode_with_nixl"
                     )
                     embeddings_tensor = await self.remote_encode_with_nixl(request)
+                    logging.info("PrefillHandler received embeddings from Encode Worker")
 
         # Generate prefill response locally and return disaggregated_params
         response_count = 0
@@ -132,7 +141,9 @@ class PrefillHandler(HandlerBase):
                 return
 
             # Return response with disaggregated_params to frontend
+            logging.info(f"PrefillHandler yielding response with disaggregated_params: {res.get('disaggregated_params') is not None}")
             yield res
+        logging.info(f"=== PREFILL WORKER === Request {context.id()} completed")
 
 
 class DecodeHandler(HandlerBase):
@@ -148,14 +159,22 @@ class DecodeHandler(HandlerBase):
         Decode worker: generate tokens using disaggregated_params from prefill.
         If disaggregated_params is present, prefill was done. Otherwise generate normally.
         """
-        logging.debug(f"Decode Request ID: {context.id()}")
+        logging.info(f"=== DECODE WORKER === Request ID: {context.id()}")
+        logging.info(f"DecodeHandler.generate received request with model: {request.get('model')}")
 
         disaggregated_params = request.get("disaggregated_params")
         if disaggregated_params:
-            logging.debug(
-                f"Using disaggregated params from prefill for request {context.id()}"
+            logging.info(
+                f"DecodeHandler using disaggregated params from prefill for request {context.id()}"
+            )
+        else:
+            logging.warning(
+                f"DecodeHandler received request WITHOUT disaggregated_params for request {context.id()}"
             )
 
         # Generate tokens locally (with or without disaggregated_params)
+        token_count = 0
         async for res in self.generate_locally(request, context):
+            token_count += 1
             yield res
+        logging.info(f"=== DECODE WORKER === Request {context.id()} completed, yielded {token_count} responses")

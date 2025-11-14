@@ -59,6 +59,10 @@ class MultimodalRequestProcessor:
         self.allowed_local_media_path = allowed_local_media_path
         self.max_file_size_mb = max_file_size_mb
         self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
+        logging.info(
+            f"MultimodalRequestProcessor initialized with allowed_local_media_path='{self.allowed_local_media_path}', "
+            f"max_file_size_mb={self.max_file_size_mb}"
+        )
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
@@ -67,6 +71,14 @@ class MultimodalRequestProcessor:
 
     def load_tensor_from_path_or_url(self, path: str) -> torch.Tensor:
         """Load a tensor from either a local file path or a URL."""
+        logging.debug(f"load_tensor_from_path_or_url called with path='{path}'")
+        # Handle file:// URLs by extracting the path
+        parsed = urlparse(path)
+        if parsed.scheme == "file":
+            # Extract the path from file:// URL
+            path = parsed.path
+            logging.debug(f"Converted file:// URL to local path: '{path}'")
+        
         if self.is_url(path):
             # Download directly to memory using BytesIO (no filesystem ops)
             try:
@@ -171,8 +183,10 @@ class MultimodalRequestProcessor:
         )
 
         if not image_urls and not embedding_paths:
-            logging.warning("No multimodal content, returning None")
-            return None
+            # Text-only request on multimodal worker - return text as plain string
+            # The engine will tokenize it
+            logging.info("Text-only request on multimodal worker, returning text prompt")
+            return text_prompt
 
         loader_kwargs = {}
         if embeddings is not None:
