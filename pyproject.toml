@@ -144,6 +144,8 @@ addopts = [
     "--strict-markers",
     "--strict-config",
     "--mypy",
+    "--timestamps",
+    "--durations=0",
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
