@@ -429,6 +429,8 @@ RUN apt-get update \
         ibverbs-providers \
         infiniband-diags \
         perftest \
+        # Libfabric
+        libhwloc15 \
         # Development libraries
         libgoogle-glog-dev \
         libgtest-dev \
@@ -614,6 +616,7 @@ ${NIXL_LIB_DIR}:\
 ${NIXL_PLUGIN_DIR}:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
+/usr/local/libfabric/lib:\
 /usr/local/nvidia/lib64:\
 ${LD_LIBRARY_PATH}
 
