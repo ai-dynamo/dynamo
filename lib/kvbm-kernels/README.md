@@ -144,7 +144,8 @@ installs Rust and builds the project.
 ./run.sh
 
 # Or build manually
-docker build -t kvbm-kernel
+# Or build manually
+docker build -t kvbm-kernels .
 docker run --rm --gpus all kvbm-kernels
 ```
 
