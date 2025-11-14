@@ -6,7 +6,7 @@
 # Declare variables to be passed into your templates.
 
 # This is the Dynamo namespace where the dynamo model is deployed
-dynamoNamespace: "vllm-agg"
+dynamoNamespace: "my-model-vllm-agg"
 
 # This is the port on which the model is exposed
 model:
