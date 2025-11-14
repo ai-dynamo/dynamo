@@ -3,13 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Script to detect broken links in markdown files within a git repository.
+Script to detect broken links in markdown files and problematic symbolic links within a git repository.
 
 This script:
 1. Finds all .md files in the specified directory (recursively)
 2. Parses each file to extract links to other .md files
 3. Validates if the linked files exist
-4. Generates a JSON or HTML report of broken links with line numbers
+4. Detects problematic symbolic links (broken, circular, outside repo)
+5. Generates a JSON or HTML report of broken links and problematic symlinks with line numbers
 """
 
 import argparse
@@ -556,9 +557,161 @@ def validate_links(
     return broken_links_report
 
 
+def find_symbolic_links(root_dir: str, logger: logging.Logger) -> List[Path]:
+    """
+    Find all symbolic links in the given directory recursively.
+
+    Args:
+        root_dir: Root directory to search for symbolic links
+        logger: Logger instance for logging
+
+    Returns:
+        List of Path objects representing symbolic links
+    """
+    symlinks = []
+    root_path = Path(root_dir).resolve()
+
+    logger.debug(f"Searching for symbolic links in: {root_path}")
+
+    try:
+        for item in root_path.rglob("*"):
+            if item.is_symlink():
+                symlinks.append(item)
+                logger.debug(f"Found symbolic link: {item}")
+    except (OSError, PermissionError) as e:
+        logger.warning(f"Error accessing path during symlink search: {e}")
+
+    logger.info(f"Found {len(symlinks)} symbolic links in {root_dir}")
+    return symlinks
+
+
+def detect_problematic_symlinks(
+    symlinks: List[Path], git_root_dir: Optional[str], logger: logging.Logger
+) -> Dict[str, List[Dict[str, str]]]:
+    """
+    Detect problematic symbolic links including broken, circular, and external links.
+
+    Args:
+        symlinks: List of symbolic link paths to check
+        git_root_dir: Git repository root directory for relative path calculation
+        logger: Logger instance for logging
+
+    Returns:
+        Dictionary with categories of problematic symlinks
+    """
+    problematic_symlinks = {
+        "broken": [],
+        "circular": [],
+        "external": [],
+        "suspicious": [],
+    }
+
+    git_root_path = Path(git_root_dir).resolve() if git_root_dir else None
+
+    for symlink in symlinks:
+        try:
+            symlink_path = symlink.resolve()
+            target_path = symlink.readlink()
+
+            # Get relative path from git root for reporting
+            if git_root_path:
+                try:
+                    relative_symlink = symlink.relative_to(git_root_path)
+                except ValueError:
+                    relative_symlink = symlink
+            else:
+                relative_symlink = symlink
+
+            symlink_info = {
+                "symlink_path": str(relative_symlink),
+                "target_path": str(target_path),
+                "absolute_symlink_path": str(symlink),
+                "issue": "",
+            }
+
+            # Check if symlink is broken (target doesn't exist)
+            if not symlink_path.exists():
+                symlink_info[
+                    "issue"
+                ] = f"Broken symlink: target '{target_path}' does not exist"
+                problematic_symlinks["broken"].append(symlink_info)
+                logger.warning(f"Broken symlink found: {symlink} -> {target_path}")
+                continue
+
+            # Check for circular symlinks
+            try:
+                # Try to resolve the symlink completely
+                resolved_path = symlink.resolve(strict=True)
+                if resolved_path == symlink:
+                    symlink_info["issue"] = "Circular symlink: points to itself"
+                    problematic_symlinks["circular"].append(symlink_info)
+                    logger.warning(f"Circular symlink found: {symlink}")
+                    continue
+            except (OSError, RuntimeError) as e:
+                if "Too many levels of symbolic links" in str(e):
+                    symlink_info[
+                        "issue"
+                    ] = "Circular symlink: too many levels of symbolic links"
+                    problematic_symlinks["circular"].append(symlink_info)
+                    logger.warning(f"Circular symlink found: {symlink}")
+                    continue
+
+            # Check if symlink points outside the repository
+            if git_root_path:
+                try:
+                    symlink_path.relative_to(git_root_path)
+                except ValueError:
+                    symlink_info[
+                        "issue"
+                    ] = f"External symlink: points outside repository to '{symlink_path}'"
+                    problematic_symlinks["external"].append(symlink_info)
+                    logger.warning(
+                        f"External symlink found: {symlink} -> {symlink_path}"
+                    )
+                    continue
+
+            # Check for suspicious patterns (e.g., very long paths, unusual targets)
+            if len(str(target_path)) > 200:
+                symlink_info[
+                    "issue"
+                ] = f"Suspicious symlink: unusually long target path ({len(str(target_path))} characters)"
+                problematic_symlinks["suspicious"].append(symlink_info)
+                logger.info(f"Suspicious symlink found: {symlink} (long path)")
+
+            # Check if target is in a different directory tree (potential maintenance issue)
+            if "../" in str(target_path) and str(target_path).count("../") > 3:
+                symlink_info[
+                    "issue"
+                ] = f"Suspicious symlink: target requires many directory traversals ('{target_path}')"
+                problematic_symlinks["suspicious"].append(symlink_info)
+                logger.info(f"Suspicious symlink found: {symlink} (many traversals)")
+
+        except (OSError, PermissionError) as e:
+            symlink_info = {
+                "symlink_path": str(symlink),
+                "target_path": "unknown",
+                "absolute_symlink_path": str(symlink),
+                "issue": f"Error accessing symlink: {e}",
+            }
+            problematic_symlinks["broken"].append(symlink_info)
+            logger.error(f"Error processing symlink {symlink}: {e}")
+
+    # Log summary
+    total_issues = sum(len(issues) for issues in problematic_symlinks.values())
+    if total_issues > 0:
+        logger.warning(f"Found {total_issues} problematic symbolic links:")
+        for category, issues in problematic_symlinks.items():
+            if issues:
+                logger.warning(f"  {category}: {len(issues)}")
+    else:
+        logger.info("No problematic symbolic links found")
+
+    return problematic_symlinks
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Detect broken links in markdown files",
+        description="Detect broken links in markdown files and problematic symbolic links",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -615,6 +768,12 @@ Examples:
         "--log-file", type=str, help="Log file path for detailed logging"
     )
 
+    parser.add_argument(
+        "--check-symlinks",
+        action="store_true",
+        help="Also check for problematic symbolic links (broken, circular, external)",
+    )
+
     args = parser.parse_args()
 
     # Set up logging
@@ -657,7 +816,31 @@ Examples:
             logger.error(f"Error processing directory {directory}: {e}")
             continue
 
+    # Check for problematic symbolic links if requested
+    all_problematic_symlinks = {}
+    if args.check_symlinks:
+        logger.info("Checking for problematic symbolic links...")
+        for directory in args.directories:
+            try:
+                symlinks = find_symbolic_links(directory, logger)
+                if symlinks:
+                    problematic_symlinks = detect_problematic_symlinks(
+                        symlinks, git_root_dir, logger
+                    )
+                    # Only include categories that have issues
+                    for category, issues in problematic_symlinks.items():
+                        if issues:
+                            if category not in all_problematic_symlinks:
+                                all_problematic_symlinks[category] = []
+                            all_problematic_symlinks[category].extend(issues)
+            except Exception as e:
+                logger.error(f"Error checking symlinks in directory {directory}: {e}")
+                continue
+
     # Prepare the final report
+    total_problematic_symlinks = sum(
+        len(issues) for issues in all_problematic_symlinks.values()
+    )
     report = {
         "summary": {
             "total_files_processed": total_files_processed,
@@ -665,8 +848,11 @@ Examples:
             "total_broken_links": sum(
                 len(links) for links in all_broken_links.values()
             ),
+            "total_problematic_symlinks": total_problematic_symlinks,
+            "symlink_check_enabled": args.check_symlinks,
         },
         "broken_links": all_broken_links,
+        "problematic_symlinks": all_problematic_symlinks,
         "all_processed_files": sorted(all_processed_files),
     }
 
@@ -687,6 +873,7 @@ Examples:
     cleaned_report = {
         "summary": report["summary"],
         "broken_links": cleaned_broken_links,
+        "problematic_symlinks": report["problematic_symlinks"],
         "all_processed_files": report["all_processed_files"],
     }
     output_content = json.dumps(cleaned_report, indent=2, ensure_ascii=False)
@@ -707,14 +894,41 @@ Examples:
         logger.info("Writing report to stdout")
         print(output_content)
 
-    # Exit with error code if broken links were found
-    if all_broken_links:
+    # Exit with error code if broken links or problematic symlinks were found
+    # Note: "suspicious" symlinks are warnings only and don't cause failure
+    has_broken_links = bool(all_broken_links)
+
+    # Only count critical symlink issues (broken, circular, external) as errors
+    critical_symlink_categories = ["broken", "circular", "external"]
+    critical_symlinks = {
+        category: issues
+        for category, issues in all_problematic_symlinks.items()
+        if category in critical_symlink_categories
+    }
+    has_critical_symlinks = bool(critical_symlinks)
+    total_critical_symlinks = sum(len(issues) for issues in critical_symlinks.values())
+
+    # Log suspicious symlinks separately as warnings
+    suspicious_symlinks = all_problematic_symlinks.get("suspicious", [])
+    if suspicious_symlinks:
         logger.warning(
-            f"Exiting with error code 1 due to {len(all_broken_links)} files with broken links"
+            f"Found {len(suspicious_symlinks)} suspicious symlinks (warnings only, not causing failure)"
         )
+
+    if has_broken_links or has_critical_symlinks:
+        error_msg = []
+        if has_broken_links:
+            error_msg.append(f"{len(all_broken_links)} files with broken links")
+        if has_critical_symlinks:
+            error_msg.append(f"{total_critical_symlinks} critical problematic symlinks")
+
+        logger.warning(f"Exiting with error code 1 due to: {', '.join(error_msg)}")
         sys.exit(1)
     else:
-        logger.info("No broken links found - exiting successfully")
+        success_msg = "No broken links found"
+        if args.check_symlinks:
+            success_msg += " and no critical problematic symlinks found"
+        logger.info(f"{success_msg} - exiting successfully")
 
 
 if __name__ == "__main__":

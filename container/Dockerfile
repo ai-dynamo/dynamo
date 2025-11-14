@@ -335,6 +335,9 @@ ARG ARCH_ALT
 ENV DYNAMO_HOME=/opt/dynamo \
     CARGO_TARGET_DIR=/opt/dynamo/target
 
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
         # required for AIC perf files

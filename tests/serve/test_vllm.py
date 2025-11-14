@@ -244,6 +244,34 @@ vllm_configs = {
             )
         ],
     ),
+    "multimodal_audio_agg": VLLMConfig(
+        name="multimodal_audio_agg",
+        directory="/workspace/examples/multimodal",
+        script_name="audio_agg.sh",
+        marks=[pytest.mark.gpu_2],
+        model="Qwen/Qwen2-Audio-7B-Instruct",
+        delayed_start=0,
+        script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
+        timeout=500,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is recited in the audio?"},
+                    {
+                        "type": "audio_url",
+                        "audio_url": {
+                            "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=[
+                    "The original content of this audio is:'yet these thoughts affected Hester Pynne less with hope than apprehension.'"
+                ],
+                temperature=0.8,
+            )
+        ],
+    ),
     # TODO: Enable this test case when we have 4 GPUs runners.
     # "multimodal_disagg": VLLMConfig(
     #     name="multimodal_disagg",

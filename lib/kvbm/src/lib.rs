@@ -20,9 +20,22 @@ mod block_manager;
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    logging::init();
-
+    // Initialize tokio runtime first to avoid panics when OTEL_EXPORT_ENABLED=1
     init_pyo3_tokio_rt();
+
+    if std::env::var("OTEL_EXPORT_ENABLED")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        // OTLP batch exporter needs runtime context to spawn background tasks
+        let handle = get_current_tokio_handle();
+        let _guard = handle.enter();
+        logging::init();
+    } else {
+        // OTEL disabled: no runtime context needed
+        logging::init();
+    }
+
     #[cfg(feature = "block-manager")]
     block_manager::add_to_module(m)?;
 

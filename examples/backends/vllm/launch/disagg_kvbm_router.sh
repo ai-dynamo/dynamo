@@ -27,11 +27,13 @@ python -m dynamo.router \
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
-    --enforce-eager &
+    --enforce-eager \
+    --is-decode-worker &
 
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
-    --enforce-eager &
+    --enforce-eager \
+    --is-decode-worker &
 
 # two prefill workers with KVBM enabled
 # Each worker needs unique ZMQ ports to avoid KVBM coordination conflicts
@@ -44,6 +46,8 @@ CUDA_VISIBLE_DEVICES=2 DYN_KVBM_CPU_CACHE_GB=20 \
     --is-prefill-worker \
     --connector kvbm &
 
+DYN_VLLM_KV_EVENT_PORT=20081 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 DYN_KVBM_LEADER_ZMQ_PUB_PORT=56003 \
 DYN_KVBM_LEADER_ZMQ_ACK_PORT=56004 \
 CUDA_VISIBLE_DEVICES=3 DYN_KVBM_CPU_CACHE_GB=20 \

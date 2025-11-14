@@ -479,10 +479,6 @@ async fn cleanup_orphaned_consumers(
     };
 
     // Filter to only routers for this component
-    // Note: keys differ between storage backends:
-    // - FileStore: "namespace/component/uuid" (relative to bucket)
-    // - EtcdStore: "v1/kv_routers/namespace/component/uuid" (full path)
-    // Use contains() to handle both cases
     let component_path = component.path();
     let active_uuids: HashSet<String> = entries
         .iter()
