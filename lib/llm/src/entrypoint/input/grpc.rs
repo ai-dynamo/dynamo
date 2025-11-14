@@ -6,17 +6,15 @@ use std::sync::Arc;
 use crate::{
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
-    entrypoint::{self, EngineConfig, input::common},
+    entrypoint::{self, EngineConfig, RouterConfig, input::common},
     grpc::service::kserve,
-    kv_router::KvRouterConfig,
     namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::pipeline::RouterMode;
+use dynamo_runtime::{DistributedRuntime, pipeline::RouterMode};
 
 /// Build and run an KServe gRPC service
 pub async fn run(
@@ -41,9 +39,7 @@ pub async fn run(
             run_watcher(
                 distributed_runtime.clone(),
                 grpc_service.state().manager_clone(),
-                router_config.router_mode,
-                Some(router_config.kv_router_config),
-                router_config.busy_threshold,
+                router_config.clone(),
                 target_namespace,
             )
             .await?;
@@ -88,7 +84,8 @@ pub async fn run(
                 None,
                 kv_chooser.clone(),
                 tokenizer_hf.clone(),
-                None, // No prefill chooser in grpc static mode
+                None,  // No prefill chooser in grpc static mode
+                false, // No enforce_disagg in grpc static mode
             )
             .await?;
             manager.add_chat_completions_model(
@@ -107,7 +104,8 @@ pub async fn run(
                 None,
                 kv_chooser,
                 tokenizer_hf,
-                None, // No prefill chooser in grpc static mode
+                None,  // No prefill chooser in grpc static mode
+                false, // No enforce_disagg in grpc static mode
             )
             .await?;
             manager.add_completions_model(
@@ -166,18 +164,10 @@ pub async fn run(
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
-    router_mode: RouterMode,
-    kv_router_config: Option<KvRouterConfig>,
-    busy_threshold: Option<f64>,
+    router_config: RouterConfig,
     target_namespace: Option<String>,
 ) -> anyhow::Result<()> {
-    let watch_obj = ModelWatcher::new(
-        runtime.clone(),
-        model_manager,
-        router_mode,
-        kv_router_config,
-        busy_threshold,
-    );
+    let watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
