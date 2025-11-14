@@ -414,15 +414,15 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 &
 ### Production Workflow
 ```bash
 # 1. Build production runtime image (runs as non-root dynamo user)
-./build.sh --framework vllm --target runtime --release-build
+./build.sh --framework vllm --target runtime 
 
 # 2. Run production container as non-root dynamo user
 ./run.sh --image dynamo:latest-vllm-runtime --gpus all -v $HOME/.cache:/home/dynamo/.cache
 ```
 
-### CI/CD Workflow
+### Dev Workflow
 ```bash
-# 1. Build dev image (you can use --target runtime to build production non root user image)
+# 1. Build dev image 
 ./build.sh --framework vllm --no-cache
 
 # 2. Run tests with network isolation for reproducible results (no -it needed for CI)
