@@ -118,7 +118,6 @@ Dynamo containers implement a multi-stage user strategy:
 - **dev stage**: Runs as root for maximum development flexibility (builds on runtime but switches to root)
 - **local-dev stage**: Runs as `dynamo` user with UID/GID matched to host user for safe file system operations
 - **Security**: Runtime and local-dev use non-root execution to reduce attack surface
-- **Permissions**: The `dynamo` user has sudo access for administrative tasks when needed
 - **File Ownership**: All application files, virtual environments, and build artifacts are owned by `dynamo:root` (1000:0) in runtime stage
 - **Environment Setup**: Launch banner moved to `/opt/dynamo/.launch_screen` (shared across all users) and venv activation configured in `/etc/bash.bashrc` for system-wide availability. This replaces the previous per-user `~/.launch_screen` and `~/.bashrc` approach.
 
