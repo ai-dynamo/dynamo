@@ -159,7 +159,7 @@ pub struct RuntimeConfig {
 
     /// Enable active health checking with payloads
     /// Set this at runtime with environment variable DYN_HEALTH_CHECK_ENABLED
-    #[builder(default = "false")]
+    #[builder(default = "true")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub health_check_enabled: bool,
 
