@@ -423,7 +423,10 @@ struct GatedPing {
 impl Handler for GatedPing {
     async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
         if !self.state.is_ready() {
-            tracing::info!("Ping received but worker not ready; deferring ACK");
+            tracing::info!(
+                "KVBM worker is under initialization. It could take a while if set with large CPU or DISK cache size. Please wait..."
+            );
+            tracing::debug!("Ping received but worker not ready; deferring ACK");
             // Prevent Drop panic; leader won't get an ACK for this round and will retry.
             message.mark_handled();
             return Ok(());
