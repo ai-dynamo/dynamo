@@ -73,17 +73,17 @@ Dockerfile.local_dev → local-dev (from vllm dev image)
 
 ### Environment Variables by Stage
 
-| Variable | **base** | **base→dev** | **vllm→framework** | **vllm→runtime** | **vllm→dev** | **local-dev** |
-|----------|----------|--------------|--------------------|-----------------|--------------|--------------------|
-| **DYNAMO_HOME** | ❌ Not set | `/opt/dynamo` | ❌ Not set | `/opt/dynamo` | `/workspace` ✅ **OVERRIDE** | `/workspace` (inherited) |
-| **WORKSPACE_DIR** | ❌ Not set | ❌ Not set | ❌ Not set | ❌ Not set | `/workspace` | `/workspace` (inherited) |
-| **CARGO_TARGET_DIR** | ❌ Not set | `/opt/dynamo/target` | ❌ Not set | ❌ Not set | `/workspace/target` ✅ **OVERRIDE** | `/workspace/target` (inherited) |
-| **VIRTUAL_ENV** | `/opt/dynamo/venv` | (inherited) | `/opt/dynamo/venv` | `/opt/dynamo/venv` | `/opt/dynamo/venv` ✅ **REDEFINE** | `/opt/dynamo/venv` (inherited) |
-| **RUSTUP_HOME** | `/usr/local/rustup` | (inherited) | ❌ Not set | ❌ Not set | `/usr/local/rustup` | `/home/dynamo/.rustup` ✅ **OVERRIDE** |
-| **CARGO_HOME** | `/usr/local/cargo` | (inherited) | ❌ Not set | ❌ Not set | `/usr/local/cargo` | `/home/dynamo/.cargo` ✅ **OVERRIDE** |
-| **USERNAME** | ❌ Not set | ❌ Not set | ❌ Not set | ❌ Not set | ❌ Not set | `dynamo` ✅ **NEW** |
-| **HOME** | (system default) | (system default) | (system default) | (system default) | `/home/dynamo` | `/home/dynamo` ✅ **NEW** |
-| **PATH** | (includes cargo) | (inherited) | (system default) | (includes venv, etcd, ucx) | `/usr/local/cargo/bin:$PATH` | `/home/dynamo/.cargo/bin:$PATH` ✅ **OVERRIDE** |
+| Variable             | **base**            | **base→dev**         | **vllm→framework** | **vllm→runtime**   | **vllm→dev** | **local-dev** |
+|----------------------|---------------------|----------------------|--------------------|--------------------|--------------|--------------------|
+| **DYNAMO_HOME**      | ❌ Not set          | `/opt/dynamo`        | ❌ Not set         | `/opt/dynamo`      | `/workspace` ✅ **OVERRIDE** | `/workspace` (inherited) |
+| **WORKSPACE_DIR**    | ❌ Not set          | ❌ Not set           | ❌ Not set         | ❌ Not set         | `/workspace` | `/workspace` (inherited) |
+| **CARGO_TARGET_DIR** | ❌ Not set          | `/opt/dynamo/target` | ❌ Not set         | ❌ Not set         | `/workspace/target` ✅ **OVERRIDE** | `/workspace/target` (inherited) |
+| **VIRTUAL_ENV**      | `/opt/dynamo/venv`  | (inherited)          | `/opt/dynamo/venv` | `/opt/dynamo/venv` | `/opt/dynamo/venv` ✅ **REDEFINE** | `/opt/dynamo/venv` (inherited) |
+| **RUSTUP_HOME**      | `/usr/local/rustup` | (inherited)          | ❌ Not set         | ❌ Not set         | `/usr/local/rustup` | `/home/dynamo/.rustup` ✅ **OVERRIDE** |
+| **CARGO_HOME**       | `/usr/local/cargo`  | (inherited)          | ❌ Not set         | ❌ Not set         | `/usr/local/cargo` | `/home/dynamo/.cargo` ✅ **OVERRIDE** |
+| **USERNAME**         | ❌ Not set          | `dynamo`             | ❌ Not set         | `dynamo`           | ❌ Not set   | `dynamo` |
+| **HOME**             | (system default)    | `/home/dynamo`       | (system default)   | `/home/dynamo`     | (system default) | `/home/dynamo` |
+| **PATH**             | (includes cargo)    | (inherited)          | (system default)   | (includes venv, etcd, ucx) | `/usr/local/cargo/bin:$PATH` | `/home/dynamo/.cargo/bin:$PATH` ✅ **OVERRIDE** |
 
 ### Key Insights
 
