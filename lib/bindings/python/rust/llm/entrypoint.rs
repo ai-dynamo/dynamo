@@ -24,7 +24,6 @@ pub enum EngineType {
     Echo = 1,
     Dynamic = 2,
     Mocker = 3,
-    Static = 4,
 }
 
 #[pyclass]
@@ -72,21 +71,24 @@ pub struct RouterConfig {
     router_mode: RouterMode,
     kv_router_config: KvRouterConfig,
     busy_threshold: Option<f64>,
+    enforce_disagg: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, busy_threshold=None))]
+    #[pyo3(signature = (mode, config=None, busy_threshold=None, enforce_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
         busy_threshold: Option<f64>,
+        enforce_disagg: bool,
     ) -> Self {
         Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
             busy_threshold,
+            enforce_disagg,
         }
     }
 }
@@ -97,6 +99,7 @@ impl From<RouterConfig> for RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
             busy_threshold: rc.busy_threshold,
+            enforce_disagg: rc.enforce_disagg,
         }
     }
 }
@@ -246,11 +249,9 @@ async fn select_engine(
             RsEngineConfig::StaticFull {
                 model: Box::new(local_model),
                 engine: dynamo_llm::engines::make_echo_engine(),
-                is_static: false,
             }
         }
         EngineType::Dynamic => RsEngineConfig::Dynamic(Box::new(local_model)),
-        EngineType::Static => RsEngineConfig::StaticRemote(Box::new(local_model)),
         EngineType::Mocker => {
             let mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
                 MockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
@@ -279,7 +280,6 @@ async fn select_engine(
             RsEngineConfig::StaticCore {
                 engine,
                 model: Box::new(local_model),
-                is_static: false,
                 is_prefill: args.is_prefill,
             }
         }

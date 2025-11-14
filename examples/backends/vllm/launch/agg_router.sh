@@ -24,7 +24,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
     --connector none \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556"}' &
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
 
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
@@ -32,4 +32,4 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --block-size $BLOCK_SIZE \
     --enforce-eager \
     --connector none \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}'

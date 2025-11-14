@@ -92,9 +92,9 @@ Backend engines require Python development headers for JIT compilation. Install 
 sudo apt install python3-dev
 ```
 
-### Install etcd and NATS (required)
+### Install etcd (optional) and NATS (required)
 
-To coordinate across a data center, Dynamo relies on etcd and NATS. To run Dynamo locally, these need to be available.
+To coordinate across a data center, Dynamo relies on etcd and NATS. These will be used in production. To run Dynamo locally etcd is optional.
 
 - [etcd](https://etcd.io/) can be run directly as `./etcd`.
 - [nats](https://nats.io/) needs jetstream enabled: `nats-server -js`.
@@ -105,6 +105,9 @@ To quickly setup etcd & NATS, you can also run:
 # At the root of the repository:
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+To run locally without etcd, pass `--store-kv file` to both the frontend and workers. The directory used for key-value data can be configured via the `DYN_FILE_KV` environment variable (example: `export DYN_FILE_KV=/data/kv/dynamo`). Defaults to `$TMPDIR/dynamo_store_kv`.
+
 
 ## 2. Select an engine
 
@@ -142,11 +145,13 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 ```
 # Start an OpenAI compatible HTTP server, a pre-processor (prompt templating and tokenization) and a router.
 # Pass the TLS certificate and key paths to use HTTPS instead of HTTP.
-python -m dynamo.frontend --http-port 8000 [--tls-cert-path cert.pem] [--tls-key-path key.pem]
+# Pass --store-kv to use the filesystem instead of etcd. The workers and frontend must share a disk.
+python -m dynamo.frontend --http-port 8000 [--tls-cert-path cert.pem] [--tls-key-path key.pem] [--store-kv file]
 
 # Start the SGLang engine, connecting to NATS and etcd to receive requests. You can run several of these,
 # both for the same model and for multiple models. The frontend node will discover them.
-python -m dynamo.sglang --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+# Pass --store-kv to use the filesystem instead of etcd. The workers and frontend must share a disk.
+python -m dynamo.sglang --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B [--store-kv file]
 ```
 
 #### Send a Request
@@ -336,7 +341,7 @@ uv pip install -e .
 
 You should now be able to run `python -m dynamo.frontend`.
 
-Remember that nats and etcd must be running (see earlier).
+Remember that nats and etcd must typically be running (see earlier).
 
 Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
 

@@ -27,7 +27,7 @@ CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=2 \
     --enforce-eager \
     --connector kvbm \
     --gpu-memory-utilization 0.4 \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556"}' &
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
 
 DYN_KVBM_LEADER_ZMQ_PUB_PORT=56003 \
 DYN_KVBM_LEADER_ZMQ_ACK_PORT=56004 \
@@ -38,4 +38,4 @@ CUDA_VISIBLE_DEVICES=0 DYN_KVBM_CPU_CACHE_GB=2 \
     --enforce-eager \
     --connector kvbm \
     --gpu-memory-utilization 0.4 \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}'

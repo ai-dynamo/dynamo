@@ -7,9 +7,8 @@ use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{self, EngineConfig, input::common},
+    entrypoint::{EngineConfig, RouterConfig, input::common},
     http::service::service_v2::{self, HttpService},
-    kv_router::KvRouterConfig,
     namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -17,7 +16,6 @@ use crate::{
     },
 };
 use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::pipeline::RouterMode;
 
 /// Build and run an HTTP service
 pub async fn run(
@@ -81,86 +79,12 @@ pub async fn run(
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
-                router_config.router_mode,
-                Some(router_config.kv_router_config),
-                router_config.busy_threshold,
+                router_config.clone(),
                 target_namespace,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
             )
             .await?;
-            http_service
-        }
-        EngineConfig::StaticRemote(local_model) => {
-            let card = local_model.card();
-            let checksum = card.mdcsum();
-            let router_mode = local_model.router_config().router_mode;
-            let http_service = http_service_builder.build()?;
-            let manager = http_service.model_manager();
-
-            let endpoint_id = local_model.endpoint_id();
-            let component = distributed_runtime
-                .namespace(&endpoint_id.namespace)?
-                .component(&endpoint_id.component)?;
-            let client = component.endpoint(&endpoint_id.name).client().await?;
-
-            let kv_chooser = if router_mode == RouterMode::KV {
-                Some(
-                    manager
-                        .kv_chooser_for(
-                            &component,
-                            card.kv_cache_block_size,
-                            Some(local_model.router_config().kv_router_config),
-                        )
-                        .await?,
-                )
-            } else {
-                None
-            };
-
-            let tokenizer_hf = card.tokenizer_hf()?;
-            let chat_engine = entrypoint::build_routed_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(
-                card,
-                &client,
-                router_mode,
-                None,
-                kv_chooser.clone(),
-                tokenizer_hf.clone(),
-                None, // No prefill chooser in http static mode
-            )
-            .await?;
-            manager.add_chat_completions_model(
-                local_model.display_name(),
-                checksum,
-                chat_engine,
-            )?;
-
-            let completions_engine = entrypoint::build_routed_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(
-                card,
-                &client,
-                router_mode,
-                None,
-                kv_chooser,
-                tokenizer_hf,
-                None, // No prefill chooser in http static mode
-            )
-            .await?;
-            manager.add_completions_model(
-                local_model.display_name(),
-                checksum,
-                completions_engine,
-            )?;
-
-            for endpoint_type in EndpointType::all() {
-                http_service.enable_model_endpoint(endpoint_type, true);
-            }
-
             http_service
         }
         EngineConfig::StaticFull { engine, model, .. } => {
@@ -263,24 +187,15 @@ pub async fn run(
 
 /// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
-#[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
-    router_mode: RouterMode,
-    kv_router_config: Option<KvRouterConfig>,
-    busy_threshold: Option<f64>,
+    router_config: RouterConfig,
     target_namespace: Option<String>,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
 ) -> anyhow::Result<()> {
-    let mut watch_obj = ModelWatcher::new(
-        runtime.clone(),
-        model_manager,
-        router_mode,
-        kv_router_config,
-        busy_threshold,
-    );
+    let mut watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

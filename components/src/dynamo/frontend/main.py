@@ -20,7 +20,6 @@ import asyncio
 import logging
 import os
 import pathlib
-import re
 import signal
 
 import uvloop
@@ -47,18 +46,6 @@ CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR = (
 CUSTOM_BACKEND_ENDPOINT_ENV_VAR = "CUSTOM_BACKEND_ENDPOINT"
 
 logger = logging.getLogger(__name__)
-
-
-def validate_static_endpoint(value):
-    """Validate that static-endpoint is three words separated by dots."""
-    if not re.match(
-        r"^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$",
-        value,
-    ):
-        raise argparse.ArgumentTypeError(
-            f"static-endpoint must be three words separated by dots, got: {value}"
-        )
-    return value
 
 
 def validate_model_name(value):
@@ -176,15 +163,16 @@ def parse_args():
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing.",
     )
     parser.add_argument(
+        "--enforce-disagg",
+        action="store_true",
+        default=False,
+        help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
+    )
+    parser.add_argument(
         "--busy-threshold",
         type=float,
         default=None,
         help="Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. If not set, busy detection is disabled.",
-    )
-    parser.add_argument(
-        "--static-endpoint",
-        type=validate_static_endpoint,
-        help="Static endpoint in format: word.word.word (e.g., dynamo.backend.generate)",
     )
     parser.add_argument(
         "--model-name",
@@ -234,8 +222,6 @@ def parse_args():
 
     flags = parser.parse_args()
 
-    if flags.static_endpoint and (not flags.model_name or not flags.model_path):
-        parser.error("--static-endpoint requires both --model-name and --model-path")
     if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
         parser.error("--tls-cert-path and --tls-key-path must be provided together")
     if flags.custom_backend_metrics_polling_interval < 0:
@@ -249,7 +235,6 @@ def parse_args():
 async def async_main():
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
-    is_static = bool(flags.static_endpoint)  # true if the string has a value
 
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
@@ -268,7 +253,7 @@ async def async_main():
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.store_kv, is_static)
+    runtime = DistributedRuntime(loop, flags.store_kv)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -299,12 +284,9 @@ async def async_main():
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
         "router_config": RouterConfig(
-            router_mode, kv_router_config, flags.busy_threshold
+            router_mode, kv_router_config, flags.busy_threshold, flags.enforce_disagg
         ),
     }
-
-    if flags.static_endpoint:
-        kwargs["endpoint_id"] = flags.static_endpoint
 
     if flags.model_name:
         kwargs["model_name"] = flags.model_name
@@ -325,13 +307,7 @@ async def async_main():
             "custom_backend_metrics_polling_interval"
         ] = flags.custom_backend_metrics_polling_interval
 
-    if is_static:
-        # out=dyn://<static_endpoint>
-        engine_type = EngineType.Static
-    else:
-        # out=auto, most common
-        engine_type = EngineType.Dynamic
-    e = EntrypointArgs(engine_type, **kwargs)
+    e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
 
     try:

@@ -11,14 +11,14 @@ WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
 # Ensure we're not running as root
 if [ "$(id -u)" -eq 0 ]; then
     echo "❌ ERROR: This script should not be run as root!"
-    echo "The script should run as the 'ubuntu' user, not root."
+    echo "The script should run as the 'dynamo' user, not root."
     echo "Current user: $(whoami) (UID: $(id -u))"
     exit 1
 fi
 
 # Verify we're running as the expected user
-if [ "$(whoami)" != "ubuntu" ]; then
-    echo "⚠️  WARNING: Expected to run as 'ubuntu' user, but running as '$(whoami)'"
+if [ "$(whoami)" != "dynamo" ]; then
+    echo "⚠️  WARNING: Expected to run as 'dynamo' user, but running as '$(whoami)'"
     echo "This might cause permission issues."
 fi
 

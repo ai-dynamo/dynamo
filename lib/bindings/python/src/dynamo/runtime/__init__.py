@@ -20,12 +20,12 @@ from dynamo._core import Namespace as Namespace
 from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
-def dynamo_worker(static=False):
+def dynamo_worker():
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
-            runtime = DistributedRuntime(loop, "etcd", static)
+            runtime = DistributedRuntime(loop, "etcd")
 
             await func(runtime, *args, **kwargs)
 

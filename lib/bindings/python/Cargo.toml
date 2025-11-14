@@ -36,11 +36,8 @@ async-trait = { version = "0.1" }
 derive-getters = "0.5"
 either = { version = "1.13", features = ["serde"] }
 futures = { version = "0.3" }
-local-ip-address = { version = "0.6" }
 once_cell = { version = "1.20.3" }
 parking_lot = { version = "0.12.4" }
-rand = { version = "0.9" }
-socket2 = { version = "0.6" }
 serde = { version = "1" }
 serde_json = { version = "1.0.138" }
 thiserror = { version = "2.0" }

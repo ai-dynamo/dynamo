@@ -325,7 +325,6 @@ mod integration_tests {
         let engine_config = EngineConfig::StaticFull {
             engine: make_echo_engine(),
             model: Box::new(local_model.clone()),
-            is_static: false, // This enables MDC registration!
         };
 
         let service = HttpService::builder()
@@ -340,9 +339,7 @@ mod integration_tests {
         let model_watcher = ModelWatcher::new(
             distributed_runtime.clone(),
             service.state().manager_clone(),
-            RouterMode::RoundRobin,
-            None,
-            None,
+            dynamo_llm::entrypoint::RouterConfig::default(),
         );
         // Start watching for model registrations via discovery interface
         let discovery = distributed_runtime.discovery();
@@ -513,9 +510,7 @@ mod integration_tests {
             let watcher = ModelWatcher::new(
                 distributed_runtime.clone(),
                 service.state().manager_clone(),
-                RouterMode::RoundRobin,
-                None,
-                None,
+                dynamo_llm::entrypoint::RouterConfig::default(),
             );
 
             // Get all model entries for our test model
