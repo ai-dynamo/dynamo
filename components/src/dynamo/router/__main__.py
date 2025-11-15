@@ -120,6 +120,7 @@ class StandaloneRouterHandler:
                 "index": worker_output.get("index"),
                 "disaggregated_params": worker_output.get("disaggregated_params"),
                 "extra_args": worker_output.get("extra_args"),
+                "completion_usage": worker_output.get("completion_usage"),
             }
             yield llm_engine_output
 
