@@ -165,14 +165,20 @@ class MultimodalRequestProcessor:
         ):
             request["sampling_options"]["temperature"] = request.pop("temperature")
 
-        messages = request.get("messages", [])
+        # Extract messages - check extra_args first (from Rust preprocessor for multimodal)
+        # Fall back to direct messages field for backward compatibility
+        messages = request.get("extra_args", {}).get(
+            "messages", request.get("messages", [])
+        )
         text_prompt, image_urls, embedding_paths = self.extract_prompt_and_media(
             messages
         )
 
         if not image_urls and not embedding_paths:
-            logging.warning("No multimodal content, returning None")
-            return None
+            # Text-only request on multimodal worker - return text as plain string
+            # The engine will tokenize it
+            logging.info("Text-only request on multimodal worker, returning text prompt")
+            return text_prompt
 
         loader_kwargs = {}
         if embeddings is not None:

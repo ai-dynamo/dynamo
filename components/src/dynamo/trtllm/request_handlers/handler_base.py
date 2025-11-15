@@ -277,18 +277,6 @@ class HandlerBase:
                         self.publisher.start()
                         self.first_generation = False
 
-                    # Upon completion, send a final chunk with "stop" as the finish reason.
-                    # This signals to the client that the stream has ended.
-                    if (
-                        res.finished
-                        and self.disaggregation_mode != DisaggregationMode.PREFILL
-                    ):
-                        if self.multimodal_processor:
-                            final_out = self.multimodal_processor.get_stop_response(
-                                request_id, model_name
-                            )
-                            yield final_out
-
                     # If we are not done generating, but there are no outputs, return an error
                     if not res.outputs and not res.finished:
                         yield {"finish_reason": "error", "token_ids": []}
@@ -298,12 +286,9 @@ class HandlerBase:
                     # The engine returns all tokens generated so far. We must calculate the new
                     # tokens generated in this iteration to create the "delta".
                     next_total_toks = len(output.token_ids)
-                    if self.multimodal_processor:
-                        out = self.multimodal_processor.create_response_chunk(
-                            output, num_output_tokens_so_far, request_id, model_name
-                        )
-                    else:
-                        out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
+                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+                    
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
                     if output.stop_reason:
