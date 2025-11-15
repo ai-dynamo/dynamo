@@ -123,6 +123,7 @@ def profile_decode(
             tokenizer,
             base_url=url,
             num_gpus=num_gpus,
+            attention_dp_size=attention_dp_size,
         )
 
     return _profile_decode_helper(

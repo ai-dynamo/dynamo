@@ -376,5 +376,7 @@ class SGLangConfigModifier:
         # Cap total tokens processed in a batch to avoid chunked prefill
         args = set_argument_value(args, "--chunked-prefill-size", str(max_num_tokens))
 
+        args = append_argument(args, "--enable-dp-lm-head")
+
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()

@@ -457,6 +457,7 @@ async def run_profile(args):
                                 model_name,
                                 base_url=base_url,
                                 num_gpus=num_gpus,
+                                attention_dp_size=mapping.get_attn_dp_size(),
                             )
 
                         if itl is not None and thpt_per_gpu is not None:
