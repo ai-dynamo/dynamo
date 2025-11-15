@@ -202,6 +202,12 @@ def setup_vllm_engine(config, stat_logger=None):
 
     engine_args = config.engine_args
 
+    if engine_args.enable_lora:
+        if "VLLM_ALLOW_RUNTIME_LORA_UPDATING" not in os.environ:
+            os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"
+        if "VLLM_LORA_MODULES_LOADING_TIMEOUT" not in os.environ:
+            os.environ["VLLM_LORA_MODULES_LOADING_TIMEOUT"] = "600"
+
     # KV transfer config is now handled by args.py based on ENABLE_LMCACHE env var
     if ENABLE_LMCACHE:
         setup_lmcache_environment()
@@ -323,7 +329,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
-        runtime, component, engine_client, default_sampling_params
+        runtime,
+        component,
+        engine_client,
+        default_sampling_params,
+        generate_endpoint=generate_endpoint,
+        config=config,
     )
 
     # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
@@ -410,6 +421,9 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
+    load_lora_endpoint = component.endpoint("load_lora")
+    unload_lora_endpoint = component.endpoint("unload_lora")
+    list_loras_endpoint = component.endpoint("list_loras")
 
     factory = StatLoggerFactory(
         component,
@@ -430,6 +444,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         component,
         engine_client,
         default_sampling_params,
+        generate_endpoint=generate_endpoint,
+        config=config,
     )
 
     # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
@@ -490,6 +506,18 @@ async def init(runtime: DistributedRuntime, config: Config):
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
+                metrics_labels=[("model", config.served_model_name or config.model)],
+            ),
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora,
+                metrics_labels=[("model", config.served_model_name or config.model)],
+            ),
+            unload_lora_endpoint.serve_endpoint(
+                handler.unload_lora,
+                metrics_labels=[("model", config.served_model_name or config.model)],
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras,
                 metrics_labels=[("model", config.served_model_name or config.model)],
             ),
         )

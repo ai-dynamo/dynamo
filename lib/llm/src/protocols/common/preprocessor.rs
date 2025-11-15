@@ -43,6 +43,12 @@ pub struct PreprocessedRequest {
     /// to return log probabilities, or whether to skip special tokens in output.
     pub output_options: OutputOptions,
 
+    /// Optional LoRA adapter name to use for this request.
+    /// If specified, the backend will route this request to use the named LoRA adapter.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_name: Option<String>,
+
     /// The EOS token ID(s) for the Model
     /// Not every backend needs this, but those that do can find it here.
     /// TODO - refactor this to a better location

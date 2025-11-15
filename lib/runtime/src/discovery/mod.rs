@@ -20,6 +20,9 @@ mod kube;
 pub use kube::{KubeDiscoveryClient, hash_pod_name};
 
 pub mod utils;
+
+#[cfg(test)]
+mod tests_lora;
 use crate::component::TransportType;
 pub use utils::watch_and_extract_field;
 

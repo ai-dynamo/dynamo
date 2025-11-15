@@ -14,12 +14,17 @@ import torch
 import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.inputs.data import TokensPrompt
+from vllm.lora.request import LoRARequest
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
-from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
+from dynamo.llm import (
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
+    lora_name_to_hash_id,
+)
 from dynamo.runtime import Component, DistributedRuntime, Endpoint, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -110,6 +115,10 @@ class VllmBaseWorker:
         self.engine_args = config.engine_args
         self.config = config
         self.setup_vllm_engine(component, endpoint)
+        # Track loaded LoRAs: lora_name -> lora_id (deterministic hash)
+        self.lora_name_to_id: dict[str, int] = {}
+        # Track LoRA paths: lora_name -> lora_path
+        self.lora_name_to_path: dict[str, str] = {}
 
     async def async_init(self, runtime: DistributedRuntime):
         pass
@@ -188,6 +197,134 @@ class VllmBaseWorker:
     def cleanup(self):
         """Override in subclasses if cleanup is needed."""
         pass
+
+    async def load_lora(self, request=None):
+        """
+        Load a LoRA adapter dynamically into the vLLM's AsyncLLM engine.
+        Expected request format:
+        {
+            "lora_name": str,
+            "lora_path": str,
+        }
+        """
+        try:
+            if request is None:
+                yield {
+                    "status": "error",
+                    "message": "Request is required with 'lora_name' and 'lora_path' fields",
+                }
+                return
+            lora_name = request.get("lora_name")
+            lora_path = request.get("lora_path")
+            if not lora_name or not lora_path:
+                yield {
+                    "status": "error",
+                    "message": "Both 'lora_name' and 'lora_path' are required in request",
+                }
+                return
+
+            logger.info(f"Loading LoRA adapter: {lora_name} from {lora_path}")
+
+            # Generate deterministic ID from lora_name before using it
+            lora_id = lora_name_to_hash_id(lora_name)
+
+            # Add the LoRA to the engine
+            await self.engine_client.add_lora(
+                LoRARequest(
+                    lora_name=lora_name, lora_int_id=lora_id, lora_path=lora_path
+                )
+            )
+
+            # Track the LoRA
+            self.lora_name_to_id[lora_name] = lora_id
+            if lora_name not in self.lora_name_to_path:
+                logger.info(f"Adding LoRA path: {lora_path} for {lora_name}")
+                self.lora_name_to_path[lora_name] = lora_path
+
+            logger.info(
+                f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
+            )
+            yield {
+                "status": "success",
+                "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                "lora_name": lora_name,
+                "lora_path": lora_path,
+                "lora_id": lora_id,
+            }
+        except Exception as e:
+            logger.error(f"Failed to load LoRA adapter: {e}")
+            yield {"status": "error", "message": str(e)}
+
+    async def unload_lora(self, request=None):
+        """
+        Unload a LoRA adapter dynamically from the vLLM's AsyncLLM engine.
+        Expected request format:
+        {
+            "lora_name": str,
+        }
+        """
+        try:
+            if request is None:
+                yield {
+                    "status": "error",
+                    "message": "Request is required with 'lora_name' field",
+                }
+                return
+            lora_name = request.get("lora_name")
+            if not lora_name:
+                yield {
+                    "status": "error",
+                    "message": "'lora_name' is required in request",
+                }
+                return
+
+            # Check if the LoRA exists
+            if lora_name not in self.lora_name_to_id:
+                yield {
+                    "status": "error",
+                    "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.lora_name_to_id.keys())}",
+                }
+                return
+
+            logger.info(f"Unloading LoRA adapter: {lora_name}")
+            lora_id = self.lora_name_to_id[lora_name]
+
+            await self.engine_client.remove_lora(lora_id)
+
+            # Remove from tracking dictionaries
+            del self.lora_name_to_id[lora_name]
+            if lora_name in self.lora_name_to_path:
+                del self.lora_name_to_path[lora_name]
+
+            logger.info(
+                f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
+            )
+            yield {
+                "status": "success",
+                "message": f"LoRA adapter '{lora_name}' unloaded successfully",
+                "lora_name": lora_name,
+                "lora_id": lora_id,
+            }
+        except Exception as e:
+            logger.error(f"Failed to unload LoRA adapter: {e}")
+            yield {"status": "error", "message": str(e)}
+
+    async def list_loras(self, request=None):
+        """
+        List all loaded LoRA adapters.
+        Returns a dictionary of lora_name -> lora_id mappings.
+        """
+        try:
+            # Convert defaultdict to regular dict for JSON serialization
+            loras = dict(self.lora_name_to_id)
+            yield {
+                "status": "success",
+                "loras": loras,
+                "count": len(loras),
+            }
+        except Exception as e:
+            logger.error(f"Failed to list LoRA adapters: {e}")
+            yield {"status": "error", "message": str(e)}
 
 
 class VllmDecodeWorker(VllmBaseWorker):
@@ -441,7 +578,9 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
-
+    load_lora_endpoint = component.endpoint("load_lora")
+    unload_lora_endpoint = component.endpoint("unload_lora")
+    list_loras_endpoint = component.endpoint("list_loras")
     if args.worker_type in ["prefill", "encode_prefill"]:
         handler: VllmBaseWorker = VllmPDWorker(
             args, component, generate_endpoint, config
@@ -461,6 +600,15 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=metrics_labels
+            ),
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora, metrics_labels=metrics_labels
+            ),
+            unload_lora_endpoint.serve_endpoint(
+                handler.unload_lora, metrics_labels=metrics_labels
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras, metrics_labels=metrics_labels
             ),
         )
     except Exception as e:

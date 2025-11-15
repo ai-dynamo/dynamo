@@ -22,7 +22,7 @@ use crate::{
     backend::Backend,
     entrypoint::{self, RouterConfig},
     kv_router::PrefillRouter,
-    model_card::ModelDeploymentCard,
+    model_card::{ModelDeploymentCard, ROOT_PATH},
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
     protocols::{
@@ -641,5 +641,52 @@ impl ModelWatcher {
             matches_name && matches_namespace
         });
         Ok(all.into_iter().map(|(_eid, card)| card).collect())
+    }
+}
+
+/// The ModelDeploymentCard is published in store with a key like:
+/// - Base model: "v1/mdc/dynamo/backend/generate/694d9981145a61ad"
+/// - LoRA model: "v1/mdc/dynamo/backend/generate/694d9981145a61ad/my-lora-slug"
+///
+/// Extract the EndpointId and instance_id (worker connection ID, always 4th part) from that.
+#[allow(dead_code)]
+fn key_extract(s: &str) -> anyhow::Result<(EndpointId, String)> {
+    if !s.starts_with(ROOT_PATH) {
+        anyhow::bail!("Invalid format: expected model card ROOT_PATH segment in {s}");
+    }
+    let parts: Vec<&str> = s.split('/').collect();
+
+    // Need at least: v1/mdc/namespace/component/endpoint/instance_id (6 parts)
+    // May have: v1/mdc/namespace/component/endpoint/instance_id/lora_slug (7 parts)
+    if parts.len() < 6 {
+        anyhow::bail!("Invalid format: not enough path segments in {s}");
+    }
+
+    let endpoint_id = EndpointId {
+        namespace: parts[2].to_string(),
+        component: parts[3].to_string(),
+        name: parts[4].to_string(),
+    };
+    // Always use the 6th part (index 5) as instance_id, even for LoRAs
+    // This ensures we route to the actual worker instance
+    let instance_id = parts[5].to_string();
+
+    Ok((endpoint_id, instance_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_key_extract() {
+        let input = format!(
+            "{}/dynamo/backend/generate/694d9981145a61ad",
+            crate::model_card::ROOT_PATH
+        );
+        let (endpoint_id, _) = key_extract(&input).unwrap();
+        assert_eq!(endpoint_id.namespace, "dynamo");
+        assert_eq!(endpoint_id.component, "backend");
+        assert_eq!(endpoint_id.name, "generate");
     }
 }

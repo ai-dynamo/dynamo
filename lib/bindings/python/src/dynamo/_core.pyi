@@ -1000,8 +1000,16 @@ async def register_llm(
     runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
+    lora_name: Optional[str] = None,
+    base_model_path: Optional[str] = None,
 ) -> None:
-    """Attach the model at path to the given endpoint, and advertise it as model_type"""
+    """
+    Attach the model at path to the given endpoint, and advertise it as model_type.
+    If `lora_name` is provided, this function will publish a LoRA adapter instead of a base model:
+    - LoRA path: v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
+    - Base model path: v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}
+    For LoRA mode, `base_model_path` must be provided to inherit configuration from the base model.
+    """
     ...
 
 async def fetch_llm(remote_name: str) -> str:
