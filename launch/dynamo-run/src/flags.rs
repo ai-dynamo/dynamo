@@ -123,11 +123,14 @@ pub struct Flags {
     /// Which key-value backend to use: etcd, mem, file.
     /// Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details.
     /// File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.
-    #[arg(long, default_value = "etcd")]
+    #[arg(long, default_value = "etcd", value_parser = ["etcd", "file", "mem"])]
     pub store_kv: String,
 
-    /// Everything after a `--`.
-    /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
+    /// Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp].
+    #[arg(long, default_value = "nats", value_parser = ["nats", "http", "tcp"])]
+    pub request_plane: String,
+
+    /// Everything after a `--`. Not currently used.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]
     pub last: Vec<String>,
 }

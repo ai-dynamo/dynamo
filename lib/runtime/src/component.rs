@@ -32,7 +32,8 @@
 use std::fmt;
 
 use crate::{
-    config::{HealthStatus, RequestPlaneMode},
+    config::HealthStatus,
+    distributed::RequestPlaneMode,
     metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
     service::ServiceSet,
     transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
@@ -412,7 +413,7 @@ impl Component {
 
         // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
         // Only enable NATS service metrics collection when using NATS request plane mode
-        let request_plane_mode = RequestPlaneMode::get();
+        let request_plane_mode = self.drt.request_plane();
         match request_plane_mode {
             RequestPlaneMode::Nats => {
                 if let Err(err) = self.start_scraping_nats_service_component_metrics() {

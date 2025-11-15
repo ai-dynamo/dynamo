@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
 from functools import wraps
 from typing import Any, AsyncGenerator, Callable, Type, Union
 
@@ -25,7 +26,8 @@ def dynamo_worker():
         @wraps(func)
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
-            runtime = DistributedRuntime(loop, "etcd")
+            request_plane = os.environ.get("DYN_REQUEST_PLANE", "nats")
+            runtime = DistributedRuntime(loop, "etcd", request_plane)
 
             await func(runtime, *args, **kwargs)
 

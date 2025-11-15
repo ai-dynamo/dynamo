@@ -207,8 +207,16 @@ def parse_args():
     parser.add_argument(
         "--store-kv",
         type=str,
+        choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
         help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
+    parser.add_argument(
+        "--request-plane",
+        type=str,
+        choices=["nats", "http", "tcp"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
 
     args = parser.parse_args()

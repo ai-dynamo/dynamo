@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::local_model::LocalModel;
-use dynamo_runtime::distributed::DistributedConfig;
+use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
@@ -429,8 +429,9 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    fn new(event_loop: PyObject, store_kv: String) -> PyResult<Self> {
+    fn new(event_loop: PyObject, store_kv: String, request_plane: String) -> PyResult<Self> {
         let selected_kv_store: KeyValueStoreSelect = store_kv.parse().map_err(to_pyerr)?;
+        let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
 
         // Try to get existing runtime first, create new Worker only if needed
         // This allows multiple DistributedRuntime instances to share the same tokio runtime
@@ -463,6 +464,7 @@ impl DistributedRuntime {
         let runtime_config = DistributedConfig {
             store_backend: selected_kv_store,
             nats_config: dynamo_runtime::transports::nats::ClientOptions::default(),
+            request_plane,
         };
         let inner = runtime
             .secondary()
