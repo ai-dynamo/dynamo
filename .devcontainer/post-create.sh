@@ -65,19 +65,13 @@ mkdir -p $CARGO_TARGET_DIR
 uv pip uninstall --yes ai-dynamo ai-dynamo-runtime 2>/dev/null || true
 
 # Build project, with `dev` profile it will be saved at $CARGO_TARGET_DIR/debug
-cargo build --locked --profile dev --features dynamo-llm/block-manager
-
-# install the python bindings
-
-# Install maturin if not already installed.
-# TODO: Uncomment for SGLANG. Right now, the CI team is making a refactor
-#       to the Dockerfile, so this is a temporary fix.
-# if ! command -v maturin &> /dev/null; then
-#     echo "Installing maturin..."
-#     retry uv pip install maturin[patchelf]
-# else
-#     echo "maturin is already installed"
-# fi
+if ! cargo build --locked --profile dev --features dynamo-llm/block-manager 2>/dev/null; then
+    echo "⚠️  WARNING: Cargo.lock needs updating. Running 'cargo update' to sync dependencies..."
+    echo "    This is expected when switching branches or after dependency changes."
+    cargo update
+    echo "✅ Cargo.lock updated. Proceeding with build..."
+    cargo build --locked --profile dev --features dynamo-llm/block-manager
+fi
 
 # install ai-dynamo-runtime
 (cd $WORKSPACE_DIR/lib/bindings/python && retry maturin develop)
