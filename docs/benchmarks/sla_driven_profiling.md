@@ -82,8 +82,12 @@ This feature is only available with cluster-scoped operators (`namespaceRestrict
 
 1. **Hardware Setup**: Uses defaults or user-specified hardware configuration. Optionally, cluster-scoped operators can enable automatic GPU discovery to detect specifications from cluster nodes.
 2. **Identify Sweep Ranges**: Automatically determine minimum and maximum number of GPUs per engine. Minimum is determined by the model size and GPU VRAM. Maximum is set to one node for dense model and 4 nodes for MoE models.
-3. **Parallelization Mapping Sweep**: Use the input ISL and OSL, test the performance of the engines with different parallelization mappings. For dense models, we test different TP sizes for both prefill and decode. For MoE models, we test different TEP sizes for prefill and DEP sizes for decode.
-   - **Prefill**: For prefill, since there is no in-flight batching (assume isl is long enough to saturate the GPU), we directly measure the TTFT for a request with given isl without kv-reusing. For example, the below plot shows the prefill parallelization mapping sweep results for H100 for deepseek-ai/DeepSeek-R1-Distill-Llama-8B.
+3. **Parallelization Mapping Sweep**: Use the input ISL and OSL, test the performance of the engines with different parallelization mappings.
+   - For dense models, we test different TP sizes for both prefill and decode.
+   - For MoE models (SGLang), we evaluate both TEP and DEP as candidates for prefill and decode.
+   - **Prefill**:
+     - TP/TEP: We measure TTFT with batch size = 1 (assuming ISL is long enough to saturate compute) without KV reuse.
+     - DEP: Attention uses data parallelism. We send a single burst with total concurrency `attention_dp_size × attn_dp_num_req_ratio` (defaults to 4) and compute the reported TTFT as `time_to_first_token.max / attn_dp_num_req_ratio` from the AIPerf summary of that burst. This stabilizes measurements when the first batch may launch before all requests arrive.
    ![Prefill Performance](../images/h100_prefill_performance.png)
    - **Decode**: Since the ITL (or iteration time) is relevant with how many requests are in-flight, we measure the ITL under different number of in-flight requests. The range of the number of in-flight requests is from 1 to the maximum number of requests that the kv cache of the engine can hold. To measure the ITL without being affected by piggy-backed prefill requests, the script will enable kv-reuse and warm up the engine by issuing the same prompts before measuring the ITL. Since the kv cache is sufficient for all the requests, it can hold the kv cache of the pre-computed prompts and skip the prefill phase when measuring the ITL. However, for MoE models, this is not guaranteed because the kv cache in different attention DP ranks is different. We are working on framework-side change to fix this issue. For example, the below plot shows the decode parallelization mapping sweep results for H100 for deepseek-ai/DeepSeek-R1-Distill-Llama-8B.
    ![Decode Performance](../images/h100_decode_performance.png)
@@ -299,16 +303,11 @@ profilingConfig:
     sweep:
       use_ai_configurator: true
       aic_system: h200_sxm              # GPU system: h100_sxm, h200_sxm, b200_sxm, gb200_sxm, a100_sxm
-      aic_model_name: QWEN3_32B         # AIC model identifier (see supported list)
-      aic_backend_version: "0.20.0"     # TensorRT-LLM version: 0.20.0, 1.0.0rc3, 1.0.0rc6
+      aic_hf_id: Qwen/Qwen3-32B         # Huggingface model id
+      aic_backend_version: "0.20.0"     # TensorRT-LLM version: 0.20.0, 1.0.0rc3
 ```
 
 **Supported configurations:** See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#supported-features)
-
-**Model name mapping examples:**
-- `Qwen/Qwen3-32B` → `QWEN3_32B`
-- `meta-llama/Llama-3.1-70B` → `LLAMA3.1_70B`
-- `deepseek-ai/DeepSeek-V3` → `DEEPSEEK_V3`
 
 ### Planner Configuration (Optional)
 
@@ -393,7 +392,7 @@ spec:
   backend: trtllm
 
   profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.1"
     config:
       sla:
         isl: 4000
@@ -410,7 +409,7 @@ spec:
         backend_version: "0.20.0"
 
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
+    workersImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.1"
 
   autoApply: true
 ```
@@ -494,7 +493,7 @@ AssertionError: num_heads <N> should be divisible by tp_size <M> and the divisio
 
 ```yaml
 profilingConfig:
-  profilerImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
+  profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.1"
   config:
     hardware:
       max_num_gpus_per_engine: 4  # For Qwen3-0.6B (16 heads / 4 = max TP of 4)

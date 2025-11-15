@@ -16,6 +16,7 @@ members = [
     "lib/engines/*",
     "lib/discovery",
     "lib/kvbm",
+    "lib/config",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
@@ -33,7 +34,7 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -44,15 +45,15 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.6.1" }
-dynamo-llm = { path = "lib/llm", version = "0.6.1" }
-dynamo-config = { path = "lib/config", version = "0.6.1" }
-dynamo-tokens = { path = "lib/tokens", version = "0.6.1" }
-dynamo-async-openai = { path = "lib/async-openai", version = "0.6.1", features = [
+dynamo-runtime = { path = "lib/runtime", version = "0.7.0" }
+dynamo-llm = { path = "lib/llm", version = "0.7.0" }
+dynamo-config = { path = "lib/config", version = "0.7.0" }
+dynamo-tokens = { path = "lib/tokens", version = "0.7.0" }
+dynamo-async-openai = { path = "lib/async-openai", version = "0.7.0", features = [
     "byot",
     "rustls",
 ] }
-dynamo-parsers = { path = "lib/parsers", version = "0.6.1" }
+dynamo-parsers = { path = "lib/parsers", version = "0.7.0" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -97,6 +98,7 @@ reqwest = { version = "0.12.22", default-features = false, features = [
     "stream",
     "rustls-tls",
 ] }
+rmp-serde = { version = "1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 strum = { version = "0.27", features = ["derive"] }
@@ -106,8 +108,10 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["codec", "net", "rt"] }
 tower-http = { version = "0.6", features = ["trace"] }
-axum = { version = "0.8.4", features = ["macros"] }
+axum = { version = "=0.8.4", features = ["macros"] }
 axum-core = { version = "0.5.2" }
+hyper = { version = "=1.7.0" }
+hyper-util = { version = "=0.1.17" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
@@ -134,3 +138,4 @@ insta.opt-level = 3
 # These make the build much slower but shrink the binary, and could help performance
 codegen-units = 1
 lto = "thin"
+

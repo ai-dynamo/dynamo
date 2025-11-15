@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agg-config
+data:
+  agg.yaml: |
+    backend: pytorch
+    trust_remote_code: true
+    tensor_parallel_size: 4
+    moe_expert_parallel_size: 4
+    moe_tensor_parallel_size: 1
+    enable_attention_dp: false
+    enable_chunked_prefill: true
+    build_config:
+      max_batch_size: 128
+      max_num_tokens: 8192
+      max_seq_len: 8192
+    kv_cache_config:
+      enable_block_reuse: true
+      free_gpu_memory_fraction: 0.8
+      dtype: auto
+    cache_transceiver_config:
+      backend: DEFAULT
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 128
+    disable_overlap_scheduler: false
+    print_iter_log: false
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-235b-a22b-agg
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: qwen3-235b-a22b-agg
+      replicas: 1
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                    - qwen3-235b-a22b-agg-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          args:
+            - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+          command:
+            - /bin/sh
+            - -c
+    TrtllmWorker:
+      componentType: main
+      dynamoNamespace: qwen3-235b-a22b-agg
+      envFromSecret: hf-token-secret
+      sharedMemory:
+        size: 256Gi
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          env:
+            - name: MODEL_PATH
+              value: /mnt/model-cache/hub/models--Qwen--Qwen3-235B-A22B-FP8/snapshots/39eb2b067ea6b8e3e1dd97d3cd0c7ffeaf3e1a35
+            - name: ENGINE_ARGS
+              value: /engine_configs/agg.yaml
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              python3 -m dynamo.trtllm \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
+              --extra-engine-args "${ENGINE_ARGS}"
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          workingDir: /workspace/components/backends/trtllm
+          volumeMounts:
+            - name: agg-config
+              mountPath: /engine_configs
+            - name: model-cache
+              mountPath: /mnt/model-cache
+        volumes:
+          - name: agg-config
+            configMap:
+              name: agg-config
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+      replicas: 4
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"

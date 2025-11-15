@@ -144,11 +144,9 @@ impl Default for LoggingConfig {
     }
 }
 
-/// Check if OTLP trace exporting is enabled (set OTEL_EXPORT_ENABLED=1 to enable)
+/// Check if OTLP trace exporting is enabled (set OTEL_EXPORT_ENABLED to a truthy value: 1, true, on, yes)
 fn otlp_exporter_enabled() -> bool {
-    std::env::var(OTEL_EXPORT_ENABLED_ENV)
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    crate::config::env_is_truthy(OTEL_EXPORT_ENABLED_ENV)
 }
 
 /// Get the service name from environment or use default
@@ -414,6 +412,30 @@ pub fn inject_otel_context_into_nats_headers(
 /// Inject trace context from current span into NATS headers
 pub fn inject_current_trace_into_nats_headers(headers: &mut async_nats::HeaderMap) {
     inject_otel_context_into_nats_headers(headers, None);
+}
+
+// Inject trace headers into a generic HashMap for HTTP/TCP transports
+pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<String, String>) {
+    if let Some(trace_context) = get_distributed_tracing_context() {
+        // Inject W3C traceparent header
+        headers.insert(
+            "traceparent".to_string(),
+            trace_context.create_traceparent(),
+        );
+
+        // Inject optional tracestate
+        if let Some(tracestate) = trace_context.tracestate {
+            headers.insert("tracestate".to_string(), tracestate);
+        }
+
+        // Inject custom request IDs
+        if let Some(x_request_id) = trace_context.x_request_id {
+            headers.insert("x-request-id".to_string(), x_request_id);
+        }
+        if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
+            headers.insert("x-dynamo-request-id".to_string(), x_dynamo_request_id);
+        }
+    }
 }
 
 /// Create a client_request span linked to the parent trace context

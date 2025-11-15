@@ -6,8 +6,8 @@
 //! This module provides reusable patterns for watching etcd prefixes and maintaining
 //! HashMap-based state that automatically updates based on etcd events.
 
-use crate::Result;
 use crate::transports::etcd::{Client as EtcdClient, WatchEvent};
+use anyhow::Result;
 use etcd_client::KeyValue;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -92,7 +92,7 @@ where
     let prefix = prefix.into();
 
     let prefix_watcher = client.kv_get_and_watch_prefix(&prefix).await?;
-    let (prefix_str, _watcher, mut events_rx) = prefix_watcher.dissolve();
+    let (prefix_str, mut events_rx) = prefix_watcher.dissolve();
 
     tokio::spawn(async move {
         let mut state: HashMap<K, V> = HashMap::new();
