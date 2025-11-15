@@ -290,6 +290,10 @@ func main() {
 	}
 
 	webhookServer := webhook.NewServer(webhook.Options{
+		// Must match the port exposed by the manager container and targeted by the Service.
+		Port: 9443,
+		// Must match the mountPath of the webhook certificate secret in the Deployment.
+		CertDir: "/tmp/k8s-webhook-server/serving-certs",
 		TLSOpts: tlsOpts,
 	})
 
