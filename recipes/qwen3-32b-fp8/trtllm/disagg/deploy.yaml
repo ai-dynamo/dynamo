@@ -332,7 +332,7 @@ spec:
           - mountPath: /opt/dynamo/configs
             name: llm-config-decode
             readOnly: true
-            workingDir: /workspace/examples/backends/trtllm
+          workingDir: /workspace/examples/backends/trtllm
         volumes:
         - configMap:
             name: llm-config-decode
