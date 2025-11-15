@@ -330,6 +330,9 @@ COPY --chown=dynamo: deploy /workspace/deploy
 COPY --chown=dynamo: components/ /workspace/components/
 COPY --chown=dynamo: recipes/ /workspace/recipes/
 
+# Copy pyproject.toml for pytest configuration (markers, etc.)
+COPY --chown=dynamo: pyproject.toml /workspace/pyproject.toml
+
 # Copy attribution files with correct ownership
 COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 

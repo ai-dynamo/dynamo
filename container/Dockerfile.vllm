@@ -287,8 +287,12 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
+# FIXME: Copy directories more selectively instead of copying everything
 # Copy benchmarks, examples, and tests for CI with correct ownership
 COPY --chown=dynamo: . /workspace/
+
+# Copy pyproject.toml for pytest configuration (markers, etc.)
+COPY --chown=dynamo: pyproject.toml /workspace/pyproject.toml
 
 # Copy attribution files
 COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
