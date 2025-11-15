@@ -291,6 +291,7 @@ impl ResponseFactory {
             choices: vec![choice],
             system_fingerprint: self.system_fingerprint.clone(),
             usage,
+            nvext: None, // Will be populated by router layer if needed
         };
         NvCreateCompletionResponse { inner }
     }

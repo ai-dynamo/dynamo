@@ -582,6 +582,7 @@ impl JailedStream {
                     usage: None,
                     service_tier: None,
                     system_fingerprint: None,
+                    nvext: None,
                 };
 
                 let final_metadata = (last_annotated_id, last_annotated_event, last_annotated_comment);

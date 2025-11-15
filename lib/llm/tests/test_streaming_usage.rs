@@ -93,6 +93,7 @@ fn create_mock_backend_stream(
             top_logprobs: None,
             finish_reason: None,
             index: Some(0),
+            disaggregated_params: None,
         },
         // Second chunk with " world"
         BackendOutput {
@@ -104,6 +105,7 @@ fn create_mock_backend_stream(
             top_logprobs: None,
             finish_reason: None,
             index: Some(0),
+            disaggregated_params: None,
         },
         // Third chunk with "!" and finish_reason
         BackendOutput {
@@ -115,6 +117,7 @@ fn create_mock_backend_stream(
             top_logprobs: None,
             finish_reason: Some(FinishReason::Stop),
             index: Some(0),
+            disaggregated_params: None,
         },
     ];
 

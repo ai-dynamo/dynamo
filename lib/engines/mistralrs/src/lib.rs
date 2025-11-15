@@ -419,6 +419,7 @@ impl
                             usage: None,
                             system_fingerprint: Some(c.system_fingerprint),
                             service_tier: None,
+                            nvext: None,
                         };
                         let ann = Annotated{
                             id: None,

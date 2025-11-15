@@ -108,6 +108,7 @@ fn load_test_data(file_path: &str) -> TestData {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
                 service_tier: None,
+                nvext: None,
             };
 
             Annotated {

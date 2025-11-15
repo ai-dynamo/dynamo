@@ -11,6 +11,15 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+cd /raid/daniewang/daniel-dynamo-new
+source venv/bin/activate
+export TORCHINDUCTOR_CACHE_DIR=/raid/daniewang/.cache/torch_compile
+
+# Common configuration
+MODEL="../ds"
+MODEL_NAME="ds"
+BLOCK_SIZE=16
+
 # Parse command line arguments
 ENABLE_OTEL=false
 while [[ $# -gt 0 ]]; do
@@ -47,7 +56,7 @@ fi
 # run ingress
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend \
- --http-port=8000 \
+ --http-port=7999 \
  --router-mode kv \
  --kv-overlap-score-weight 0 \
  --router-reset-states &
@@ -57,7 +66,7 @@ DYNAMO_PID=$!
 OTEL_SERVICE_NAME=dynamo-router-prefill DYN_SYSTEM_PORT=8081 \
 python3 -m dynamo.router \
   --endpoint dynamo.prefill.generate \
-  --block-size 64 \
+  --block-size $BLOCK_SIZE \
   --router-reset-states \
   --no-track-active-blocks &
 PREFILL_ROUTER_PID=$!
@@ -65,9 +74,9 @@ PREFILL_ROUTER_PID=$!
 # run prefill worker
 OTEL_SERVICE_NAME=dynamo-worker-prefill-1 DYN_SYSTEM_PORT=8082 \
 python3 -m dynamo.sglang \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --page-size 64 \
+  --model-path $MODEL \
+  --served-model-name $MODEL_NAME \
+  --page-size $BLOCK_SIZE \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode prefill \
@@ -80,9 +89,9 @@ PREFILL_PID=$!
 # run prefill worker
 OTEL_SERVICE_NAME=dynamo-worker-prefill-2 DYN_SYSTEM_PORT=8083 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --page-size 64 \
+  --model-path $MODEL \
+  --served-model-name $MODEL_NAME \
+  --page-size $BLOCK_SIZE \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode prefill \
@@ -95,9 +104,9 @@ PREFILL_PID=$!
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode-1 DYN_SYSTEM_PORT=8084 \
 CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --page-size 64 \
+  --model-path $MODEL \
+  --served-model-name $MODEL_NAME \
+  --page-size $BLOCK_SIZE \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode decode \
@@ -110,9 +119,9 @@ PREFILL_PID=$!
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode-2 DYN_SYSTEM_PORT=8085 \
 CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --page-size 64 \
+  --model-path $MODEL \
+  --served-model-name $MODEL_NAME \
+  --page-size $BLOCK_SIZE \
   --tp 1 \
   --trust-remote-code \
   --disaggregation-mode decode \
