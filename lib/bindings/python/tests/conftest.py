@@ -436,6 +436,6 @@ This is required because DistributedRuntime is a process-level singleton.
             )
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "etcd", False)
+    runtime = DistributedRuntime(loop, "etcd", True)
     yield runtime
     runtime.shutdown()
