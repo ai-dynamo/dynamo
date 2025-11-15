@@ -103,7 +103,7 @@ flowchart LR
 
 ### Multimodal Example
 
-In the case of the [Dynamo Multimodal Disaggregated Example](../../../examples/multimodal/README.md):
+In the case of the [Dynamo Multimodal Disaggregated Example](../../backends/vllm/multimodal.md):
 
  1. The HTTP frontend accepts a text prompt and a URL to an image.
 
@@ -153,11 +153,11 @@ flowchart LR
 
 #### Code Examples
 
-See [prefill_worker](../../../examples/multimodal/components/worker.py) or [decode_worker](../../../examples/multimodal/components/worker.py) from our Multimodal example,
+See [MultimodalPDWorkerHandler](../../../components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) or [MultimodalDecodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) from our Multimodal example,
 for how they coordinate directly with the Encode Worker by creating a [`WritableOperation`](writable_operation.md),
 sending the operation's metadata via Dynamo's round-robin dispatcher, and awaiting the operation for completion before making use of the transferred data.
 
-See [encode_worker](../../..//examples/multimodal/components/encode_worker.py#L190) from our Multimodal example,
+See [MultimodalEncodeWorkerHandler](../../../components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) from our Multimodal example,
 for how the resulting embeddings are registered with the NIXL subsystem by creating a [`Descriptor`](descriptor.md),
 a [`WriteOperation`](write_operation.md) is created using the metadata provided by the requesting worker,
 and the worker awaits for the data transfer to complete for yielding a response.
