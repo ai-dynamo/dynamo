@@ -403,7 +403,7 @@ mod tests {
             namespace: "test".to_string(),
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
 
         let instance = client.register(spec).await.unwrap();
@@ -429,7 +429,7 @@ mod tests {
             namespace: "ns1".to_string(),
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec1).await.unwrap();
 
@@ -437,7 +437,7 @@ mod tests {
             namespace: "ns1".to_string(),
             component: "comp1".to_string(),
             endpoint: "ep2".to_string(),
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec2).await.unwrap();
 
@@ -445,7 +445,7 @@ mod tests {
             namespace: "ns2".to_string(),
             component: "comp2".to_string(),
             endpoint: "ep1".to_string(),
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec3).await.unwrap();
 
@@ -493,7 +493,7 @@ mod tests {
                 namespace: "test".to_string(),
                 component: "comp1".to_string(),
                 endpoint: "ep1".to_string(),
-                transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+                transport: TransportType::Nats("nats://localhost:4222".to_string()),
             };
             client_clone.register(spec).await.unwrap();
         });

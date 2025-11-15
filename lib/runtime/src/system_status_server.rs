@@ -798,9 +798,7 @@ mod integration_tests {
                             endpoint: "health".to_string(),
                             namespace: "test_namespace".to_string(),
                             instance_id: 1,
-                            transport: crate::component::TransportType::NatsTcp(
-                                endpoint.to_string(),
-                            ),
+                            transport: crate::component::TransportType::Nats(endpoint.to_string()),
                         },
                         health_check_payload.clone(),
                     );

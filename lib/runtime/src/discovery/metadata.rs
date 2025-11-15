@@ -234,7 +234,7 @@ mod tests {
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
             instance_id: 123,
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         });
 
         metadata.register_endpoint(instance).unwrap();
@@ -266,7 +266,7 @@ mod tests {
                         component: "comp1".to_string(),
                         endpoint: format!("ep{}", i),
                         instance_id: i,
-                        transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+                        transport: TransportType::Nats("nats://localhost:4222".to_string()),
                     });
                     meta.register_endpoint(instance).unwrap();
                 })
@@ -294,7 +294,7 @@ mod tests {
                 component: "comp1".to_string(),
                 endpoint: format!("ep{}", i),
                 instance_id: i,
-                transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+                transport: TransportType::Nats("nats://localhost:4222".to_string()),
             });
             metadata.register_endpoint(instance).unwrap();
         }
