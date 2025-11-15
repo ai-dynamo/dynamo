@@ -165,7 +165,11 @@ class MultimodalRequestProcessor:
         ):
             request["sampling_options"]["temperature"] = request.pop("temperature")
 
-        messages = request.get("messages", [])
+        # Extract messages - check extra_args first (from Rust preprocessor for multimodal)
+        # Fall back to direct messages field for backward compatibility
+        messages = request.get("extra_args", {}).get(
+            "messages", request.get("messages", [])
+        )
         text_prompt, image_urls, embedding_paths = self.extract_prompt_and_media(
             messages
         )
