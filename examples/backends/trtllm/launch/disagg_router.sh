@@ -22,7 +22,8 @@ trap cleanup EXIT INT TERM
 
 
 # run frontend with KV routing for cache-aware optimization
-python3 -m dynamo.frontend --router-mode kv --http-port 8000 &
+# DYN_HTTP_PORT env var is read by dynamo.frontend (defaults to 8000 if not set)
+python3 -m dynamo.frontend --router-mode kv &
 DYNAMO_PID=$!
 
 # run prefill worker

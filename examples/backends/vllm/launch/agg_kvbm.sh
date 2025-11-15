@@ -5,7 +5,8 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress
-python -m dynamo.frontend --http-port=8000 &
+# DYN_HTTP_PORT env var is read by dynamo.frontend (defaults to 8000 if not set)
+python -m dynamo.frontend &
 
 # run worker with KVBM enabled
 # NOTE: remove --enforce-eager for production use

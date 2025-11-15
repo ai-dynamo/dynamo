@@ -13,9 +13,9 @@ BLOCK_SIZE=64
 
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
+# DYN_HTTP_PORT env var is read by dynamo.frontend (defaults to 8000 if not set)
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port 8000 \
     --router-reset-states &
 
 # two decode workers

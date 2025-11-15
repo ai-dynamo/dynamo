@@ -5,7 +5,8 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress
-python -m dynamo.frontend --router-mode kv --http-port=8000 &
+# DYN_HTTP_PORT env var is read by dynamo.frontend (defaults to 8000 if not set)
+python -m dynamo.frontend --router-mode kv &
 
 # Data Parallel Attention / Expert Parallelism
 # Routing to DP workers managed by Dynamo
