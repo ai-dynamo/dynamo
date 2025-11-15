@@ -9,6 +9,7 @@ on:
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
+  workflow_dispatch:  # Allow manual triggering for testing
 
 concurrency:
     # The group name is a ternary operation. If the ref_name is 'main',
@@ -43,7 +44,8 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing
+    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -70,15 +72,35 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
+          set -x
+          exec > >(tee -a linter-${{ matrix.platform.arch }}.log) 2>&1
+          
           cd deploy/cloud/operator
-          docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          if ! docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .; then
+            export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+            bash ../../.github/scripts/create_error_annotation.sh \
+              "Linter: operator (${{ matrix.platform.arch }})" \
+              "66" \
+              "linter-${{ matrix.platform.arch }}.log" \
+              "Linter check failed for operator on ${{ matrix.platform.arch }}"
+          fi
       - name: Tester
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
+          set -x
+          exec > >(tee -a tester-${{ matrix.platform.arch }}.log) 2>&1
+          
           cd deploy/cloud/operator
-          docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          if ! docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .; then
+            export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+            bash ../../.github/scripts/create_error_annotation.sh \
+              "Tester: operator (${{ matrix.platform.arch }})" \
+              "83" \
+              "tester-${{ matrix.platform.arch }}.log" \
+              "Tester build failed for operator on ${{ matrix.platform.arch }}"
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
@@ -89,21 +111,41 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
+          set -x
+          exec > >(tee -a check-uncommitted-${{ matrix.platform.arch }}.log) 2>&1
+          
           sudo apt-get update && sudo apt-get install -y make
           cd deploy/cloud/operator
-          make check
+          if ! make check; then
+            export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+            bash ../../.github/scripts/create_error_annotation.sh \
+              "Check Uncommitted Changes: operator (${{ matrix.platform.arch }})" \
+              "105" \
+              "check-uncommitted-${{ matrix.platform.arch }}.log" \
+              "Uncommitted changes detected for operator on ${{ matrix.platform.arch }}"
+          fi
       - name: Build Container
         id: build-image
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
+          set -x
+          exec > >(tee -a build-operator-${{ matrix.platform.arch }}.log) 2>&1
+          
           cd deploy/cloud/operator
-          docker buildx build --load \
+          if ! docker buildx build --load \
               --platform linux/${{ matrix.platform.arch }} \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
               -f Dockerfile \
-              -t dynamo-operator:latest .
+              -t dynamo-operator:latest .; then
+            export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+            bash ../../.github/scripts/create_error_annotation.sh \
+              "Build Container: operator (${{ matrix.platform.arch }})" \
+              "102" \
+              "build-operator-${{ matrix.platform.arch }}.log" \
+              "Docker build failed for operator on ${{ matrix.platform.arch }}"
+          fi
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
@@ -119,7 +161,8 @@ jobs:
 
   vllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing
+    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -184,7 +227,8 @@ jobs:
 
   sglang:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing
+    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -247,7 +291,8 @@ jobs:
 
   trtllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing
+    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -499,7 +544,8 @@ jobs:
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing - run even if dependencies fail
+    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -513,6 +559,9 @@ jobs:
         BRANCH: ${{ github.ref_name }}
       run: |
         set -x
+        
+        # Redirect all output to a log file while still showing it
+        exec > >(tee -a deploy-operator.log) 2>&1
 
         # Set namespace
         # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
@@ -521,6 +570,7 @@ jobs:
         BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
         NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
         echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+        echo "NAMESPACE=${NAMESPACE}" >> $GITHUB_ENV
 
         # Setup kubeconfig
         echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
@@ -555,23 +605,69 @@ jobs:
         kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
         # Create docker pull secret for operator image
         kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
+        
+        # Check if Helm is available
+        echo "Checking Helm availability..."
+        if ! command -v helm &> /dev/null; then
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Helm is not installed or not available in PATH. Helm installation may have failed during runner setup." "$NAMESPACE"
+        fi
+        
+        echo "Helm version: $(helm version --short)"
+        
         # Install helm dependencies
-        helm repo add bitnami https://charts.bitnami.com/bitnami
+        echo "Installing Helm dependencies..."
+        if ! helm repo add bitnami https://charts.bitnami.com/bitnami 2>&1; then
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Failed to add Helm bitnami repository" "$NAMESPACE"
+        fi
+        
         cd deploy/cloud/helm/platform/
-        helm dep build .
+        
+        if ! helm dep build . 2>&1; then
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Failed to build Helm dependencies" "$NAMESPACE"
+        fi
+        
         # Install platform with namespace restriction for single profile testing
-        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+        echo "Installing dynamo-platform Helm chart..."
+        if ! helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
           --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
-          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret 2>&1; then
+          
+          # Capture additional diagnostics
+          echo "=== Pod Status ==="
+          kubectl get pods -n ${NAMESPACE} -o wide || true
+          echo "=== Events ==="
+          kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' | tail -20 || true
+          echo "=== Helm Status ==="
+          helm status dynamo-platform -n ${NAMESPACE} || true
+          
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Failed to install dynamo-platform Helm chart. This may be due to: pre-install hook timeout, image pull failures, or resource constraints." "$NAMESPACE"
+        fi
+        
         # Wait for all deployments to be ready
-        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+        echo "Waiting for deployments to be ready..."
+        if ! timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch 2>&1; then
+          # Capture diagnostics
+          echo "=== Pod Status ==="
+          kubectl get pods -n ${NAMESPACE} -o wide || true
+          echo "=== Deployment Status ==="
+          kubectl get deployments -n ${NAMESPACE} || true
+          
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          bash .github/scripts/create_error_annotation.sh "Deploy Operator" "512" "deploy-operator.log" "Deployment rollout timed out after 300 seconds" "$NAMESPACE"
+        fi
+    
 
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing - run even if dependencies fail
+    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
@@ -604,12 +700,16 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
         kubectl config get-contexts
     - name: Run Tests
+      id: run-tests
       env:
         NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       run: |
         set -x
         export KUBECONFIG=$(pwd)/.kubeconfig
         kubectl config set-context --current --namespace=$NAMESPACE
+
+        # Redirect all output to a log file while still showing it
+        exec > >(tee -a test-output.log) 2>&1
 
         cd examples/backends/$FRAMEWORK
         export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
@@ -632,7 +732,19 @@ jobs:
         export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
         echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
         # Wait for all pods with the deployment label to be ready
-        kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1300s
+        if ! kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1300s 2>&1; then
+          ERROR_MSG="Pod readiness check failed. kubectl wait timed out or found no matching resources."
+          echo "$ERROR_MSG"
+          
+          # Capture diagnostics
+          echo "=== Pod Status ==="
+          kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} -o wide || echo "No pods found"
+          echo "=== Recent Events ==="
+          kubectl get events -n ${KUBE_NS} --sort-by='.lastTimestamp' | tail -20 || true
+          
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          bash .github/scripts/create_error_annotation.sh "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }})" "777" "test-output.log" "$ERROR_MSG" "$NAMESPACE"
+        fi
 
         # Debug: Show final pod statuses for the deployment
         echo "=== FINAL POD STATUSES ==="
@@ -641,6 +753,21 @@ jobs:
 
         kubectl get all -n $KUBE_NS
         export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} | tail -n1 | awk '{print $1}')
+        
+        if [ -z "$FRONTEND_POD" ] || [ "$FRONTEND_POD" == "NAME" ]; then
+          ERROR_MSG="Failed to find frontend pod with label nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}"
+          echo "$ERROR_MSG"
+          
+          # Capture diagnostics
+          echo "=== All Pods in Namespace ==="
+          kubectl get pods -n ${KUBE_NS} -o wide || true
+          echo "=== Events ==="
+          kubectl get events -n ${KUBE_NS} --sort-by='.lastTimestamp' | tail -20 || true
+          
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          bash .github/scripts/create_error_annotation.sh "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }})" "777" "test-output.log" "$ERROR_MSG" "$NAMESPACE"
+        fi
+        
         export CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${KUBE_NS} -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
         echo "Container port is ${CONTAINER_PORT}"
         kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${KUBE_NS} &
@@ -662,9 +789,17 @@ jobs:
           ATTEMPT=$((ATTEMPT + 1))
         done
         if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-          echo "Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts"
-          echo "Last response: $MODELS_RESPONSE"
-          exit 1
+          ERROR_MSG="Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts. Last response: $MODELS_RESPONSE"
+          echo "$ERROR_MSG"
+          
+          # Capture diagnostics
+          echo "=== Pod Status ==="
+          kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} -o wide || true
+          echo "=== Pod Logs (Frontend) ==="
+          kubectl logs -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} -n ${KUBE_NS} --tail=50 || true
+          
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          bash .github/scripts/create_error_annotation.sh "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }})" "777" "test-output.log" "$ERROR_MSG" "$NAMESPACE"
         fi
         RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused -X POST "${LLM_URL}/v1/chat/completions" \
           -H 'accept: text/event-stream' \
@@ -683,26 +818,32 @@ jobs:
           }' 2>&1)
         echo "Response: $RESPONSE"
         TEST_RESULT=0
+        ERROR_MSG=""
         if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
-          echo "Test failed: Response is not valid JSON"
-          echo "Got: $RESPONSE"
+          ERROR_MSG="Test failed: Response is not valid JSON. Got: $RESPONSE"
+          echo "$ERROR_MSG"
           TEST_RESULT=1
         elif ! echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
-          echo "Test failed: Message role is not 'assistant'"
-          echo "Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
+          ERROR_MSG="Test failed: Message role is not 'assistant'. Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
+          echo "$ERROR_MSG"
           TEST_RESULT=1
         elif ! echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
-          echo "Test failed: Model name is incorrect"
-          echo "Got: $(echo "$RESPONSE" | jq '.model')"
+          ERROR_MSG="Test failed: Model name is incorrect. Expected: ${MODEL_NAME}, Got: $(echo "$RESPONSE" | jq '.model')"
+          echo "$ERROR_MSG"
           TEST_RESULT=1
         elif ! echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 100' >/dev/null 2>&1; then
-          echo "Test failed: Response content length is not greater than 100 characters"
-          echo "Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
+          ERROR_MSG="Test failed: Response content length is not greater than 100 characters. Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
+          echo "$ERROR_MSG"
           TEST_RESULT=1
         else
           echo "Test passed: Response matches expected format and content"
         fi
-        exit $TEST_RESULT
+        
+        if [ $TEST_RESULT -ne 0 ]; then
+          # Test failed - use common annotation script
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          bash .github/scripts/create_error_annotation.sh "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }})" "777" "test-output.log" "$ERROR_MSG" "$NAMESPACE"
+        fi
     - name: Cleanup
       if: always()
       timeout-minutes: 5
@@ -721,7 +862,8 @@ jobs:
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing - run even if dependencies fail
+    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
@@ -742,7 +884,8 @@ jobs:
 
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # Temporarily override skip condition for testing - run even if dependencies fail
+    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
