@@ -196,6 +196,7 @@ struct ActiveSlotState {
     completion: ParkingMutex<Option<Arc<CompletionKind>>>,
     completed: AtomicBool,
     generation: AtomicU64,
+    waiter_count: AtomicU32,
 }
 
 impl ActiveSlot {
@@ -206,14 +207,18 @@ impl ActiveSlot {
                 completion: ParkingMutex::new(None),
                 completed: AtomicBool::new(false),
                 generation: AtomicU64::new(0),
+                waiter_count: AtomicU32::new(0),
             }),
         }
     }
 
     fn waiter(&self) -> LocalWaiter {
+        // Increment waiter count to prevent completion from being cleared
+        self.state.waiter_count.fetch_add(1, Ordering::AcqRel);
         LocalWaiter {
             state: Arc::clone(&self.state),
             observed_generation: self.state.generation.load(Ordering::Acquire),
+            decremented: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -244,10 +249,14 @@ impl ActiveSlotState {
     fn begin_generation(&self) -> u64 {
         let next = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.completed.store(false, Ordering::Release);
-        {
+
+        // Only clear completion if no waiters are using it
+        // This prevents race where stale waiters try to observe completion after it's cleared
+        if self.waiter_count.load(Ordering::Acquire) == 0 {
             let mut guard = self.completion.lock();
             guard.take();
         }
+
         next
     }
 
@@ -271,10 +280,22 @@ impl ActiveSlotState {
 struct LocalWaiter {
     state: Arc<ActiveSlotState>,
     observed_generation: u64,
+    decremented: Arc<AtomicBool>,
 }
 
 impl LocalWaiter {
     async fn wait(self) -> Arc<CompletionKind> {
+        let result = self.wait_inner().await;
+
+        // Decrement waiter count after consuming completion (RAII-style)
+        if !self.decremented.swap(true, Ordering::AcqRel) {
+            self.state.waiter_count.fetch_sub(1, Ordering::AcqRel);
+        }
+
+        result
+    }
+
+    async fn wait_inner(&self) -> Arc<CompletionKind> {
         loop {
             let current = self.state.generation.load(Ordering::Acquire);
             if current != self.observed_generation {
@@ -286,6 +307,15 @@ impl LocalWaiter {
                 return value;
             }
             self.state.notify.notified().await;
+        }
+    }
+}
+
+impl Drop for LocalWaiter {
+    fn drop(&mut self) {
+        // Ensure we decrement exactly once, even if wait() was never called or panicked
+        if !self.decremented.swap(true, Ordering::AcqRel) {
+            self.state.waiter_count.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
