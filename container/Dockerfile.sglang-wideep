@@ -8,7 +8,7 @@ ARG CARGO_BUILD_JOBS
 FROM scratch AS local_src
 COPY . /src
 
-FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
+FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG} AS dev
 
 WORKDIR /sgl-workspace
 
