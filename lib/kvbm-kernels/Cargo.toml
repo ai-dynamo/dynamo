@@ -15,7 +15,9 @@ name = "kvbm_kernels"
 crate-type = ["rlib", "cdylib"]
 
 [features]
-default = []
+default = ["testing-cuda"]
+testing-cuda = []
+prebuilt-kernels = []
 # python-bindings = ["pyo3"]
 
 [dependencies]
@@ -24,4 +26,6 @@ once_cell = "1.19"
 # pyo3 = { version = "0.26", optional = true, features = ["extension-module"] }
 
 [build-dependencies]
+dynamo-config = { workspace = true }
 cc = "1.0"
+md5 = "0.8.0"
