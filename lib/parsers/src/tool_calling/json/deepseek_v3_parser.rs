@@ -8,15 +8,12 @@ use uuid::Uuid;
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
-/// Extract individual tool call blocks from the input string.
+/// Extract individual tool call blocks from the input string for DeepSeek V3 format.
 /// Returns a list of strings, each representing one tool call block.
 ///
-/// DeepSeek format: <｜tool▁call▁begin｜>{name}<｜tool▁sep｜>{args}<｜tool▁call▁end｜>
+/// DeepSeek V3 format: <｜tool▁call▁begin｜>{type}<｜tool▁sep｜>{name}\n```json\n{args}\n```<｜tool▁call▁end｜>
 ///
-/// DeepSeek uses nested tokens:
-/// - Wrapper tokens: <｜tool▁calls▁begin｜> ... <｜tool▁calls▁end｜> (wraps all tool calls)
-/// - Individual tokens: <｜tool▁call▁begin｜> ... <｜tool▁call▁end｜> (individual call)
-fn extract_tool_call_blocks(
+fn extract_tool_call_blocks_v3(
     input: &str,
     start_tokens: &[String],
     end_tokens: &[String],
@@ -44,6 +41,7 @@ fn extract_tool_call_blocks(
             // Build regex pattern with escaped tokens
             let escaped_start = regex::escape(start_token);
             let escaped_end = regex::escape(end_token);
+            // DeepSeek V3 format: <｜tool▁call▁begin｜>{type}<｜tool▁sep｜>{function_name}\n```json\n{arguments}\n```<｜tool▁call▁end｜>
             let pattern = format!(r"{}(.*?){}", escaped_start, escaped_end);
 
             if let Ok(regex) = RegexBuilder::new(&pattern)
@@ -71,24 +69,39 @@ fn extract_tool_call_blocks(
     blocks
 }
 
-/// Parse a single tool call block that contains function name and arguments separated by a separator token.
+/// Parse a single tool call block for DeepSeek V3 format.
 ///
-/// Format: {function_name}<｜tool▁sep｜>{json_arguments}
-fn parse_single_tool_call(block: &str, separator_tokens: &[String]) -> Option<(String, Value)> {
+/// Format: {type}<｜tool▁sep｜>{function_name}\n```json\n{json_arguments}\n```
+fn parse_single_tool_call_v3(block: &str, separator_tokens: &[String]) -> Option<(String, Value)> {
     // Try each separator token
     for sep_token in separator_tokens.iter() {
         if sep_token.is_empty() {
             continue;
         }
 
-        if let Some((name_part, args_part)) = block.split_once(sep_token) {
-            let function_name = name_part.trim();
-            let args_str = args_part.trim();
-
-            // Validate function name (should not be empty and should not contain JSON-like chars)
+        if let Some((_type_part, function_and_args_part)) = block.split_once(sep_token) {
+            // Parse the function name (after the type and separator)
+            let (function_name_part, args_block) = function_and_args_part.split_once('\n')?;
+            let function_name = function_name_part.trim();
             if function_name.is_empty() || function_name.contains(['{', '}', '[', ']']) {
                 continue;
             }
+
+            // Extract JSON arguments from code block
+            let args_str = if let Some(json_start) = args_block.find("```json") {
+                let after_fence = &args_block[json_start + "```json".len()..];
+                let after_newline = after_fence
+                    .strip_prefix("\r\n")
+                    .or_else(|| after_fence.strip_prefix('\n'))
+                    .unwrap_or(after_fence);
+                if let Some(json_end) = after_newline.find("```") {
+                    after_newline[..json_end].trim()
+                } else {
+                    after_newline.trim()
+                }
+            } else {
+                args_block.trim()
+            };
 
             // Try to parse arguments as JSON
             // First try parsing as-is
@@ -113,12 +126,12 @@ fn parse_single_tool_call(block: &str, separator_tokens: &[String]) -> Option<(S
     None
 }
 
-pub fn parse_tool_calls_deepseek_v3_1(
+pub fn parse_tool_calls_deepseek_v3(
     message: &str,
     config: &JsonParserConfig,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     // Format Structure:
-    // <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>{function_name}<｜tool▁sep｜>{json_arguments}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    // <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>{type}<｜tool▁sep｜>{function_name}\n```json\n{json_arguments}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     let trimmed = message.trim();
 
     // Early exit if no content
@@ -126,16 +139,10 @@ pub fn parse_tool_calls_deepseek_v3_1(
         return Ok((vec![], Some(String::new())));
     }
 
-    // For DeepSeek_v3_1, we consider the tool call block to be
+    // For DeepSeek_v3, we consider the tool call block to be
     // <｜tool▁calls▁begin｜>...<｜tool▁calls▁end｜> and only start parsing
     // if seeing <｜tool▁calls▁begin｜>, even though the individual calls are
     // parsed by <｜tool▁call▁begin｜>...<｜tool▁call▁end｜>.
-    // This is because if we start parsing by considering all call(s) tokens,
-    // we are not properly grouping the tool calls and results in groups:
-    // 1. <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>...<｜tool▁call▁end｜>
-    // 2. <｜tool▁calls▁end｜>
-    // where 2. will not be recognized as part of the tool call block due
-    // to missing start token and will not be consumed.
     let has_end_token = config
         .tool_call_end_tokens
         .iter()
@@ -156,7 +163,7 @@ pub fn parse_tool_calls_deepseek_v3_1(
     }
 
     // Check if tool call start token is present
-    if !detect_tool_call_start_deepseek_v3_1(trimmed, config) {
+    if !detect_tool_call_start_deepseek_v3(trimmed, config) {
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
@@ -186,7 +193,8 @@ pub fn parse_tool_calls_deepseek_v3_1(
     };
 
     // Extract individual tool call blocks
-    let blocks = extract_tool_call_blocks(trimmed, &tool_call_start_tokens, &tool_call_end_tokens);
+    let blocks =
+        extract_tool_call_blocks_v3(trimmed, &tool_call_start_tokens, &tool_call_end_tokens);
 
     if blocks.is_empty() {
         // Found start token but no valid blocks
@@ -196,7 +204,9 @@ pub fn parse_tool_calls_deepseek_v3_1(
     // Parse each block to extract function name and arguments
     let mut tool_calls: Vec<ToolCallResponse> = Vec::new();
     for block in blocks {
-        if let Some((function_name, arguments)) = parse_single_tool_call(&block, separator_tokens) {
+        if let Some((function_name, arguments)) =
+            parse_single_tool_call_v3(&block, separator_tokens)
+        {
             tool_calls.push(ToolCallResponse {
                 id: format!("call-{}", Uuid::new_v4()),
                 tp: ToolCallType::Function,
@@ -216,7 +226,7 @@ pub fn parse_tool_calls_deepseek_v3_1(
     Ok((tool_calls, Some(normal_text)))
 }
 
-pub fn detect_tool_call_start_deepseek_v3_1(chunk: &str, config: &JsonParserConfig) -> bool {
+pub fn detect_tool_call_start_deepseek_v3(chunk: &str, config: &JsonParserConfig) -> bool {
     let trimmed = chunk.trim();
     if trimmed.is_empty() {
         return false;
@@ -263,25 +273,34 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tool_calls_deepseek_v3_1_basic() {
-        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Paris"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
-        let config = ToolCallConfig::deepseek_v3_1().json;
-        let (result, content) = parse_tool_calls_deepseek_v3_1(text, &config).unwrap();
+    fn test_parse_tool_calls_deepseek_v3_basic() {
+        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
+```json
+{"location": "HongKong"}
+```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
+```json
+{"location": "Paris"}
+```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
+        let config = ToolCallConfig::deepseek_v3().json;
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config).unwrap();
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 2);
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_current_weather");
-        assert_eq!(args["location"], "Tokyo");
+        assert_eq!(args["location"], "HongKong");
         let (name, args) = extract_name_and_args(result[1].clone());
         assert_eq!(name, "get_current_weather");
         assert_eq!(args["location"], "Paris");
     }
 
     #[test]
-    fn test_parse_tool_calls_deepseek_v3_1_with_normal_text() {
-        let text = r#"The following tool call retrieves weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "New York"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
-        let config = ToolCallConfig::deepseek_v3_1().json;
-        let (result, content) = parse_tool_calls_deepseek_v3_1(text, &config).unwrap();
+    fn test_parse_tool_calls_deepseek_v3_with_normal_text() {
+        let text = r#"The following tool call retrieves weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
+```json
+{"location": "New York"}
+```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
+        let config = ToolCallConfig::deepseek_v3().json;
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config).unwrap();
         assert_eq!(
             content,
             Some("The following tool call retrieves weather information: ".to_string())
@@ -293,61 +312,87 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tool_calls_deepseek_v3_1_without_tool_call_start_token() {
-        let text = r#"<｜tool▁call▁begin｜>get_current_weather宽带}{location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
-        let config = ToolCallConfig::deepseek_v3_1().json;
-        let (result, content) = parse_tool_calls_deepseek_v3_1(text, &config).unwrap();
+    fn test_parse_tool_calls_deepseek_v3_without_tool_call_start_token() {
+        let text = r#"<｜tool▁call▁begin｜>function宽带}{location": "HongKong"}
+```json
+}
+```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
+        let config = ToolCallConfig::deepseek_v3().json;
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config).unwrap();
         assert_eq!(content, Some(text.to_string()));
         assert_eq!(result.len(), 0);
     }
 
     #[test]
-    fn test_parse_tool_calls_deepseek_v3_1_with_multi_tool_calls_with_multiple_args() {
-        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Berlin", "units": "metric"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast<｜tool▁sep｜>{"location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality<｜tool▁sep｜>{"location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
-        let config = ToolCallConfig::deepseek_v3_1().json;
-        let (result, content) = parse_tool_calls_deepseek_v3_1(text, &config).unwrap();
+    fn test_parse_tool_calls_deepseek_v3_with_multi_tool_calls_with_multiple_args() {
+        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
+```json
+{"location": "Shanghai", "units": "metric"}
+```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather_forecast
+```json
+{"location": "Shanghai", "days": 7, "units": "imperial"}
+```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_air_quality
+```json
+{"location": "Shanghai", "radius": 50}
+```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
+        let config = ToolCallConfig::deepseek_v3().json;
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config).unwrap();
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 3);
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_current_weather");
-        assert_eq!(args["location"], "Berlin");
+        assert_eq!(args["location"], "Shanghai");
         assert_eq!(args["units"], "metric");
         let (name, args) = extract_name_and_args(result[1].clone());
         assert_eq!(name, "get_weather_forecast");
-        assert_eq!(args["location"], "Berlin");
+        assert_eq!(args["location"], "Shanghai");
         assert_eq!(args["days"], 7);
         assert_eq!(args["units"], "imperial");
         let (name, args) = extract_name_and_args(result[2].clone());
         assert_eq!(name, "get_air_quality");
-        assert_eq!(args["location"], "Berlin");
+        assert_eq!(args["location"], "Shanghai");
         assert_eq!(args["radius"], 50);
     }
 
     #[test]
-    fn test_parse_tool_calls_deepseek_v3_1_with_invalid_json() {
+    fn test_parse_tool_calls_deepseek_v3_with_invalid_json() {
         // Everything is normal text in case of invalid json
-        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather}{location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
-        let config = ToolCallConfig::deepseek_v3_1().json;
-        let (result, content) = parse_tool_calls_deepseek_v3_1(text, &config).unwrap();
+        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather}{location": "HongKong"}
+```json
+}
+```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
+        let config = ToolCallConfig::deepseek_v3().json;
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config).unwrap();
         assert_eq!(content, Some(text.trim().to_string()));
         assert_eq!(result.len(), 0);
     }
 
     #[test]
-    fn test_parse_tool_calls_deepseek_v3_1_with_multi_tool_calls_with_normal_text() {
+    fn test_parse_tool_calls_deepseek_v3_with_multi_tool_calls_with_normal_text() {
         // Everything is normal text in case of invalid json
-        let text = r#"The following tool calls retrieve weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather宽带}{location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast宽带}{location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality宽带}{location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
-        let config = ToolCallConfig::deepseek_v3_1().json;
-        let (result, content) = parse_tool_calls_deepseek_v3_1(text, &config).unwrap();
+        let text = r#"The following tool calls retrieve weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function宽带}{location": "HongKong"}
+```json
+}
+```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function宽带}{location": "Shanghai", "days": 7, "units": "imperial"}
+```json
+}
+```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function宽带}{location": "Shanghai", "radius": 50}
+```json
+}
+```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
+        let config = ToolCallConfig::deepseek_v3().json;
+        let (result, content) = parse_tool_calls_deepseek_v3(text, &config).unwrap();
         assert_eq!(content, Some(text.trim().to_string()));
         assert_eq!(result.len(), 0);
     }
 
     #[test]
-    fn test_parse_tool_calls_deepseek_v3_1_with_multiline_json() {
-        let text = r#"I'll help you understand this codebase. Let me start by exploring the structure and key
-  files to provide you with a comprehensive
-  explanation.<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>TodoWrite<｜tool▁sep｜>{"todos":
+    fn test_parse_tool_calls_deepseek_v3_with_multiline_json() {
+        let text = r#"I'll help you understand this Xiaohongshu codebase. Let me start by exploring the structure
+  and key files to provide you with a comprehensive
+  explanation.<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>TodoWrite
+```json
+{"todos":
   [{"content": "Explore the root directory structure", "status": "in_progress", "activeForm":
    "Exploring the root directory structure"}, {"content": "Examine package.json and
   configuration files", "status": "pending", "activeForm": "Examining package.json and
@@ -357,11 +402,12 @@ mod tests {
   "activeForm": "Identifying main entry points and architectural patterns"}, {"content":
   "Summarize the codebase purpose and functionality", "status": "pending", "activeForm":
   "Summarizing the codebase purpose and
-  functionality"}]}<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
-        let config = ToolCallConfig::deepseek_v3_1().json;
+  functionality"}]}
+```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"#;
+        let config = ToolCallConfig::deepseek_v3().json;
 
         let (tool_call_results, normal_content) =
-            parse_tool_calls_deepseek_v3_1(text, &config).unwrap();
+            parse_tool_calls_deepseek_v3(text, &config).unwrap();
 
         assert_eq!(tool_call_results.len(), 1);
 
@@ -396,7 +442,7 @@ mod tests {
 
         assert_eq!(
             normal_content,
-            Some("I'll help you understand this codebase. Let me start by exploring the structure and key\n  files to provide you with a comprehensive\n  explanation.".to_string())
+            Some("I'll help you understand this Xiaohongshu codebase. Let me start by exploring the structure\n  and key files to provide you with a comprehensive\n  explanation.".to_string())
         );
     }
 }
@@ -406,59 +452,59 @@ mod detect_parser_tests {
     use super::super::config::ToolCallConfig;
     use super::*;
     #[test]
-    fn test_detect_tool_call_start_deepseek_v3_1_chunk_with_tool_call_start_token() {
-        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather宽带}"#;
-        let config = ToolCallConfig::deepseek_v3_1().json;
-        let result = detect_tool_call_start_deepseek_v3_1(text, &config);
+    fn test_detect_tool_call_start_deepseek_v3_chunk_with_tool_call_start_token() {
+        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function宽带}"#;
+        let config = ToolCallConfig::deepseek_v3().json;
+        let result = detect_tool_call_start_deepseek_v3(text, &config);
         assert!(result);
     }
 
     #[test]
-    fn test_detect_tool_call_start_deepseek_v3_1_chunk_without_tool_call_start_token() {
-        let text = r#"<｜tool▁call▁begin｜>get_current_weather宽带}"#;
-        let config = ToolCallConfig::deepseek_v3_1().json;
-        let result = detect_tool_call_start_deepseek_v3_1(text, &config);
+    fn test_detect_tool_call_start_deepseek_v3_chunk_without_tool_call_start_token() {
+        let text = r#"<｜tool▁call▁begin｜>function宽带}"#;
+        let config = ToolCallConfig::deepseek_v3().json;
+        let result = detect_tool_call_start_deepseek_v3(text, &config);
         assert!(!result);
     }
 
     #[test]
-    fn test_detect_tool_call_start_deepseek_v3_1_chunk_with_tool_call_start_token_in_middle() {
-        let text = r#"The following tool calls retrieve weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather宽带}"#;
-        let config = ToolCallConfig::deepseek_v3_1().json;
-        let result = detect_tool_call_start_deepseek_v3_1(text, &config);
+    fn test_detect_tool_call_start_deepseek_v3_chunk_with_tool_call_start_token_in_middle() {
+        let text = r#"The following tool calls retrieve weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function宽带}"#;
+        let config = ToolCallConfig::deepseek_v3().json;
+        let result = detect_tool_call_start_deepseek_v3(text, &config);
         assert!(result);
     }
 
     #[test]
-    fn test_detect_tool_call_start_deepseek_v3_1_partial_tokens() {
+    fn test_detect_tool_call_start_deepseek_v3_partial_tokens() {
         // Test partial token detection for streaming scenarios with unicode characters
-        let config = ToolCallConfig::deepseek_v3_1().json;
+        let config = ToolCallConfig::deepseek_v3().json;
 
         // Test various partial prefixes
         assert!(
-            detect_tool_call_start_deepseek_v3_1("<", &config),
+            detect_tool_call_start_deepseek_v3("<", &config),
             "'<' should be detected as potential start"
         );
         assert!(
-            detect_tool_call_start_deepseek_v3_1("<｜", &config),
+            detect_tool_call_start_deepseek_v3("<｜", &config),
             "'<｜' should be detected as potential start"
         );
         assert!(
-            detect_tool_call_start_deepseek_v3_1("<｜tool", &config),
+            detect_tool_call_start_deepseek_v3("<｜tool", &config),
             "'<｜tool' should be detected as potential start"
         );
         assert!(
-            detect_tool_call_start_deepseek_v3_1("<｜tool▁calls", &config),
+            detect_tool_call_start_deepseek_v3("<｜tool▁calls", &config),
             "'<｜tool▁calls' should be detected as potential start"
         );
 
         // Test that unrelated text is not detected
         assert!(
-            !detect_tool_call_start_deepseek_v3_1("hello world", &config),
+            !detect_tool_call_start_deepseek_v3("hello world", &config),
             "'hello world' should not be detected"
         );
         assert!(
-            !detect_tool_call_start_deepseek_v3_1("xyz", &config),
+            !detect_tool_call_start_deepseek_v3("xyz", &config),
             "'xyz' should not be detected"
         );
     }
