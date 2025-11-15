@@ -71,20 +71,8 @@ pub struct EventHandle(u128);
 
 impl EventHandle {
     pub fn new(owner_worker: u64, local_index: u32, generation: Generation) -> Result<Self> {
-        if local_index > MAX_LOCAL_INDEX {
-            bail!(
-                "Local event index {} exceeds {}-bit capacity",
-                local_index,
-                LOCAL_BITS
-            );
-        }
-        if generation > MAX_GENERATION {
-            bail!(
-                "Generation {} exceeds {}-bit capacity",
-                generation,
-                GENERATION_BITS
-            );
-        }
+        // Note: MAX_LOCAL_INDEX is u32::MAX and MAX_GENERATION is u32::MAX
+        // so overflow checks are not needed for these u32 parameters
 
         let raw = ((owner_worker as u128) << WORKER_SHIFT)
             | ((local_index as u128) << LOCAL_SHIFT)
@@ -440,14 +428,13 @@ impl EventEntry {
 
         match state.active_generation {
             Some(active) if active == generation => {
-                let slot =
-                    state
-                        .active_slot
-                        .as_ref()
-                        .ok_or_else(|| EventEntryError::MissingSlot {
-                            key: self.key,
-                            generation,
-                        })?;
+                let slot = state
+                    .active_slot
+                    .as_ref()
+                    .ok_or(EventEntryError::MissingSlot {
+                        key: self.key,
+                        generation,
+                    })?;
                 Ok(WaitRegistration::Pending(slot.waiter()))
             }
             Some(active) => Err(EventEntryError::InvalidGeneration {

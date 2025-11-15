@@ -58,6 +58,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 type WorkerId = u64;
+type SlotAllocation<T, E> = (usize, u64, Arc<Slot<T, E>>);
 
 const RESPONSE_SLOT_CAPACITY: usize = u16::MAX as usize;
 const MAX_GENERATION: u64 = (1u64 << 48) - 1;
@@ -337,7 +338,7 @@ impl ResponseManagerInner {
         }
     }
 
-    fn try_allocate_slot(&self) -> Option<(usize, u64, Arc<Slot<Option<Bytes>, String>>)> {
+    fn try_allocate_slot(&self) -> Option<SlotAllocation<Option<Bytes>, String>> {
         self.arena.allocate()
     }
 
@@ -647,7 +648,7 @@ impl<T, E> SlotArena<T, E> {
         })
     }
 
-    pub fn allocate(&self) -> Option<(usize, u64, Arc<Slot<T, E>>)> {
+    pub fn allocate(&self) -> Option<SlotAllocation<T, E>> {
         let mut free = self.free.lock();
         free.pop_front().map(|i| {
             self.allocated.insert(i);

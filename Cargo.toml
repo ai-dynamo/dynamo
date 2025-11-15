@@ -7,6 +7,7 @@ members = [
     "lib/llm",
     "lib/runtime",
     "lib/config",
+    "lib/identity",
     "lib/tokens",
     "lib/memory",
     "lib/async-openai",
@@ -15,6 +16,7 @@ members = [
     "lib/bindings/python/codegen",
     "lib/engines/*",
     "lib/config",
+    "lib/nova",
     "lib/nova-backend",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
@@ -25,10 +27,12 @@ default-members = [
     "lib/llm",
     "lib/runtime",
     "lib/config",
+    "lib/identity",
     "lib/tokens",
     "lib/async-openai",
     "lib/parsers",
     "lib/bindings/c",
+    "lib/nova",
     "lib/nova-backend",
 ]
 resolver = "3"
@@ -45,6 +49,8 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
+dynamo-identity = { path = "lib/identity", version = "0.7.0" }
+dynamo-nova = { path = "lib/nova", version = "0.7.0" }
 dynamo-nova-backend = { path = "lib/nova-backend", version = "0.7.0" }
 dynamo-runtime = { path = "lib/runtime", version = "0.7.0" }
 dynamo-llm = { path = "lib/llm", version = "0.7.0" }

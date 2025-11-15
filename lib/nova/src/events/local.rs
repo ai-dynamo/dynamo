@@ -241,16 +241,14 @@ impl LocalEventSystem {
             .map(|guard| guard.clone())
             .ok_or_else(|| anyhow!("Unknown local event {}", handle))?;
 
-        let result = match entry.register_local_waiter(handle.generation())? {
+        match entry.register_local_waiter(handle.generation())? {
             WaitRegistration::Ready => Ok(()),
             WaitRegistration::Poisoned(poison) => Err(anyhow!((*poison).clone())),
             WaitRegistration::Pending(waiter) => {
                 let signal = waiter.wait().await;
                 signal.as_ref().as_result().map_err(anyhow::Error::new)
             }
-        };
-
-        result
+        }
     }
 
     fn poll_local(&self, handle: EventHandle) -> Result<EventStatus> {
