@@ -2630,6 +2630,8 @@ version = "0.7.0"
 dependencies = [
  "cc",
  "cudarc 0.17.8",
+ "dynamo-config",
+ "md5",
  "once_cell",
 ]
 
