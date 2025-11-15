@@ -64,10 +64,22 @@ into existing pipelines without living in CUDA all day.
 ### Building the CUDA Library
 
 The CUDA code is compiled via `nvcc` in `build.rs`. Supported architectures
-default to `sm_80` and `sm_90`. Override with `CUDA_ARCHS` if required:
+default to `sm_80` (Ampere) and `sm_90` (Hopper). Override with `CUDA_ARCHS`
+for broader compatibility:
 
 ```bash
-CUDA_ARCHS=80,90,102 cargo build --features python-bindings
+# Default build (sm_80, sm_90)
+cargo build
+
+# Broader compatibility across GPU generations
+CUDA_ARCHS="80,86,89,90,100" cargo build
+
+# Common architectures:
+# 80  = Ampere (A100)
+# 86  = Ampere (RTX 30xx)
+# 89  = Ada Lovelace (RTX 40xx, L4, L40)
+# 90  = Hopper (H100, H200)
+# 100 = Blackwell (B100, B200, GB200)
 ```
 
 > **Prerequisites**
