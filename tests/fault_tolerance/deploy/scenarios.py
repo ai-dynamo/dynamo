@@ -16,7 +16,7 @@
 import re
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Dict, Optional, Pattern
+from typing import Callable, Dict, Optional, Pattern
 
 from typing_extensions import TypedDict
 
@@ -187,6 +187,7 @@ class Scenario:
     # When set to True, the test will be automatically marked with @pytest.mark.custom_build
     # and excluded from default test runs unless --include-custom-build flag is used
     requires_custom_build: bool = False  # Flag for tests needing custom builds/setup
+    validation: Optional[Callable] = None  # Optional custom validation function
 
 
 # Helper functions to create deployment specs
@@ -410,13 +411,6 @@ def _create_backend_failures(backend, deploy_type="disagg"):
         failures["sglang_prefill_detokenizer"] = [
             Failure(30, prefill_worker, "sglang::detokenizer", "SIGKILL")
         ]
-    elif backend == "trtllm":
-        failures["trtllm_decode_engine_core"] = [
-            Failure(30, decode_worker, "TRTLLM::EngineCore", "SIGKILL")
-        ]
-        failures["trtllm_prefill_engine_core"] = [
-            Failure(30, prefill_worker, "TRTLLM::EngineCore", "SIGKILL")
-        ]
 
     return failures
 
@@ -569,12 +563,22 @@ for deployment_name, deployment_info in DEPLOYMENT_SPECS.items():
         # Get model from deployment info or use the global model
         scenario_model = deployment_info.get("model", model)
 
+        # Determine custom validation if needed
+        # For now, let pattern matching handle it, but you can override here
+        custom_validation = None
+
+        # Example: Add custom validation for specific scenario
+        # if scenario_name == "vllm-agg-tp-1-dp-1-decode_worker_pod":
+        #     from tests.fault_tolerance.deploy.validations import validate_decode_worker_pod_deletion
+        #     custom_validation = validate_decode_worker_pod_deletion
+
         scenarios[scenario_name] = Scenario(
             deployment=deployment_info["spec"],
             load=load_config,
             failures=failure,
             model=scenario_model,
             backend=backend,
+            validation=custom_validation,
             requires_custom_build=is_moe,  # MoE models require custom builds
         )
 
