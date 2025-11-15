@@ -363,27 +363,36 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
         // Extract worker_id from disaggregated_params and inject into nvext if present
-        if let Some(disagg_params) = delta.disaggregated_params {
-            if let Some(worker_id_json) = disagg_params.get("worker_id") {
-                use crate::protocols::openai::nvext::{WorkerIdInfo, NvExtResponse};
+        if let Some(worker_id_json) = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("worker_id"))
+        {
+            use crate::protocols::openai::nvext::{NvExtResponse, WorkerIdInfo};
 
-                let prefill_worker_id = worker_id_json.get("prefill_worker_id").and_then(|v| v.as_u64());
-                let decode_worker_id = worker_id_json.get("decode_worker_id").and_then(|v| v.as_u64());
+            let prefill_worker_id = worker_id_json
+                .get("prefill_worker_id")
+                .and_then(|v| v.as_u64());
+            let decode_worker_id = worker_id_json
+                .get("decode_worker_id")
+                .and_then(|v| v.as_u64());
 
-                let worker_id_info = WorkerIdInfo {
+            let worker_id_info = WorkerIdInfo {
+                prefill_worker_id,
+                decode_worker_id,
+            };
+
+            let nvext_response = NvExtResponse {
+                worker_id: Some(worker_id_info),
+            };
+
+            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+                stream_response.nvext = Some(nvext_json);
+                tracing::debug!(
+                    "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
                     prefill_worker_id,
-                    decode_worker_id,
-                };
-
-                let nvext_response = NvExtResponse {
-                    worker_id: Some(worker_id_info),
-                };
-
-                if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
-                    stream_response.nvext = Some(nvext_json);
-                    tracing::info!("Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
-                        prefill_worker_id, decode_worker_id);
-                }
+                    decode_worker_id
+                );
             }
         }
 

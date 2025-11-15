@@ -595,7 +595,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Get prefill worker ID if available (stored by PrefillRouter)
         // In aggregated mode, prefill_worker_id is None, so we use decode_worker_id for both
         let decode_worker_id = instance_id;
-        let prefill_worker_id = context.get::<u64>("prefill_worker_id")
+        let prefill_worker_id = context
+            .get::<u64>("prefill_worker_id")
             .ok()
             .map(|arc| *arc)
             .or(Some(decode_worker_id)); // Use decode_worker_id if no separate prefill worker

@@ -245,7 +245,9 @@ impl PrefillRouter {
         let prefill_worker_id = disaggregated_params
             .get("worker_id")
             .and_then(|worker_id_json| {
-                worker_id_json.get("decode_worker_id").and_then(|v| v.as_u64())
+                worker_id_json
+                    .get("decode_worker_id")
+                    .and_then(|v| v.as_u64())
             });
         Ok((PrefillResult {
             disaggregated_params,
