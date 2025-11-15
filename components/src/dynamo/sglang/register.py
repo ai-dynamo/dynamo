@@ -94,6 +94,12 @@ async def _get_runtime_config(
     if max_prefill_tokens:
         runtime_config.max_num_batched_tokens = max_prefill_tokens
 
+    # Expose data_parallel_size for DP-aware routing
+    dp_size = getattr(server_args, "dp_size", 1)
+    runtime_config.data_parallel_size = dp_size
+    if dp_size > 1:
+        logging.info(f"Registering with data_parallel_size={dp_size}")
+
     try:
         # Try to check if the engine has a scheduler attribute with the computed values
         if hasattr(engine, "scheduler_info") and engine.scheduler_info is not None:

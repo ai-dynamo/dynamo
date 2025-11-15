@@ -74,16 +74,33 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         yield bootstrap_info
 
-        input_param = self._get_input_param(request["request"])
+        inner_request = request["request"]
+        sampling_params_dict = request["sampling_params"]
 
-        results = await self.engine.async_generate(
-            **input_param,
-            sampling_params=request["sampling_params"],
-            stream=True,
-            bootstrap_host=self.bootstrap_host,
-            bootstrap_port=self.bootstrap_port,
-            bootstrap_room=bootstrap_room,
+        # Extract data_parallel_rank from inner request (explicit None check to preserve dp_rank=0)
+        data_parallel_rank = (
+            inner_request.get("data_parallel_rank")
+            if "data_parallel_rank" in inner_request
+            and inner_request["data_parallel_rank"] is not None
+            else None
         )
+
+        input_param = self._get_input_param(inner_request)
+
+        # Build engine kwargs
+        generate_kwargs = {
+            **input_param,
+            "sampling_params": sampling_params_dict,
+            "stream": True,
+            "bootstrap_host": self.bootstrap_host,
+            "bootstrap_port": self.bootstrap_port,
+            "bootstrap_room": bootstrap_room,
+        }
+
+        if data_parallel_rank is not None:
+            generate_kwargs["data_parallel_rank"] = data_parallel_rank
+
+        results = await self.engine.async_generate(**generate_kwargs)
 
         task = asyncio.create_task(self._consume_results(results, context))
         self._consume_tasks.add(task)
