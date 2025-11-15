@@ -148,7 +148,12 @@ pub async fn spawn_system_status_server(
         .live_path()
         .to_string();
 
-    let app = Router::new()
+    // Check if LoRA feature is enabled
+    let lora_enabled = std::env::var("DYN_LORA_ENABLED")
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    let mut app = Router::new()
         .route(
             &health_path,
             get({
@@ -176,25 +181,32 @@ pub async fn spawn_system_status_server(
                 let state = Arc::clone(&server_state);
                 move || metadata_handler(state)
             }),
-        )
-        .route(
-            "/v1/loras",
-            get({
-                let state = Arc::clone(&server_state);
-                move || list_loras_handler(State(state))
-            })
-            .post({
-                let state = Arc::clone(&server_state);
-                move |body| load_lora_handler(State(state), body)
-            }),
-        )
-        .route(
-            "/v1/loras/{lora_name}",
-            delete({
-                let state = Arc::clone(&server_state);
-                move |path| unload_lora_handler(State(state), path)
-            }),
-        )
+        );
+
+    // Add LoRA routes only if DYN_LORA_ENABLED is set to true
+    if lora_enabled {
+        app = app
+            .route(
+                "/v1/loras",
+                get({
+                    let state = Arc::clone(&server_state);
+                    move || list_loras_handler(State(state))
+                })
+                .post({
+                    let state = Arc::clone(&server_state);
+                    move |body| load_lora_handler(State(state), body)
+                }),
+            )
+            .route(
+                "/v1/loras/{lora_name}",
+                delete({
+                    let state = Arc::clone(&server_state);
+                    move |path| unload_lora_handler(State(state), path)
+                }),
+            );
+    }
+
+    let app = app
         .fallback(|| async {
             tracing::info!("[fallback handler] called");
             (StatusCode::NOT_FOUND, "Route not found").into_response()
