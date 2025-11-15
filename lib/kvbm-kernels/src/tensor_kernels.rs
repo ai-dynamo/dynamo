@@ -217,7 +217,7 @@ pub unsafe fn operational_copy(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-cuda"))]
 mod tests {
     use super::*;
     use cudarc::driver::{CudaContext, CudaSlice, DevicePtr, DevicePtrMut, DriverError};
