@@ -587,9 +587,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Check if worker_id is requested in extra_fields
         let should_populate_worker_id = backend_input
             .extra_fields
-            .as_ref()
-            .map(|fields| fields.contains(&"worker_id".to_string()))
-            .unwrap_or(false);
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .any(|s| s == "worker_id");
         
         // Get prefill worker ID if available (stored by PrefillRouter)
         // In aggregated mode, prefill_worker_id is None, so we use decode_worker_id for both
