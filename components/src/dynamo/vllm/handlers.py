@@ -191,7 +191,6 @@ class BaseWorkerHandler(ABC):
             # v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
             # This allows the frontend to discover it and route correctly to the worker instance
 
-            logger.info(f"TEST: generate_endpoint: {self.generate_endpoint}")
             if self.generate_endpoint is not None and self.config is not None:
                 logger.info(
                     f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"

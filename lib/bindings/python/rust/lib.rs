@@ -767,7 +767,7 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
+        let ingress = JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?;
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
@@ -798,6 +798,9 @@ impl Endpoint {
         if let Some(payload) = health_payload_json {
             builder = builder.health_check_payload(payload);
         }
+
+        // Register the engine in the local endpoint registry for in-process calls
+        builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
