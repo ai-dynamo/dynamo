@@ -290,6 +290,8 @@ func main() {
 	}
 
 	webhookServer := webhook.NewServer(webhook.Options{
+		// Bind to all interfaces so the Service can reach the webhook server
+		Host: "0.0.0.0",
 		// Must match the port exposed by the manager container and targeted by the Service.
 		Port: 9443,
 		// Must match the mountPath of the webhook certificate secret in the Deployment.
