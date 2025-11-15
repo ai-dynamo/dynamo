@@ -181,7 +181,6 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		"ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N ''",
 		// Create SSH daemon config to use custom host keys location and non-privileged port
 		fmt.Sprintf("printf 'Port %d\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config", commonconsts.MpiRunSshPort),
-		"mkdir -p /run/sshd",
 		"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 	}
 
