@@ -238,8 +238,8 @@ ignore_missing_imports = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-# Skip mypy analysis on internal dependencies of vllm
-module = ["vllm.*"]
+# Skip mypy analysis on internal dependencies of each framework
+module = ["vllm.*", "sglang.*", "tensorrt_llm.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
