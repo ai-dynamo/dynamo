@@ -175,6 +175,7 @@ filterwarnings = [
     "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
+    "ignore:.*transformers version.*incompatible with nvidia-modelopt.*:UserWarning", # Ignore transformers/nvidia-modelopt version compatibility warning, we don't currently control nvidia-modelopt install.
 ]
 
 
