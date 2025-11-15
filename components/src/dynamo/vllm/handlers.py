@@ -56,6 +56,13 @@ def build_sampling_params(
             if key == "stop":
                 continue
             setattr(sampling_params, key, value)
+        if (
+            key == "stop_token_ids_hidden"
+            and value is not None
+            and hasattr(sampling_params, "stop_token_ids")
+        ):
+            existing = sampling_params.stop_token_ids or []
+            sampling_params.stop_token_ids = list(set(existing).union(value))
 
     return sampling_params
 
