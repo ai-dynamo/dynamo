@@ -59,6 +59,7 @@ from dynamo.trtllm.utils.trtllm_utils import (
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+_SUPPORTED_LLMAPI_BACKENDS = ["pytorch", "_autodeploy"]
 
 configure_dynamo_logging()
 
@@ -228,9 +229,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
             arg_map["backend"] = "pytorch"
-        elif arg_map["backend"] != "pytorch":
+        elif arg_map["backend"] not in _SUPPORTED_LLMAPI_BACKENDS:
             logging.error(
-                "Only pytorch backend is supported for now to publish events and metrics."
+                "Only %s supported for now to publish events and metrics. Got: %s",
+                _SUPPORTED_LLMAPI_BACKENDS,
+                arg_map["backend"],
             )
             sys.exit(1)
 
@@ -286,7 +289,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
     )
 
-    async with get_llm_engine(engine_args) as engine:
+    async with get_llm_engine(engine_args, backend=engine_args["backend"]) as engine:
         endpoint = component.endpoint(config.endpoint)
 
         # should ideally call get_engine_runtime_config
