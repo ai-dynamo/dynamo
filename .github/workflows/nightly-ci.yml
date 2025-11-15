@@ -25,6 +25,8 @@ env:
   NIGHTLY_IMAGE_PREFIX: nightly
   AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
   AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
   AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
   PREFER_PROVIDER: aws
@@ -61,8 +63,8 @@ jobs:
           aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_access_key_id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ env.AWS_SECRET_ACCESS_KEY }}
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Images
         uses: ./.github/actions/docker-tag-push
@@ -108,8 +110,8 @@ jobs:
           aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_access_key_id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ env.AWS_SECRET_ACCESS_KEY }}
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Images
         uses: ./.github/actions/docker-tag-push
@@ -155,8 +157,8 @@ jobs:
           aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_access_key_id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ env.AWS_SECRET_ACCESS_KEY }}
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Images
         uses: ./.github/actions/docker-tag-push
@@ -202,8 +204,8 @@ jobs:
           aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_access_key_id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ env.AWS_SECRET_ACCESS_KEY }}
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Images
         uses: ./.github/actions/docker-tag-push
@@ -249,8 +251,8 @@ jobs:
           aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_access_key_id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ env.AWS_SECRET_ACCESS_KEY }}
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Images
         uses: ./.github/actions/docker-tag-push
@@ -296,8 +298,8 @@ jobs:
           aws_default_region: ${{ env.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_access_key_id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ env.AWS_SECRET_ACCESS_KEY }}
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
       - name: Tag and Push Nightly Images
         uses: ./.github/actions/docker-tag-push
