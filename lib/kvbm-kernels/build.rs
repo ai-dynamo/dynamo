@@ -76,27 +76,65 @@ fn build_with_prebuilt_kernels() {
         );
     }
 
-    // Compute hash of current .cu file
-    let current_hash = compute_file_hash(&cu_path);
+    // Read stored hashes (three lines: build.rs, .cu, .fatbin)
+    let stored_hashes_content =
+        fs::read_to_string(&md5_path).expect("Failed to read cuda/prebuilt/tensor_kernels.md5");
 
-    // Read stored hash
-    let stored_hash = fs::read_to_string(&md5_path)
-        .expect("Failed to read cuda/prebuilt/tensor_kernels.md5")
-        .trim()
-        .to_string();
-
-    // Validate hashes match
-    if current_hash != stored_hash {
+    let stored_hashes: Vec<&str> = stored_hashes_content.lines().collect();
+    if stored_hashes.len() != 3 {
         panic!(
-            "Hash mismatch! The .cu source file has changed but the prebuilt .fatbin is outdated.\n\
-             Current hash: {}\n\
-             Stored hash: {}\n\
+            "Invalid .md5 file format. Expected 3 lines (build.rs, .cu, .fatbin hashes), found {}.\n\
              Please rebuild with nvcc available to regenerate the prebuilt artifacts.",
-            current_hash, stored_hash
+            stored_hashes.len()
         );
     }
 
-    println!("cargo:warning=Hash validation passed: {}", current_hash);
+    let stored_build_rs_hash = stored_hashes[0];
+    let stored_cu_hash = stored_hashes[1];
+    let stored_fatbin_hash = stored_hashes[2];
+
+    // Compute current hashes
+    let build_rs_path = Path::new(&manifest_dir).join("build.rs");
+    let current_build_rs_hash = compute_file_hash(&build_rs_path);
+    let current_cu_hash = compute_file_hash(&cu_path);
+    let current_fatbin_hash = compute_file_hash(&fatbin_path);
+
+    // Validate all three hashes
+    let mut mismatches = Vec::new();
+
+    if current_build_rs_hash != stored_build_rs_hash {
+        mismatches.push(format!(
+            "  build.rs: current={}, stored={}",
+            current_build_rs_hash, stored_build_rs_hash
+        ));
+    }
+
+    if current_cu_hash != stored_cu_hash {
+        mismatches.push(format!(
+            "  .cu source: current={}, stored={}",
+            current_cu_hash, stored_cu_hash
+        ));
+    }
+
+    if current_fatbin_hash != stored_fatbin_hash {
+        mismatches.push(format!(
+            "  .fatbin: current={}, stored={}",
+            current_fatbin_hash, stored_fatbin_hash
+        ));
+    }
+
+    if !mismatches.is_empty() {
+        panic!(
+            "Hash mismatch! The prebuilt .fatbin is out of sync:\n{}\n\
+             Please rebuild with nvcc available to regenerate the prebuilt artifacts.",
+            mismatches.join("\n")
+        );
+    }
+
+    println!("cargo:warning=Hash validation passed:");
+    println!("cargo:warning=  build.rs: {}", current_build_rs_hash);
+    println!("cargo:warning=  .cu source: {}", current_cu_hash);
+    println!("cargo:warning=  .fatbin: {}", current_fatbin_hash);
 
     // Link the prebuilt fatbin
     // Note: We need to inform the linker about the fatbin file.
@@ -202,16 +240,24 @@ fn generate_prebuilt_artifacts(cu_path: &Path, arch_flags: &[String], out_dir: &
     // Copy .fatbin to prebuilt directory
     fs::copy(&temp_fatbin, &fatbin_path).expect("Failed to copy .fatbin to cuda/prebuilt/");
 
-    // Generate MD5 hash of the source file
-    let hash = compute_file_hash(cu_path);
-    fs::write(&md5_path, format!("{}\n", hash)).expect("Failed to write .md5 file");
+    // Generate MD5 hashes of all three files for consistency validation
+    let build_rs_path = Path::new(&manifest_dir).join("build.rs");
+    let build_rs_hash = compute_file_hash(&build_rs_path);
+    let cu_hash = compute_file_hash(cu_path);
+    let fatbin_hash = compute_file_hash(&fatbin_path);
+
+    // Write all three hashes (one per line)
+    let hashes = format!("{}\n{}\n{}\n", build_rs_hash, cu_hash, fatbin_hash);
+    fs::write(&md5_path, hashes).expect("Failed to write .md5 file");
 
     println!(
         "cargo:warning=Generated prebuilt artifacts:\n  {}\n  {}",
         fatbin_path.display(),
         md5_path.display()
     );
-    println!("cargo:warning=Source hash: {}", hash);
+    println!("cargo:warning=build.rs hash: {}", build_rs_hash);
+    println!("cargo:warning=.cu source hash: {}", cu_hash);
+    println!("cargo:warning=.fatbin hash: {}", fatbin_hash);
 }
 
 fn compute_file_hash(path: &Path) -> String {
