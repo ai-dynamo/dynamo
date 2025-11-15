@@ -251,7 +251,6 @@ class HandlerBase:
         )
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
-        model_name = request.get("model", "unknown_model")
 
         # Optional test-only logits processing (enable with DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1)
         if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
@@ -288,7 +287,7 @@ class HandlerBase:
                     next_total_toks = len(output.token_ids)
 
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-                    
+
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
                     if output.stop_reason:

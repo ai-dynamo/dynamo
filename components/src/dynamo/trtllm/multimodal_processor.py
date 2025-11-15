@@ -177,7 +177,9 @@ class MultimodalRequestProcessor:
         if not image_urls and not embedding_paths:
             # Text-only request on multimodal worker - return text as plain string
             # The engine will tokenize it
-            logging.info("Text-only request on multimodal worker, returning text prompt")
+            logging.info(
+                "Text-only request on multimodal worker, returning text prompt"
+            )
             return text_prompt
 
         loader_kwargs = {}
