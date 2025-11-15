@@ -117,7 +117,7 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ runner.os }}-cargo-
     - name: Set up Rust Toolchain Components
-      run: rustup component add clippy
+      run: rustup component add clippy rustfmt
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
