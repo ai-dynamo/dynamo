@@ -31,7 +31,7 @@ pub struct NvCreateResponse {
 pub struct NvResponse {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::responses::Response,
-    
+
     /// NVIDIA extension field for response metadata (worker IDs, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
@@ -207,10 +207,10 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
 
     fn try_from(nv_resp: NvCreateChatCompletionResponse) -> Result<Self, Self::Error> {
         let chat_resp = nv_resp;
-        
+
         // Preserve nvext field from chat completion response
         let nvext = chat_resp.nvext.clone();
-        
+
         let content_text = chat_resp
             .choices
             .into_iter()
@@ -261,7 +261,7 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
             user: None,
         };
 
-        Ok(NvResponse { 
+        Ok(NvResponse {
             inner: response,
             nvext,
         })

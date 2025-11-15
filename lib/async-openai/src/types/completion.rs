@@ -216,7 +216,7 @@ pub struct CreateCompletionResponse {
     /// The object type, which is always "text_completion"
     pub object: String,
     pub usage: Option<CompletionUsage>,
-    
+
     /// NVIDIA extension field for response metadata (worker IDs, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,

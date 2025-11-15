@@ -16,7 +16,7 @@ pub struct WorkerIdInfo {
     /// The prefill worker ID that processed this request
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefill_worker_id: Option<u64>,
-    
+
     /// The decode worker ID that processed this request
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,

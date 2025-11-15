@@ -591,7 +591,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap_or(&[])
             .iter()
             .any(|s| s == "worker_id");
-        
+
         // Get prefill worker ID if available (stored by PrefillRouter)
         // In aggregated mode, prefill_worker_id is None, so we use decode_worker_id for both
         let decode_worker_id = instance_id;
@@ -599,7 +599,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .ok()
             .map(|arc| *arc)
             .or(Some(decode_worker_id)); // Use decode_worker_id if no separate prefill worker
-        
+
         let updated_request = context.map(|_| backend_input);
 
         let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
@@ -631,7 +631,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             }
                             prefill_marked = true;
                         }
-                        
+
                         // Inject worker_id in first item's disaggregated_params if requested
                         if first_item && should_populate_worker_id {
                             if let Some(ref mut data) = item.data {
@@ -641,7 +641,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                     "prefill_worker_id": prefill_worker_id,
                                     "decode_worker_id": decode_worker_id,
                                 });
-                                
+
                                 if let Some(ref mut params) = data.disaggregated_params {
                                     if let Some(obj) = params.as_object_mut() {
                                         obj.insert("worker_id".to_string(), worker_id_json);
@@ -652,7 +652,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             }
                             first_item = false;
                         }
-                        
+
                         yield item;
                     }
                 }

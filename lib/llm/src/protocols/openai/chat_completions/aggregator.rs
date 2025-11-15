@@ -142,7 +142,7 @@ impl DeltaAggregator {
                     if let Some(system_fingerprint) = delta.system_fingerprint {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
-                    
+
                     // Aggregate nvext field (take the last non-None value)
                     if delta.nvext.is_some() {
                         aggregator.nvext = delta.nvext;
