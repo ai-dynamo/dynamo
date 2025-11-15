@@ -383,6 +383,9 @@ COPY --chown=dynamo: benchmarks /workspace/benchmarks
 COPY --chown=dynamo: deploy /workspace/deploy
 COPY --chown=dynamo: components/ /workspace/components/
 
+# Copy pyproject.toml for pytest configuration (markers, etc.)
+COPY --chown=dynamo: pyproject.toml /workspace/pyproject.toml
+
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
