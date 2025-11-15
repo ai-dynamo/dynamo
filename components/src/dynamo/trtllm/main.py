@@ -33,7 +33,7 @@ from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
 from torch.cuda import device_count
-from transformers import AutoConfig
+from transformers import AutoConfig, GenerationConfig
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
@@ -239,8 +239,13 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # Populate default sampling params from the model
     tokenizer = tokenizer_factory(arg_map["model"])
+
+    model_config = AutoConfig.from_pretrained(arg_map["model"], trust_remote_code=True)
+    generation_config = GenerationConfig.from_pretrained(
+        arg_map["model"], trust_remote_code=True
+    )
     default_sampling_params = SamplingParams()
-    default_sampling_params._setup(tokenizer)
+    default_sampling_params._setup(tokenizer, model_config, generation_config)
     default_sampling_params.stop = None
     model_input = ModelInput.Tokens
 
@@ -262,9 +267,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     if modality == "multimodal":
         engine_args["skip_tokenizer_init"] = False
         model_input = ModelInput.Text
-        model_config = AutoConfig.from_pretrained(
-            config.model_path, trust_remote_code=True
-        )
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,
             model_dir=config.model_path,
@@ -286,7 +288,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
     )
 
-    async with get_llm_engine(engine_args) as engine:
+    async with get_llm_engine(engine_args, config.disaggregation_mode) as engine:
         endpoint = component.endpoint(config.endpoint)
 
         # should ideally call get_engine_runtime_config
