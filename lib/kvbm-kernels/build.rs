@@ -52,10 +52,7 @@ fn determine_build_mode() -> bool {
 }
 
 fn is_nvcc_available() -> bool {
-    Command::new("nvcc")
-        .arg("--version")
-        .output()
-        .is_ok()
+    Command::new("nvcc").arg("--version").output().is_ok()
 }
 
 fn build_with_prebuilt_kernels() {
@@ -203,13 +200,11 @@ fn generate_prebuilt_artifacts(cu_path: &Path, arch_flags: &[String], out_dir: &
     }
 
     // Copy .fatbin to prebuilt directory
-    fs::copy(&temp_fatbin, &fatbin_path)
-        .expect("Failed to copy .fatbin to cuda/prebuilt/");
+    fs::copy(&temp_fatbin, &fatbin_path).expect("Failed to copy .fatbin to cuda/prebuilt/");
 
     // Generate MD5 hash of the source file
     let hash = compute_file_hash(cu_path);
-    fs::write(&md5_path, format!("{}\n", hash))
-        .expect("Failed to write .md5 file");
+    fs::write(&md5_path, format!("{}\n", hash)).expect("Failed to write .md5 file");
 
     println!(
         "cargo:warning=Generated prebuilt artifacts:\n  {}\n  {}",
