@@ -54,20 +54,12 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
-        # Disable mypy for unit tests to avoid CUDA cleanup segfaults (exit code 139)
-        # Unit tests import GPU framework modules which conflict with mypy's import system during cleanup
-        MYPY_FLAG=""
-        if [[ "${{ inputs.test_type }}" == *"unit"* ]]; then
-          MYPY_FLAG="-p no:mypy"
-          echo "Disabling mypy plugin for unit tests to avoid CUDA cleanup issues"
-        fi
-
         docker run --runtime=nvidia --gpus all -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
           ${{ inputs.image_tag }} \
-          bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
