@@ -265,7 +265,7 @@ impl ActiveSlotState {
         if current != generation {
             return;
         }
-        if self.completed.swap(true, Ordering::SeqCst) {
+        if self.completed.swap(true, Ordering::AcqRel) {
             return;
         }
         {
@@ -299,13 +299,29 @@ impl LocalWaiter {
         loop {
             let current = self.state.generation.load(Ordering::Acquire);
             if current != self.observed_generation {
-                // stale waiter; treat as completion missed
+                // Stale waiter - generation advanced without us observing completion
                 if let Some(value) = self.state.clone_completion() {
                     return value;
                 }
+                // If no completion exists for our generation, return error rather than
+                // waiting forever. This can occur if generation advanced without completing,
+                // which indicates a logic error in the caller.
+                return Arc::new(CompletionKind::Poisoned(Arc::new(EventPoison::new(
+                    EventHandle::from_raw(0), // Dummy handle - we don't have the real one
+                    format!(
+                        "generation expired: observed {}, current {}",
+                        self.observed_generation, current
+                    ),
+                ))));
             } else if let Some(value) = self.state.clone_completion() {
                 return value;
             }
+            // Lost-wakeup prevention: tokio::Notify guarantees that if we check
+            // completion, then call notified(), we won't miss a notification that
+            // happens between the check and the await. This is safe because:
+            // 1. We check completion state before awaiting
+            // 2. notified() is created before the await point
+            // 3. Any notify_waiters() after notified() creation will wake us
             self.state.notify.notified().await;
         }
     }

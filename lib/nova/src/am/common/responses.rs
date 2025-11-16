@@ -344,11 +344,11 @@ impl ResponseManagerInner {
 
     fn recycle_slot(&self, index: usize) {
         self.arena.recycle(index);
-        self.pending.fetch_sub(1, Ordering::Relaxed);
+        self.pending.fetch_sub(1, Ordering::Release);
     }
 
     fn mark_pending(&self) {
-        self.pending.fetch_add(1, Ordering::Relaxed);
+        self.pending.fetch_add(1, Ordering::AcqRel);
     }
 
     fn encode_key(&self, slot_index: usize, generation: u64) -> ResponseId {
@@ -478,7 +478,7 @@ impl ResponseManagerInner {
     }
 
     fn pending_outcome_count(&self) -> usize {
-        self.pending.load(Ordering::Relaxed)
+        self.pending.load(Ordering::Acquire)
     }
 }
 
