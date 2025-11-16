@@ -9,18 +9,17 @@ Dynamo supports SGLang's implementation of wide expert parallelism and large sca
 
 ## Instructions
 
-1. Build the Dynamo container using the latest published dynamo version and stable sglang version. If you want to build from a local dynamo repo, you can add `--build-arg BRANCH_TYPE=local` to the build command. If you want to build from a remote dynamo repo, you can add `--build-arg BRANCH_TYPE=remote` to the build command. If you want to use a specific tag for the default sglang version, you can add `--build-arg SGLANG_IMAGE_TAG=<tag>` to the build command.
+1. Build the Dynamo container for AMD64/x86_64 (H100) using the `build.sh` script.
 
 > [!Note]
-> Please ensure that you are building this on an AMD64 (x86_64) machine. The correct SGLang image will be selected automatically via the multi-arch manifest.
+> Please ensure that you are building this on an AMD64 (x86_64) machine. The build script will automatically configure the correct platform for SGLang.
 
 ```bash
 cd $DYNAMO_ROOT
-docker build \
-  -f container/Dockerfile.sglang-wideep \
-  -t dynamo-wideep \
-  --no-cache \
-  .
+./container/build.sh \
+  --framework SGLANG \
+  --tag dynamo-wideep:latest \
+  --no-cache
 ```
 
 2. You can run this container on each 8xH100 node using the following command.

@@ -9,22 +9,22 @@ Dynamo supports SGLang's GB200 implementation of wide expert parallelism and lar
 
 ## Instructions
 
-1. Build the Dynamo container using the latest published dynamo version and stable sglang version. If you want to build from a local dynamo repo, you can add `--build-arg BRANCH_TYPE=local` to the build command. If you want to build from a remote dynamo repo, you can add `--build-arg BRANCH_TYPE=remote` to the build command. If you want to use a specific tag for the default sglang version, you can add `--build-arg SGLANG_IMAGE_TAG=<tag>` to the build command.
+1. Build the Dynamo container for ARM64 (GB200) using the `build.sh` script.
 
 > [!Note]
-> Please ensure that you are building this on an ARM64 machine. The correct SGLang image will be selected automatically via the multi-arch manifest.
+> Please ensure that you are building this on an ARM64 machine. The build script will automatically configure the correct platform and build arguments for SGLang on ARM64/GB200.
 
 > [!Note]
 > Please use `--build-arg SGLANG_IMAGE_TAG=nightly-dev-20251019-fda0cb2a` to build the container due to a bug that we found with the DeepEP version being installed. This was fixed in [PR 11773](https://github.com/sgl-project/sglang/pull/11773). When SGLang releases a version > `0.5.3.post3` we will update these instructions.
 
 ```bash
 cd $DYNAMO_ROOT
-docker build \
-  -f container/Dockerfile.sglang-wideep \
-  -t dynamo-wideep-gb200 \
+./container/build.sh \
+  --framework SGLANG \
+  --platform linux/arm64 \
+  --tag dynamo-wideep-gb200:latest \
   --build-arg SGLANG_IMAGE_TAG=nightly-dev-20251019-fda0cb2a \
-  --no-cache \
-  .
+  --no-cache
 ```
 
 2. You can run this container on each 4xGB200 node using the following command.
