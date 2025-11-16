@@ -259,7 +259,7 @@ impl NovaBackend {
             )));
         }
 
-        for priority in priorities {
+        for priority in &priorities {
             if !required_transports.contains(&priority) {
                 return Err(NovaBackendError::InvalidTransportPriority(format!(
                     "Priority transport not found: {:?}",
@@ -268,9 +268,8 @@ impl NovaBackend {
             }
         }
 
-        let mut priorities = self.priorities.lock();
-        *priorities = priorities.clone();
-
+        let mut guard = self.priorities.lock();
+        *guard = priorities;
         Ok(())
     }
 }
