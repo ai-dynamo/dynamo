@@ -6,7 +6,7 @@ aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@5554d2eb820
 aiofiles
 aiperf @ git+https://github.com/ai-dynamo/aiperf.git@16dad7c02fcd959ba96823d7bfe7e681e5d5b41d
 av==15.0.0
-fastapi==0.120.1
+fastapi==0.121.2
 ftfy
 genai-perf==0.0.15
 grpcio-tools==1.66.0
@@ -33,6 +33,8 @@ PyYAML
 scikit-learn
 scipy<1.14.0  # Pin scipy version for pmdarima compatibility
 sentencepiece
+# Minimum starlette version needed to address CVE(s):
+starlette>=0.49.1
 tensorboard==2.19.0
 tensorboardX==2.6.2.2
 transformers
