@@ -9,6 +9,67 @@ use either::Either;
 use minijinja::{Environment, Value};
 use tracing;
 
+/// Replace non-standard Jinja2 block tags with placeholders
+///
+/// minijinja doesn't expose its tag list publicly - they're hardcoded in a private match statement
+/// in the parser. This list is derived from minijinja v2.12.0's parser.rs implementation.
+/// See: https://github.com/mitsuhiko/minijinja/blob/main/minijinja/src/compiler/parser.rs#L542
+fn replace_non_standard_blocks(template: &str) -> String {
+    use regex::Regex;
+
+    // Standard Jinja2/minijinja tags (cannot be queried from minijinja API)
+    let standard_keywords = [
+        "for",
+        "endfor",
+        "if",
+        "elif",
+        "else",
+        "endif",
+        "block",
+        "endblock",
+        "extends",
+        "include",
+        "import",
+        "from",
+        "macro",
+        "endmacro",
+        "call",
+        "endcall",
+        "set",
+        "endset",
+        "with",
+        "endwith",
+        "filter",
+        "endfilter",
+        "autoescape",
+        "endautoescape",
+        "raw",
+        "endraw",
+        "do",
+    ];
+
+    let re = Regex::new(r"\{%\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*%\}").unwrap();
+    let mut result = template.to_string();
+    let mut replacements = Vec::new();
+
+    for cap in re.captures_iter(template) {
+        let full_match = cap.get(0).unwrap().as_str();
+        let tag_name = cap.get(1).unwrap().as_str();
+
+        if !standard_keywords.contains(&tag_name) {
+            // Non-standard tag (e.g., vLLM's {% generation %}) - replace with placeholder
+            let placeholder = format!("__JINJA_BLOCK_{}", tag_name.to_uppercase());
+            replacements.push((full_match.to_string(), placeholder));
+        }
+    }
+
+    for (original, placeholder) in replacements {
+        result = result.replace(&original, &placeholder);
+    }
+
+    result
+}
+
 impl JinjaEnvironment {
     fn env(self) -> Environment<'static> {
         self.env
@@ -64,8 +125,12 @@ impl HfTokenizerConfigJsonFormatter {
                     );
                     supports_add_generation_prompt = Some(true);
                 }
-                env.add_template_owned("default", x.to_string())?;
-                env.add_template_owned("tool_use", x.to_string())?;
+                // Replace non-standard Jinja2 block tags with placeholders for minijinja validation
+                // Standard Jinja2/minijinja blocks: for, if, block, macro, call, filter, set, with, autoescape, trans
+                // Any other {% tag %} blocks are likely backend-specific extensions (like vLLM's {% generation %})
+                let template_for_validation = replace_non_standard_blocks(x);
+                env.add_template_owned("default", template_for_validation.clone())?;
+                env.add_template_owned("tool_use", template_for_validation)?;
             }
             Either::Right(map) => {
                 for t in map {
@@ -87,7 +152,9 @@ impl HfTokenizerConfigJsonFormatter {
                         } else {
                             supports_add_generation_prompt = Some(false);
                         }
-                        env.add_template_owned(k.to_string(), v.to_string())?;
+                        // Replace non-standard Jinja2 block tags with placeholders for minijinja validation
+                        let template_for_validation = replace_non_standard_blocks(v);
+                        env.add_template_owned(k.to_string(), template_for_validation)?;
                     }
                 }
                 if env.templates().count() == 0 {

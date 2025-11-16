@@ -146,6 +146,18 @@ class ChatProcessor:
         else:
             chat_template = request.chat_template or self.tokenizer.chat_template
 
+        # Restore non-standard Jinja2 tags that were replaced with placeholders by Rust frontend
+        # for minijinja validation. Backend frameworks (like vLLM) may have custom extensions for these.
+        if chat_template:
+            import re
+
+            # Restore all __JINJA_BLOCK_<TAG>__ placeholders back to {% tag %}
+            chat_template = re.sub(
+                r"__JINJA_BLOCK_([A-Z_]+)__",
+                lambda m: "{% " + m.group(1).lower() + " %}",
+                chat_template,
+            )
+
         (
             conversation,
             request_prompts,
