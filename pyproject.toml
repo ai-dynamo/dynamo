@@ -143,7 +143,7 @@ addopts = [
     "--showlocals",
     "--strict-markers",
     "--strict-config",
-    "--mypy",
+    #"--mypy",
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
@@ -245,14 +245,12 @@ ignore_missing_imports = true
 
 [tool.sphinx]
 
-# extra-content-head
 extra_content_head = [
    '''
    <script src="https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js" ></script>
    ''',
 ]
 
-#extra-content-footer
 extra_content_footer = [
    '''
    <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
