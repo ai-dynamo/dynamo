@@ -94,6 +94,7 @@ pub struct RegistryInner {
 #[derive(Clone)]
 pub struct Registry {
     pub(crate) inner: Arc<tokio::sync::Mutex<RegistryInner>>,
+    is_static: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

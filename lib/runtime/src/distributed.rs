@@ -182,7 +182,7 @@ impl DistributedRuntime {
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             discovery_metadata,
-            component_registry: component::Registry::new(),
+            component_registry: component::Registry::new_with_static(is_static),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),

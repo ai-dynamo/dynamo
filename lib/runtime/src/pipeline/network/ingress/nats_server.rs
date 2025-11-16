@@ -99,9 +99,14 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         tracing::info!("Successfully retrieved service group");
 
         // Construct the full NATS subject with instance ID
-        // Format: {endpoint_name}-{instance_id_hex}
-        // This matches Endpoint::name_with_id() and subject_to() format
-        let endpoint_with_id = format!("{}-{:x}", endpoint_name, instance_id);
+        // In static mode, use plain endpoint name (no instance ID)
+        // In dynamic mode, append instance ID for multi-instance support
+        // This matches Endpoint::name_with_id() behavior
+        let endpoint_with_id = if self.component_registry.is_static() {
+            endpoint_name.clone()
+        } else {
+            format!("{}-{:x}", endpoint_name, instance_id)
+        };
 
         // Create NATS service endpoint with the full subject
         let service_endpoint = service_group
