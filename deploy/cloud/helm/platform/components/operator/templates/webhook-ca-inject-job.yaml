@@ -161,9 +161,9 @@ spec:
         - -c
         - |
           set -e
-          
+
           echo "🔐 Injecting CA bundle into webhook configuration..."
-          
+
           # Configuration
           SECRET_NAME="{{ .Values.webhook.certificateSecret.name }}"
           NAMESPACE="{{ .Release.Namespace }}"
@@ -172,7 +172,7 @@ spec:
           {{- else }}
           WEBHOOK_NAME="{{ include "dynamo-operator.fullname" . }}-validating"
           {{- end }}
-          
+
           echo "⏳ Waiting for certificate secret to be available..."
           # Wait for secret (up to 5 minutes)
           for i in $(seq 1 60); do
@@ -187,17 +187,17 @@ spec:
             echo "   Waiting for secret... ($i/60)"
             sleep 5
           done
-          
+
           echo "📝 Extracting CA bundle from secret..."
           CA_BUNDLE=$(kubectl get secret ${SECRET_NAME} \
             -n ${NAMESPACE} \
             -o jsonpath='{.data.ca\.crt}')
-          
+
           if [ -z "$CA_BUNDLE" ]; then
             echo "❌ ERROR: ca.crt not found in secret ${SECRET_NAME}"
             exit 1
           fi
-          
+
           echo "📝 Patching ValidatingWebhookConfiguration..."
           # Patch both webhooks (DynamoComponentDeployment and DynamoGraphDeployment)
           kubectl patch validatingwebhookconfiguration ${WEBHOOK_NAME} \
@@ -213,7 +213,7 @@ spec:
                 \"value\": \"${CA_BUNDLE}\"
               }
             ]"
-          
+
           echo "✅ CA bundle injected successfully!"
           echo "🎉 Webhook configuration complete!"
         securityContext:

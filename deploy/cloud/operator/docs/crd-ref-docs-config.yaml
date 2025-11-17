@@ -35,6 +35,7 @@ processor:
     # - "DynamoComponentDeploymentOverridesSpec$"
     - "DynamoComponentDeploymentStatus$"
     - "BaseStatus$"
+    - "ExcludedNamespacesChecker"
 
 render:
   # Output format - use markdown instead of default asciidoc
