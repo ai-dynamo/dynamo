@@ -88,6 +88,12 @@ func (r *DynamoComponentDeployment) ValidateUpdate(ctx context.Context, oldObj, 
 
 	dynamocomponentdeploymentlog.Info("validate update", "name", newDeployment.Name)
 
+	// Skip validation if the resource is being deleted (to allow finalizer removal)
+	if !newDeployment.DeletionTimestamp.IsZero() {
+		dynamocomponentdeploymentlog.Info("skipping validation for resource being deleted", "name", newDeployment.Name)
+		return nil, nil
+	}
+
 	// Run the same validations as create
 	warnings, err := newDeployment.ValidateCreate(ctx, newObj)
 	if err != nil {
