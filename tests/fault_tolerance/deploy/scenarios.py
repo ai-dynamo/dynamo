@@ -14,13 +14,23 @@
 # limitations under the License.
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Callable, Dict, Optional, Pattern
+from typing import Dict, List, Optional, Pattern, TYPE_CHECKING
 
 from typing_extensions import TypedDict
 
 from tests.utils.managed_deployment import DeploymentSpec
+
+if TYPE_CHECKING:
+    from tests.fault_tolerance.deploy.base_checker import BaseChecker
+
+
+# Import checker factory (actual import, not TYPE_CHECKING)
+def _get_checkers_for_scenario(scenario_name: str, scenario: "Scenario") -> List["BaseChecker"]:
+    """Lazy import to avoid circular dependencies during module initialization."""
+    from tests.fault_tolerance.deploy.checker_factory import get_checkers_for_scenario
+    return get_checkers_for_scenario(scenario_name, scenario)
 
 
 class TestPhase(Enum):
@@ -187,7 +197,9 @@ class Scenario:
     # When set to True, the test will be automatically marked with @pytest.mark.custom_build
     # and excluded from default test runs unless --include-custom-build flag is used
     requires_custom_build: bool = False  # Flag for tests needing custom builds/setup
-    validation: Optional[Callable] = None  # Optional custom validation function
+    # List of checkers to run for validation (scenario + results checkers)
+    # If None, factory will determine checkers based on scenario name and deployment
+    checkers: Optional[List["BaseChecker"]] = field(default=None)
 
 
 # Helper functions to create deployment specs
@@ -563,24 +575,22 @@ for deployment_name, deployment_info in DEPLOYMENT_SPECS.items():
         # Get model from deployment info or use the global model
         scenario_model = deployment_info.get("model", model)
 
-        # Determine custom validation if needed
-        # For now, let pattern matching handle it, but you can override here
-        custom_validation = None
-
-        # Example: Add custom validation for specific scenario
-        # if scenario_name == "vllm-agg-tp-1-dp-1-decode_worker_pod":
-        #     from tests.fault_tolerance.deploy.validations import validate_decode_worker_pod_deletion
-        #     custom_validation = validate_decode_worker_pod_deletion
-
-        scenarios[scenario_name] = Scenario(
+        # Create scenario first (without checkers)
+        scenario = Scenario(
             deployment=deployment_info["spec"],
             load=load_config,
             failures=failure,
             model=scenario_model,
             backend=backend,
-            validation=custom_validation,
+            checkers=None,  # Will be populated below
             requires_custom_build=is_moe,  # MoE models require custom builds
         )
+
+        # Generate checkers for this scenario
+        # This uses the checker factory to determine appropriate validation checks
+        scenario.checkers = _get_checkers_for_scenario(scenario_name, scenario)
+
+        scenarios[scenario_name] = scenario
 
 
 # Add token overflow test scenarios

@@ -9,6 +9,7 @@ from contextlib import contextmanager
 
 import pytest
 
+from tests.fault_tolerance.deploy.base_checker import ValidationContext
 from tests.fault_tolerance.deploy.client_factory import get_client_function
 from tests.fault_tolerance.deploy.parse_factory import parse_test_results
 from tests.fault_tolerance.deploy.parse_results import process_overflow_recovery_test
@@ -18,10 +19,6 @@ from tests.fault_tolerance.deploy.scenarios import (
     Load,
     TokenOverflowFailure,
     scenarios,
-)
-from tests.fault_tolerance.deploy.validations import (
-    get_validation_for_results,
-    get_validation_for_scenario,
 )
 from tests.utils.managed_deployment import ManagedDeployment
 
@@ -253,15 +250,15 @@ test_results_cache = {}
 
 
 @pytest.fixture(autouse=True)
-def test_context(request, scenario):  # noqa: F811
+def validation_context(request, scenario):  # noqa: F811
     """Provides shared context between test execution and validation.
 
     This fixture creates a shared dictionary that the test populates during
     execution (deployment, namespace, affected_pods), then uses that data
-    in teardown to parse results and run validation.
+    in teardown to parse results and run checkers.
 
     Automatically detects result type (AI-Perf or legacy) and uses
-    the appropriate parser. After parsing, immediately runs validation.
+    the appropriate parser. After parsing, immediately runs validation checkers.
     """
     # Shared context that test will populate during execution
     context = {"deployment": None, "namespace": None, "affected_pods": {}}
@@ -309,12 +306,6 @@ def test_context(request, scenario):  # noqa: F811
                 logger.info("Running validation checks...")
                 logger.info("=" * 60)
 
-                # Get validation function for this scenario
-                result_validation_func = get_validation_for_results(test_name, scenario)
-
-                scenario_validation_func = get_validation_for_scenario(
-                    test_name, scenario
-                )
                 # Extract metrics and recovery time from parsed results
                 if isinstance(results, list) and len(results) > 0:
                     result = results[0]
@@ -328,23 +319,26 @@ def test_context(request, scenario):  # noqa: F811
                     metrics = result.get("metrics", {})
                     recovery_time = result.get("recovery_time")
 
-                    if scenario_validation_func:
-                        scenario_validation_func(
-                            scenario=scenario,
-                            log_dir=test_name,
-                            metrics=metrics,
-                            deployment=context.get("deployment"),
-                            namespace=context.get("namespace"),
-                            recovery_time=recovery_time,
-                            affected_pods=context.get("affected_pods", {}),
-                        )
-                    # Run validation with context populated by test
-                    if result_validation_func:
-                        result_validation_func(
-                            scenario=scenario,
-                            metrics=metrics,
-                            recovery_time=recovery_time,
-                        )
+                    # Create ValidationContext for all checkers
+                    validation_ctx = ValidationContext(
+                        scenario=scenario,
+                        log_dir=test_name,
+                        metrics=metrics,
+                        deployment=context.get("deployment"),
+                        namespace=context.get("namespace"),
+                        recovery_time=recovery_time,
+                        affected_pods=context.get("affected_pods", {}),
+                    )
+
+                    # Use pre-generated checkers from scenario
+                    # Checkers were already determined during scenario creation
+                    checkers = scenario.checkers or []
+
+                    # Run all checkers
+                    for checker in checkers:
+                        logger.info(f"\nRunning checker: {checker.name}")
+                        checker.check(validation_ctx)
+
                     logger.info("=" * 60)
                     logger.info("✓ All validation checks passed")
                     logger.info("=" * 60 + "\n")
@@ -448,16 +442,16 @@ async def test_fault_scenario(
     request,
     image,
     namespace,
-    test_context,  # noqa: F811  # Shared context for passing data to validation
+    validation_context,  # noqa: F811  # Shared context for passing data to validation
 ):
     """
     Test dynamo serve deployments with injected failures
 
     Flow:
-    1. test_context fixture creates empty dict: {"deployment": None, "namespace": None, "affected_pods": {}}
-    2. This test populates it: test_context["deployment"] = deployment, etc.
-    3. After test completes, fixture reads test_context and runs validation
-    4. Validation uses the populated values to verify test results and K8s events
+    1. validation_context fixture creates empty dict: {"deployment": None, "namespace": None, "affected_pods": {}}
+    2. This test populates it: validation_context["deployment"] = deployment, etc.
+    3. After test completes, fixture reads validation_context and runs validation checkers
+    4. Checkers use the populated ValidationContext to verify test results and K8s events
     """
 
     logger = logging.getLogger(request.node.name)
@@ -501,8 +495,8 @@ async def test_fault_scenario(
         deployment_spec=scenario.deployment,
     ) as deployment:
         # Populate shared context for validation
-        test_context["deployment"] = deployment
-        test_context["namespace"] = namespace
+        validation_context["deployment"] = deployment
+        validation_context["namespace"] = namespace
 
         with _clients(
             logger,
@@ -514,6 +508,6 @@ async def test_fault_scenario(
         ):
             # Inject failures and capture which pods were affected
             affected_pods = _inject_failures(scenario.failures, logger, deployment)
-            test_context["affected_pods"] = affected_pods
+            validation_context["affected_pods"] = affected_pods
 
             logger.info(f"Affected pods during test: {affected_pods}")
