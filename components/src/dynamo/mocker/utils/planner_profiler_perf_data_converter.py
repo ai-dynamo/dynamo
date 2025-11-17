@@ -7,7 +7,7 @@ This script converts planner profiler's results for mocker to use.
 Example prefill query:
     input:
         isl: 3000
-    
+
     1. binary search prefill_isl to find isl_idx
     2. predicted TTFT is prefill_ttft_ms[isl_idx]
 For chunked prefill, can ignore the KV cache read time and use ISL=prefill_tokens in this iteration.
@@ -17,7 +17,7 @@ Example decode query:
     input:
         active_kv_tokens: 10000
         batch_size: 100
-    
+
     1. derive decode_context_length = active_kv_tokens / batch_size = 100
     2. binary search decode_active_kv_tokens to find kv_idx
     3. binary search decode_context_length to find context_idx
@@ -29,11 +29,16 @@ and might leads to slightly higher latency.
 """
 
 import argparse
-import os
 import logging
+import os
+
 import numpy as np
+
+from dynamo.planner.utils.perf_interpolation import (
+    DecodeInterpolator,
+    PrefillInterpolator,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.planner.utils.perf_interpolation import PrefillInterpolator, DecodeInterpolator
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -47,9 +52,11 @@ args = parser.parse_args()
 if not args.output_dir:
     args.output_dir = args.profile_results_dir
 
-logger.info(f"Converting profile results from {args.profile_results_dir} to {args.output_dir}...")
+logger.info(
+    f"Converting profile results from {args.profile_results_dir} to {args.output_dir}..."
+)
 
-# first convert prefill 
+# first convert prefill
 prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
 
 prefill_x = np.linspace(
@@ -65,7 +72,9 @@ result = {
 }
 
 # then convert decode
-decode_interpolator = DecodeInterpolator(args.profile_results_dir, resolution=args.resolution)
+decode_interpolator = DecodeInterpolator(
+    args.profile_results_dir, resolution=args.resolution
+)
 
 decode_active_kv_tokens = decode_interpolator.xi * decode_interpolator.max_kv_tokens
 decode_context_length = decode_interpolator.yi
