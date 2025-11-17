@@ -37,6 +37,7 @@ var _ admission.CustomValidator = &DynamoGraphDeployment{}
 func (r *DynamoGraphDeployment) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).
 		For(r).
+		WithValidator(r).
 		Complete()
 }
 

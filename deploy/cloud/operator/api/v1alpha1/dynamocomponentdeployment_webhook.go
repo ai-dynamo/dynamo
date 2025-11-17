@@ -37,6 +37,7 @@ var _ admission.CustomValidator = &DynamoComponentDeployment{}
 func (r *DynamoComponentDeployment) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).
 		For(r).
+		WithValidator(r).
 		Complete()
 }
 
