@@ -53,10 +53,10 @@ if [[ $HEAD_NODE -eq 1 ]]; then
     # Llama 4 doesn't support image embedding input, so the prefill worker will also
     # handle image encoding inline.
     # run prefill worker
-    VLLM_NIXL_SIDE_CHANNEL_PORT=20097 python -m dynamo.vllm --multimodal-encode-prefill-worker --is-prefill-worker --model $MODEL_NAME --tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization 0.80 &
+    VLLM_NIXL_SIDE_CHANNEL_PORT=20097 python -m dynamo.vllm --multimodal-encode-prefill-worker --is-prefill-worker --model $MODEL_NAME --tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization 0.80 --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
 else
     # run decode worker on non-head node
-    VLLM_NIXL_SIDE_CHANNEL_PORT=20098 python -m dynamo.vllm --multimodal-decode-worker --model $MODEL_NAME --tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization 0.80 &
+    VLLM_NIXL_SIDE_CHANNEL_PORT=20098 python -m dynamo.vllm --multimodal-decode-worker --model $MODEL_NAME --tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization 0.80 --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
 fi
 
 # Wait for all background processes to complete

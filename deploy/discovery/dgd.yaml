@@ -17,9 +17,6 @@ spec:
       dynamoNamespace: dynamo
       componentType: frontend
       replicas: 1
-      envs:
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
       extraPodSpec:
         mainContainer:
           image: ${IMAGE}
@@ -30,29 +27,6 @@ spec:
       resources:
         limits:
           gpu: "1"
-      envs:
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
-        - name: DYN_SYSTEM_STARTING_HEALTH_STATUS
-          value: "notready"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\", \"clear_kv_blocks\"]"
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        initialDelaySeconds: 60
-        periodSeconds: 10
-        timeoutSeconds: 5
-        failureThreshold: 60
-      livenessProbe:
-        httpGet:
-          path: /live
-          port: 9090
-        initialDelaySeconds: 60
-        periodSeconds: 10
-        timeoutSeconds: 5
-        failureThreshold: 60
       extraPodSpec:
         terminationGracePeriodSeconds: 120
         mainContainer:
@@ -72,29 +46,6 @@ spec:
       resources:
         limits:
           gpu: "1"
-      envs:
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
-        - name: DYN_SYSTEM_STARTING_HEALTH_STATUS
-          value: "notready"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\", \"clear_kv_blocks\"]"
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        initialDelaySeconds: 60
-        periodSeconds: 10
-        timeoutSeconds: 5
-        failureThreshold: 60
-      livenessProbe:
-        httpGet:
-          path: /live
-          port: 9090
-        initialDelaySeconds: 60
-        periodSeconds: 10
-        timeoutSeconds: 5
-        failureThreshold: 60
       extraPodSpec:
         terminationGracePeriodSeconds: 120
         mainContainer:
