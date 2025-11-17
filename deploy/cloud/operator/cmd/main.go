@@ -590,6 +590,22 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoModel")
 		os.Exit(1)
 	}
+
+	// Configure webhooks with lease-based namespace exclusion
+	// In cluster-wide mode, inject ctrlConfig.ExcludedNamespaces (leaseWatcher) so webhooks can defer to namespace-restricted operators
+	// In namespace-restricted mode, webhooks validate without checking leases (ExcludedNamespaces is nil)
+	// The webhooks use LeaseAwareValidator wrapper to transparently add coordination logic
+	if ctrlConfig.RestrictedNamespace == "" {
+		// Cluster-wide mode: inject the same ExcludedNamespaces used by controllers
+		setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
+		nvidiacomv1alpha1.SetWebhookExcludedNamespaces(ctrlConfig.ExcludedNamespaces)
+	} else {
+		// Namespace-restricted mode: no exclusion checking needed (validators not wrapped)
+		setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
+			"restrictedNamespace", ctrlConfig.RestrictedNamespace)
+		nvidiacomv1alpha1.SetWebhookExcludedNamespaces(nil)
+	}
+
 	if err = (&nvidiacomv1alpha1.DynamoComponentDeployment{}).SetupWebhookWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create webhook", "webhook", "DynamoComponentDeployment")
 		os.Exit(1)

@@ -33,11 +33,16 @@ var dynamographdeploymentlog = logf.Log.WithName("dynamographdeployment-resource
 // Ensure DynamoGraphDeployment implements admission.CustomValidator interface
 var _ admission.CustomValidator = &DynamoGraphDeployment{}
 
-// SetupWebhookWithManager will setup the manager to manage the webhooks
+// SetupWebhookWithManager will setup the manager to manage the webhooks.
+// The validator is automatically wrapped with LeaseAwareValidator to add namespace exclusion logic.
 func (r *DynamoGraphDeployment) SetupWebhookWithManager(mgr ctrl.Manager) error {
+	// Wrap the validator with lease-aware logic (reuses the same excludedNamespaces as DynamoComponentDeployment)
+	// This transparently adds namespace exclusion without modifying validation methods
+	validator := NewLeaseAwareValidator(r, webhookExcludedNamespaces)
+
 	return ctrl.NewWebhookManagedBy(mgr).
 		For(r).
-		WithValidator(r).
+		WithValidator(validator).
 		Complete()
 }
 
