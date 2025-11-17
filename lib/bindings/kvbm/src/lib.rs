@@ -13,7 +13,10 @@ use dynamo_runtime::{self as rs, RuntimeConfig, logging, traits::DistributedRunt
 
 use dynamo_llm::{self as llm_rs};
 
+#[cfg(feature = "block-manager")]
 mod block_manager;
+#[cfg(feature = "block-manager")]
+mod kernels;
 
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
@@ -38,6 +41,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     #[cfg(feature = "block-manager")]
     block_manager::add_to_module(m)?;
+
+    #[cfg(feature = "block-manager")]
+    {
+        let kernels = PyModule::new(m.py(), "kernels")?;
+        kernels::add_to_module(&kernels)?;
+        m.add_submodule(&kernels)?;
+    }
 
     Ok(())
 }
