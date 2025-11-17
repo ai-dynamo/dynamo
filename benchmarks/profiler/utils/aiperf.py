@@ -226,6 +226,7 @@ def get_prefill_ttft(
     """
     # DEP-aware measurement (waves of size attention_dp_size)
     if attention_dp_size > 1:
+        assert attn_dp_num_req_ratio > 0, "attn_dp_num_req_ratio must be greater than 0"
         total_concurrency = attention_dp_size * attn_dp_num_req_ratio
         logger.info(
             f"DEP prefill measurement: isl={isl}, attn_dp={attention_dp_size}, attn_dp_num_req_ratio={attn_dp_num_req_ratio}, "
