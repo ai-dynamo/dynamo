@@ -71,7 +71,6 @@ USER dynamo
 RUN uv pip show ai_dynamo_runtime
 RUN uv pip show ai_dynamo
 RUN uv pip show nixl
-RUN uv pip show kvbm
 
 ENTRYPOINT ["/epp"]
 CMD ["/bin/bash"]

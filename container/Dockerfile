@@ -415,8 +415,6 @@ RUN uv pip install \
 RUN uv pip show ai_dynamo_runtime
 RUN uv pip show ai_dynamo
 RUN uv pip show nixl
-RUN uv pip show kvbm
-
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
