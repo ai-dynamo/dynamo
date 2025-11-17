@@ -3720,6 +3720,11 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 						Args: []string{"python3", "-m", "dynamo.vllm", "--tensor-parallel-size", "4", "--pipeline-parallel-size", "1"},
 					},
 				},
+				Resources: &common.Resources{
+					Limits: &common.ResourceItem{
+						GPU: "2",
+					},
+				},
 			},
 			backendFramework: BackendFrameworkVLLM,
 			role:             RoleLeader,
@@ -3734,6 +3739,11 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				ExtraPodSpec: &common.ExtraPodSpec{
 					MainContainer: &corev1.Container{
 						Args: []string{"python3", "-m", "dynamo.vllm", "--tensor-parallel-size", "4", "--pipeline-parallel-size", "1"},
+					},
+				},
+				Resources: &common.Resources{
+					Limits: &common.ResourceItem{
+						GPU: "2",
 					},
 				},
 			},

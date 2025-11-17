@@ -10225,6 +10225,8 @@ spec:
                             Indicates the number of GPUs to request.
                             total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
                           type: string
+                        gpuType:
+                          type: string
                         memory:
                           type: string
                       type: object
@@ -10240,6 +10242,8 @@ spec:
                           description: |-
                             Indicates the number of GPUs to request.
                             total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                          type: string
+                        gpuType:
                           type: string
                         memory:
                           type: string

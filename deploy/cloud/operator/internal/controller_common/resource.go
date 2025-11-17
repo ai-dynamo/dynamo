@@ -423,7 +423,7 @@ func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequiremen
 			if currentResources.Limits == nil {
 				currentResources.Limits = make(corev1.ResourceList)
 			}
-			currentResources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)] = q
+			currentResources.Limits[getGPUResourceName(resources.Limits)] = q
 		}
 		for k, v := range resources.Limits.Custom {
 			q, err := resource.ParseQuantity(v)
@@ -475,6 +475,16 @@ func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequiremen
 		currentResources.Claims = append(currentResources.Claims, resources.Claims...)
 	}
 	return currentResources, nil
+}
+
+func getGPUResourceName(resourceItem *common.ResourceItem) corev1.ResourceName {
+	if resourceItem == nil {
+		return corev1.ResourceName(consts.KubeResourceGPUNvidia)
+	}
+	if resourceItem.GPUType != "" {
+		return corev1.ResourceName(resourceItem.GPUType)
+	}
+	return corev1.ResourceName(consts.KubeResourceGPUNvidia)
 }
 
 type Resource struct {

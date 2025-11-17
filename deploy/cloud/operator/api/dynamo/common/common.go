@@ -27,8 +27,9 @@ type ResourceItem struct {
 	Memory string `json:"memory,omitempty"`
 	// Indicates the number of GPUs to request.
 	// total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
-	GPU    string            `json:"gpu,omitempty"`
-	Custom map[string]string `json:"custom,omitempty"`
+	GPU     string            `json:"gpu,omitempty"`
+	GPUType string            `json:"gpuType,omitempty"`
+	Custom  map[string]string `json:"custom,omitempty"`
 }
 
 type Resources struct {
