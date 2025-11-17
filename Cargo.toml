@@ -14,7 +14,6 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/engines/*",
-    "lib/kvbm",
     "lib/config",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
@@ -107,7 +106,9 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["codec", "net", "rt"] }
 tower-http = { version = "0.6", features = ["trace"] }
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "=0.8.4", features = ["macros"] }
+hyper = { version = "=1.7.0" }
+hyper-util = { version = "=0.1.17" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
@@ -134,3 +135,4 @@ insta.opt-level = 3
 # These make the build much slower but shrink the binary, and could help performance
 codegen-units = 1
 lto = "thin"
+

@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     component::{Endpoint, Instance, TransportType, service::EndpointStatsHandler},
-    config::RequestPlaneMode,
+    distributed::RequestPlaneMode,
     pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint},
     storage::key_value_store,
     traits::DistributedRuntimeProvider,
@@ -113,7 +113,7 @@ impl EndpointConfigBuilder {
         }
 
         // Determine request plane mode
-        let request_plane_mode = RequestPlaneMode::get();
+        let request_plane_mode = endpoint.drt().request_plane();
         tracing::info!(
             "Endpoint starting with request plane mode: {:?}",
             request_plane_mode
