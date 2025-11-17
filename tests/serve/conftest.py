@@ -7,9 +7,13 @@ import os
 import pytest
 from pytest_httpserver import HTTPServer
 
+from tests.serve.common import WORKSPACE_DIR
+
 # Shared constants for multimodal testing
-FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 IMAGE_SERVER_PORT = 8765
+MULTIMODAL_IMG_PATH = os.path.join(
+    WORKSPACE_DIR, "lib/llm/tests/data/media/llm-optimize-deploy-graphic.png"
+)
 
 
 @pytest.fixture(scope="session")
@@ -20,28 +24,27 @@ def httpserver_listen_address():
 @pytest.fixture(scope="function")
 def image_server(httpserver: HTTPServer):
     """
-    Provide an HTTP server that serves test fixture images.
+    Provide an HTTP server that serves test images for multimodal inference.
 
     This function-scoped fixture configures pytest-httpserver to serve
-    images from the fixtures/ directory. It's designed for testing multimodal
+    the LLM optimization diagram image. It's designed for testing multimodal
     inference capabilities where models need to fetch images via HTTP.
 
     Currently serves:
-        - /basketball.png - Basketball image for multimodal tests
+        - /llm-graphic.png - LLM diagram image for multimodal tests
 
     Usage:
         def test_multimodal(image_server):
-            url = "http://localhost:8765/basketball.png"
+            url = "http://localhost:8765/llm-graphic.png"
             # ... use url in your test payload
     """
-    # Load basketball image
-    basketball_path = os.path.join(FIXTURES_DIR, "basketball.png")
-    with open(basketball_path, "rb") as f:
-        basketball_data = f.read()
+    # Load LLM graphic image from shared test data
+    with open(MULTIMODAL_IMG_PATH, "rb") as f:
+        image_data = f.read()
 
     # Configure server endpoint
-    httpserver.expect_request("/basketball.png").respond_with_data(
-        basketball_data,
+    httpserver.expect_request("/llm-graphic.png").respond_with_data(
+        image_data,
         content_type="image/png",
     )
 

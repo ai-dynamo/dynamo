@@ -35,16 +35,19 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
 
-BASKETBALL_IMG_B64 = None
-# Encode basketball image for base64 multimodal tests
-with open(
-    os.path.join(os.path.dirname(__file__), "fixtures", "basketball.png"), "rb"
-) as f:
-    BASKETBALL_IMG_B64 = base64.b64encode(f.read()).decode()
+# Path to LLM graphic image for multimodal tests
+MULTIMODAL_IMG_PATH = os.path.join(
+    WORKSPACE_DIR, "lib/llm/tests/data/media/llm-optimize-deploy-graphic.png"
+)
+
+MULTIMODAL_IMG_B64 = None
+# Encode LLM graphic image for base64 multimodal tests
+with open(MULTIMODAL_IMG_PATH, "rb") as f:
+    MULTIMODAL_IMG_B64 = base64.b64encode(f.read()).decode()
 
 # HTTP URL for image (pytest-httpserver will serve this)
 IMAGE_SERVER_PORT = 8765
-BASKETBALL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/basketball.png"
+MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
 
 # vLLM test configurations
 vllm_configs = {
@@ -129,12 +132,14 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": BASKETBALL_IMG_URL},
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["basketball"],
+                expected_response=["flowchart", "LLM"],
                 temperature=0.0,
+                min_tokens=100,
+                max_tokens=100,
             )
         ],
     ),
@@ -153,11 +158,13 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": BASKETBALL_IMG_URL},
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["basketball"],
+                expected_response=["flowchart", "LLM"],
+                min_tokens=100,
+                max_tokens=100,
             )
         ],
     ),
@@ -178,12 +185,14 @@ vllm_configs = {
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/png;base64,{BASKETBALL_IMG_B64}"
+                            "url": f"data:image/png;base64,{MULTIMODAL_IMG_B64}"
                         },
                     },
                 ],
                 repeat_count=1,
-                expected_response=["basketball"],
+                expected_response=["flowchart", "LLM"],
+                min_tokens=100,
+                max_tokens=100,
             ),
             # HTTP URL test
             chat_payload(
@@ -191,11 +200,13 @@ vllm_configs = {
                     {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": BASKETBALL_IMG_URL},
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["basketball"],
+                expected_response=["flowchart", "LLM"],
+                min_tokens=100,
+                max_tokens=100,
             ),
         ],
     ),
