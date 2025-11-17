@@ -81,6 +81,9 @@ pub enum KvCacheEventError {
 
     #[error("Failed to find block")]
     BlockNotFound,
+
+    #[error("Invalid block sequence")]
+    InvalidBlockSequence,
 }
 
 /// A shared reference to a [`RadixBlock`].
@@ -391,7 +394,7 @@ impl RadixTree {
                             block_hash = ?block_id.block_hash,
                             "Detected self-referential block insertion; skipping block"
                         );
-                        break;
+                        return Err(KvCacheEventError::InvalidBlockSequence);
                     }
 
                     let mut inner = current.borrow_mut();
@@ -616,6 +619,7 @@ pub struct KvIndexerMetrics {
 pub const METRIC_STATUS_OK: &str = "ok";
 pub const METRIC_STATUS_PARENT_NOT_FOUND: &str = "parent_block_not_found";
 pub const METRIC_STATUS_BLOCK_NOT_FOUND: &str = "block_not_found";
+pub const METRIC_STATUS_INVALID_BLOCK: &str = "invalid_block";
 
 /// Metric event labels.
 pub const METRIC_EVENT_STORED: &str = "stored";
@@ -688,6 +692,7 @@ impl KvIndexerMetrics {
                 let error_label = match e {
                     KvCacheEventError::ParentBlockNotFound => METRIC_STATUS_PARENT_NOT_FOUND,
                     KvCacheEventError::BlockNotFound => METRIC_STATUS_BLOCK_NOT_FOUND,
+                    KvCacheEventError::InvalidBlockSequence => METRIC_STATUS_INVALID_BLOCK,
                 };
                 self.kv_cache_events_applied
                     .with_label_values(&[event_type, error_label])
@@ -1746,6 +1751,29 @@ mod tests {
             result.unwrap_err(),
             KvCacheEventError::BlockNotFound
         ));
+
+        // Prepare a valid root block
+        trie.apply_event(create_store_event(worker_0, 1, vec![0], None))
+            .unwrap();
+
+        // Self-referential block should be rejected
+        let result = trie.apply_event(create_store_event(
+            worker_0,
+            2,
+            vec![0],
+            Some(ExternalSequenceBlockHash(0)),
+        ));
+        assert!(matches!(
+            result.unwrap_err(),
+            KvCacheEventError::InvalidBlockSequence
+        ));
+
+        // Tree remains unchanged beyond the root block
+        assert_eq!(
+            trie.root.borrow().children.len(),
+            1,
+            "Invalid block must not mutate the radix tree"
+        );
     }
 
     #[test]
