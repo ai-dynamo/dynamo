@@ -1794,4 +1794,93 @@ pub mod kserve_test {
             "Expected error message about missing value"
         );
     }
+
+    #[tokio::test]
+    async fn test_kserve_grpc_metrics_endpoint() {
+        use tokio::time::timeout;
+
+        // Test that the HTTP metrics endpoint is properly exposed alongside gRPC service
+        let grpc_port = get_random_port().await;
+        let http_metrics_port = get_random_port().await;
+
+        let service = KserveService::builder()
+            .port(grpc_port)
+            .http_metrics_port(http_metrics_port)
+            .build()
+            .unwrap();
+
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        // Add a mock completions engine
+        let card = ModelDeploymentCard::with_name_only("test_model");
+        let engine = Arc::new(SplitEngine {});
+        manager
+            .add_completions_model("test_model", card.mdcsum(), engine)
+            .unwrap();
+
+        // Start both HTTP and gRPC servers
+        let cancel_token = CancellationToken::new();
+        let http_service = service.http_service().clone();
+        let grpc_task = service.spawn(cancel_token.clone());
+        let http_task = http_service.spawn(cancel_token.clone());
+
+        // Wait for services to be ready
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Test that the HTTP metrics endpoint is accessible
+        let client = reqwest::Client::new();
+        let metrics_response = timeout(
+            Duration::from_secs(5),
+            client.get(format!("http://localhost:{}/metrics", http_metrics_port)).send()
+        )
+        .await
+        .expect("Metrics request timed out")
+        .expect("Metrics request failed");
+
+        assert!(
+            metrics_response.status().is_success(),
+            "Metrics endpoint should be accessible"
+        );
+
+        let metrics_body = metrics_response.text().await.unwrap();
+        println!("=== gRPC METRICS ENDPOINT ===");
+        println!("{}", metrics_body);
+        println!("=== END METRICS ===");
+
+        // Verify that metrics are present
+        assert!(
+            metrics_body.contains("dynamo_frontend_requests_total"),
+            "Metrics should contain request counter"
+        );
+        assert!(
+            metrics_body.contains("dynamo_frontend_inflight_requests"),
+            "Metrics should contain inflight gauge"
+        );
+
+        // Test that gRPC service is also running by making a model metadata request
+        let channel = Channel::from_shared(format!("http://localhost:{}", grpc_port))
+            .unwrap()
+            .connect()
+            .await
+            .expect("Failed to connect to gRPC service");
+
+        let mut grpc_client = GrpcInferenceServiceClient::new(channel);
+        let metadata_response = timeout(
+            Duration::from_secs(5),
+            grpc_client.model_metadata(Request::new(ModelMetadataRequest {
+                name: "test_model".to_string(),
+                version: "".to_string(),
+            }))
+        )
+        .await
+        .expect("Model metadata request timed out")
+        .expect("Model metadata request failed");
+
+        assert_eq!(metadata_response.get_ref().name, "test_model");
+
+        // Clean up
+        cancel_token.cancel();
+        let _ = tokio::join!(grpc_task, http_task);
+    }
 }
