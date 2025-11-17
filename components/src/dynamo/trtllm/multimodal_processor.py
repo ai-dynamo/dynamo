@@ -63,6 +63,9 @@ class MultimodalRequestProcessor:
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
         parsed = urlparse(path)
+        # file:// URLs have scheme but no netloc, treat them as local paths
+        if parsed.scheme == "file":
+            return False
         return bool(parsed.scheme and parsed.netloc)
 
     def load_tensor_from_path_or_url(self, path: str) -> torch.Tensor:
@@ -97,7 +100,12 @@ class MultimodalRequestProcessor:
                     )
                     raise RuntimeError("Failed to load tensor")
 
-                resolved_path = Path(path).resolve()
+                # Strip file:// prefix if present
+                local_path = path
+                if local_path.startswith("file://"):
+                    local_path = local_path[7:]  # Remove "file://"
+                
+                resolved_path = Path(local_path).resolve()
                 allowed_path = Path(self.allowed_local_media_path).resolve()
 
                 # Secure path validation: Check if the resolved path is actually within allowed directory
