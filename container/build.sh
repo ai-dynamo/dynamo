@@ -59,7 +59,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TRTLLM_BASE_IMAGE_TAG=25.06-py3
+TRTLLM_BASE_IMAGE_TAG=25.10-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -98,7 +98,7 @@ TRTLLM_GIT_URL=""
 DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.1.0rc5"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc2"
 TENSORRTLLM_PIP_WHEEL=""
 
 
