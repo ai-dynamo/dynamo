@@ -368,8 +368,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 
 		// if k8s discovery is enabled, create a service for each component
 		// else, only create for the frontend component
-		if r.Config.IsK8sDiscoveryEnabled(dynamoDeployment.Annotations) || component.ComponentType == consts.ComponentTypeFrontend {
-			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamoDeployment, component, componentName)
+		isK8sDiscoveryEnabled := r.Config.IsK8sDiscoveryEnabled(dynamoDeployment.Annotations)
+		if isK8sDiscoveryEnabled || component.ComponentType == consts.ComponentTypeFrontend {
+			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamoDeployment, component, componentName, isK8sDiscoveryEnabled)
 			if err != nil {
 				logger.Error(err, "failed to generate the main component service")
 				return "", "", "", fmt.Errorf("failed to generate the main component service: %w", err)

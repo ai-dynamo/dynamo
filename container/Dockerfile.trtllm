@@ -206,6 +206,8 @@ RUN apt-get update && \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
         python3-pip \
+        # jq for polling various endpoints and health checks
+        jq \
         # CUDA/ML libraries
         libcudnn9-cuda-12 \
         # Network and communication libraries
