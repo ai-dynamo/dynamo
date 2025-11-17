@@ -70,6 +70,44 @@ fn replace_non_standard_blocks(template: &str) -> String {
     result
 }
 
+/// Detects whether a chat template requires message content as arrays (multimodal)
+/// or accepts simple strings (standard text-only templates).
+///
+/// This function test-renders the template with both formats:
+/// - Array format: `[{"type": "text", "text": "X"}]`
+/// - String format: `"X"`
+///
+/// If the array format works but string format doesn't produce output,
+/// the template requires arrays (e.g., llava, Qwen-VL multimodal templates).
+fn detect_content_array_usage(env: &Environment) -> bool {
+    use minijinja::context;
+    use serde_json::json;
+
+    // Test with array format
+    let test_array = context! {
+        messages => json!([{"role": "user", "content": [{"type": "text", "text": "X"}]}]),
+        add_generation_prompt => false,
+    };
+
+    // Test with string format
+    let test_string = context! {
+        messages => json!([{"role": "user", "content": "X"}]),
+        add_generation_prompt => false,
+    };
+
+    let out_array = env
+        .get_template("default")
+        .and_then(|t| t.render(&test_array))
+        .unwrap_or_default();
+    let out_string = env
+        .get_template("default")
+        .and_then(|t| t.render(&test_string))
+        .unwrap_or_default();
+
+    // If array works but string doesn't, template requires arrays
+    out_array.contains("X") && !out_string.contains("X")
+}
+
 impl JinjaEnvironment {
     fn env(self) -> Environment<'static> {
         self.env
@@ -165,11 +203,20 @@ impl HfTokenizerConfigJsonFormatter {
             }
         }
 
+        // Detect at model load time whether this template requires content arrays
+        let requires_content_arrays = detect_content_array_usage(&env);
+
+        tracing::info!(
+            "Template analysis: requires_content_arrays = {}",
+            requires_content_arrays
+        );
+
         Ok(HfTokenizerConfigJsonFormatter {
             env,
             config,
             mixins: Arc::new(mixins),
             supports_add_generation_prompt: supports_add_generation_prompt.unwrap_or(false),
+            requires_content_arrays,
         })
     }
 }
