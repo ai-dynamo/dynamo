@@ -18,7 +18,21 @@ fn main() {
         build_with_prebuilt_kernels();
     } else {
         build_from_source();
+
         // Only link against CUDA runtime when building from source
+        // Add CUDA library search paths
+        if let Ok(cuda_path) = env::var("CUDA_PATH") {
+            println!("cargo:rustc-link-search=native={}/lib64", cuda_path);
+            println!("cargo:rustc-link-search=native={}/lib", cuda_path);
+        } else if let Ok(cuda_home) = env::var("CUDA_HOME") {
+            println!("cargo:rustc-link-search=native={}/lib64", cuda_home);
+            println!("cargo:rustc-link-search=native={}/lib", cuda_home);
+        } else {
+            // Try standard paths
+            println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
+            println!("cargo:rustc-link-search=native=/usr/local/cuda/lib");
+        }
+
         println!("cargo:rustc-link-lib=cudart");
     }
 }

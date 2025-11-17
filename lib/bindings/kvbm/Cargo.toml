@@ -26,7 +26,7 @@ block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc", "dep:kv
 [dependencies]
 dynamo-llm = { path = "../../llm" }
 dynamo-runtime = { path = "../../runtime" }
-kvbm_kernels = { path = "../../kvbm-kernels", package = "dynamo-kvbm-kernels", optional = true, features = ["prebuilt-kernels"] }
+kvbm_kernels = { path = "../../kvbm-kernels", package = "dynamo-kvbm-kernels", optional = true }
 
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }
