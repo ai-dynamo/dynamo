@@ -6,13 +6,13 @@
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"meta-llama/Llama-4-Maverick-17B-128E-Instruct"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"meta-llama/Llama-4-Maverick-17B-128E-Instruct"}
-export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/llama4/trtllm/multimodal/prefill.yaml"}
-export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/llama4/trtllm/multimodal/prefill.yaml"}
+export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/llama4/trtllm/multimodal/llama4-Scout/prefill.yaml"}
+export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/llama4/trtllm/multimodal/llama4-Scout/decode.yaml"}
 # Placeholder for now, this is NO-OP as encoder just loads embeddings path, done to maintain consistency with other workers adn future api enhancements
-export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/llama4/trtllm/multimodal/prefill.yaml"}
-export PREFILL_CUDA_VISIBLE_DEVICES=${PREFILL_CUDA_VISIBLE_DEVICES:-"0"}
-export DECODE_CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-"1"}
-export ENCODE_CUDA_VISIBLE_DEVICES=${ENCODE_CUDA_VISIBLE_DEVICES:-"2"}
+export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/llama4/trtllm/multimodal/llama4-Scout/encode.yaml"}
+export PREFILL_CUDA_VISIBLE_DEVICES=${PREFILL_CUDA_VISIBLE_DEVICES:-"0,1,2,3"}
+export DECODE_CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-"4,5,6,7"}
+export ENCODE_CUDA_VISIBLE_DEVICES=${ENCODE_CUDA_VISIBLE_DEVICES:-"0"}
 export ENCODE_ENDPOINT=${ENCODE_ENDPOINT:-"dyn://dynamo.tensorrt_llm_encode.generate"}
 export MODALITY=${MODALITY:-"multimodal"}
 export ALLOWED_LOCAL_MEDIA_PATH=${ALLOWED_LOCAL_MEDIA_PATH:-"/tmp"}
