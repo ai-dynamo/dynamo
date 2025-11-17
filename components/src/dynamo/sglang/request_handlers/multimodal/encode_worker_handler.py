@@ -159,7 +159,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             # Create descriptor for the multimodal data
             descriptor = connect.Descriptor(precomputed_embeddings)
 
-            with self._connector.create_readable(descriptor) as readable:
+            with await self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()
 
                 logger.debug(f"Request: {request.model_dump_json()}")
@@ -184,6 +184,5 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
         self._connector = connect.Connector()
-        await self._connector.initialize()
 
         logger.info("Startup completed.")
