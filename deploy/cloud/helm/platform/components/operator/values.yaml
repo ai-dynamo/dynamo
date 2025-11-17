@@ -122,6 +122,16 @@ dynamo:
     secretName: "mpi-run-ssh-secret"
     sshKeygen:
       enabled: true
+      # Image for SSH key generation (must have ssh-keygen)
+      keygenImage:
+        repository: bitnamisecure/git
+        tag: latest
+        pullPolicy: IfNotPresent
+      # Image for kubectl operations (must have kubectl)
+      kubectlImage:
+        repository: alpine/k8s
+        tag: 1.34.1
+        pullPolicy: IfNotPresent
 
 
 #imagePullSecrets: []

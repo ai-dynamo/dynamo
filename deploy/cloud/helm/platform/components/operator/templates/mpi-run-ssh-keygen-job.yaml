@@ -48,7 +48,8 @@ spec:
         fsGroup: 65534
       initContainers:
       - name: keygen
-        image: bitnamisecure/git:latest
+        image: {{ .Values.dynamo.mpiRun.sshKeygen.keygenImage.repository }}:{{ .Values.dynamo.mpiRun.sshKeygen.keygenImage.tag }}
+        imagePullPolicy: {{ .Values.dynamo.mpiRun.sshKeygen.keygenImage.pullPolicy }}
         volumeMounts:
         - name: shared
           mountPath: /shared
@@ -67,7 +68,8 @@ spec:
           echo "SSH keys generated and saved to shared volume"
       containers:
       - name: kubectl-create-secret
-        image: alpine/k8s:1.34.1
+        image: {{ .Values.dynamo.mpiRun.sshKeygen.kubectlImage.repository }}:{{ .Values.dynamo.mpiRun.sshKeygen.kubectlImage.tag }}
+        imagePullPolicy: {{ .Values.dynamo.mpiRun.sshKeygen.kubectlImage.pullPolicy }}
         volumeMounts:
         - name: shared
           mountPath: /shared
