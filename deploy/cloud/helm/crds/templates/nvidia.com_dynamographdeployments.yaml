@@ -10361,6 +10361,9 @@ spec:
                                   total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
                                 type: string
                               gpuType:
+                                description: |-
+                                  Can specify a custom GPU type, e.g. "gpu.intel.com/xe"
+                                  By default if not specified, the GPU type is "nvidia.com/gpu"
                                 type: string
                               memory:
                                 type: string
@@ -10379,6 +10382,9 @@ spec:
                                   total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
                                 type: string
                               gpuType:
+                                description: |-
+                                  Can specify a custom GPU type, e.g. "gpu.intel.com/xe"
+                                  By default if not specified, the GPU type is "nvidia.com/gpu"
                                 type: string
                               memory:
                                 type: string

@@ -26,7 +26,6 @@ import (
 
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
@@ -867,7 +866,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											Limits: corev1.ResourceList{
 												corev1.ResourceMemory: resource.MustParse("20Gi"),
 												corev1.ResourceCPU:    resource.MustParse("10"),
-												corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+												corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
 											},
 										},
 										LivenessProbe: &corev1.Probe{
@@ -991,7 +990,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											Limits: corev1.ResourceList{
 												corev1.ResourceMemory: resource.MustParse("20Gi"),
 												corev1.ResourceCPU:    resource.MustParse("10"),
-												corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+												"nvidia.com/gpu":      resource.MustParse("1"),
 											},
 											Requests: corev1.ResourceList{
 												corev1.ResourceCPU:    resource.MustParse("300m"),
