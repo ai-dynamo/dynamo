@@ -16,7 +16,7 @@
 import re
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Dict, List, Optional, Pattern, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Optional, Pattern
 
 from typing_extensions import TypedDict
 
@@ -27,9 +27,12 @@ if TYPE_CHECKING:
 
 
 # Import checker factory (actual import, not TYPE_CHECKING)
-def _get_checkers_for_scenario(scenario_name: str, scenario: "Scenario") -> List["BaseChecker"]:
+def _get_checkers_for_scenario(
+    scenario_name: str, scenario: "Scenario"
+) -> List["BaseChecker"]:
     """Lazy import to avoid circular dependencies during module initialization."""
     from tests.fault_tolerance.deploy.checker_factory import get_checkers_for_scenario
+
     return get_checkers_for_scenario(scenario_name, scenario)
 
 

@@ -32,9 +32,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ValidationContext:
     """Standardized context passed to all checkers.
-    
+
     This ensures all checkers receive the same input structure.
-    
+
     Attributes:
         scenario: Scenario object being tested
         log_dir: Test log directory
@@ -56,13 +56,13 @@ class ValidationContext:
 
 class BaseChecker(ABC):
     """Abstract base class for all validation checkers.
-    
+
     All checkers must:
     1. Implement check() method
     2. Accept ValidationContext as input
     3. Raise AssertionError on validation failure
     4. Log validation progress and results
-    
+
     Usage:
         class MyChecker(BaseChecker):
             def check(self, context: ValidationContext) -> None:
@@ -72,7 +72,7 @@ class BaseChecker(ABC):
 
     def __init__(self, name: Optional[str] = None):
         """Initialize checker with optional name.
-        
+
         Args:
             name: Human-readable name for the checker (defaults to class name)
         """
@@ -82,10 +82,10 @@ class BaseChecker(ABC):
     @abstractmethod
     def check(self, context: ValidationContext) -> None:
         """Perform validation check.
-        
+
         Args:
             context: ValidationContext with all necessary data
-            
+
         Raises:
             AssertionError: If validation fails
         """
@@ -93,7 +93,7 @@ class BaseChecker(ABC):
 
     def __call__(self, context: ValidationContext) -> None:
         """Allow checker to be called directly.
-        
+
         Args:
             context: ValidationContext with all necessary data
         """
@@ -103,4 +103,3 @@ class BaseChecker(ABC):
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(name='{self.name}')"
-

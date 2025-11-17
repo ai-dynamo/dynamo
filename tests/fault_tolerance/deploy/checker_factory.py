@@ -41,16 +41,16 @@ logger = logging.getLogger(__name__)
 
 def get_checkers_for_scenario(test_name: str, scenario: Scenario) -> List[BaseChecker]:
     """Get appropriate list of checkers for a scenario.
-    
+
     This factory function determines which checkers to use based on:
     1. Explicit checkers in scenario object (highest priority)
     2. Pattern matching on test name
     3. Deployment redundancy (DP > 1)
-    
+
     Args:
         test_name: Full test name (e.g., "test_fault_scenario[vllm-agg-tp-1-dp-1-decode_worker_pod]")
         scenario: Scenario object
-        
+
     Returns:
         List of BaseChecker instances to run
     """
@@ -80,11 +80,11 @@ def get_checkers_for_scenario(test_name: str, scenario: Scenario) -> List[BaseCh
 
 def get_scenario_checker(test_name: str, scenario: Scenario) -> BaseChecker:
     """Get appropriate scenario checker (Stage 1).
-    
+
     Args:
         test_name: Full test name
         scenario: Scenario object
-        
+
     Returns:
         Scenario checker instance
     """
@@ -97,7 +97,17 @@ def get_scenario_checker(test_name: str, scenario: Scenario) -> BaseChecker:
         return PodDeletionChecker()
 
     # Process termination scenarios (not pod deletions)
-    if any(x in test_name for x in ["decode_worker]", "prefill_worker]", "frontend]", "scheduler]", "detokenizer]", "engine_core]"]):
+    if any(
+        x in test_name
+        for x in [
+            "decode_worker]",
+            "prefill_worker]",
+            "frontend]",
+            "scheduler]",
+            "detokenizer]",
+            "engine_core]",
+        ]
+    ):
         return ProcessTerminationChecker()
 
     # Default: no specific scenario checker
@@ -107,13 +117,13 @@ def get_scenario_checker(test_name: str, scenario: Scenario) -> BaseChecker:
 
 def get_results_checker(test_name: str, scenario: Scenario) -> BaseChecker:
     """Get appropriate results checker (Stage 2).
-    
+
     Determines checker based on deployment redundancy (DP).
-    
+
     Args:
         test_name: Full test name
         scenario: Scenario object
-        
+
     Returns:
         Results checker instance
     """
@@ -138,7 +148,9 @@ def get_results_checker(test_name: str, scenario: Scenario) -> BaseChecker:
             # Agg deployment uses TRTLLMWorker
             worker_service_name = "TRTLLMWorker"
     else:
-        logger.warning(f"Unsupported backend: {scenario.backend}, using default checker")
+        logger.warning(
+            f"Unsupported backend: {scenario.backend}, using default checker"
+        )
         return SingleWorkerResultsChecker()
 
     try:
@@ -150,9 +162,8 @@ def get_results_checker(test_name: str, scenario: Scenario) -> BaseChecker:
 
     # Select appropriate results checker
     if has_redundancy:
-        logger.info(f"Using HighAvailabilityResultsChecker (DP > 1)")
+        logger.info("Using HighAvailabilityResultsChecker (DP > 1)")
         return HighAvailabilityResultsChecker()
     else:
-        logger.info(f"Using SingleWorkerResultsChecker (DP = 1)")
+        logger.info("Using SingleWorkerResultsChecker (DP = 1)")
         return SingleWorkerResultsChecker()
-

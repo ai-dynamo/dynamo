@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 class PodDeletionChecker(BaseChecker):
     """Verify that pod deletion scenario was executed correctly.
-    
+
     Checks:
     - Specific pods were deleted (via K8s events)
     - Pod lifecycle events (deletion → recreation)
@@ -57,8 +57,16 @@ class PodDeletionChecker(BaseChecker):
     def check(self, context: ValidationContext) -> None:
         """Verify pod deletion via K8s events."""
         self.logger.info("╔" + "═" * 78 + "╗")
-        self.logger.info("║" + " " * 20 + "STAGE 1: SCENARIO VERIFICATION" + " " * 28 + "║")
-        self.logger.info("║" + " " * 15 + "(Verify test scenario executed correctly)" + " " * 20 + "║")
+        self.logger.info(
+            "║" + " " * 20 + "STAGE 1: SCENARIO VERIFICATION" + " " * 28 + "║"
+        )
+        self.logger.info(
+            "║"
+            + " " * 15
+            + "(Verify test scenario executed correctly)"
+            + " " * 20
+            + "║"
+        )
         self.logger.info("╚" + "═" * 78 + "╝")
         self.logger.info("")
 
@@ -131,7 +139,7 @@ class PodDeletionChecker(BaseChecker):
 
 class ProcessTerminationChecker(BaseChecker):
     """Verify that process termination scenario was executed correctly.
-    
+
     Checks for process termination by looking at:
     1. Container restart count (most reliable)
     2. Container restart events in K8s
@@ -143,7 +151,9 @@ class ProcessTerminationChecker(BaseChecker):
     def check(self, context: ValidationContext) -> None:
         """Verify process termination via container restarts."""
         self.logger.info("╔" + "═" * 78 + "╗")
-        self.logger.info("║" + " " * 20 + "STAGE 1: SCENARIO VERIFICATION" + " " * 28 + "║")
+        self.logger.info(
+            "║" + " " * 20 + "STAGE 1: SCENARIO VERIFICATION" + " " * 28 + "║"
+        )
         self.logger.info(
             "║"
             + " " * 10
@@ -167,7 +177,9 @@ class ProcessTerminationChecker(BaseChecker):
                 # Skip pod deletions - only check process terminations
                 if "delete_pod" not in failure_key:
                     terminated_pod_names.extend(pod_list)
-                    self.logger.info(f"Target pod(s) for process termination: {pod_list}")
+                    self.logger.info(
+                        f"Target pod(s) for process termination: {pod_list}"
+                    )
                     self.logger.info(f"Process killed: {failure_key}")
 
             if terminated_pod_names:
@@ -213,7 +225,9 @@ class ProcessTerminationChecker(BaseChecker):
                             scenario_verified = True
 
                 if scenario_verified:
-                    self.logger.info("\n✓ STAGE 1.1 PASSED: Process termination confirmed")
+                    self.logger.info(
+                        "\n✓ STAGE 1.1 PASSED: Process termination confirmed"
+                    )
                 else:
                     self.logger.warning(
                         "\n⚠ STAGE 1.1 WARNING: Could not fully confirm process termination. "
@@ -240,11 +254,17 @@ class NoFailureChecker(BaseChecker):
     def check(self, context: ValidationContext) -> None:
         """No specific verification needed for baseline."""
         self.logger.info("╔" + "═" * 78 + "╗")
-        self.logger.info("║" + " " * 20 + "STAGE 1: SCENARIO VERIFICATION" + " " * 28 + "║")
-        self.logger.info("║" + " " * 15 + "(No failures - baseline scenario)" + " " * 26 + "║")
+        self.logger.info(
+            "║" + " " * 20 + "STAGE 1: SCENARIO VERIFICATION" + " " * 28 + "║"
+        )
+        self.logger.info(
+            "║" + " " * 15 + "(No failures - baseline scenario)" + " " * 26 + "║"
+        )
         self.logger.info("╚" + "═" * 78 + "╝")
         self.logger.info("")
-        self.logger.info("✓ STAGE 1 COMPLETE: No failures to verify (baseline scenario)\n")
+        self.logger.info(
+            "✓ STAGE 1 COMPLETE: No failures to verify (baseline scenario)\n"
+        )
 
 
 # ============================================================================
@@ -257,7 +277,7 @@ class SuccessRateChecker(BaseChecker):
 
     def __init__(self, min_threshold: float = 0.80, stage_label: str = ""):
         """Initialize success rate checker.
-        
+
         Args:
             min_threshold: Minimum acceptable success rate (0.0 to 1.0)
             stage_label: Optional label for logging (e.g., "High Availability")
@@ -290,7 +310,7 @@ class RecoveryTimeChecker(BaseChecker):
 
     def __init__(self, max_seconds: Optional[float] = None):
         """Initialize recovery time checker.
-        
+
         Args:
             max_seconds: Maximum acceptable recovery time (None = no check)
         """
@@ -356,7 +376,9 @@ class BasicRecoveryChecker(BaseChecker):
             raise AssertionError(
                 "✗ STAGE 2.1 FAILED: No requests succeeded - system did not recover"
             )
-        self.logger.info(f"✓ System recovered: {successful_requests} requests succeeded")
+        self.logger.info(
+            f"✓ System recovered: {successful_requests} requests succeeded"
+        )
 
 
 # ============================================================================
@@ -366,7 +388,7 @@ class BasicRecoveryChecker(BaseChecker):
 
 class HighAvailabilityResultsChecker(BaseChecker):
     """Composite checker for high availability scenarios.
-    
+
     Validates:
     - High success rate (≥90%)
     - Fast recovery time (≤60s)
@@ -385,30 +407,36 @@ class HighAvailabilityResultsChecker(BaseChecker):
     def check(self, context: ValidationContext) -> None:
         """Run all high availability checks."""
         self.logger.info("╔" + "═" * 78 + "╗")
-        self.logger.info("║" + " " * 20 + "STAGE 2: RESULTS VERIFICATION" + " " * 29 + "║")
-        self.logger.info("║" + " " * 17 + "(High availability - with redundancy)" + " " * 22 + "║")
+        self.logger.info(
+            "║" + " " * 20 + "STAGE 2: RESULTS VERIFICATION" + " " * 29 + "║"
+        )
+        self.logger.info(
+            "║" + " " * 17 + "(High availability - with redundancy)" + " " * 22 + "║"
+        )
         self.logger.info("╚" + "═" * 78 + "╝")
         self.logger.info("")
 
         # Run individual checks
         BasicRecoveryChecker().check(context)
         SuccessRateChecker(
-            min_threshold=self.min_success_rate,
-            stage_label="High Availability"
+            min_threshold=self.min_success_rate, stage_label="High Availability"
         ).check(context)
         RecoveryTimeChecker(max_seconds=self.max_recovery_time).check(context)
 
         self.logger.info("\n")
         self.logger.info("╔" + "═" * 78 + "╗")
         self.logger.info(
-            "║" + "VALIDATION STAGE 2 PASSED: Results verification passed" + " " * 30 + "║"
+            "║"
+            + "VALIDATION STAGE 2 PASSED: Results verification passed"
+            + " " * 30
+            + "║"
         )
         self.logger.info("╚" + "═" * 78 + "╝")
 
 
 class SingleWorkerResultsChecker(BaseChecker):
     """Composite checker for single worker scenarios.
-    
+
     Validates:
     - Acceptable success rate (≥10%)
     - Reasonable recovery time (≤180s)
@@ -427,23 +455,29 @@ class SingleWorkerResultsChecker(BaseChecker):
     def check(self, context: ValidationContext) -> None:
         """Run all single worker checks."""
         self.logger.info("╔" + "═" * 78 + "╗")
-        self.logger.info("║" + " " * 20 + "STAGE 2: RESULTS VERIFICATION" + " " * 29 + "║")
-        self.logger.info("║" + " " * 17 + "(Single worker - no redundancy)" + " " * 28 + "║")
+        self.logger.info(
+            "║" + " " * 20 + "STAGE 2: RESULTS VERIFICATION" + " " * 29 + "║"
+        )
+        self.logger.info(
+            "║" + " " * 17 + "(Single worker - no redundancy)" + " " * 28 + "║"
+        )
         self.logger.info("╚" + "═" * 78 + "╝")
         self.logger.info("")
 
         # Run individual checks
         BasicRecoveryChecker().check(context)
         SuccessRateChecker(
-            min_threshold=self.min_success_rate,
-            stage_label="Single Worker"
+            min_threshold=self.min_success_rate, stage_label="Single Worker"
         ).check(context)
         RecoveryTimeChecker(max_seconds=self.max_recovery_time).check(context)
 
         self.logger.info("\n")
         self.logger.info("╔" + "═" * 78 + "╗")
         self.logger.info(
-            "║" + "VALIDATION STAGE 2 PASSED: Results verification passed" + " " * 30 + "║"
+            "║"
+            + "VALIDATION STAGE 2 PASSED: Results verification passed"
+            + " " * 30
+            + "║"
         )
         self.logger.info("╚" + "═" * 78 + "╝")
 
@@ -457,7 +491,9 @@ class BaselineResultsChecker(BaseChecker):
     def check(self, context: ValidationContext) -> None:
         """Run baseline checks."""
         self.logger.info("╔" + "═" * 78 + "╗")
-        self.logger.info("║" + " " * 20 + "STAGE 2: RESULTS VERIFICATION" + " " * 29 + "║")
+        self.logger.info(
+            "║" + " " * 20 + "STAGE 2: RESULTS VERIFICATION" + " " * 29 + "║"
+        )
         self.logger.info("║" + " " * 17 + "(No failures - baseline)" + " " * 34 + "║")
         self.logger.info("╚" + "═" * 78 + "╝")
         self.logger.info("")
@@ -467,7 +503,9 @@ class BaselineResultsChecker(BaseChecker):
         self.logger.info("\n")
         self.logger.info("╔" + "═" * 78 + "╗")
         self.logger.info(
-            "║" + "VALIDATION STAGE 2 PASSED: Results verification passed" + " " * 30 + "║"
+            "║"
+            + "VALIDATION STAGE 2 PASSED: Results verification passed"
+            + " " * 30
+            + "║"
         )
         self.logger.info("╚" + "═" * 78 + "╝")
-
