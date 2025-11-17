@@ -37,7 +37,7 @@ therefore the operation should be awaited until completed unless cancellation is
     ) -> None:
       descriptor = dynamo.nixl_connect.Descriptor(local_tensor)
 
-      with self.connector.create_readable(descriptor) as read_op:
+      with await self.connector.create_readable(descriptor) as read_op:
         op_metadata = read_op.metadata()
 
         # Send the metadata to the remote worker via sideband communication.

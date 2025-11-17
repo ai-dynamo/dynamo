@@ -38,7 +38,7 @@ Cancellation is handled asynchronously.
     ) -> None:
       descriptor = dynamo.nixl_connect.Descriptor(local_tensor)
 
-      with self.connector.create_writable(descriptor) as write_op:
+      with await self.connector.create_writable(descriptor) as write_op:
         op_metadata = write_op.metadata()
 
         # Send the metadata to the remote worker via sideband communication.
