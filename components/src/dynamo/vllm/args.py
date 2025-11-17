@@ -325,7 +325,6 @@ def parse_args() -> Config:
 
 def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
-
     # If prefix caching is not enabled, no events config needed
     if not config.engine_args.enable_prefix_caching or config.is_decode_worker:
         logger.info("No kv_events_config required")
@@ -351,6 +350,13 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
 
     # If user provided their own config, use that
     if c := getattr(config.engine_args, "kv_events_config"):
+        # Ensure enable_kv_cache_events is True (user may have omitted it from JSON)
+        if not c.enable_kv_cache_events:
+            logger.info(
+                "User provided kv_events_config but enable_kv_cache_events was False. "
+                "Setting it to True to actually publish events."
+            )
+            c.enable_kv_cache_events = True
         logger.info(f"Using user-provided kv_events_config {c}")
         return c
 
