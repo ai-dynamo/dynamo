@@ -101,10 +101,8 @@ class MultimodalRequestProcessor:
                     raise RuntimeError("Failed to load tensor")
 
                 # Strip file:// prefix if present
-                local_path = path
-                if local_path.startswith("file://"):
-                    local_path = local_path[7:]  # Remove "file://"
-
+                local_path = path.removeprefix("file://")
+                
                 resolved_path = Path(local_path).resolve()
                 allowed_path = Path(self.allowed_local_media_path).resolve()
 
@@ -158,21 +156,8 @@ class MultimodalRequestProcessor:
     async def process_openai_request(
         self, request: Dict, embeddings: Any
     ) -> Optional[Any]:
-        """Process OpenAI request and return with multimodal data."""
-        # Normalize the request to handle OpenAI format
-        if "stop_conditions" not in request:
-            request["stop_conditions"] = {}
-        if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
-            request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
-
-        if "sampling_options" not in request:
-            request["sampling_options"] = {}
-        if (
-            "temperature" in request
-            and "temperature" not in request["sampling_options"]
-        ):
-            request["sampling_options"]["temperature"] = request.pop("temperature")
-
+        """Process OpenAI request and return with multimodal data.
+        """
         # Extract messages - check extra_args first (from Rust preprocessor for multimodal)
         # Fall back to direct messages field for backward compatibility
         messages = request.get("extra_args", {}).get(
@@ -252,20 +237,4 @@ class MultimodalRequestProcessor:
             "created": int(time.time()),
             "object": "chat.completion.chunk",
             "choices": [choice],
-        }
-
-    def get_stop_response(self, request_id: str, model_name: str) -> Dict[str, Any]:
-        """Creates the final stop response chunk for multimodal streaming."""
-        final_choice = {
-            "index": 0,
-            "delta": {},
-            "finish_reason": "stop",
-        }
-        return {
-            "id": request_id,
-            "model": model_name,
-            "created": int(time.time()),
-            "object": "chat.completion.chunk",
-            "choices": [final_choice],
-            "finish_reason": "stop",
         }
