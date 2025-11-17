@@ -7,6 +7,7 @@ members = [
     "lib/llm",
     "lib/runtime",
     "lib/config",
+    "lib/identity",
     "lib/tokens",
     "lib/memory",
     "lib/async-openai",
@@ -15,6 +16,9 @@ members = [
     "lib/bindings/python/codegen",
     "lib/engines/*",
     "lib/config",
+    "lib/nova",
+    "lib/nova-backend",
+    "lib/kvbm",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
@@ -24,10 +28,14 @@ default-members = [
     "lib/llm",
     "lib/runtime",
     "lib/config",
+    "lib/identity",
     "lib/tokens",
     "lib/async-openai",
     "lib/parsers",
     "lib/bindings/c",
+    "lib/nova",
+    "lib/nova-backend",
+    "lib/kvbm",
 ]
 resolver = "3"
 
@@ -43,6 +51,10 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
+dynamo-identity = { path = "lib/identity", version = "0.7.0" }
+dynamo-nova = { path = "lib/nova", version = "0.7.0" }
+dynamo-nova-backend = { path = "lib/nova-backend", version = "0.7.0" }
+dynamo-memory = { path = "lib/memory", version = "0.7.0" }
 dynamo-runtime = { path = "lib/runtime", version = "0.7.0" }
 dynamo-llm = { path = "lib/llm", version = "0.7.0" }
 dynamo-config = { path = "lib/config", version = "0.7.0" }
@@ -60,6 +72,7 @@ async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 async_zmq = { version = "0.4.0" }
 blake3 = { version = "1" }
+bs58 = { version = "0.5" }
 bytes = { version = "1" }
 chrono = { version = "0.4", default-features = false, features = [
     "alloc",
