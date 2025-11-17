@@ -43,6 +43,7 @@ pub struct TcpListener {
     error_handler: Arc<dyn TransportErrorHandler>,
     cancel_token: CancellationToken,
     runtime_config: RuntimeConfig,
+    listener: Option<std::net::TcpListener>,
 }
 
 impl TcpListener {
@@ -119,9 +120,20 @@ impl TcpListener {
 
     /// Main server loop that accepts connections
     async fn run_server(self) -> Result<()> {
-        let listener = TokioTcpListener::bind(self.bind_addr)
-            .await
-            .context(format!("Failed to bind TCP listener to {}", self.bind_addr))?;
+        // Use pre-bound listener if provided, otherwise bind to the address
+        let listener = if let Some(std_listener) = self.listener {
+            // Set non-blocking for tokio conversion
+            std_listener
+                .set_nonblocking(true)
+                .context("Failed to set listener to non-blocking")?;
+
+            TokioTcpListener::from_std(std_listener)
+                .context("Failed to convert std TcpListener to tokio TcpListener")?
+        } else {
+            TokioTcpListener::bind(self.bind_addr)
+                .await
+                .context(format!("Failed to bind TCP listener to {}", self.bind_addr))?
+        };
 
         let local_addr = listener
             .local_addr()
@@ -309,6 +321,7 @@ pub struct TcpListenerBuilder {
     error_handler: Option<Arc<dyn TransportErrorHandler>>,
     cancel_token: Option<CancellationToken>,
     runtime_config: Option<RuntimeConfig>,
+    listener: Option<std::net::TcpListener>,
 }
 
 impl TcpListenerBuilder {
@@ -320,6 +333,7 @@ impl TcpListenerBuilder {
             error_handler: None,
             cancel_token: None,
             runtime_config: None,
+            listener: None,
         }
     }
 
@@ -365,6 +379,15 @@ impl TcpListenerBuilder {
         self
     }
 
+    /// Use a pre-bound TcpListener
+    ///
+    /// This is useful for tests where you want to bind to port 0 and avoid port races.
+    /// When provided, the bind_addr should still be set (for logging/debugging purposes).
+    pub fn listener(mut self, listener: Option<std::net::TcpListener>) -> Self {
+        self.listener = listener;
+        self
+    }
+
     /// Build the TcpListener
     pub fn build(self) -> Result<TcpListener> {
         let bind_addr = self
@@ -387,6 +410,7 @@ impl TcpListenerBuilder {
             error_handler,
             cancel_token,
             runtime_config,
+            listener: self.listener,
         })
     }
 }

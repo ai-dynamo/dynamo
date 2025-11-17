@@ -2318,6 +2318,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-kvbm"
+version = "0.7.0"
+dependencies = [
+ "aligned-vec",
+ "anyhow",
+ "async-trait",
+ "bincode 2.0.1",
+ "blake3",
+ "bytes",
+ "cudarc 0.17.8",
+ "dashmap 6.1.0",
+ "derive-getters",
+ "derive_builder",
+ "dynamo-config",
+ "dynamo-memory",
+ "dynamo-nova",
+ "dynamo-tokens",
+ "figment",
+ "lru",
+ "oneshot",
+ "parking_lot",
+ "proptest",
+ "rstest 0.26.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid 1.18.1",
+ "validator",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "dynamo-llm"
 version = "0.7.0"
 dependencies = [
@@ -7525,6 +7562,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rstest"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5a3193c063baaa2a95a33f03035c8a72b83d97a54916055ba22d35ed3839d49"
+dependencies = [
+ "futures-timer",
+ "futures-util",
+ "rstest_macros 0.26.1",
+]
+
+[[package]]
 name = "rstest_macros"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7546,6 +7594,24 @@ name = "rstest_macros"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "825ea780781b15345a146be27eaefb05085e337e869bff01b4306a4fd4a9ad5a"
+dependencies = [
+ "cfg-if 1.0.4",
+ "glob",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "relative-path",
+ "rustc_version",
+ "syn 2.0.110",
+ "unicode-ident",
+]
+
+[[package]]
+name = "rstest_macros"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c845311f0ff7951c5506121a9ad75aec44d083c31583b2ea5a30bcb0b0abba0"
 dependencies = [
  "cfg-if 1.0.4",
  "glob",

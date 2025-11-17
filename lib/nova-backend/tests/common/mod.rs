@@ -22,7 +22,6 @@ use dynamo_nova_backend::{
     DataStreams, MessageType, PeerInfo, Transport, TransportErrorHandler,
     tcp::{TcpTransport, TcpTransportBuilder},
 };
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -243,10 +242,8 @@ impl TestTransportHandle<TcpTransport> {
     /// For other transport types, use `with_factory()`.
     pub async fn new_tcp() -> anyhow::Result<Self> {
         Self::with_factory(|| {
-            let addr = format!("127.0.0.1:{}", get_random_port())
-                .parse::<SocketAddr>()
-                .unwrap();
-            TcpTransportBuilder::new().bind_addr(addr).build()
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            TcpTransportBuilder::new().from_listener(listener)?.build()
         })
         .await
     }
@@ -414,10 +411,8 @@ impl TestCluster<TcpTransport> {
     /// For other transport types, use `with_factory()`.
     pub async fn new(size: usize) -> anyhow::Result<Self> {
         Self::with_factory(size, || {
-            let addr = format!("127.0.0.1:{}", get_random_port())
-                .parse::<SocketAddr>()
-                .unwrap();
-            TcpTransportBuilder::new().bind_addr(addr).build()
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            TcpTransportBuilder::new().from_listener(listener)?.build()
         })
         .await
     }

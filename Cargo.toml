@@ -18,6 +18,7 @@ members = [
     "lib/config",
     "lib/nova",
     "lib/nova-backend",
+    "lib/kvbm",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
@@ -34,6 +35,7 @@ default-members = [
     "lib/bindings/c",
     "lib/nova",
     "lib/nova-backend",
+    "lib/kvbm",
 ]
 resolver = "3"
 
@@ -52,6 +54,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 dynamo-identity = { path = "lib/identity", version = "0.7.0" }
 dynamo-nova = { path = "lib/nova", version = "0.7.0" }
 dynamo-nova-backend = { path = "lib/nova-backend", version = "0.7.0" }
+dynamo-memory = { path = "lib/memory", version = "0.7.0" }
 dynamo-runtime = { path = "lib/runtime", version = "0.7.0" }
 dynamo-llm = { path = "lib/llm", version = "0.7.0" }
 dynamo-config = { path = "lib/config", version = "0.7.0" }

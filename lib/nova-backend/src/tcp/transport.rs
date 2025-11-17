@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
@@ -45,6 +45,9 @@ pub struct TcpTransport {
 
     // Send channel capacity for backpressure
     channel_capacity: usize,
+
+    // Optional pre-bound listener (used for tests to avoid port races)
+    listener: Mutex<Option<std::net::TcpListener>>,
 }
 
 /// Handle to a connection's writer task
@@ -75,6 +78,7 @@ impl TcpTransport {
         key: TransportKey,
         local_address: WorkerAddress,
         channel_capacity: usize,
+        listener: Option<std::net::TcpListener>,
     ) -> Self {
         Self {
             key,
@@ -85,6 +89,7 @@ impl TcpTransport {
             runtime: OnceLock::new(),
             cancel_token: CancellationToken::new(),
             channel_capacity,
+            listener: Mutex::new(listener),
         }
     }
 
@@ -233,6 +238,12 @@ impl Transport for TcpTransport {
 
         let bind_addr = self.bind_addr;
         let cancel_token = self.cancel_token.clone();
+        // Take ownership of the listener (if present) - we can only start once
+        let listener = self
+            .listener
+            .lock()
+            .expect("Listener mutex poisoned")
+            .take();
 
         Box::pin(async move {
             // Create error handler that routes to the transport error handler
@@ -244,15 +255,16 @@ impl Transport for TcpTransport {
             }
 
             // Start TCP listener
-            let listener = TcpListener::builder()
+            let tcp_listener = TcpListener::builder()
                 .bind_addr(bind_addr)
                 .adapter(channels)
                 .error_handler(std::sync::Arc::new(DefaultErrorHandler))
                 .cancel_token(cancel_token)
+                .listener(listener)
                 .build()?;
 
             rt.spawn(async move {
-                if let Err(e) = listener.serve().await {
+                if let Err(e) = tcp_listener.serve().await {
                     error!("TCP listener error: {}", e);
                 }
             });
@@ -395,6 +407,7 @@ pub struct TcpTransportBuilder {
     bind_addr: Option<SocketAddr>,
     key: Option<TransportKey>,
     channel_capacity: usize,
+    listener: Option<std::net::TcpListener>,
 }
 
 impl TcpTransportBuilder {
@@ -404,6 +417,7 @@ impl TcpTransportBuilder {
             bind_addr: None,
             key: None,
             channel_capacity: 256,
+            listener: None,
         }
     }
 
@@ -425,6 +439,28 @@ impl TcpTransportBuilder {
         self
     }
 
+    /// Use a pre-bound TcpListener instead of binding to a specific address
+    ///
+    /// This is useful for tests where you want to bind to port 0 and get an OS-assigned
+    /// port without creating a race condition between binding and starting the transport.
+    ///
+    /// Note: This is mutually exclusive with `bind_addr()`. Using both will result in an error.
+    pub fn from_listener(mut self, listener: std::net::TcpListener) -> Result<Self> {
+        // Validate mutual exclusivity: can't use both bind_addr() and from_listener()
+        if self.bind_addr.is_some() {
+            anyhow::bail!(
+                "Cannot use both bind_addr() and from_listener() - they are mutually exclusive"
+            );
+        }
+
+        let addr = listener
+            .local_addr()
+            .context("Failed to get local address from listener")?;
+        self.bind_addr = Some(addr);
+        self.listener = Some(listener);
+        Ok(self)
+    }
+
     /// Build the TcpTransport
     pub fn build(self) -> Result<TcpTransport> {
         let bind_addr = self
@@ -443,6 +479,7 @@ impl TcpTransportBuilder {
             key,
             local_address,
             self.channel_capacity,
+            self.listener,
         ))
     }
 }
@@ -482,5 +519,26 @@ mod tests {
         let addr = "127.0.0.1:0".parse().unwrap();
         let result = TcpTransportBuilder::new().bind_addr(addr).build();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_builder_with_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let result = TcpTransportBuilder::new().from_listener(listener);
+        assert!(result.is_ok());
+        let result = result.unwrap().build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_builder_bind_addr_and_listener_mutually_exclusive() {
+        let addr = "127.0.0.1:0".parse().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let result = TcpTransportBuilder::new()
+            .bind_addr(addr)
+            .from_listener(listener);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.err().unwrap());
+        assert!(err_msg.contains("mutually exclusive"));
     }
 }

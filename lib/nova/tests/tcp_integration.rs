@@ -6,16 +6,16 @@
 use dynamo_nova::am::{Nova, NovaHandler};
 use dynamo_nova_backend::tcp::TcpTransportBuilder;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
-/// Helper to get a random available port
-fn get_random_port() -> u16 {
-    use std::net::TcpListener;
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+/// Helper to create a test listener bound to a random port
+///
+/// This returns the TcpListener itself, which can be passed to TcpTransportBuilder::from_listener()
+/// to avoid the port race condition between binding and starting the transport.
+fn create_test_listener() -> std::net::TcpListener {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,24 +32,20 @@ struct FooResponse {
 #[tokio::test]
 async fn test_handler_discovery_via_handshake() {
     // 1. Create nova_a with TCP transport
-    let addr_a = format!("127.0.0.1:{}", get_random_port())
-        .parse::<SocketAddr>()
-        .unwrap();
     let transport_a = Arc::new(
         TcpTransportBuilder::new()
-            .bind_addr(addr_a)
+            .from_listener(create_test_listener())
+            .unwrap()
             .build()
             .unwrap(),
     );
     let nova_a = Nova::new(vec![transport_a]).await.unwrap();
 
     // 2. Create nova_b with TCP transport
-    let addr_b = format!("127.0.0.1:{}", get_random_port())
-        .parse::<SocketAddr>()
-        .unwrap();
     let transport_b = Arc::new(
         TcpTransportBuilder::new()
-            .bind_addr(addr_b)
+            .from_listener(create_test_listener())
+            .unwrap()
             .build()
             .unwrap(),
     );
