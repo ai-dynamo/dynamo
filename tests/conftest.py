@@ -218,7 +218,15 @@ class EtcdServer(ManagedProcess):
 class NatsServer(ManagedProcess):
     def __init__(self, request, port=4222, timeout=300):
         data_dir = tempfile.mkdtemp(prefix="nats_")
-        command = ["nats-server", "-js", "--trace", "--store_dir", data_dir]
+        command = [
+            "nats-server",
+            "-js",
+            "--trace",
+            "--store_dir",
+            data_dir,
+            "--max_payload",
+            "10485760",
+        ]
         super().__init__(
             command=command,
             timeout=timeout,
