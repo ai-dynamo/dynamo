@@ -102,7 +102,7 @@ class MultimodalRequestProcessor:
 
                 # Strip file:// prefix if present
                 local_path = path.removeprefix("file://")
-                
+
                 resolved_path = Path(local_path).resolve()
                 allowed_path = Path(self.allowed_local_media_path).resolve()
 
@@ -156,8 +156,7 @@ class MultimodalRequestProcessor:
     async def process_openai_request(
         self, request: Dict, embeddings: Any
     ) -> Optional[Any]:
-        """Process OpenAI request and return with multimodal data.
-        """
+        """Process OpenAI request and return with multimodal data."""
         # Extract messages - check extra_args first (from Rust preprocessor for multimodal)
         # Fall back to direct messages field for backward compatibility
         messages = request.get("extra_args", {}).get(
