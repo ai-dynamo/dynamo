@@ -224,8 +224,6 @@ class NatsServer(ManagedProcess):
             "--trace",
             "--store_dir",
             data_dir,
-            "--max_payload",
-            "10485760",
         ]
         super().__init__(
             command=command,
