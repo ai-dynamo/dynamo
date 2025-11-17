@@ -3,12 +3,45 @@
 
 import json
 import logging
+import re
 import time
 from typing import Any, Dict
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+def _truncate_base64_images(obj: Any, max_length: int = 100) -> Any:
+    """
+    Recursively traverse a data structure and truncate base64-encoded image URLs.
+
+    This prevents massive base64 strings from cluttering logs while preserving
+    the structure for debugging.
+
+    Args:
+        obj: The object to sanitize (dict, list, str, or other)
+        max_length: Maximum length to keep from base64 strings
+
+    Returns:
+        A deep copy of the object with base64 data URLs truncated
+    """
+    if isinstance(obj, dict):
+        return {k: _truncate_base64_images(v, max_length) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_truncate_base64_images(item, max_length) for item in obj]
+    elif isinstance(obj, str):
+        # Match base64 data URLs: data:image/*;base64,<very long string>
+        match = re.match(r"^(data:image/[^;]+;base64,)(.+)$", obj)
+        if match:
+            prefix = match.group(1)
+            base64_data = match.group(2)
+            if len(base64_data) > max_length:
+                truncated = base64_data[:max_length]
+                return f"{prefix}{truncated}...<{len(base64_data)} chars total, truncated for logging>"
+        return obj
+    else:
+        return obj
 
 
 def send_request(
@@ -35,7 +68,10 @@ def send_request(
     """
 
     method_upper = method.upper()
-    payload_json = json.dumps(payload, indent=2)
+
+    # Sanitize payload for logging (truncate base64 images)
+    sanitized_payload = _truncate_base64_images(payload)
+    payload_json = json.dumps(sanitized_payload, indent=2)
 
     curl_command = ""
     if method_upper == "GET":
