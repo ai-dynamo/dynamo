@@ -9,6 +9,21 @@ use either::Either;
 use minijinja::{Environment, Value};
 use tracing;
 
+/// Remove known non-standard Jinja2 tags from chat templates
+///
+/// Some models use custom Jinja2 extensions that minijinja doesn't recognize. These tags
+/// are typically metadata markers that don't affect the rendered output. For example:
+/// - {% generation %} / {% endgeneration %}: Used by vLLM's AssistantTracker to mark
+///   assistant-generated content. The tags themselves don't produce output.
+///
+/// By removing these tags before validation, we allow templates with backend-specific
+/// extensions to work with minijinja while maintaining correct output semantics.
+fn remove_known_non_jinja2_tags(template: &str) -> String {
+    template
+        .replace("{% generation %}", "")
+        .replace("{% endgeneration %}", "")
+}
+
 impl JinjaEnvironment {
     fn env(self) -> Environment<'static> {
         self.env
@@ -64,8 +79,10 @@ impl HfTokenizerConfigJsonFormatter {
                     );
                     supports_add_generation_prompt = Some(true);
                 }
-                env.add_template_owned("default", x.to_string())?;
-                env.add_template_owned("tool_use", x.to_string())?;
+                // Remove known non-standard tags before validation (they don't affect output)
+                let template_cleaned = remove_known_non_jinja2_tags(x);
+                env.add_template_owned("default", template_cleaned.clone())?;
+                env.add_template_owned("tool_use", template_cleaned)?;
             }
             Either::Right(map) => {
                 for t in map {
@@ -87,7 +104,9 @@ impl HfTokenizerConfigJsonFormatter {
                         } else {
                             supports_add_generation_prompt = Some(false);
                         }
-                        env.add_template_owned(k.to_string(), v.to_string())?;
+                        // Remove known non-standard tags before validation (they don't affect output)
+                        let template_cleaned = remove_known_non_jinja2_tags(v);
+                        env.add_template_owned(k.to_string(), template_cleaned)?;
                     }
                 }
                 if env.templates().count() == 0 {
@@ -117,3 +136,30 @@ impl HfTokenizerConfigJsonFormatter {
 
 //     // fn apply_tool_template()
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_remove_known_non_jinja2_tags() {
+        let template =
+            "USER: {{ message }} ASSISTANT: {% generation %}Reply here{% endgeneration %}";
+        let result = remove_known_non_jinja2_tags(template);
+        assert_eq!(result, "USER: {{ message }} ASSISTANT: Reply here");
+    }
+
+    #[test]
+    fn test_remove_known_non_jinja2_tags_preserves_standard_tags() {
+        let template = "{% for item in items %}{{ item }}{% endfor %}";
+        let result = remove_known_non_jinja2_tags(template);
+        assert_eq!(result, template);
+    }
+
+    #[test]
+    fn test_remove_known_non_jinja2_tags_multiple() {
+        let template = "Start {% generation %}Part 1{% endgeneration %} middle {% generation %}Part 2{% endgeneration %}";
+        let result = remove_known_non_jinja2_tags(template);
+        assert_eq!(result, "Start Part 1 middle Part 2");
+    }
+}
