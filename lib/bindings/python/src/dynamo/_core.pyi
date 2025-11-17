@@ -1521,6 +1521,163 @@ class VirtualConnectorClient:
         """Blocks until there is a new decision to fetch using 'get'"""
         ...
 
+class PyLoRACache:
+    """
+    Cache manager for LoRA adapters.
+    Handles local caching and validation of downloaded LoRA files.
+    """
+
+    def __init__(self, cache_root: str) -> None:
+        """
+        Initialize LoRA cache with custom root directory.
+
+        Args:
+            cache_root: Path to the cache root directory
+        """
+        ...
+
+    @staticmethod
+    def from_env() -> "PyLoRACache":
+        """
+        Create LoRA cache from DYN_LORA_PATH environment variable.
+        Defaults to /tmp/dynamo_loras if not set.
+
+        Returns:
+            PyLoRACache instance
+        """
+        ...
+
+    def is_cached(self, lora_id: str) -> bool:
+        """
+        Check if a LoRA adapter is cached locally.
+
+        Args:
+            lora_id: Identifier for the LoRA adapter
+
+        Returns:
+            True if cached, False otherwise
+        """
+        ...
+
+    def get_cache_path(self, lora_id: str) -> str:
+        """
+        Get the local cache path for a LoRA adapter.
+
+        Args:
+            lora_id: Identifier for the LoRA adapter
+
+        Returns:
+            Path to the cached LoRA directory
+        """
+        ...
+
+    def validate_cached(self, lora_id: str) -> bool:
+        """
+        Validate that cached LoRA has required files.
+
+        Args:
+            lora_id: Identifier for the LoRA adapter
+
+        Returns:
+            True if validation passes, False otherwise
+        """
+        ...
+
+class PyLocalLoRASource:
+    """
+    Local filesystem LoRA source.
+    Handles file:// URIs and validates local LoRA directories.
+    """
+
+    def __init__(self) -> None:
+        """Initialize local LoRA source."""
+        ...
+
+    def exists(self, lora_uri: str) -> bool:
+        """
+        Check if a local LoRA exists at the given file:// URI.
+
+        Args:
+            lora_uri: file:// URI to the LoRA directory
+
+        Returns:
+            True if exists, False otherwise
+        """
+        ...
+
+class PyS3LoRASource:
+    """
+    S3-based LoRA source using object_store crate.
+    Reads AWS credentials from environment variables.
+    """
+
+    @staticmethod
+    def from_env() -> "PyS3LoRASource":
+        """
+        Create S3 source from environment variables:
+        - AWS_ACCESS_KEY_ID
+        - AWS_SECRET_ACCESS_KEY
+        - AWS_REGION (optional, defaults to us-east-1)
+        - AWS_ENDPOINT (optional, for custom S3-compatible endpoints)
+
+        Returns:
+            PyS3LoRASource instance
+        """
+        ...
+
+    def exists(self, s3_uri: str) -> bool:
+        """
+        Check if a LoRA exists at the given S3 URI.
+
+        Args:
+            s3_uri: s3:// URI to the LoRA (e.g., s3://bucket/path/to/lora)
+
+        Returns:
+            True if exists, False otherwise
+        """
+        ...
+
+class PyLoRADownloader:
+    """
+    LoRA downloader with automatic caching.
+    Downloads LoRAs from various sources (local, S3, etc.) and caches them locally.
+    """
+
+    def __init__(self, cache: PyLoRACache) -> None:
+        """
+        Initialize downloader with cache.
+        Automatically includes LocalLoRASource and S3LoRASource (if AWS credentials are set).
+
+        Args:
+            cache: PyLoRACache instance for caching
+        """
+        ...
+
+    @staticmethod
+    def create_default() -> "PyLoRADownloader":
+        """
+        Create downloader with default configuration from environment.
+        Includes LocalLoRASource and S3LoRASource (if AWS credentials are set).
+
+        Returns:
+            PyLoRADownloader instance
+        """
+        ...
+
+    def download_if_needed(self, lora_uri: str) -> str:
+        """
+        Download LoRA if not cached, return local path.
+        For local file:// URIs, returns the original path without copying.
+        For remote URIs (s3://, etc.), downloads to cache.
+
+        Args:
+            lora_uri: URI to the LoRA (file://, s3://, etc.)
+
+        Returns:
+            Local path to the LoRA directory
+        """
+        ...
+
 __all__ = [
     "Backend",
     "Client",
@@ -1530,5 +1687,9 @@ __all__ = [
     "ModelDeploymentCard",
     "OAIChatPreprocessor",
     "PythonAsyncEngine",
+    "PyLoRACache",
+    "PyLoRADownloader",
+    "PyLocalLoRASource",
+    "PyS3LoRASource",
     "prometheus_names",
 ]

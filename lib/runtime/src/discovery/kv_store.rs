@@ -501,9 +501,20 @@ impl Discovery for KVStoreDiscovery {
 
                         // Extract instance_id from the key path, not the value
                         // Delete events have empty values in etcd, so we parse the instance_id from the key
-                        // Key format: "v1/instances/namespace/component/endpoint/{instance_id:x}"
+                        // Key format for instances: "v1/instances/namespace/component/endpoint/{instance_id:x}"
+                        // Key format for models: "v1/mdc/namespace/component/endpoint/{instance_id:x}"
+                        // Key format for LoRA models: "v1/mdc/namespace/component/endpoint/{instance_id:x}/{lora_slug}"
+                        //
+                        // The instance_id is always at a fixed position:
+                        // - Instances: split('/')[5] = instance_id
+                        // - Models: split('/')[5] = instance_id
+                        // - LoRA models: split('/')[5] = instance_id (NOT the last part!)
                         let key_parts: Vec<&str> = key_str.split('/').collect();
-                        match key_parts.last() {
+
+                        // For both INSTANCES_BUCKET and MODELS_BUCKET, instance_id is at index 5
+                        let instance_id_index = if bucket_name == MODELS_BUCKET { 5 } else { 5 };
+
+                        match key_parts.get(instance_id_index) {
                             Some(instance_id_hex) => {
                                 match u64::from_str_radix(instance_id_hex, 16) {
                                     Ok(instance_id) => {
@@ -518,6 +529,7 @@ impl Discovery for KVStoreDiscovery {
                                         tracing::warn!(
                                             key = %key_str,
                                             error = %e,
+                                            instance_id_hex = %instance_id_hex,
                                             "Failed to parse instance_id hex from deleted key"
                                         );
                                         None
@@ -527,7 +539,9 @@ impl Discovery for KVStoreDiscovery {
                             None => {
                                 tracing::warn!(
                                     key = %key_str,
-                                    "Delete event key has no path components"
+                                    expected_index = instance_id_index,
+                                    actual_parts = key_parts.len(),
+                                    "Delete event key doesn't have instance_id at expected position"
                                 );
                                 None
                             }

@@ -62,6 +62,7 @@ mod engine;
 mod http;
 mod kserve_grpc;
 mod llm;
+mod lora;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
@@ -194,6 +195,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     engine::add_to_module(m)?;
     parsers::add_to_module(m)?;
+    lora::register(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
     let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
@@ -602,7 +604,7 @@ async fn unregister_model(
         lora_slug.map(|s| format!("/{}", s)).unwrap_or_default()
     );
 
-    let key = rs::storage::key_value_store::Key::new(&relative_key);
+    let key = rs::storage::key_value_store::Key::from_raw(relative_key.clone());
     mdc_bucket
         .delete(&key)
         .await

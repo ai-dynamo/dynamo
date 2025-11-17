@@ -350,7 +350,9 @@ async fn load_lora_handler(
         "load_lora",
         json!({
             "lora_name": request.lora_name,
-            "lora_path": request.source.uri,
+            "source": {
+                "uri": request.source.uri
+            },
         }),
     )
     .await
