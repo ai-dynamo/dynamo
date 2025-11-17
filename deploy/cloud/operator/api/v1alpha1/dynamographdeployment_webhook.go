@@ -45,11 +45,16 @@ func (r *DynamoGraphDeployment) SetupWebhookWithManager(mgr ctrl.Manager) error 
 
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type
 func (r *DynamoGraphDeployment) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	dynamographdeploymentlog.Info("validate create", "name", r.Name)
+	deployment, ok := obj.(*DynamoGraphDeployment)
+	if !ok {
+		return nil, fmt.Errorf("expected DynamoGraphDeployment but got %T", obj)
+	}
+
+	dynamographdeploymentlog.Info("validate create", "name", deployment.Name)
 
 	// Validate services if provided
-	if len(r.Spec.Services) > 0 {
-		for serviceName, service := range r.Spec.Services {
+	if len(deployment.Spec.Services) > 0 {
+		for serviceName, service := range deployment.Spec.Services {
 			if serviceName == "" {
 				return nil, fmt.Errorf("service name in spec.services cannot be empty")
 			}
@@ -61,7 +66,7 @@ func (r *DynamoGraphDeployment) ValidateCreate(ctx context.Context, obj runtime.
 
 			// Validate service autoscaling
 			if service.Autoscaling != nil {
-				if err := r.validateServiceAutoscaling(serviceName, service); err != nil {
+				if err := deployment.validateServiceAutoscaling(serviceName, service); err != nil {
 					return nil, err
 				}
 			}
@@ -69,7 +74,7 @@ func (r *DynamoGraphDeployment) ValidateCreate(ctx context.Context, obj runtime.
 	}
 
 	// Validate environment variables for duplicates
-	if err := r.validateEnvVars(); err != nil {
+	if err := deployment.validateEnvVars(); err != nil {
 		return nil, err
 	}
 
@@ -78,10 +83,15 @@ func (r *DynamoGraphDeployment) ValidateCreate(ctx context.Context, obj runtime.
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type
 func (r *DynamoGraphDeployment) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
-	dynamographdeploymentlog.Info("validate update", "name", r.Name)
+	newDeployment, ok := newObj.(*DynamoGraphDeployment)
+	if !ok {
+		return nil, fmt.Errorf("expected DynamoGraphDeployment but got %T", newObj)
+	}
+
+	dynamographdeploymentlog.Info("validate update", "name", newDeployment.Name)
 
 	// Run the same validations as create
-	warnings, err := r.ValidateCreate(ctx, newObj)
+	warnings, err := newDeployment.ValidateCreate(ctx, newObj)
 	if err != nil {
 		return warnings, err
 	}
@@ -92,7 +102,7 @@ func (r *DynamoGraphDeployment) ValidateUpdate(ctx context.Context, oldObj, newO
 	}
 
 	// Validate that BackendFramework is not changed (immutable)
-	if r.Spec.BackendFramework != oldDeployment.Spec.BackendFramework {
+	if newDeployment.Spec.BackendFramework != oldDeployment.Spec.BackendFramework {
 		return admission.Warnings{"Changing spec.backendFramework may cause service disruption"},
 			fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation")
 	}
@@ -102,7 +112,12 @@ func (r *DynamoGraphDeployment) ValidateUpdate(ctx context.Context, oldObj, newO
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type
 func (r *DynamoGraphDeployment) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	dynamographdeploymentlog.Info("validate delete", "name", r.Name)
+	deployment, ok := obj.(*DynamoGraphDeployment)
+	if !ok {
+		return nil, fmt.Errorf("expected DynamoGraphDeployment but got %T", obj)
+	}
+
+	dynamographdeploymentlog.Info("validate delete", "name", deployment.Name)
 
 	// No validation needed for delete
 	return nil, nil

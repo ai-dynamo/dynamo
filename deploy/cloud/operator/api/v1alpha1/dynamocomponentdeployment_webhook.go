@@ -45,28 +45,33 @@ func (r *DynamoComponentDeployment) SetupWebhookWithManager(mgr ctrl.Manager) er
 
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type
 func (r *DynamoComponentDeployment) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	dynamocomponentdeploymentlog.Info("validate create", "name", r.Name)
+	deployment, ok := obj.(*DynamoComponentDeployment)
+	if !ok {
+		return nil, fmt.Errorf("expected DynamoComponentDeployment but got %T", obj)
+	}
+
+	dynamocomponentdeploymentlog.Info("validate create", "name", deployment.Name)
 
 	// Validate ServiceName if provided
-	if r.Spec.ServiceName != "" && len(r.Spec.ServiceName) > 63 {
+	if deployment.Spec.ServiceName != "" && len(deployment.Spec.ServiceName) > 63 {
 		return nil, fmt.Errorf("spec.serviceName must be 63 characters or less")
 	}
 
 	// Validate replicas if specified
-	if r.Spec.Replicas != nil && *r.Spec.Replicas < 0 {
+	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas < 0 {
 		return nil, fmt.Errorf("spec.replicas must be non-negative")
 	}
 
 	// Validate autoscaling configuration if specified
-	if r.Spec.Autoscaling != nil {
-		if err := r.validateAutoscaling(); err != nil {
+	if deployment.Spec.Autoscaling != nil {
+		if err := deployment.validateAutoscaling(); err != nil {
 			return nil, err
 		}
 	}
 
 	// Validate ingress configuration if enabled
-	if r.Spec.Ingress != nil && r.Spec.Ingress.Enabled {
-		if err := r.validateIngress(); err != nil {
+	if deployment.Spec.Ingress != nil && deployment.Spec.Ingress.Enabled {
+		if err := deployment.validateIngress(); err != nil {
 			return nil, err
 		}
 	}
@@ -76,10 +81,15 @@ func (r *DynamoComponentDeployment) ValidateCreate(ctx context.Context, obj runt
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type
 func (r *DynamoComponentDeployment) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
-	dynamocomponentdeploymentlog.Info("validate update", "name", r.Name)
+	newDeployment, ok := newObj.(*DynamoComponentDeployment)
+	if !ok {
+		return nil, fmt.Errorf("expected DynamoComponentDeployment but got %T", newObj)
+	}
+
+	dynamocomponentdeploymentlog.Info("validate update", "name", newDeployment.Name)
 
 	// Run the same validations as create
-	warnings, err := r.ValidateCreate(ctx, newObj)
+	warnings, err := newDeployment.ValidateCreate(ctx, newObj)
 	if err != nil {
 		return warnings, err
 	}
@@ -90,7 +100,7 @@ func (r *DynamoComponentDeployment) ValidateUpdate(ctx context.Context, oldObj, 
 	}
 
 	// Validate that BackendFramework is not changed (immutable)
-	if r.Spec.BackendFramework != oldDeployment.Spec.BackendFramework {
+	if newDeployment.Spec.BackendFramework != oldDeployment.Spec.BackendFramework {
 		return admission.Warnings{"Changing spec.backendFramework may cause service disruption"},
 			fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation")
 	}
@@ -100,7 +110,12 @@ func (r *DynamoComponentDeployment) ValidateUpdate(ctx context.Context, oldObj, 
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type
 func (r *DynamoComponentDeployment) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	dynamocomponentdeploymentlog.Info("validate delete", "name", r.Name)
+	deployment, ok := obj.(*DynamoComponentDeployment)
+	if !ok {
+		return nil, fmt.Errorf("expected DynamoComponentDeployment but got %T", obj)
+	}
+
+	dynamocomponentdeploymentlog.Info("validate delete", "name", deployment.Name)
 
 	// No validation needed for delete
 	return nil, nil
