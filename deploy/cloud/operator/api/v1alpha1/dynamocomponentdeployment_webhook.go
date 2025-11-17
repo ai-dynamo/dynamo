@@ -18,6 +18,7 @@
 package v1alpha1
 
 import (
+	"context"
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,6 +30,9 @@ import (
 // log is for logging in this package.
 var dynamocomponentdeploymentlog = logf.Log.WithName("dynamocomponentdeployment-resource")
 
+// Ensure DynamoComponentDeployment implements admission.CustomValidator interface
+var _ admission.CustomValidator = &DynamoComponentDeployment{}
+
 // SetupWebhookWithManager will setup the manager to manage the webhooks
 func (r *DynamoComponentDeployment) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).
@@ -38,8 +42,8 @@ func (r *DynamoComponentDeployment) SetupWebhookWithManager(mgr ctrl.Manager) er
 
 //+kubebuilder:webhook:path=/validate-nvidia-com-v1alpha1-dynamocomponentdeployment,mutating=false,failurePolicy=fail,sideEffects=None,groups=nvidia.com,resources=dynamocomponentdeployments,verbs=create;update,versions=v1alpha1,name=vdynamocomponentdeployment.kb.io,admissionReviewVersions=v1
 
-// ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (r *DynamoComponentDeployment) ValidateCreate() (admission.Warnings, error) {
+// ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type
+func (r *DynamoComponentDeployment) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	dynamocomponentdeploymentlog.Info("validate create", "name", r.Name)
 
 	// Validate ServiceName if provided
@@ -69,19 +73,19 @@ func (r *DynamoComponentDeployment) ValidateCreate() (admission.Warnings, error)
 	return nil, nil
 }
 
-// ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *DynamoComponentDeployment) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
+// ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type
+func (r *DynamoComponentDeployment) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	dynamocomponentdeploymentlog.Info("validate update", "name", r.Name)
 
 	// Run the same validations as create
-	warnings, err := r.ValidateCreate()
+	warnings, err := r.ValidateCreate(ctx, newObj)
 	if err != nil {
 		return warnings, err
 	}
 
-	oldDeployment, ok := old.(*DynamoComponentDeployment)
+	oldDeployment, ok := oldObj.(*DynamoComponentDeployment)
 	if !ok {
-		return nil, fmt.Errorf("expected DynamoComponentDeployment but got %T", old)
+		return nil, fmt.Errorf("expected DynamoComponentDeployment but got %T", oldObj)
 	}
 
 	// Validate that BackendFramework is not changed (immutable)
@@ -93,8 +97,8 @@ func (r *DynamoComponentDeployment) ValidateUpdate(old runtime.Object) (admissio
 	return warnings, nil
 }
 
-// ValidateDelete implements webhook.Validator so a webhook will be registered for the type
-func (r *DynamoComponentDeployment) ValidateDelete() (admission.Warnings, error) {
+// ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type
+func (r *DynamoComponentDeployment) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	dynamocomponentdeploymentlog.Info("validate delete", "name", r.Name)
 
 	// No validation needed for delete

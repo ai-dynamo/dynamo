@@ -18,6 +18,7 @@
 package v1alpha1
 
 import (
+	"context"
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,6 +30,9 @@ import (
 // log is for logging in this package.
 var dynamographdeploymentlog = logf.Log.WithName("dynamographdeployment-resource")
 
+// Ensure DynamoGraphDeployment implements admission.CustomValidator interface
+var _ admission.CustomValidator = &DynamoGraphDeployment{}
+
 // SetupWebhookWithManager will setup the manager to manage the webhooks
 func (r *DynamoGraphDeployment) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).
@@ -38,8 +42,8 @@ func (r *DynamoGraphDeployment) SetupWebhookWithManager(mgr ctrl.Manager) error 
 
 //+kubebuilder:webhook:path=/validate-nvidia-com-v1alpha1-dynamographdeployment,mutating=false,failurePolicy=fail,sideEffects=None,groups=nvidia.com,resources=dynamographdeployments,verbs=create;update,versions=v1alpha1,name=vdynamographdeployment.kb.io,admissionReviewVersions=v1
 
-// ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (r *DynamoGraphDeployment) ValidateCreate() (admission.Warnings, error) {
+// ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type
+func (r *DynamoGraphDeployment) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	dynamographdeploymentlog.Info("validate create", "name", r.Name)
 
 	// Validate services if provided
@@ -71,19 +75,19 @@ func (r *DynamoGraphDeployment) ValidateCreate() (admission.Warnings, error) {
 	return nil, nil
 }
 
-// ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *DynamoGraphDeployment) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
+// ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type
+func (r *DynamoGraphDeployment) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	dynamographdeploymentlog.Info("validate update", "name", r.Name)
 
 	// Run the same validations as create
-	warnings, err := r.ValidateCreate()
+	warnings, err := r.ValidateCreate(ctx, newObj)
 	if err != nil {
 		return warnings, err
 	}
 
-	oldDeployment, ok := old.(*DynamoGraphDeployment)
+	oldDeployment, ok := oldObj.(*DynamoGraphDeployment)
 	if !ok {
-		return nil, fmt.Errorf("expected DynamoGraphDeployment but got %T", old)
+		return nil, fmt.Errorf("expected DynamoGraphDeployment but got %T", oldObj)
 	}
 
 	// Validate that BackendFramework is not changed (immutable)
@@ -95,8 +99,8 @@ func (r *DynamoGraphDeployment) ValidateUpdate(old runtime.Object) (admission.Wa
 	return warnings, nil
 }
 
-// ValidateDelete implements webhook.Validator so a webhook will be registered for the type
-func (r *DynamoGraphDeployment) ValidateDelete() (admission.Warnings, error) {
+// ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type
+func (r *DynamoGraphDeployment) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	dynamographdeploymentlog.Info("validate delete", "name", r.Name)
 
 	// No validation needed for delete
