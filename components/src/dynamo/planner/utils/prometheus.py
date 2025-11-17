@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import time
 import typing
 
 from prometheus_api_client import PrometheusConnect
@@ -46,6 +47,55 @@ class PrometheusAPIClient:
     def __init__(self, url: str, dynamo_namespace: str):
         self.prom = PrometheusConnect(url=url, disable_ssl=True)
         self.dynamo_namespace = dynamo_namespace
+
+    def _check_prometheus_connection(self):
+        """
+        Checks if the Prometheus server is reachable and responding to queries.
+
+        Returns:
+            bool: True if connection is successful, False otherwise.
+        """
+        try:
+            # Run a simple query to check connectivity; 'up' is a common Prometheus metric
+            result = self.prom.custom_query(query="up")
+            if result is not None:
+                logger.debug(
+                    "Successfully connected to Prometheus at %s", self.prom.url
+                )
+                return True
+            else:
+                logger.debug(
+                    "Could not retrieve data from Prometheus at %s", self.prom.url
+                )
+                return False
+        except Exception as e:
+            logger.debug(
+                "Failed to connect to Prometheus at %s: %s", self.prom.url, str(e)
+            )
+            return False
+
+    def wait_for_prometheus_connection(
+        self, timeout: int = 7200, retry_interval: int = 10
+    ):
+        start_time = time.time()
+        while (time.time() - start_time) < timeout:
+            if self._check_prometheus_connection():
+                logger.info("Prometheus connection established.")
+                return True
+            logger.info(
+                "Prometheus not reachable yet at %s. Retrying in %d seconds...",
+                self.prom.url,
+                retry_interval,
+            )
+            time.sleep(retry_interval)
+        logger.error(
+            "Timed out after %d seconds waiting for Prometheus at %s",
+            timeout,
+            self.prom.url,
+        )
+        raise TimeoutError(
+            f"Could not establish Prometheus connection within {timeout} seconds."
+        )
 
     def _get_average_metric(
         self, full_metric_name: str, interval: str, operation_name: str, model_name: str

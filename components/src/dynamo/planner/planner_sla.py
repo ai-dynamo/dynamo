@@ -16,38 +16,16 @@
 import asyncio
 import logging
 
-from pydantic import BaseModel
-
 from dynamo.planner.utils.planner_argparse import create_sla_planner_parser
 from dynamo.planner.utils.planner_core import start_sla_planner
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 logger = logging.getLogger(__name__)
 
-# start planner 30 seconds after the other components to make sure planner can see them
-# TODO: remove this delay
-INIT_PLANNER_START_DELAY = 30
-
-
-class RequestType(BaseModel):
-    text: str
-
 
 @dynamo_worker()
 async def init_planner(runtime: DistributedRuntime, args):
-    await asyncio.sleep(INIT_PLANNER_START_DELAY)
-
     await start_sla_planner(runtime, args)
-
-    component = runtime.namespace(args.namespace).component("Planner")
-    await component.create_service()
-
-    async def generate(request: RequestType):
-        """Dummy endpoint to satisfy that each component has an endpoint"""
-        yield "mock endpoint"
-
-    generate_endpoint = component.endpoint("generate")
-    await generate_endpoint.serve_endpoint(generate)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from prometheus_client import Gauge, start_http_server
+from pydantic import BaseModel
 
 from dynamo.planner import (
     KubernetesConnector,
@@ -491,6 +492,36 @@ class Planner:
             )
             logger.info("Successfully validated the deployment")
 
+        if not self.dryrun:
+            # check if the prometheus metrics pulling is working
+            assert (
+                self.runtime is not None
+            ), "Runtime must be provided in non-dryrun mode"
+            try:
+                self.prometheus_api_client.wait_for_prometheus_connection()
+            except TimeoutError:
+                logger.error("Failed to connect to Prometheus")
+                return
+
+            # mark the planner service as ready by serving a dummy endpoint
+            component = self.runtime.namespace(self.namespace).component("Planner")
+            await component.create_service()
+
+            class RequestType(BaseModel):
+                text: str
+
+            async def mock(request: RequestType):
+                """Dummy endpoint to report health status"""
+                yield "mock endpoint"
+
+            mock_endpoint = component.endpoint("mock")
+
+            async def serve_mock_endpoint():
+                await mock_endpoint.serve_endpoint(mock)
+
+            asyncio.create_task(serve_mock_endpoint())
+
+        if not self.args.no_operation:
             await self.connector.wait_for_deployment_ready()
 
             model_name = self.connector.get_model_name()
