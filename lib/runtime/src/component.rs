@@ -374,6 +374,7 @@ impl Component {
         unimplemented!("collect_stats")
     }
 
+    // Gather NATS metrics
     pub async fn add_stats_service(&mut self) -> anyhow::Result<()> {
         let service_name = self.service_name();
 
@@ -411,26 +412,12 @@ impl Component {
             ));
         }
 
-        // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
-        // Only enable NATS service metrics collection when using NATS request plane mode
-        let request_plane_mode = self.drt.request_plane();
-        match request_plane_mode {
-            RequestPlaneMode::Nats => {
-                if let Err(err) = self.start_scraping_nats_service_component_metrics() {
-                    tracing::debug!(
-                        "Metrics registration failed for '{}': {}",
-                        self.service_name(),
-                        err
-                    );
-                }
-            }
-            _ => {
-                tracing::info!(
-                    "Skipping NATS service metrics collection for '{}' - request plane mode is '{}'",
-                    self.service_name(),
-                    request_plane_mode
-                );
-            }
+        if let Err(err) = self.start_scraping_nats_service_component_metrics() {
+            tracing::debug!(
+                "Metrics registration failed for '{}': {}",
+                self.service_name(),
+                err
+            );
         }
         Ok(())
     }

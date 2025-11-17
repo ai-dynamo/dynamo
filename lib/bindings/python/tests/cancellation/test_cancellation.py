@@ -129,7 +129,6 @@ async def server(runtime, namespace):
     async def init_server():
         """Initialize the test server component and serve the generate endpoint"""
         component = runtime.namespace(namespace).component("backend")
-        await component.create_service()
         endpoint = component.endpoint("generate")
         print("Started test server instance")
 

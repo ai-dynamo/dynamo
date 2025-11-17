@@ -143,7 +143,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     # Convert model path to Path object if it's a local path, otherwise keep as string
     model_path = str(config.model_path)

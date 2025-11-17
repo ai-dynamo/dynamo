@@ -42,7 +42,6 @@ async def worker(runtime: DistributedRuntime):
     A `Component` can serve multiple endpoints
     """
     component = runtime.namespace("dynamo").component("backend")
-    await component.create_service()
 
     endpoint = component.endpoint("generate")
     await endpoint.serve_endpoint(RequestHandler().generate)
