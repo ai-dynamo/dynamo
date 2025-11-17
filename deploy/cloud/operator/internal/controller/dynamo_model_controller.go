@@ -69,6 +69,7 @@ type DynamoModelReconciler struct {
 	client.Client
 	Recorder       record.EventRecorder
 	EndpointClient *modelendpoint.Client
+	Config         commoncontroller.Config
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels,verbs=get;list;watch;create;update;patch;delete
@@ -94,6 +95,44 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	logs = logs.WithValues("dynamoModel", model.Name, "namespace", model.Namespace, "baseModelName", model.Spec.BaseModelName)
 	logs.Info("Reconciling DynamoModel")
+
+	// Validate the DynamoModel spec (defense in depth - only when webhooks are disabled)
+	if !r.Config.WebhooksEnabled {
+		if err := model.Validate(); err != nil {
+			logs.Error(err, "DynamoModel validation failed, refusing to reconcile")
+
+			// Set validation error condition
+			meta.SetStatusCondition(&model.Status.Conditions, metav1.Condition{
+				Type:               "Valid",
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: model.Generation,
+				Reason:             "ValidationFailed",
+				Message:            fmt.Sprintf("Validation failed: %v", err),
+			})
+
+			// Update status and don't requeue (user must fix the spec)
+			if statusErr := r.Status().Update(ctx, model); statusErr != nil {
+				logs.Error(statusErr, "Failed to update DynamoModel status with validation error")
+				return ctrl.Result{}, statusErr
+			}
+
+			// Record event for visibility
+			r.Recorder.Event(model, corev1.EventTypeWarning, "ValidationFailed", err.Error())
+
+			// Don't requeue - user must fix the spec
+			logs.Info("DynamoModel is invalid, not reconciling until spec is fixed")
+			return ctrl.Result{}, nil
+		}
+
+		// Set Valid condition to True
+		meta.SetStatusCondition(&model.Status.Conditions, metav1.Condition{
+			Type:               "Valid",
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: model.Generation,
+			Reason:             "ValidationPassed",
+			Message:            "DynamoModel spec is valid",
+		})
+	}
 
 	// Handle finalizer using common handler
 	finalized, err := commoncontroller.HandleFinalizer(ctx, model, r.Client, r)

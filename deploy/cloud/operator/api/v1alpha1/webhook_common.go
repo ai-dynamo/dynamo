@@ -31,12 +31,14 @@ var webhookCommonLog = logf.Log.WithName("webhook-common")
 // ExcludedNamespacesChecker defines the interface for checking namespace exclusions
 // This matches controller_common.ExcludedNamespacesInterface to allow reuse of the
 // lease-based coordination mechanism.
+// +kubebuilder:object:generate=false
 type ExcludedNamespacesChecker interface {
 	Contains(namespace string) bool
 }
 
 // webhookExcludedNamespaces holds the excluded namespaces checker (usually leaseWatcher)
 // This is set by main.go and shared across all webhook validators
+// +kubebuilder:object:generate=false
 var webhookExcludedNamespaces ExcludedNamespacesChecker
 
 // SetWebhookExcludedNamespaces sets the excluded namespaces checker for all webhooks.
@@ -51,6 +53,7 @@ func SetWebhookExcludedNamespaces(checker ExcludedNamespacesChecker) {
 //
 // This implements the Decorator pattern to transparently add coordination logic without
 // modifying the actual validation implementations.
+// +kubebuilder:object:generate=false
 type LeaseAwareValidator struct {
 	validator          admission.CustomValidator
 	excludedNamespaces ExcludedNamespacesChecker

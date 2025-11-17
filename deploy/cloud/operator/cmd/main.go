@@ -147,6 +147,7 @@ func main() {
 	var namespaceScopeLeaseRenewInterval time.Duration
 	var operatorVersion string
 	var discoveryBackend string
+	var enableWebhooks bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -156,6 +157,9 @@ func main() {
 		"If set the metrics endpoint is served securely")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.BoolVar(&enableWebhooks, "enable-webhooks", false,
+		"Enable admission webhooks for validation. When enabled, controllers skip validation "+
+			"(webhooks handle it). When disabled, controllers perform validation.")
 	flag.StringVar(&restrictedNamespace, "restrictedNamespace", "",
 		"Enable resources filtering, only the resources belonging to the given namespace will be handled.")
 	flag.StringVar(&leaderElectionID, "leader-election-id", "", "Leader election id"+
@@ -586,33 +590,49 @@ func main() {
 		Client:         mgr.GetClient(),
 		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
 		EndpointClient: modelendpoint.NewClient(),
+		Config:         ctrlConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoModel")
 		os.Exit(1)
 	}
 
-	// Configure webhooks with lease-based namespace exclusion
-	// In cluster-wide mode, inject ctrlConfig.ExcludedNamespaces (leaseWatcher) so webhooks can defer to namespace-restricted operators
-	// In namespace-restricted mode, webhooks validate without checking leases (ExcludedNamespaces is nil)
-	// The webhooks use LeaseAwareValidator wrapper to transparently add coordination logic
-	if ctrlConfig.RestrictedNamespace == "" {
-		// Cluster-wide mode: inject the same ExcludedNamespaces used by controllers
-		setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
-		nvidiacomv1alpha1.SetWebhookExcludedNamespaces(ctrlConfig.ExcludedNamespaces)
+	// Set webhooks enabled flag in config
+	ctrlConfig.WebhooksEnabled = enableWebhooks
+
+	if enableWebhooks {
+		setupLog.Info("Webhooks are enabled - webhooks will validate, controllers will skip validation")
 	} else {
-		// Namespace-restricted mode: no exclusion checking needed (validators not wrapped)
-		setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
-			"restrictedNamespace", ctrlConfig.RestrictedNamespace)
-		nvidiacomv1alpha1.SetWebhookExcludedNamespaces(nil)
+		setupLog.Info("Webhooks are disabled - controllers will validate (defense in depth)")
 	}
 
-	if err = (&nvidiacomv1alpha1.DynamoComponentDeployment{}).SetupWebhookWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "DynamoComponentDeployment")
-		os.Exit(1)
-	}
-	if err = (&nvidiacomv1alpha1.DynamoGraphDeployment{}).SetupWebhookWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "DynamoGraphDeployment")
-		os.Exit(1)
+	// Configure webhooks with lease-based namespace exclusion (only if enabled)
+	// In cluster-wide mode, inject ctrlConfig.ExcludedNamespaces (leaseWatcher) so webhooks can defer
+	// to namespace-restricted operators. In namespace-restricted mode, webhooks validate without checking
+	// leases (ExcludedNamespaces is nil). The webhooks use LeaseAwareValidator wrapper to add coordination.
+	if enableWebhooks {
+		if ctrlConfig.RestrictedNamespace == "" {
+			// Cluster-wide mode: inject the same ExcludedNamespaces used by controllers
+			setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
+			nvidiacomv1alpha1.SetWebhookExcludedNamespaces(ctrlConfig.ExcludedNamespaces)
+		} else {
+			// Namespace-restricted mode: no exclusion checking needed (validators not wrapped)
+			setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
+				"restrictedNamespace", ctrlConfig.RestrictedNamespace)
+			nvidiacomv1alpha1.SetWebhookExcludedNamespaces(nil)
+		}
+
+		if err = (&nvidiacomv1alpha1.DynamoComponentDeployment{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "DynamoComponentDeployment")
+			os.Exit(1)
+		}
+		if err = (&nvidiacomv1alpha1.DynamoGraphDeployment{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "DynamoGraphDeployment")
+			os.Exit(1)
+		}
+		if err = (&nvidiacomv1alpha1.DynamoModel{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "DynamoModel")
+			os.Exit(1)
+		}
 	}
 	//+kubebuilder:scaffold:builder
 

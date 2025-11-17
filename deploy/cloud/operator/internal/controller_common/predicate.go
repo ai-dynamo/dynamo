@@ -79,6 +79,11 @@ type Config struct {
 
 	// DiscoveryBackend is the discovery backend to use. By default, will rely on ETCD for discovery. Can be set to "kubernetes" to use Kubernetes API for service discovery.
 	DiscoveryBackend string
+
+	// WebhooksEnabled indicates whether admission webhooks are enabled
+	// When true, controllers skip validation (webhooks handle it)
+	// When false, controllers perform validation (defense in depth)
+	WebhooksEnabled bool
 }
 
 // RBACConfig holds configuration for RBAC management

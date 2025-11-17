@@ -142,6 +142,9 @@ spec:
         {{- end }}
         {{- end }}
           - --operator-version={{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
+        {{- if .Values.webhook.enabled }}
+          - --enable-webhooks=true
+        {{- end }}
         command:
         - /manager
         env:

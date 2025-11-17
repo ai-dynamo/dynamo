@@ -48,6 +48,56 @@ func (r *DynamoGraphDeployment) SetupWebhookWithManager(mgr ctrl.Manager) error 
 
 //+kubebuilder:webhook:path=/validate-nvidia-com-v1alpha1-dynamographdeployment,mutating=false,failurePolicy=fail,sideEffects=None,groups=nvidia.com,resources=dynamographdeployments,verbs=create;update,versions=v1alpha1,name=vdynamographdeployment.kb.io,admissionReviewVersions=v1
 
+// Validate performs stateless validation on the DynamoGraphDeployment.
+// This can be called from webhooks, controllers, or tests without needing the old object.
+// It validates:
+// - Services (at least one, valid names, replicas, autoscaling)
+// - Environment variables (no duplicates)
+func (r *DynamoGraphDeployment) Validate() error {
+	// Validate services if provided
+	if len(r.Spec.Services) > 0 {
+		for serviceName, service := range r.Spec.Services {
+			if serviceName == "" {
+				return fmt.Errorf("service name in spec.services cannot be empty")
+			}
+
+			// Validate service replicas
+			if service.Replicas != nil && *service.Replicas < 0 {
+				return fmt.Errorf("spec.services[%s].replicas must be non-negative", serviceName)
+			}
+
+			// Validate service autoscaling
+			if service.Autoscaling != nil {
+				if err := r.validateServiceAutoscaling(serviceName, service); err != nil {
+					return err
+				}
+			}
+		}
+	} else {
+		return fmt.Errorf("spec.services is required")
+	}
+
+	// Validate environment variables for duplicates
+	if err := r.validateEnvVars(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ValidateGraphUpdate performs stateful validation comparing old and new DynamoGraphDeployment.
+// This checks immutability constraints that require comparing with the previous state.
+// It validates:
+// - backendFramework immutability
+func (r *DynamoGraphDeployment) ValidateGraphUpdate(old *DynamoGraphDeployment) error {
+	// Validate that BackendFramework is not changed (immutable)
+	if r.Spec.BackendFramework != old.Spec.BackendFramework {
+		return fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation")
+	}
+
+	return nil
+}
+
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type
 func (r *DynamoGraphDeployment) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	deployment, ok := obj.(*DynamoGraphDeployment)
@@ -57,33 +107,8 @@ func (r *DynamoGraphDeployment) ValidateCreate(ctx context.Context, obj runtime.
 
 	dynamographdeploymentlog.Info("validate create", "name", deployment.Name)
 
-	// Validate services if provided
-	if len(deployment.Spec.Services) > 0 {
-		for serviceName, service := range deployment.Spec.Services {
-			if serviceName == "" {
-				return nil, fmt.Errorf("service name in spec.services cannot be empty")
-			}
-
-			// Validate service replicas
-			if service.Replicas != nil && *service.Replicas < 0 {
-				return nil, fmt.Errorf("spec.services[%s].replicas must be non-negative", serviceName)
-			}
-
-			// Validate service autoscaling
-			if service.Autoscaling != nil {
-				if err := deployment.validateServiceAutoscaling(serviceName, service); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-
-	// Validate environment variables for duplicates
-	if err := deployment.validateEnvVars(); err != nil {
-		return nil, err
-	}
-
-	return nil, nil
+	// Use reusable stateless validation
+	return nil, deployment.Validate()
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type
@@ -101,24 +126,22 @@ func (r *DynamoGraphDeployment) ValidateUpdate(ctx context.Context, oldObj, newO
 		return nil, nil
 	}
 
-	// Run the same validations as create
-	warnings, err := newDeployment.ValidateCreate(ctx, newObj)
-	if err != nil {
-		return warnings, err
+	// Validate new object using reusable stateless validation
+	if err := newDeployment.Validate(); err != nil {
+		return nil, err
 	}
 
+	// Check for immutable fields using stateful validation
 	oldDeployment, ok := oldObj.(*DynamoGraphDeployment)
 	if !ok {
 		return nil, fmt.Errorf("expected DynamoGraphDeployment but got %T", oldObj)
 	}
 
-	// Validate that BackendFramework is not changed (immutable)
-	if newDeployment.Spec.BackendFramework != oldDeployment.Spec.BackendFramework {
-		return admission.Warnings{"Changing spec.backendFramework may cause service disruption"},
-			fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation")
+	if err := newDeployment.ValidateGraphUpdate(oldDeployment); err != nil {
+		return admission.Warnings{"Changing spec.backendFramework may cause service disruption"}, err
 	}
 
-	return warnings, nil
+	return nil, nil
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type

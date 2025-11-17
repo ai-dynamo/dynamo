@@ -126,6 +126,66 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	logs = logs.WithValues("dynamoComponentDeployment", dynamoComponentDeployment.Name, "namespace", dynamoComponentDeployment.Namespace)
 
+	// Setup defer to handle errors and update status
+	defer func() {
+		if err == nil {
+			return
+		}
+		logs.Error(err, "Failed to reconcile DynamoComponentDeployment.")
+		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeWarning, "ReconcileError", "Failed to reconcile DynamoComponentDeployment: %v", err)
+		_, err = r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "Reconciling",
+				Message: fmt.Sprintf("Failed to reconcile DynamoComponentDeployment: %v", err),
+			},
+		)
+		if err != nil {
+			return
+		}
+	}()
+
+	// Validate the DynamoComponentDeployment spec (defense in depth - only when webhooks are disabled)
+	if !r.Config.WebhooksEnabled {
+		if validationErr := dynamoComponentDeployment.Validate(); validationErr != nil {
+			logs.Error(validationErr, "DynamoComponentDeployment validation failed, refusing to reconcile")
+
+			// Set validation error condition
+			meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, metav1.Condition{
+				Type:               "Valid",
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: dynamoComponentDeployment.Generation,
+				Reason:             "ValidationFailed",
+				Message:            fmt.Sprintf("Validation failed: %v", validationErr),
+			})
+
+			// Update status and don't requeue (user must fix the spec)
+			if statusErr := r.Status().Update(ctx, dynamoComponentDeployment); statusErr != nil {
+				logs.Error(statusErr, "Failed to update DynamoComponentDeployment status with validation error")
+				err = statusErr
+				return ctrl.Result{}, err
+			}
+
+			// Record event for visibility
+			r.Recorder.Event(dynamoComponentDeployment, corev1.EventTypeWarning, "ValidationFailed", validationErr.Error())
+
+			// Don't requeue - user must fix the spec
+			logs.Info("DynamoComponentDeployment is invalid, not reconciling until spec is fixed")
+			err = nil
+			return ctrl.Result{}, nil
+		}
+
+		// Set Valid condition to True
+		meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, metav1.Condition{
+			Type:               "Valid",
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: dynamoComponentDeployment.Generation,
+			Reason:             "ValidationPassed",
+			Message:            "DynamoComponentDeployment spec is valid",
+		})
+	}
+
 	deleted, err := commonController.HandleFinalizer(ctx, dynamoComponentDeployment, r.Client, r)
 	if err != nil {
 		logs.Error(err, "Failed to handle finalizer")
@@ -157,25 +217,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 			return
 		}
 	}
-
-	defer func() {
-		if err == nil {
-			return
-		}
-		logs.Error(err, "Failed to reconcile DynamoComponentDeployment.")
-		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeWarning, "ReconcileError", "Failed to reconcile DynamoComponentDeployment: %v", err)
-		_, err = r.setStatusConditions(ctx, req,
-			metav1.Condition{
-				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
-				Status:  metav1.ConditionFalse,
-				Reason:  "Reconciling",
-				Message: fmt.Sprintf("Failed to reconcile DynamoComponentDeployment: %v", err),
-			},
-		)
-		if err != nil {
-			return
-		}
-	}()
 
 	modified := false
 

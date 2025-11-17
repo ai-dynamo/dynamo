@@ -48,6 +48,48 @@ func (r *DynamoComponentDeployment) SetupWebhookWithManager(mgr ctrl.Manager) er
 
 //+kubebuilder:webhook:path=/validate-nvidia-com-v1alpha1-dynamocomponentdeployment,mutating=false,failurePolicy=fail,sideEffects=None,groups=nvidia.com,resources=dynamocomponentdeployments,verbs=create;update,versions=v1alpha1,name=vdynamocomponentdeployment.kb.io,admissionReviewVersions=v1
 
+// Validate performs stateless validation on the DynamoComponentDeployment.
+// This can be called from webhooks, controllers, or tests without needing the old object.
+// It validates:
+// - Replicas (non-negative)
+// - Autoscaling configuration
+// - Ingress configuration
+func (r *DynamoComponentDeployment) Validate() error {
+	// Validate replicas if specified
+	if r.Spec.Replicas != nil && *r.Spec.Replicas < 0 {
+		return fmt.Errorf("spec.replicas must be non-negative")
+	}
+
+	// Validate autoscaling configuration if specified
+	if r.Spec.Autoscaling != nil {
+		if err := r.validateAutoscaling(); err != nil {
+			return err
+		}
+	}
+
+	// Validate ingress configuration if enabled
+	if r.Spec.Ingress != nil && r.Spec.Ingress.Enabled {
+		if err := r.validateIngress(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ValidateComponentUpdate performs stateful validation comparing old and new DynamoComponentDeployment.
+// This checks immutability constraints that require comparing with the previous state.
+// It validates:
+// - backendFramework immutability
+func (r *DynamoComponentDeployment) ValidateComponentUpdate(old *DynamoComponentDeployment) error {
+	// Validate that BackendFramework is not changed (immutable)
+	if r.Spec.BackendFramework != old.Spec.BackendFramework {
+		return fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation")
+	}
+
+	return nil
+}
+
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type
 func (r *DynamoComponentDeployment) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	deployment, ok := obj.(*DynamoComponentDeployment)
@@ -57,31 +99,8 @@ func (r *DynamoComponentDeployment) ValidateCreate(ctx context.Context, obj runt
 
 	dynamocomponentdeploymentlog.Info("validate create", "name", deployment.Name)
 
-	// Validate ServiceName if provided
-	if deployment.Spec.ServiceName != "" && len(deployment.Spec.ServiceName) > 63 {
-		return nil, fmt.Errorf("spec.serviceName must be 63 characters or less")
-	}
-
-	// Validate replicas if specified
-	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas < 0 {
-		return nil, fmt.Errorf("spec.replicas must be non-negative")
-	}
-
-	// Validate autoscaling configuration if specified
-	if deployment.Spec.Autoscaling != nil {
-		if err := deployment.validateAutoscaling(); err != nil {
-			return nil, err
-		}
-	}
-
-	// Validate ingress configuration if enabled
-	if deployment.Spec.Ingress != nil && deployment.Spec.Ingress.Enabled {
-		if err := deployment.validateIngress(); err != nil {
-			return nil, err
-		}
-	}
-
-	return nil, nil
+	// Use reusable stateless validation
+	return nil, deployment.Validate()
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type
@@ -99,24 +118,22 @@ func (r *DynamoComponentDeployment) ValidateUpdate(ctx context.Context, oldObj, 
 		return nil, nil
 	}
 
-	// Run the same validations as create
-	warnings, err := newDeployment.ValidateCreate(ctx, newObj)
-	if err != nil {
-		return warnings, err
+	// Validate new object using reusable stateless validation
+	if err := newDeployment.Validate(); err != nil {
+		return nil, err
 	}
 
+	// Check for immutable fields using stateful validation
 	oldDeployment, ok := oldObj.(*DynamoComponentDeployment)
 	if !ok {
 		return nil, fmt.Errorf("expected DynamoComponentDeployment but got %T", oldObj)
 	}
 
-	// Validate that BackendFramework is not changed (immutable)
-	if newDeployment.Spec.BackendFramework != oldDeployment.Spec.BackendFramework {
-		return admission.Warnings{"Changing spec.backendFramework may cause service disruption"},
-			fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation")
+	if err := newDeployment.ValidateComponentUpdate(oldDeployment); err != nil {
+		return admission.Warnings{"Changing spec.backendFramework may cause service disruption"}, err
 	}
 
-	return warnings, nil
+	return nil, nil
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type
