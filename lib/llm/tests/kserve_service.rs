@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "common/ports.rs"]
+mod ports;
+
 pub mod kserve_test {
     // For using gRPC client for test
     pub mod inference {
@@ -41,6 +44,7 @@ pub mod kserve_test {
     use tokio::time::timeout;
     use tonic::{Request, Response, transport::Channel};
 
+    use crate::ports::get_random_port;
     use dynamo_async_openai::types::Prompt;
     use prost::Message;
 
