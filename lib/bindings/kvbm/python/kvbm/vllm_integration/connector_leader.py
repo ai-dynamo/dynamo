@@ -226,7 +226,17 @@ class KvConnectorLeader:
         # note our worker can communication with us oob and we can use that to know
         # ahead of time if the request is finished.
         status = self._connector.request_finished(request.request_id, block_ids)
-        return status, None
+
+        # Extract kv_transfer_params from request's sampling_params if present
+        # This is needed for prefill workers with do_remote_decode=True to pass
+        # kv_transfer_params to the decode worker via RequestOutput
+        kv_transfer_params = None
+        if hasattr(request, "sampling_params") and request.sampling_params:
+            extra_args = getattr(request.sampling_params, "extra_args", None)
+            if extra_args and isinstance(extra_args, dict):
+                kv_transfer_params = extra_args.get("kv_transfer_params")
+
+        return status, kv_transfer_params
 
     # Utility functions
 

@@ -325,10 +325,16 @@ def parse_args() -> Config:
 
 def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
+    if config.is_decode_worker:
+        logger.info(
+            f"Decode worker detected (is_decode_worker={config.is_decode_worker}): "
+            f"kv_events_config disabled (decode workers don't publish KV events)"
+        )
+        return None
 
     # If prefix caching is not enabled, no events config needed
-    if not config.engine_args.enable_prefix_caching or config.is_decode_worker:
-        logger.info("No kv_events_config required")
+    if not config.engine_args.enable_prefix_caching:
+        logger.info("No kv_events_config required: prefix caching is disabled")
         return None
 
     # There is a bug with KV events publishing when LORA is enabled.
