@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::local_model::LocalModel;
-use dynamo_runtime::distributed::DistributedConfig;
+use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
@@ -22,6 +22,7 @@ use std::{
 use tokio::sync::Mutex;
 use tracing::Instrument;
 
+use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
@@ -125,7 +126,10 @@ fn create_request_context(
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
-    if rs::config::env_is_truthy("OTEL_EXPORT_ENABLED") {
+    if std::env::var(env_otlp::OTEL_EXPORT_ENABLED)
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         eprintln!(
             "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
         );
@@ -429,8 +433,9 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    fn new(event_loop: PyObject, store_kv: String) -> PyResult<Self> {
+    fn new(event_loop: PyObject, store_kv: String, request_plane: String) -> PyResult<Self> {
         let selected_kv_store: KeyValueStoreSelect = store_kv.parse().map_err(to_pyerr)?;
+        let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
 
         // Try to get existing runtime first, create new Worker only if needed
         // This allows multiple DistributedRuntime instances to share the same tokio runtime
@@ -454,7 +459,10 @@ impl DistributedRuntime {
 
         // Initialize logging in context where tokio runtime is available
         // otel exporter requires it
-        if rs::config::env_is_truthy("OTEL_EXPORT_ENABLED") {
+        if std::env::var(env_otlp::OTEL_EXPORT_ENABLED)
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             runtime.secondary().block_on(async {
                 rs::logging::init();
             });
@@ -463,6 +471,7 @@ impl DistributedRuntime {
         let runtime_config = DistributedConfig {
             store_backend: selected_kv_store,
             nats_config: dynamo_runtime::transports::nats::ClientOptions::default(),
+            request_plane,
         };
         let inner = runtime
             .secondary()

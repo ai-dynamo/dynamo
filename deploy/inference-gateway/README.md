@@ -111,13 +111,12 @@ cd deploy/inference-gateway
 
 # Export the Dynamo image you have used when deploying your model in Step 3.
 export DYNAMO_IMAGE=<the-dynamo-image-you-have-used-when-deploying-the-model>
-# Export the image tag provided by Dynamo (nvcr.io/nvstaging/ai-dynamo/epp-inference-extension-dynamo:v0.6.0-1) or you can build the Dynamo EPP image by following the commands later in this README.
+# Export the FrontEnd image tag provided by Dynamo (recommended) or build the Dynamo EPP image by following the commands later in this README.
 export EPP_IMAGE=<the-epp-image-you-built>
 ```
 
 ```bash
 helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE
-# do not include --set-string extension.image=$EPP_IMAGE to use the default images
 ```
 
 Key configurations include:
@@ -126,7 +125,7 @@ Key configurations include:
 - A service for the inference gateway
 - Required RBAC roles and bindings
 - RBAC permissions
-- values-dynamo-epp.yaml sets epp.dynamo.namespace=vllm-agg for the bundled example. Point it at your actual Dynamo namespace by editing that file or adding --set epp.dynamo.namespace=<namespace> (and likewise for epp.dynamo.component, epp.dynamo.kvBlockSize if they differ).
+- dynamoGraphDeploymentName - the name of the Dynamo Graph where your model is deployed.
 
 
 **Configuration**
@@ -147,7 +146,7 @@ You can configure the plugin by setting environment vars in your [values-dynamo-
 
 Dynamo provides a custom routing plugin `pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go` to perform efficient kv routing.
 The Dynamo router is built as a static library, the EPP router will call to provide fast inference.
-You can either use the image `nvcr.io/nvstaging/ai-dynamo/epp-inference-extension-dynamo:v0.6.0-1` for the EPP_IMAGE in the Helm deployment command and proceed to the step 2 or you can build the image yourself following the steps below.
+You can either use the special FrontEnd image for the EPP_IMAGE in the Helm deployment command and proceed to the step 2 or you can build the image yourself following the steps below.
 
 ##### 1. Build the custom EPP image #####
 
