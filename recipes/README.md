@@ -7,9 +7,9 @@ Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA D
 
 ## Available Recipes
 
-| Model | Framework | Mode | GPUs | Deployment | Benchmark Recipe | Notes |
-|-------|-----------|------|------|------------|------------------|-------|
-| **[Llama-3-70B](llama-3-70b/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization |
+| Model | Framework | Mode | GPUs | Deployment | Benchmark Recipe | Notes | GAIE integration |
+|-------|-----------|------|------|------------|------------------|-------|------------------|
+| **[Llama-3-70B](llama-3-70b/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization | ✅ |
 | **[Llama-3-70B](llama-3-70b/vllm/disagg-single-node/)** | vLLM | Disagg (Single-Node) | 8x H100/H200 | ✅ | ✅ | Prefill + Decode separation |
 | **[Llama-3-70B](llama-3-70b/vllm/disagg-multi-node/)** | vLLM | Disagg (Multi-Node) | 16x H100/H200 | ✅ | ✅ | 2 nodes, 8 GPUs each |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GPU | ✅ | ✅ | FP8 quantization |
@@ -145,6 +145,18 @@ kubectl logs -f job/<benchmark-job-name> -n ${NAMESPACE}
 
 # View results after completion
 kubectl logs job/<benchmark-job-name> -n ${NAMESPACE} | tail -50
+```
+
+**Step 4: GAIE Integration (Optional)**
+
+For Llama-3-70B with vLLM (Aggregated), an example of integration with the Inference Gateway is provided.
+
+Follow to Follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE. Then apply manifests.
+
+```bash
+export DEPLOY_PATH=llama-3-70b/vllm/agg/
+#DEPLOY_PATH=<model>/<framework>/<mode>/
+kubectl apply -R -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
 ```
 
 ## Example Deployments
