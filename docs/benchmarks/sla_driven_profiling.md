@@ -392,7 +392,7 @@ spec:
   backend: trtllm
 
   profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.1"
     config:
       sla:
         isl: 4000
@@ -409,7 +409,7 @@ spec:
         backend_version: "0.20.0"
 
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
+    workersImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.1"
 
   autoApply: true
 ```
@@ -493,7 +493,7 @@ AssertionError: num_heads <N> should be divisible by tp_size <M> and the divisio
 
 ```yaml
 profilingConfig:
-  profilerImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
+  profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.1"
   config:
     hardware:
       max_num_gpus_per_engine: 4  # For Qwen3-0.6B (16 heads / 4 = max TP of 4)

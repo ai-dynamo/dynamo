@@ -1337,6 +1337,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 											},
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
+										SecurityContext: &corev1.PodSecurityContext{
+											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+										},
 										ImagePullSecrets: []corev1.LocalObjectReference{
 											{
 												Name: "frontend-secret",
@@ -1512,7 +1515,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
-										RestartPolicy:                 corev1.RestartPolicyAlways,
+										SecurityContext: &corev1.PodSecurityContext{
+											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+										},
+										RestartPolicy: corev1.RestartPolicyAlways,
 
 										Containers: []corev1.Container{
 											{
@@ -1896,6 +1902,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									PodSpec: corev1.PodSpec{
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
+										SecurityContext: &corev1.PodSecurityContext{
+											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+										},
 										Volumes: []corev1.Volume{
 											{
 												Name: "shared-memory",
@@ -2069,6 +2078,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									PodSpec: corev1.PodSpec{
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
+										SecurityContext: &corev1.PodSecurityContext{
+											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+										},
 										Volumes: []corev1.Volume{
 											{
 												Name: "shared-memory",
@@ -2214,7 +2226,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 											},
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
-										RestartPolicy:                 corev1.RestartPolicyAlways,
+										SecurityContext: &corev1.PodSecurityContext{
+											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+										},
+										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
 												Name:  commonconsts.MainContainerName,
@@ -2357,7 +2372,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									PodSpec: corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
-										RestartPolicy:                 corev1.RestartPolicyAlways,
+										SecurityContext: &corev1.PodSecurityContext{
+											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+										},
+										RestartPolicy: corev1.RestartPolicyAlways,
 										Volumes: []corev1.Volume{
 											{
 												Name: "dynamo-pvc",
@@ -2791,7 +2809,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 											},
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
-										RestartPolicy:                 corev1.RestartPolicyAlways,
+										SecurityContext: &corev1.PodSecurityContext{
+											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+										},
+										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
 												Name:  commonconsts.MainContainerName,
@@ -2940,6 +2961,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									// StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
+										SecurityContext: &corev1.PodSecurityContext{
+											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+										},
 										Volumes: []corev1.Volume{
 											{
 												Name: "shared-memory",
@@ -3086,7 +3110,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 											},
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
-										RestartPolicy:                 corev1.RestartPolicyAlways,
+										SecurityContext: &corev1.PodSecurityContext{
+											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+										},
+										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
 												Name:  commonconsts.MainContainerName,
@@ -3229,6 +3256,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									PodSpec: corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
+										SecurityContext: &corev1.PodSecurityContext{
+											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+										},
 										Volumes: []corev1.Volume{
 											{
 												Name: "dynamo-pvc",
@@ -5017,6 +5047,10 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				},
 				RestartPolicy:                 corev1.RestartPolicyAlways,
 				TerminationGracePeriodSeconds: ptr.To(int64(60)),
+				SecurityContext: &corev1.PodSecurityContext{
+					// Only fsGroup is injected by default for volume permissions
+					FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+				},
 				Volumes: []corev1.Volume{
 					{
 						Name: "shared-memory",
@@ -5633,6 +5667,155 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 				if !found {
 					t.Errorf("GenerateBasePodSpec() expected volume mount %+v not found", tt.expectedMount)
 				}
+			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := controller_common.Config{}
+
+	tests := []struct {
+		name                    string
+		component               *v1alpha1.DynamoComponentDeploymentSharedSpec
+		expectedSecurityContext *corev1.PodSecurityContext
+		description             string
+	}{
+		{
+			name: "no security context provided - should apply fsGroup default only",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+			},
+			expectedSecurityContext: &corev1.PodSecurityContext{
+				FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+			},
+			description: "Operator should only inject fsGroup for volume permissions, not UID/GID (backward compatible)",
+		},
+		{
+			name: "full security context override - should use user values",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &common.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						SecurityContext: &corev1.PodSecurityContext{
+							RunAsNonRoot: ptr.To(true),
+							RunAsUser:    ptr.To(int64(5000)),
+							RunAsGroup:   ptr.To(int64(5000)),
+							FSGroup:      ptr.To(int64(5000)),
+						},
+					},
+				},
+			},
+			expectedSecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: ptr.To(true),
+				RunAsUser:    ptr.To(int64(5000)),
+				RunAsGroup:   ptr.To(int64(5000)),
+				FSGroup:      ptr.To(int64(5000)),
+			},
+			description: "User-provided security context should completely override defaults",
+		},
+		{
+			name: "partial security context override - user gets full control",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &common.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						SecurityContext: &corev1.PodSecurityContext{
+							RunAsUser:  ptr.To(int64(2000)),
+							RunAsGroup: ptr.To(int64(3000)),
+						},
+					},
+				},
+			},
+			expectedSecurityContext: &corev1.PodSecurityContext{
+				RunAsUser:  ptr.To(int64(2000)),
+				RunAsGroup: ptr.To(int64(3000)),
+			},
+			description: "Partial user override gets full control - no defaults injected",
+		},
+		{
+			name: "only fsGroup override - user gets full control",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &common.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						SecurityContext: &corev1.PodSecurityContext{
+							FSGroup: ptr.To(int64(7000)),
+						},
+					},
+				},
+			},
+			expectedSecurityContext: &corev1.PodSecurityContext{
+				FSGroup: ptr.To(int64(7000)),
+			},
+			description: "Only fsGroup override - user gets full control, no defaults injected",
+		},
+		{
+			name: "fsGroup 2000 example - exactly what user requested",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &common.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						SecurityContext: &corev1.PodSecurityContext{
+							FSGroup: ptr.To(int64(2000)),
+						},
+					},
+				},
+			},
+			expectedSecurityContext: &corev1.PodSecurityContext{
+				FSGroup: ptr.To(int64(2000)),
+			},
+			description: "User sets fsGroup:2000, gets ONLY that - critical for allowing root users",
+		},
+		{
+			name: "OpenShift-style namespace range - should use user values",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &common.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{
+						SecurityContext: &corev1.PodSecurityContext{
+							RunAsNonRoot: ptr.To(true),
+							RunAsUser:    ptr.To(int64(1000700001)),
+							RunAsGroup:   ptr.To(int64(1000700001)),
+							FSGroup:      ptr.To(int64(1000700001)),
+						},
+					},
+				},
+			},
+			expectedSecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: ptr.To(true),
+				RunAsUser:    ptr.To(int64(1000700001)),
+				RunAsGroup:   ptr.To(int64(1000700001)),
+				FSGroup:      ptr.To(int64(1000700001)),
+			},
+			description: "OpenShift namespace UID/GID ranges should be respected",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				BackendFrameworkNoop,
+				secretsRetriever,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+			)
+
+			if err != nil {
+				t.Errorf("GenerateBasePodSpec() unexpected error: %v", err)
+				return
+			}
+
+			// Compare the entire SecurityContext using cmp.Diff
+			if diff := cmp.Diff(tt.expectedSecurityContext, podSpec.SecurityContext); diff != "" {
+				t.Errorf("GenerateBasePodSpec() SecurityContext mismatch (-want +got):\n%s\nDescription: %s", diff, tt.description)
 			}
 		})
 	}

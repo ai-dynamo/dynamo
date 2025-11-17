@@ -471,3 +471,33 @@ fn a_to_fs_err(err: anyhow::Error) -> StoreError {
 fn to_fs_err<E: std::error::Error>(err: E) -> StoreError {
     StoreError::FilesystemError(err.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use crate::storage::key_value_store::{
+        FileStore, Key, KeyValueBucket as _, KeyValueStore as _,
+    };
+
+    #[tokio::test]
+    async fn test_entries_full_path() {
+        let t = tempfile::tempdir().unwrap();
+
+        let m = FileStore::new(t.path());
+        let bucket = m.get_or_create_bucket("v1/tests", None).await.unwrap();
+        let _ = bucket
+            .insert(&Key::new("key1/multi/part"), "value1".into(), 0)
+            .await
+            .unwrap();
+        let _ = bucket
+            .insert(&Key::new("key2"), "value2".into(), 0)
+            .await
+            .unwrap();
+        let entries = bucket.entries().await.unwrap();
+        let keys: HashSet<String> = entries.into_keys().collect();
+
+        assert!(keys.contains("v1/tests/key1/multi/part"));
+        assert!(keys.contains("v1/tests/key2"));
+    }
+}

@@ -1092,6 +1092,75 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			// Clean up
 			_ = k8sClient.Delete(ctx, job)
 		})
+
+		It("Should set fsGroup in pod security context for volume permissions", func() {
+			ctx := context.Background()
+			namespace := "default"
+			dgdrName := "test-fsgroup"
+
+			// Create ServiceAccount
+			sa := &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      ServiceAccountProfilingJob,
+					Namespace: namespace,
+				},
+			}
+			Expect(k8sClient.Create(ctx, sa)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sa) }()
+
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "trtllm",
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
+						Config: createTestConfig(map[string]interface{}{
+							"sla": map[string]interface{}{
+								"ttft": 50.0,
+								"itl":  10.0,
+								"isl":  3000,
+								"osl":  500,
+							},
+						}),
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			// Re-fetch DGDR to get proper metadata from API server
+			var fetchedDGDR nvidiacomv1alpha1.DynamoGraphDeploymentRequest
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &fetchedDGDR)).Should(Succeed())
+
+			// Create profiling job with properly initialized DGDR
+			err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify job was created
+			jobName := getProfilingJobName(&fetchedDGDR)
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)).Should(Succeed())
+
+			// Verify security context has all security fields set correctly
+			podSecurityContext := job.Spec.Template.Spec.SecurityContext
+			Expect(podSecurityContext).NotTo(BeNil())
+			Expect(podSecurityContext.RunAsNonRoot).NotTo(BeNil())
+			Expect(*podSecurityContext.RunAsNonRoot).To(BeTrue())
+			Expect(podSecurityContext.RunAsUser).NotTo(BeNil())
+			Expect(*podSecurityContext.RunAsUser).To(Equal(int64(1000)))
+			Expect(podSecurityContext.RunAsGroup).NotTo(BeNil())
+			Expect(*podSecurityContext.RunAsGroup).To(Equal(int64(1000)))
+			Expect(podSecurityContext.FSGroup).NotTo(BeNil())
+			Expect(*podSecurityContext.FSGroup).To(Equal(int64(1000)))
+
+			// Clean up
+			_ = k8sClient.Delete(ctx, job)
+		})
 	})
 })
 

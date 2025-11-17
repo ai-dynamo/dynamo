@@ -8,8 +8,11 @@ use axum::{
     response::{IntoResponse, sse::Event},
     routing::get,
 };
-use dynamo_runtime::metrics::prometheus_names::{
-    frontend_service, name_prefix, sanitize_frontend_prometheus_prefix,
+use dynamo_runtime::{
+    config::environment_names::llm::metrics as env_metrics,
+    metrics::prometheus_names::{
+        frontend_service, name_prefix, sanitize_frontend_prometheus_prefix,
+    },
 };
 use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts};
 use serde::Serialize;
@@ -120,6 +123,7 @@ fn parse_bucket_config(
         );
         return (1.0, 10.0, 10);
     }
+    let env_prefix = format!("{}{}", env_metrics::HISTOGRAM_PREFIX, env_prefix);
     let mut min = std::env::var(format!("{env_prefix}_MIN"))
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
@@ -302,7 +306,7 @@ impl Metrics {
     /// Metrics are never removed to preserve historical data. Runtime config and MDC
     /// metrics are updated when models are discovered and their configurations are available.
     pub fn new() -> Self {
-        let raw_prefix = std::env::var(frontend_service::METRICS_PREFIX_ENV)
+        let raw_prefix = std::env::var(env_metrics::DYN_METRICS_PREFIX)
             .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
         if prefix != raw_prefix {
