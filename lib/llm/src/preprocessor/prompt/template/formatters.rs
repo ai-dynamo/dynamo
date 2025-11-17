@@ -7,8 +7,8 @@ use super::tokcfg::{ChatTemplate, raise_exception, strftime_now, tojson};
 use super::{ContextMixins, HfTokenizerConfigJsonFormatter, JinjaEnvironment};
 use either::Either;
 use minijinja::{Environment, Value, context};
-use tracing;
 use serde_json::json;
+use tracing;
 
 /// Replace non-standard Jinja2 block tags with placeholders
 ///
@@ -81,7 +81,6 @@ fn replace_non_standard_blocks(template: &str) -> String {
 /// If the array format works but string format doesn't produce output,
 /// the template requires arrays (multimodal templates).
 fn detect_content_array_usage(env: &Environment) -> bool {
-
     // Test with array format
     let array_msg = context! {
         messages => json!([{"role": "user", "content": [{"type": "text", "text": "template_test"}]}]),
