@@ -319,7 +319,14 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     maturin build --release --out /opt/dynamo/dist && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
-        maturin build --release --out /opt/dynamo/dist; \
+        maturin build --release --out target/wheels && \
+        auditwheel repair \
+            --exclude libnixl.so \
+            --exclude libnixl_build.so \
+            --exclude libnixl_common.so \
+            --plat manylinux_2_28_${ARCH_ALT} \
+            --wheel-dir /opt/dynamo/dist \
+            target/wheels/*.whl; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
