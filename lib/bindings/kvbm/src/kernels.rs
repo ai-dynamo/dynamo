@@ -8,12 +8,11 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, DevicePtr};
 use once_cell::sync::OnceCell;
-use pyo3::PyTryFrom;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PySequence;
 
-use crate::tensor_kernels::{
+use kvbm_kernels::{
     BlockLayout, OperationalCopyBackend, OperationalCopyDirection, TensorDataType,
     block_from_universal, operational_copy, universal_from_block,
 };
@@ -63,7 +62,7 @@ struct TensorInfo {
     device_index: i64,
 }
 
-fn tensor_info(_py: Python<'_>, tensor: &PyAny) -> PyResult<TensorInfo> {
+fn tensor_info(_py: Python<'_>, tensor: &Bound<'_, PyAny>) -> PyResult<TensorInfo> {
     if !tensor.hasattr("is_cuda")? {
         return Err(PyTypeError::new_err(
             "Expected a torch.Tensor with CUDA storage",
@@ -94,7 +93,8 @@ fn tensor_info(_py: Python<'_>, tensor: &PyAny) -> PyResult<TensorInfo> {
     let device_index: Option<i64> = device_obj.getattr("index")?.extract()?;
 
     let dtype_obj = tensor.getattr("dtype")?;
-    let dtype_str = dtype_obj.str()?.to_str()?;
+    let dtype_py_str = dtype_obj.str()?;
+    let dtype_str = dtype_py_str.to_str()?;
     let (dtype, elem_size) = map_dtype(dtype_str)?;
 
     let shape_py = tensor.getattr("shape")?;
@@ -115,7 +115,7 @@ fn tensor_info(_py: Python<'_>, tensor: &PyAny) -> PyResult<TensorInfo> {
 /// Validate and flatten the `[nl * no]` block pointer table for a single logical block.
 fn collect_block_pointers(
     py: Python<'_>,
-    blocks: &PyAny,
+    blocks: &Bound<'_, PyAny>,
     expected_len: usize,
     expected_dtype: TensorDataType,
     expected_device: i64,
@@ -127,7 +127,7 @@ fn collect_block_pointers(
             "Internal error: either expected_shape or expected_numel must be provided",
         ));
     }
-    let seq = <PySequence as PyTryFrom>::try_from(blocks)?;
+    let seq = blocks.downcast::<PySequence>()?;
     let seq_len = seq.len()?;
     if seq_len != expected_len {
         return Err(PyValueError::new_err(format!(
@@ -138,7 +138,7 @@ fn collect_block_pointers(
     let mut ptrs = Vec::with_capacity(expected_len);
     for idx in 0..seq_len {
         let item = seq.get_item(idx)?;
-        let info = tensor_info(py, item)?;
+        let info = tensor_info(py, &item)?;
         if info.dtype != expected_dtype {
             return Err(PyTypeError::new_err(format!(
                 "Block tensor at index {idx} has mismatched dtype. Expected {:?}, got {:?}",
@@ -172,9 +172,12 @@ fn collect_block_pointers(
     Ok(ptrs)
 }
 
-/// Treat any Python sequence (list, tuple, generator) as a Vec of &PyAny.
-fn sequence_items<'py>(_py: Python<'py>, obj: &'py PyAny) -> PyResult<Vec<&'py PyAny>> {
-    let seq = <PySequence as PyTryFrom>::try_from(obj)?;
+/// Treat any Python sequence (list, tuple, generator) as a Vec of Bound<PyAny>.
+fn sequence_items<'py>(
+    _py: Python<'py>,
+    obj: &Bound<'py, PyAny>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let seq = obj.downcast::<PySequence>()?;
     let len = seq.len()?;
     let mut items = Vec::with_capacity(len);
     for idx in 0..len {
@@ -222,8 +225,8 @@ fn to_cuda_error(err: cuda_runtime::cudaError_t) -> PyErr {
 #[pyfunction]
 unsafe fn block_to_universal(
     py: Python<'_>,
-    blocks: &PyAny,
-    universals: &PyAny,
+    blocks: &Bound<'_, PyAny>,
+    universals: &Bound<'_, PyAny>,
     layout: &str,
 ) -> PyResult<()> {
     let ctx = get_context()?;
@@ -233,7 +236,7 @@ unsafe fn block_to_universal(
     let layout_enum = parse_layout(layout)?;
 
     let universal_items = if universals.hasattr("data_ptr")? {
-        vec![universals]
+        vec![universals.clone()]
     } else {
         sequence_items(py, universals)?
     };
@@ -365,8 +368,8 @@ unsafe fn block_to_universal(
 #[pyfunction]
 unsafe fn universal_to_block(
     py: Python<'_>,
-    universals: &PyAny,
-    blocks: &PyAny,
+    universals: &Bound<'_, PyAny>,
+    blocks: &Bound<'_, PyAny>,
     layout: &str,
 ) -> PyResult<()> {
     let ctx = get_context()?;
@@ -376,7 +379,7 @@ unsafe fn universal_to_block(
     let layout_enum = parse_layout(layout)?;
 
     let universal_items = if universals.hasattr("data_ptr")? {
-        vec![universals]
+        vec![universals.clone()]
     } else {
         sequence_items(py, universals)?
     };
@@ -509,10 +512,11 @@ unsafe fn universal_to_block(
 ///     "auto" (default) tries the fused kernel → cudaMemcpyBatchAsync → cudaMemcpyAsync.
 ///     "kernel", "async", "batch" force the respective backend.
 #[pyfunction]
+#[pyo3(signature = (blocks, operationals, backend=None))]
 unsafe fn block_to_operational(
     py: Python<'_>,
-    blocks: &PyAny,
-    operationals: &PyAny,
+    blocks: &Bound<'_, PyAny>,
+    operationals: &Bound<'_, PyAny>,
     backend: Option<&str>,
 ) -> PyResult<()> {
     let ctx = get_context()?;
@@ -523,7 +527,7 @@ unsafe fn block_to_operational(
     let backend = parse_backend(backend)?;
 
     let operational_items = if operationals.hasattr("data_ptr")? {
-        vec![operationals]
+        vec![operationals.clone()]
     } else {
         sequence_items(py, operationals)?
     };
@@ -662,10 +666,11 @@ unsafe fn block_to_operational(
 /// backend: Optional[str]
 ///     Same semantics as `block_to_operational`.
 #[pyfunction]
+#[pyo3(signature = (operationals, blocks, backend=None))]
 unsafe fn operational_to_block(
     py: Python<'_>,
-    operationals: &PyAny,
-    blocks: &PyAny,
+    operationals: &Bound<'_, PyAny>,
+    blocks: &Bound<'_, PyAny>,
     backend: Option<&str>,
 ) -> PyResult<()> {
     let ctx = get_context()?;
@@ -676,7 +681,7 @@ unsafe fn operational_to_block(
     let backend = parse_backend(backend)?;
 
     let operational_items = if operationals.hasattr("data_ptr")? {
-        vec![operationals]
+        vec![operationals.clone()]
     } else {
         sequence_items(py, operationals)?
     };
@@ -808,8 +813,7 @@ unsafe fn operational_to_block(
     Ok(())
 }
 
-#[pymodule]
-fn cuda_tensor_kernels(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(block_to_universal, m)?)?;
     m.add_function(wrap_pyfunction!(universal_to_block, m)?)?;
     m.add_function(wrap_pyfunction!(block_to_operational, m)?)?;

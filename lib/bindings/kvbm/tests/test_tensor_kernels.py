@@ -10,9 +10,9 @@ act as both verification and documentation.
 
 from typing import List
 
-import cuda_tensor_kernels as ctk
 import pytest
 import torch
+from kvbm import kernels as ctk
 
 
 def _tolerances(dtype: torch.dtype) -> tuple[float, float]:

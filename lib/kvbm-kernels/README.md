@@ -45,19 +45,19 @@ into existing pipelines without living in CUDA all day.
 
 ```
 .
-├── Cargo.toml              # Rust lib/bin targets + PyO3 feature
+├── Cargo.toml              # Rust lib/bin targets
 ├── build.rs                # NVCC build script (sm80+sm90 by default)
 ├── cuda/
 │   └── tensor_kernels.cu   # Batched CUDA kernels + memcpy fallback
-├── pyproject.toml          # maturin config for Python wheel builds
-├── python/tests/           # pytest suites using PyTorch baselines
 ├── src/
 │   ├── lib.rs              # Rust facade for the kernels
 │   ├── main.rs             # Legacy cudaMemcpyBatchAsync demo (bin)
-│   ├── python.rs           # PyO3 bindings
 │   └── tensor_kernels.rs   # FFI wrappers + integration tests
 └── run.sh / Dockerfile     # Optional CUDA 12.9 container harness
 ```
+
+> **Note:** Python bindings (`python.rs`) and tests have been moved to
+> `lib/bindings/kvbm/` as part of the integrated `kvbm` wheel.
 
 ---
 
@@ -101,23 +101,24 @@ path (block ⇄ universal ⇄ operational), and asserts lossless round-trips.
 
 ### Python Bindings & Tests
 
-We ship PyTorch-friendly shims using PyO3. The interface mirrors what most
-attention kernels expect in production code.
+> **Note:** The Python bindings and tests have been migrated to the `kvbm` wheel
+> at `lib/bindings/kvbm/`. Install and test using that package instead.
 
 #### Install locally
 
 ```bash
-pip install maturin
-maturin develop --features python-bindings
+cd lib/bindings/kvbm
+uv pip install -e ".[dev]"
 ```
 
-This builds the shared library in-place and installs the `cuda_tensor_kernels`
-module into your active virtual environment.
+This installs the `kvbm` package with all development dependencies including
+the CUDA tensor kernels, pytest, and build tools.
 
 #### Validate against PyTorch baselines
 
 ```bash
-pytest python/tests --maxfail=1 -q
+cd lib/bindings/kvbm
+pytest tests/
 ```
 
 Each test synthesizes random CUDA tensors, permutes them using native PyTorch
@@ -127,17 +128,17 @@ ops, then compares the kernel output with tolerances tuned per dtype.
 
 ```python
 import torch
-import cuda_tensor_kernels as ctk
+from kvbm import kernels
 
 blocks = [...]         # list[list[torch.Tensor]] sized nb x (nl*no)
 universals = [...]     # list[torch.Tensor] sized nb
 operationals = [...]   # list[torch.Tensor] sized nb
 
-ctk.block_to_universal(blocks, universals, layout="NHD")
-ctk.universal_to_block(universals, blocks, layout="NHD")
+kernels.block_to_universal(blocks, universals, layout="NHD")
+kernels.universal_to_block(universals, blocks, layout="NHD")
 
-ctk.block_to_operational(blocks, operationals, backend="batch")  # or "async" / "kernel" / "auto"
-ctk.operational_to_block(operationals, blocks, backend="auto")
+kernels.block_to_operational(blocks, operationals, backend="batch")  # or "async" / "kernel" / "auto"
+kernels.operational_to_block(operationals, blocks, backend="auto")
 ```
 
 All tensors must be CUDA accessible by the specificed device and match the expected
