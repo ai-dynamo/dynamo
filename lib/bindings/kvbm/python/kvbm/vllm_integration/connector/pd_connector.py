@@ -134,7 +134,7 @@ class PdConnector(MultiConnector):
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.
-        Delegates to the first connector (DynamoConnector) to forward the tuple result.
+        Delegates to the first connector (DynamoConnector or LMCacheConnector) to forward the tuple result.
 
         Returns:
             Tuple of (bool, Optional[dict[str, Any]]):
