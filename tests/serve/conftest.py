@@ -14,6 +14,7 @@ IMAGE_SERVER_PORT = 8765
 MULTIMODAL_IMG_PATH = os.path.join(
     WORKSPACE_DIR, "lib/llm/tests/data/media/llm-optimize-deploy-graphic.png"
 )
+MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
 
 
 @pytest.fixture(scope="session")

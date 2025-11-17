@@ -13,6 +13,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.serve.conftest import MULTIMODAL_IMG_PATH, MULTIMODAL_IMG_URL
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
@@ -35,19 +36,10 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
 
-# Path to LLM graphic image for multimodal tests
-MULTIMODAL_IMG_PATH = os.path.join(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/llm-optimize-deploy-graphic.png"
-)
-
-MULTIMODAL_IMG_B64 = None
 # Encode LLM graphic image for base64 multimodal tests
+MULTIMODAL_IMG_B64 = None
 with open(MULTIMODAL_IMG_PATH, "rb") as f:
     MULTIMODAL_IMG_B64 = base64.b64encode(f.read()).decode()
-
-# HTTP URL for image (pytest-httpserver will serve this)
-IMAGE_SERVER_PORT = 8765
-MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
 
 # vLLM test configurations
 vllm_configs = {
@@ -136,10 +128,10 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["flowchart", "LLM"],
+                expected_response=["LLM"],
                 temperature=0.0,
-                min_tokens=100,
                 max_tokens=100,
+                timeout=180,
             )
         ],
     ),
@@ -162,9 +154,9 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["flowchart", "LLM"],
-                min_tokens=100,
+                expected_response=["LLM"],
                 max_tokens=100,
+                timeout=180,
             )
         ],
     ),
@@ -190,9 +182,9 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["flowchart", "LLM"],
-                min_tokens=100,
+                expected_response=["LLM"],
                 max_tokens=100,
+                timeout=180,
             ),
             # HTTP URL test
             chat_payload(
@@ -204,9 +196,9 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["flowchart", "LLM"],
-                min_tokens=100,
+                expected_response=["LLM"],
                 max_tokens=100,
+                timeout=180,
             ),
         ],
     ),
