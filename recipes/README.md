@@ -21,6 +21,8 @@ This repository contains production-ready recipes for deploying large language m
 | deepseek-r1     | sglang    | disagg (1 node, wide-ep)     | 8x H200          | ✅     | 🚧        |🚧               |
 | deepseek-r1     | sglang    | disagg (multi-node, wide-ep)     | 16x H200        | ✅     | 🚧        |🚧               |
 | gpt-oss-120b    | trtllm    | agg                 | 4x GB200         | ✅     | ✅        |🚧               |
+| Qwen3-235B-A22B | trtllm    | agg                  | 16x H200         | ✅     | ✅        |🚧               |
+| Qwen3-235B-A22B | trtllm    | disagg                  | 16x H200         | ✅     | ✅        |🚧               |
 
 **Legend:**
 - ✅ Functional
