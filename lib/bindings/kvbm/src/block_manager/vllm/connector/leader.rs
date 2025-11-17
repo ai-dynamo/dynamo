@@ -24,6 +24,7 @@ use dynamo_llm::block_manager::{
     connector::*,
 };
 use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
+use dynamo_runtime::config::environment_names::kvbm as env_kvbm;
 use std::sync::{Arc, OnceLock};
 use std::{collections::HashSet, sync::Mutex};
 use tokio;
@@ -576,7 +577,7 @@ impl PyKvConnectorLeader {
         // Initialize logging for the vLLM connector
         dynamo_runtime::logging::init();
 
-        let enable_kvbm_record = std::env::var("ENABLE_KVBM_RECORD")
+        let enable_kvbm_record = std::env::var(env_kvbm::ENABLE_KVBM_RECORD)
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
@@ -646,13 +647,13 @@ impl PyKvConnectorLeader {
 }
 
 pub fn kvbm_metrics_endpoint_enabled() -> bool {
-    std::env::var("DYN_KVBM_METRICS")
+    std::env::var(env_kvbm::DYN_KVBM_METRICS)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
 pub fn parse_kvbm_metrics_port() -> u16 {
-    match std::env::var("DYN_KVBM_METRICS_PORT") {
+    match std::env::var(env_kvbm::DYN_KVBM_METRICS_PORT) {
         Ok(val) => match val.trim().parse::<u16>() {
             Ok(port) => port,
             Err(_) => {
