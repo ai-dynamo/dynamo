@@ -137,7 +137,7 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Install from local wheel directory in build context
         WHEEL_FILE="$(find /trtllm_wheel -name "*.whl" | head -n 1)"; \
         if [ -n "$WHEEL_FILE" ]; then \
-            uv pip install "$WHEEL_FILE"; \
+            uv pip install --no-cache "$WHEEL_FILE"; \
         else \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \
@@ -151,7 +151,13 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
         bash /tmp/install_tensorrt.sh && \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
-        uv pip install --no-cache --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}"; \
+        # TRTLLM 1.2.0rc2 has issues installing from pypi with uv, installing from direct wheel link
+        if [ "$(uname -m)" = "x86_64" ]; then \
+            TENSORRTLLM_PIP_WHEEL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc2-cp312-cp312-linux_x86_64.whl"; \
+        else \
+            TENSORRTLLM_PIP_WHEEL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc2-cp312-cp312-linux_aarch64.whl"; \
+        fi; \
+        uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}"; \
     fi
 
 ##################################################
@@ -181,12 +187,16 @@ ARG PYTHON_VERSION
 
 WORKDIR /workspace
 
+ARG ENV=/etc/shinit_v2
 ENV ENV=${ENV:-/etc/shinit_v2}
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+# workaround for pickle lib issue
 ENV OMPI_MCA_coll_ucc_enable=0
+# Use UCX KVCACHE by default
+ENV TRTLLM_USE_UCX_KVCACHE=1 
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
@@ -206,7 +216,8 @@ RUN apt-get update && \
         # jq for polling various endpoints and health checks
         jq \
         # CUDA/ML libraries
-        libcudnn9-cuda-12 \
+        libcudnn9-cuda-13 \
+        libnvshmem3-cuda-13 \
         # Network and communication libraries
         libzmq3-dev \
         # RDMA/UCX libraries required to find RDMA devices
@@ -224,6 +235,8 @@ RUN apt-get update && \
         curl && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+ENV LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu/nvshmem/13/:${LD_LIBRARY_PATH}"
 
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from PyTorch base image
 COPY --from=pytorch_base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
@@ -319,6 +332,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     UV_GIT_LFS=1 uv pip install \
         --no-cache \
+        --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
@@ -345,7 +359,7 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 USER dynamo
-
+RUN apt install vim -y
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
