@@ -18,9 +18,9 @@ fn main() {
         build_with_prebuilt_kernels();
     } else {
         build_from_source();
+        // Only link against CUDA runtime when building from source
+        println!("cargo:rustc-link-lib=cudart");
     }
-
-    println!("cargo:rustc-link-lib=cudart");
 }
 
 /// Determine whether to use prebuilt kernels based on:
