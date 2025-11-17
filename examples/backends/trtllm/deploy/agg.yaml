@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/trtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:my-tag
     TRTLLMWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: trtllm-agg
@@ -24,7 +24,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/trtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:my-tag
           workingDir: /workspace/
           command:
           - python3
