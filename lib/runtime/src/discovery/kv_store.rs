@@ -252,6 +252,122 @@ impl Discovery for KVStoreDiscovery {
         Ok(instance)
     }
 
+    async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+        let (bucket_name, key_path) = match &instance {
+            DiscoveryInstance::Endpoint(inst) => {
+                let key = Self::endpoint_key(
+                    &inst.namespace,
+                    &inst.component,
+                    &inst.endpoint,
+                    inst.instance_id,
+                );
+                tracing::debug!(
+                    "KVStoreDiscovery::unregister: Unregistering endpoint instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                    inst.instance_id,
+                    inst.namespace,
+                    inst.component,
+                    inst.endpoint,
+                    key
+                );
+                (INSTANCES_BUCKET, key)
+            }
+            DiscoveryInstance::Model {
+                namespace,
+                component,
+                endpoint,
+                instance_id,
+                card_json,
+            } => {
+                let mut key = Self::model_key(namespace, component, endpoint, *instance_id);
+
+                // Check if this is a LoRA model by looking at user_data in card_json
+                // We need to reconstruct the same key that was used during registration
+                if let Some(user_data) = card_json.get("user_data")
+                    && let Some(is_lora) = user_data.get("lora_adapter").and_then(|v| v.as_bool())
+                    && is_lora
+                {
+                    // Try to use the slug field from the card first
+                    let lora_slug =
+                        if let Some(slug) = card_json.get("slug").and_then(|v| v.as_str()) {
+                            slug.to_string()
+                        } else if let Some(name) =
+                            card_json.get("display_name").and_then(|v| v.as_str())
+                        {
+                            // Fallback: compute slug from display_name (same logic as register)
+                            name.to_lowercase()
+                                .chars()
+                                .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                                .collect::<String>()
+                                .split('-')
+                                .filter(|s| !s.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("-")
+                        } else {
+                            String::new()
+                        };
+
+                    if !lora_slug.is_empty() {
+                        // Append lora slug to key for LoRA model
+                        key = format!("{}/{}", key, lora_slug);
+
+                        tracing::debug!(
+                            "KVStoreDiscovery::unregister: Unregistering LoRA model with lora_slug={}, instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                            lora_slug,
+                            instance_id,
+                            namespace,
+                            component,
+                            endpoint,
+                            key
+                        );
+                    }
+                }
+
+                // Log if it's a base model
+                let is_base_model = key.matches('/').count() == 3;
+                if is_base_model {
+                    tracing::debug!(
+                        "KVStoreDiscovery::unregister: Unregistering base model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                        instance_id,
+                        namespace,
+                        component,
+                        endpoint,
+                        key
+                    );
+                }
+
+                (MODELS_BUCKET, key)
+            }
+        };
+
+        // Get the bucket - if it doesn't exist, the instance is already gone
+        let Some(bucket) = self.store.get_bucket(bucket_name).await? else {
+            tracing::warn!(
+                "KVStoreDiscovery::unregister: Bucket {} does not exist, instance already removed",
+                bucket_name
+            );
+            return Ok(());
+        };
+
+        let key = crate::storage::key_value_store::Key::from_raw(key_path.clone());
+
+        tracing::debug!(
+            "KVStoreDiscovery::unregister: Deleting from bucket={}, key={}",
+            bucket_name,
+            key_path
+        );
+
+        // Delete the entry from the bucket
+        bucket.delete(&key).await?;
+
+        tracing::debug!(
+            "KVStoreDiscovery::unregister: Successfully unregistered instance_id={}, key={}",
+            instance.instance_id(),
+            key_path
+        );
+
+        Ok(())
+    }
+
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
         let prefix = Self::query_prefix(&query);
         let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {

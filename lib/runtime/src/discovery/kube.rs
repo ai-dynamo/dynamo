@@ -124,6 +124,48 @@ impl Discovery for KubeDiscoveryClient {
         Ok(instance)
     }
 
+    async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+        let instance_id = instance.instance_id();
+
+        tracing::debug!(
+            "Unregistering instance: {:?} with instance_id={:x}",
+            instance,
+            instance_id
+        );
+
+        // Remove from local metadata
+        let mut metadata = self.metadata.write().await;
+        match &instance {
+            DiscoveryInstance::Endpoint(inst) => {
+                tracing::info!(
+                    "Unregistered endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                    inst.namespace,
+                    inst.component,
+                    inst.endpoint,
+                    instance_id
+                );
+                metadata.unregister_endpoint(&instance)?;
+            }
+            DiscoveryInstance::Model {
+                namespace,
+                component,
+                endpoint,
+                ..
+            } => {
+                tracing::info!(
+                    "Unregistered model card: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                    namespace,
+                    component,
+                    endpoint,
+                    instance_id
+                );
+                metadata.unregister_model_card(&instance)?;
+            }
+        }
+
+        Ok(())
+    }
+
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
         tracing::debug!("KubeDiscoveryClient::list called with query={:?}", query);
 

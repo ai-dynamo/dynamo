@@ -141,6 +141,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lora_name_to_hash_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(unregister_llm, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
@@ -500,6 +501,136 @@ fn register_llm<'p>(
         register_model(config).await.map_err(to_pyerr)?;
         Ok(())
     })
+}
+
+/// Unregister a Model Deployment Card (MDC) from the service registry
+///
+/// This removes an LLM deployment from the discovery system.
+///
+/// # Arguments
+///
+/// * `endpoint` - The endpoint where the model is registered
+/// * `lora_name` - Optional LoRA adapter name (if unregistering a LoRA deployment)
+/// * `unregister_from_local_registry` - If true, also removes the endpoint from local registry
+///
+/// # MDC Path Format
+///
+/// - Base model: `v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}`
+/// - LoRA model: `v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}`
+///
+/// # Example
+///
+/// ```python
+/// # Unregister base model
+/// await unregister_llm(endpoint)
+///
+/// # Unregister LoRA adapter
+/// await unregister_llm(endpoint, lora_name="my-lora")
+///
+/// # Unregister and remove from local registry
+/// await unregister_llm(endpoint, unregister_from_local_registry=True)
+/// ```
+#[pyfunction]
+#[pyo3(signature = (endpoint, lora_name=None, unregister_from_local_registry=false))]
+fn unregister_llm<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    lora_name: Option<&str>,
+    unregister_from_local_registry: bool,
+) -> PyResult<Bound<'p, PyAny>> {
+    let lora_slug = lora_name.map(|name| rs::slug::Slug::slugify(name).to_string());
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        unregister_model(&endpoint, lora_slug.as_deref(), unregister_from_local_registry)
+            .await
+            .map_err(to_pyerr)?;
+        Ok(())
+    })
+}
+
+/// Internal function to unregister a model deployment
+async fn unregister_model(
+    endpoint: &Endpoint,
+    lora_slug: Option<&str>,
+    unregister_from_local_registry: bool,
+) -> anyhow::Result<()> {
+    let drt = endpoint.inner.drt();
+    let instance_id = drt.connection_id();
+
+    // Build the MDC key path
+    // Format: v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}[/{lora_slug}]
+    let namespace = endpoint.inner.component().namespace().name();
+    let component = endpoint.inner.component().name();
+    let endpoint_name = endpoint.inner.name();
+
+    let mut key_path = format!(
+        "{}/{}/{}/{}/{:x}",
+        llm_rs::model_card::ROOT_PATH,
+        namespace,
+        component,
+        endpoint_name,
+        instance_id
+    );
+
+    // Add LoRA slug if this is a LoRA deployment
+    if let Some(slug) = lora_slug {
+        key_path.push('/');
+        key_path.push_str(slug);
+    }
+
+    tracing::info!(
+        "Unregistering MDC from service registry: {}",
+        key_path
+    );
+
+    // Delete the MDC from the key-value store
+    // MDCs are stored in the "v1/mdc" bucket
+    let store = drt.store();
+    let mdc_bucket = store
+        .get_bucket("v1/mdc")
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to get MDC bucket: {}", e))?
+        .ok_or_else(|| anyhow::anyhow!("MDC bucket 'v1/mdc' not found"))?;
+
+    // Build the key relative to the bucket (without the bucket prefix)
+    let relative_key = format!(
+        "{}/{}/{}/{:x}{}",
+        namespace,
+        component,
+        endpoint_name,
+        instance_id,
+        lora_slug.map(|s| format!("/{}", s)).unwrap_or_default()
+    );
+
+    let key = rs::storage::key_value_store::Key::new(&relative_key);
+    mdc_bucket
+        .delete(&key)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to delete MDC: {}", e))?;
+
+    tracing::info!(
+        "Successfully unregistered MDC: {}",
+        key_path
+    );
+
+    // Optionally unregister from local endpoint registry
+    if unregister_from_local_registry {
+        let registry = drt.local_endpoint_registry();
+        let was_removed = registry.unregister(endpoint_name);
+        if was_removed {
+            tracing::info!(
+                "Unregistered endpoint '{}' from local registry",
+                endpoint_name
+            );
+        } else {
+            tracing::debug!(
+                "Endpoint '{}' was not in local registry",
+                endpoint_name
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Download a model from Hugging Face, returning it's local path

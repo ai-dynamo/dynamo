@@ -39,12 +39,65 @@ impl LocalEndpointRegistry {
         }
     }
 
+    /// Register a local endpoint
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint_name` - Name of the endpoint (e.g., "load_lora", "generate")
+    /// * `engine` - The async engine that handles requests for this endpoint
     pub fn register(&self, endpoint_name: String, engine: LocalAsyncEngine) {
         tracing::debug!("Registering local endpoint: {}", endpoint_name);
         self.engines.insert(endpoint_name, engine);
     }
 
+    /// Unregister a local endpoint
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint_name` - Name of the endpoint to unregister
+    ///
+    /// # Returns
+    ///
+    /// Returns true if the endpoint was found and removed, false otherwise
+    pub fn unregister(&self, endpoint_name: &str) -> bool {
+        tracing::debug!("Unregistering local endpoint: {}", endpoint_name);
+        self.engines.remove(endpoint_name).is_some()
+    }
+
+    /// Get a registered local endpoint
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint_name` - Name of the endpoint to retrieve
+    ///
+    /// # Returns
+    ///
+    /// The async engine if found, None otherwise
     pub fn get(&self, endpoint_name: &str) -> Option<LocalAsyncEngine> {
         self.engines.get(endpoint_name).map(|e| e.clone())
+    }
+
+    /// Check if an endpoint is registered locally
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint_name` - Name of the endpoint to check
+    pub fn contains(&self, endpoint_name: &str) -> bool {
+        self.engines.contains_key(endpoint_name)
+    }
+
+    /// List all registered endpoint names
+    pub fn list(&self) -> Vec<String> {
+        self.engines.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Get the number of registered endpoints
+    pub fn len(&self) -> usize {
+        self.engines.len()
+    }
+
+    /// Check if the registry is empty
+    pub fn is_empty(&self) -> bool {
+        self.engines.is_empty()
     }
 }
