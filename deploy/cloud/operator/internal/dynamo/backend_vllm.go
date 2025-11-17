@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -72,7 +71,7 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 
 // updateVLLMMultinodeArgs will inject Ray-specific flags for tensor parallel multinode deployments
 // OR data parallel flags for data parallel multinode deployments
-func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *common.Resources) {
+func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources) {
 	expandedArgs := getExpandedArgs(container)
 	if needsRayDistributedLaunch(expandedArgs, resources) {
 		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
@@ -109,7 +108,7 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 	container.Command = []string{"/bin/sh", "-c"} // ensure cmd is a shell
 }
 
-func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *common.Resources) {
+func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources) {
 	expandedArgs := getExpandedArgs(container)
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 	dataParallelSizeLocal := getContainerGPUs(resources) / getWorldSize(expandedArgs)
@@ -134,7 +133,7 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 
 // if world size (within DP rank) > GPU count, then we need to inject ray
 // world size = tensor parallel size * pipeline parallel size
-func needsRayDistributedLaunch(expandedArgs []string, resources *common.Resources) bool {
+func needsRayDistributedLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
 	containerGPUs := getContainerGPUs(resources)
 	if containerGPUs == 0 {
 		return false
@@ -149,7 +148,7 @@ func getWorldSize(expandedArgs []string) int64 {
 }
 
 // if world size across all DP ranks > GPU count, then we need to inject data parallel multinode coordination
-func needsDataParallelLaunch(expandedArgs []string, resources *common.Resources) bool {
+func needsDataParallelLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
 	dataParallelSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
 	containerGPUs := getContainerGPUs(resources)
 	if containerGPUs == 0 {
@@ -172,7 +171,7 @@ func getFlagValue(expandedArgs []string, flag string) int64 {
 	return flagValue
 }
 
-func getContainerGPUs(resources *common.Resources) int64 {
+func getContainerGPUs(resources *v1alpha1.Resources) int64 {
 	if resources == nil || resources.Limits == nil || resources.Limits.GPU == "" {
 		return 0
 	}

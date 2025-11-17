@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -52,8 +51,8 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Resources: &common.Resources{
-					Requests: &common.ResourceItem{
+				Resources: &v1alpha1.Resources{
+					Requests: &v1alpha1.ResourceItem{
 						GPU: "2",
 					},
 				},
@@ -106,8 +105,8 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			role:              RoleLeader,
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Resources: &common.Resources{
-					Limits: &common.ResourceItem{
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
 						GPU: "1",
 					},
 				},
@@ -557,8 +556,8 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			serviceName:       "test-service",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Resources: &common.Resources{
-					Requests: &common.ResourceItem{
+				Resources: &v1alpha1.Resources{
+					Requests: &v1alpha1.ResourceItem{
 						GPU: "2",
 					},
 				},
@@ -583,8 +582,8 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			serviceName:       "test",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Resources: &common.Resources{
-					Limits: &common.ResourceItem{
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
 						GPU: "1",
 					},
 				},
@@ -599,8 +598,8 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			serviceName:       "test",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Resources: &common.Resources{
-					Limits: &common.ResourceItem{
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
 						GPU: "1",
 					},
 				},
@@ -615,8 +614,8 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			serviceName:       "test",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Resources: &common.Resources{
-					Limits: &common.ResourceItem{
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
 						GPU: "1",
 					},
 				},
@@ -631,8 +630,8 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			serviceName:       "test",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Resources: &common.Resources{
-					Limits: &common.ResourceItem{
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
 						GPU: "1",
 					},
 				},
@@ -647,8 +646,8 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			serviceName:       "test",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Resources: &common.Resources{
-					Requests: &common.ResourceItem{
+				Resources: &v1alpha1.Resources{
+					Requests: &v1alpha1.ResourceItem{
 						GPU: "1",
 					},
 				},
@@ -663,8 +662,8 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			serviceName:       "test",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Resources: &common.Resources{
-					Requests: &common.ResourceItem{
+				Resources: &v1alpha1.Resources{
+					Requests: &v1alpha1.ResourceItem{
 						GPU: "1",
 					},
 				},
@@ -778,7 +777,7 @@ func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 func TestTRTLLMBackend_getGPUsPerNode(t *testing.T) {
 	tests := []struct {
 		name      string
-		resources *common.Resources
+		resources *v1alpha1.Resources
 		expected  int32
 	}{
 		{
@@ -788,13 +787,13 @@ func TestTRTLLMBackend_getGPUsPerNode(t *testing.T) {
 		},
 		{
 			name:      "Empty resources - default to 0",
-			resources: &common.Resources{},
+			resources: &v1alpha1.Resources{},
 			expected:  0,
 		},
 		{
 			name: "GPU in requests",
-			resources: &common.Resources{
-				Requests: &common.ResourceItem{
+			resources: &v1alpha1.Resources{
+				Requests: &v1alpha1.ResourceItem{
 					GPU: "2",
 				},
 			},
@@ -802,8 +801,8 @@ func TestTRTLLMBackend_getGPUsPerNode(t *testing.T) {
 		},
 		{
 			name: "GPU in limits",
-			resources: &common.Resources{
-				Limits: &common.ResourceItem{
+			resources: &v1alpha1.Resources{
+				Limits: &v1alpha1.ResourceItem{
 					GPU: "4",
 				},
 			},
@@ -811,11 +810,11 @@ func TestTRTLLMBackend_getGPUsPerNode(t *testing.T) {
 		},
 		{
 			name: "GPU in both requests and limits - requests takes precedence",
-			resources: &common.Resources{
-				Requests: &common.ResourceItem{
+			resources: &v1alpha1.Resources{
+				Requests: &v1alpha1.ResourceItem{
 					GPU: "3",
 				},
-				Limits: &common.ResourceItem{
+				Limits: &v1alpha1.ResourceItem{
 					GPU: "8",
 				},
 			},
@@ -823,8 +822,8 @@ func TestTRTLLMBackend_getGPUsPerNode(t *testing.T) {
 		},
 		{
 			name: "Invalid GPU value - default to 0",
-			resources: &common.Resources{
-				Requests: &common.ResourceItem{
+			resources: &v1alpha1.Resources{
+				Requests: &v1alpha1.ResourceItem{
 					GPU: "invalid",
 				},
 			},
@@ -832,8 +831,8 @@ func TestTRTLLMBackend_getGPUsPerNode(t *testing.T) {
 		},
 		{
 			name: "Empty GPU string - default to 0",
-			resources: &common.Resources{
-				Requests: &common.ResourceItem{
+			resources: &v1alpha1.Resources{
+				Requests: &v1alpha1.ResourceItem{
 					GPU: "",
 				},
 			},

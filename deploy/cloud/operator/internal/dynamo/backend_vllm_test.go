@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -100,8 +99,8 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 
 			// Create resources from GPU count and set in component
 			if tt.gpuCount > 0 {
-				tt.component.Resources = &common.Resources{
-					Limits: &common.ResourceItem{
+				tt.component.Resources = &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
 						GPU: strconv.FormatInt(tt.gpuCount, 10),
 					},
 				}
@@ -199,8 +198,8 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			// Create component with resources from GPU count
 			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
 			if tt.gpuCount > 0 {
-				component.Resources = &common.Resources{
-					Limits: &common.ResourceItem{
+				component.Resources = &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
 						GPU: strconv.FormatInt(tt.gpuCount, 10),
 					},
 				}
@@ -406,10 +405,10 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
 
 			// Create resources from GPU count
-			var resources *common.Resources
+			var resources *v1alpha1.Resources
 			if tt.gpuCount > 0 {
-				resources = &common.Resources{
-					Limits: &common.ResourceItem{
+				resources = &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
 						GPU: strconv.FormatInt(tt.gpuCount, 10),
 					},
 				}

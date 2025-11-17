@@ -24,7 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/bsm/gomega"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -481,15 +481,15 @@ func TestCopySpec(t *testing.T) {
 func TestGetResourcesConfig(t *testing.T) {
 	tests := []struct {
 		name             string
-		resources        *common.Resources
+		resources        *v1alpha1.Resources
 		expectedGPULimit corev1.ResourceName
 		expectedGPUValue string
 		expectError      bool
 	}{
 		{
 			name: "limits.gpu defined with no gpuType",
-			resources: &common.Resources{
-				Limits: &common.ResourceItem{
+			resources: &v1alpha1.Resources{
+				Limits: &v1alpha1.ResourceItem{
 					GPU: "4",
 				},
 			},
@@ -499,8 +499,8 @@ func TestGetResourcesConfig(t *testing.T) {
 		},
 		{
 			name: "limits.gpu defined with custom gpuType",
-			resources: &common.Resources{
-				Limits: &common.ResourceItem{
+			resources: &v1alpha1.Resources{
+				Limits: &v1alpha1.ResourceItem{
 					GPU:     "8",
 					GPUType: "gpu.custom-type.com/test",
 				},
