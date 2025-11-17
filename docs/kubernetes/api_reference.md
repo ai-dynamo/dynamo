@@ -599,6 +599,8 @@ The Dynamo operator automatically applies default values to various fields when 
 
 - **Health Probes**: Startup, liveness, and readiness probes are configured differently for frontend, worker, and planner components. For example, worker components receive a startup probe with a 2-hour timeout (720 failures × 10 seconds) to accommodate long model loading times.
 
+- **Security Context**: All components receive `fsGroup: 1000` by default to ensure proper file permissions for mounted volumes. This can be overridden via the `extraPodSpec.securityContext` field.
+
 - **Shared Memory**: All components receive an 8Gi shared memory volume mounted at `/dev/shm` by default (can be disabled or resized via the `sharedMemory` field).
 
 - **Environment Variables**: Components automatically receive environment variables like `DYN_NAMESPACE`, `DYN_PARENT_DGD_K8S_NAME`, `DYNAMO_PORT`, and backend-specific variables.
@@ -615,6 +617,50 @@ All components receive the following pod-level defaults unless overridden:
 
 - **`terminationGracePeriodSeconds`**: `60` seconds
 - **`restartPolicy`**: `Always`
+
+## Security Context
+
+The operator automatically applies default security context settings to all components to ensure proper file permissions, particularly for mounted volumes:
+
+- **`fsGroup`**: `1000` - Sets the group ownership of mounted volumes and any files created in those volumes
+
+This default ensures that non-root containers can write to mounted volumes (like model caches or persistent storage) without permission issues. The `fsGroup` setting is particularly important for:
+- Model downloads and caching
+- Compilation cache directories
+- Persistent volume claims (PVCs)
+- SSH key generation in multinode deployments
+
+### Overriding Security Context
+
+To override the default security context, specify your own `securityContext` in the `extraPodSpec` of your component:
+
+```yaml
+services:
+  YourWorker:
+    extraPodSpec:
+      securityContext:
+        fsGroup: 2000  # Custom group ID
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+```
+
+**Important**: When you provide *any* `securityContext` object in `extraPodSpec`, the operator will not inject any defaults. This gives you complete control over the security context, including the ability to run as root (by omitting `runAsNonRoot` or setting it to `false`).
+
+### OpenShift and Security Context Constraints
+
+In OpenShift environments with Security Context Constraints (SCCs), you may need to omit explicit UID/GID values to allow OpenShift's admission controllers to assign them dynamically:
+
+```yaml
+services:
+  YourWorker:
+    extraPodSpec:
+      securityContext:
+        # Omit fsGroup to let OpenShift assign it based on SCC
+        # OpenShift will inject the appropriate UID range
+```
+
+Alternatively, if you want to keep the default `fsGroup: 1000` behavior and are certain your cluster allows it, you don't need to specify anything - the operator defaults will work.
 
 ## Shared Memory Configuration
 
@@ -810,7 +856,7 @@ Default container ports are configured based on component type:
 
 For users who want to understand the implementation details or contribute to the operator, the default values described in this document are set in the following source files:
 
-- **Health Probes & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, environment variables, shared memory, and pod configurations
+- **Health Probes, Security Context & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, security context, environment variables, shared memory, and pod configurations
 - **Component-Specific Defaults**:
   - [`internal/dynamo/component_frontend.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_frontend.go)
   - [`internal/dynamo/component_worker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_worker.go)
@@ -826,5 +872,6 @@ For users who want to understand the implementation details or contribute to the
 
 - All these defaults can be overridden by explicitly specifying values in your DynamoComponentDeployment or DynamoGraphDeployment resources
 - User-specified probes (via `livenessProbe`, `readinessProbe`, or `startupProbe` fields) take precedence over operator defaults
+- For security context, if you provide *any* `securityContext` in `extraPodSpec`, no defaults will be injected, giving you full control
 - For multinode deployments, some defaults are modified or removed as described above to accommodate distributed execution patterns
 - The `extraPodSpec.mainContainer` field can be used to override probe configurations set by the operator
