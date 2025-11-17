@@ -46,7 +46,7 @@ DYN_REQUEST_PLANE=tcp python -m dynamo.frontend --http-port=8000 &
 # Configure GPU memory optimization for specific models
 EXTRA_ARGS=""
 if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
-    EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 2048"
+    EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
 fi
 
 # Start vLLM worker with vision model
