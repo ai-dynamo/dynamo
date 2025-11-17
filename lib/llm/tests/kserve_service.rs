@@ -1832,7 +1832,9 @@ pub mod kserve_test {
         let client = reqwest::Client::new();
         let metrics_response = timeout(
             Duration::from_secs(5),
-            client.get(format!("http://localhost:{}/metrics", http_metrics_port)).send()
+            client
+                .get(format!("http://localhost:{}/metrics", http_metrics_port))
+                .send(),
         )
         .await
         .expect("Metrics request timed out")
@@ -1871,7 +1873,7 @@ pub mod kserve_test {
             grpc_client.model_metadata(Request::new(ModelMetadataRequest {
                 name: "test_model".to_string(),
                 version: "".to_string(),
-            }))
+            })),
         )
         .await
         .expect("Model metadata request timed out")

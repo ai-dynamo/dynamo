@@ -58,10 +58,7 @@ impl State {
 
     /// Create a new State with a shared metrics object (typically from HTTP service)
     pub fn with_metrics(manager: Arc<ModelManager>, metrics: Arc<Metrics>) -> Self {
-        Self {
-            manager,
-            metrics,
-        }
+        Self { manager, metrics }
     }
 
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests

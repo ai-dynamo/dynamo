@@ -15,11 +15,11 @@ use crate::types::Annotated;
 use super::kserve;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
+use crate::http::service::metrics::InflightGuard;
 use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
     metrics::{Endpoint, process_response_and_observe_metrics},
 };
-use crate::http::service::metrics::InflightGuard;
 
 use crate::protocols::tensor;
 use crate::protocols::tensor::{
