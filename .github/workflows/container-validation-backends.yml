@@ -510,7 +510,7 @@ jobs:
         BRANCH: ${{ github.ref_name }}
       run: |
         set -x
-        
+
         # Redirect all output to a log file while still showing it
         exec > >(tee -a deploy-operator.log) 2>&1
 
@@ -556,7 +556,7 @@ jobs:
         kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
         # Create docker pull secret for operator image
         kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
-        
+
         # Check if Helm is available
         echo "Checking Helm availability..."
         if ! command -v helm &> /dev/null; then
@@ -565,9 +565,9 @@ jobs:
           echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
           exit 1
         fi
-        
+
         echo "Helm version: $(helm version --short)"
-        
+
         # Install helm dependencies
         echo "Installing Helm dependencies..."
         if ! helm repo add bitnami https://charts.bitnami.com/bitnami 2>&1; then
@@ -576,16 +576,16 @@ jobs:
           echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
           exit 1
         fi
-        
+
         cd deploy/cloud/helm/platform/
-        
+
         if ! helm dep build . 2>&1; then
           ERROR_MSG="Failed to build Helm dependencies"
           echo "$ERROR_MSG"
           echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
           exit 1
         fi
-        
+
         # Install platform with namespace restriction for single profile testing
         echo "Installing dynamo-platform Helm chart..."
         if ! helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
@@ -596,7 +596,7 @@ jobs:
           --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret 2>&1; then
           ERROR_MSG="Failed to install dynamo-platform Helm chart. This may be due to: pre-install hook timeout, image pull failures, or resource constraints."
           echo "$ERROR_MSG"
-          
+
           # Capture additional diagnostics
           echo "=== Pod Status ==="
           kubectl get pods -n ${NAMESPACE} -o wide || true
@@ -604,47 +604,47 @@ jobs:
           kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' | tail -20 || true
           echo "=== Helm Status ==="
           helm status dynamo-platform -n ${NAMESPACE} || true
-          
+
           echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
           exit 1
         fi
-        
+
         # Wait for all deployments to be ready
         echo "Waiting for deployments to be ready..."
         if ! timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch 2>&1; then
           ERROR_MSG="Deployment rollout timed out after 300 seconds"
           echo "$ERROR_MSG"
-          
+
           # Capture diagnostics
           echo "=== Pod Status ==="
           kubectl get pods -n ${NAMESPACE} -o wide || true
           echo "=== Deployment Status ==="
           kubectl get deployments -n ${NAMESPACE} || true
-          
+
           echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
           exit 1
         fi
       continue-on-error: true
-    
+
     - name: Setup Python for Log Analysis
       if: always() && steps.deploy-operator-step.outcome == 'failure'
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
-    
+
     - name: Install LogAI
       if: always() && steps.deploy-operator-step.outcome == 'failure'
       run: |
         pip install --upgrade pip
         pip install logai || echo "LogAI installation failed, will use fallback"
         chmod +x .github/scripts/extract_log_errors.py
-    
+
     - name: Extract Errors from Logs using LogAI
       if: always() && steps.deploy-operator-step.outcome == 'failure'
       id: extract-errors
       run: |
         set -x
-        
+
         # Use LogAI to extract errors from logs
         if [ -f "deploy-operator.log" ]; then
           echo "Analyzing deploy-operator.log with LogAI..."
@@ -653,84 +653,94 @@ jobs:
           echo "LOGAI_EXTRACTED_ERROR<<EOF" >> $GITHUB_ENV
           echo "$LOGAI_ERROR" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
-          
+
           echo "=== Extracted Errors ==="
           echo "$LOGAI_ERROR"
         else
           echo "LOGAI_EXTRACTED_ERROR=Log file not found" >> $GITHUB_ENV
         fi
-        
+
         # Also preserve any manually captured error
         if [ -n "$ERROR_MESSAGE" ]; then
           echo "MANUAL_ERROR_MESSAGE=$ERROR_MESSAGE" >> $GITHUB_ENV
         fi
-    
+
     - name: Check for Job Failure and Create Annotation
       if: always() && steps.deploy-operator-step.outcome == 'failure'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -x
-        
+
         # Combine LogAI extracted errors with manual captures
         ERROR_MESSAGE="${LOGAI_EXTRACTED_ERROR:-Unknown error occurred during operator deployment}"
-        
+
         # Add manually captured error if available
         if [ -n "$MANUAL_ERROR_MESSAGE" ]; then
           ERROR_MESSAGE="${ERROR_MESSAGE}\n\nManually Captured Error:\n${MANUAL_ERROR_MESSAGE}"
         fi
-        
+
         # Get additional context from Kubernetes if namespace is set
         if [ -n "$NAMESPACE" ]; then
           export KUBECONFIG=$(pwd)/.kubeconfig
-          
+
           # Get pod status
           POD_STATUS=$(kubectl get pods -n $NAMESPACE -o json 2>/dev/null || echo "{}")
           POD_ERRORS=$(echo "$POD_STATUS" | jq -r '.items[] | select(.status.phase != "Running") | "Pod: \(.metadata.name), Status: \(.status.phase), Reason: \(.status.containerStatuses[0].state.waiting.reason // .status.reason // "N/A"), Message: \(.status.containerStatuses[0].state.waiting.message // "N/A")"' 2>/dev/null | head -10 || echo "")
-          
+
           if [ -n "$POD_ERRORS" ]; then
             ERROR_MESSAGE="$ERROR_MESSAGE\n\nPod Status:\n$POD_ERRORS"
           fi
-          
+
           # Get recent events
           EVENTS=$(kubectl get events -n $NAMESPACE --sort-by='.lastTimestamp' -o json 2>/dev/null || echo "{}")
           ERROR_EVENTS=$(echo "$EVENTS" | jq -r '.items[] | select(.type == "Warning" or .type == "Error") | "\(.lastTimestamp) - \(.reason): \(.message)"' 2>/dev/null | tail -5 || echo "")
-          
+
           if [ -n "$ERROR_EVENTS" ]; then
             ERROR_MESSAGE="$ERROR_MESSAGE\n\nRecent Events:\n$ERROR_EVENTS"
           fi
         fi
-        
+
+        # Safely encode ERROR_MESSAGE for JSON using jq
+        ERROR_MESSAGE_JSON=$(jq -n --arg msg "$ERROR_MESSAGE" '$msg')
+
         # Create a check run with the annotation
         CHECK_RUN_ID=$(curl -s -X POST \
           -H "Authorization: token $GITHUB_TOKEN" \
           -H "Accept: application/vnd.github.v3+json" \
           "https://api.github.com/repos/${{ github.repository }}/check-runs" \
-          -d '{
-            "name": "Deploy Operator",
-            "head_sha": "${{ github.sha }}",
-            "status": "completed",
-            "conclusion": "failure",
-            "output": {
-              "title": "Operator Deployment Failed (LogAI Analysis)",
-              "summary": "Failed to deploy dynamo-platform operator to namespace '"${NAMESPACE}"'",
-              "text": "**Job**: deploy-operator\n**Namespace**: '"${NAMESPACE}"'\n**Analysis Method**: LogAI + Manual Capture\n\n**Error Details**:\n```\n'"${ERROR_MESSAGE}"'\n```\n\n[View Job Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
-              "annotations": [{
-                "path": ".github/workflows/container-validation-backends.yml",
-                "start_line": 357,
-                "end_line": 425,
-                "annotation_level": "failure",
-                "message": "'"${ERROR_MESSAGE}"'",
-                "title": "Operator deployment failed (LogAI)"
-              }]
-            }
-          }' | jq -r '.id')
-        
+          -d "$(jq -n \
+            --arg name "Deploy Operator" \
+            --arg sha "${{ github.sha }}" \
+            --arg namespace "${NAMESPACE}" \
+            --arg error_msg "$ERROR_MESSAGE" \
+            --arg repo "${{ github.repository }}" \
+            --arg run_id "${{ github.run_id }}" \
+            '{
+              "name": $name,
+              "head_sha": $sha,
+              "status": "completed",
+              "conclusion": "failure",
+              "output": {
+                "title": "Operator Deployment Failed (LogAI Analysis)",
+                "summary": ("Failed to deploy dynamo-platform operator to namespace " + $namespace),
+                "text": ("**Job**: deploy-operator\n**Namespace**: " + $namespace + "\n**Analysis Method**: LogAI + Manual Capture\n\n**Error Details**:\n```\n" + $error_msg + "\n```\n\n[View Job Run](https://github.com/" + $repo + "/actions/runs/" + $run_id + ")"),
+                "annotations": [{
+                  "path": ".github/workflows/container-validation-backends.yml",
+                  "start_line": 357,
+                  "end_line": 425,
+                  "annotation_level": "failure",
+                  "message": $error_msg,
+                  "title": "Operator deployment failed (LogAI)"
+                }]
+              }
+            }')" | jq -r '.id')
+
         echo "Created check run with ID: $CHECK_RUN_ID"
-        
+
         # Also use the workflow command to create an error annotation
         echo "::error file=.github/workflows/container-validation-backends.yml,line=367,title=Deploy Operator Failed (LogAI)::${ERROR_MESSAGE}"
-        
+
         # Fail the step
         exit 1
 
@@ -873,32 +883,32 @@ jobs:
         else
           echo "Test passed: Response matches expected format and content"
         fi
-        
+
         if [ $TEST_RESULT -ne 0 ]; then
           echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
         fi
         exit $TEST_RESULT
       continue-on-error: true
-    
+
     - name: Setup Python for Log Analysis
       if: always() && steps.run-tests.outcome == 'failure'
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
-    
+
     - name: Install LogAI
       if: always() && steps.run-tests.outcome == 'failure'
       run: |
         pip install --upgrade pip
         pip install logai || echo "LogAI installation failed, will use fallback"
         chmod +x .github/scripts/extract_log_errors.py
-    
+
     - name: Extract Errors from Logs using LogAI
       if: always() && steps.run-tests.outcome == 'failure'
       id: extract-test-errors
       run: |
         set -x
-        
+
         # Use LogAI to extract errors from logs
         if [ -f "test-output.log" ]; then
           echo "Analyzing test-output.log with LogAI..."
@@ -907,90 +917,89 @@ jobs:
           echo "LOGAI_EXTRACTED_ERROR<<EOF" >> $GITHUB_ENV
           echo "$LOGAI_ERROR" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
-          
+
           echo "=== Extracted Errors ==="
           echo "$LOGAI_ERROR"
         else
           echo "LOGAI_EXTRACTED_ERROR=Test log file not found" >> $GITHUB_ENV
         fi
-        
+
         # Also preserve any manually captured error
         if [ -n "$ERROR_MESSAGE" ]; then
           echo "MANUAL_ERROR_MESSAGE=$ERROR_MESSAGE" >> $GITHUB_ENV
         fi
-    
+
     - name: Check for Job Failure and Create Annotation
       if: always() && steps.run-tests.outcome == 'failure'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -x
-        
+
         # Combine LogAI extracted errors with manual captures
         ERROR_MESSAGE="${LOGAI_EXTRACTED_ERROR:-Unknown error occurred during deployment test}"
-        
+
         # Add manually captured error if available
         if [ -n "$MANUAL_ERROR_MESSAGE" ]; then
           ERROR_MESSAGE="${ERROR_MESSAGE}\n\nManually Captured Error:\n${MANUAL_ERROR_MESSAGE}"
         fi
-        
+
         # Get additional context from pod logs if available
         if [ -n "$GRAPH_NAME" ] && [ -n "$NAMESPACE" ]; then
           export KUBECONFIG=$(pwd)/.kubeconfig
           POD_STATUS=$(kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $NAMESPACE -o json 2>/dev/null || echo "{}")
-          
+
           # Extract pod error information if any pods are not ready
           POD_ERRORS=$(echo "$POD_STATUS" | jq -r '.items[] | select(.status.phase != "Running") | "Pod: \(.metadata.name), Status: \(.status.phase), Reason: \(.status.reason // "N/A")"' 2>/dev/null || echo "")
-          
+
           if [ -n "$POD_ERRORS" ]; then
             ERROR_MESSAGE="$ERROR_MESSAGE\n\nPod Status:\n$POD_ERRORS"
           fi
         fi
-        
-        # Create annotation using GitHub API
-        # Note: We use the workflow file path as the annotation target
-        cat > annotation.json <<EOF
-        {
-          "title": "Deployment Test Failed: ${{ env.FRAMEWORK }} (${{ matrix.profile }}) [LogAI]",
-          "summary": "Deployment test failed for ${{ env.FRAMEWORK }} with profile ${{ matrix.profile }}",
-          "text": "**Job**: ${{ github.job }}\n**Framework**: ${{ env.FRAMEWORK }}\n**Profile**: ${{ matrix.profile }}\n**Namespace**: ${{ needs.deploy-operator.outputs.NAMESPACE }}\n**Analysis Method**: LogAI + Manual Capture\n\n**Error Details**:\n\`\`\`\n${ERROR_MESSAGE}\n\`\`\`\n\n[View Job Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
-          "annotation_level": "failure",
-          "file": ".github/workflows/container-validation-backends.yml",
-          "start_line": 593,
-          "end_line": 807
-        }
-        EOF
-        
+
+        # Safely encode ERROR_MESSAGE for JSON using jq
+        ERROR_MESSAGE_JSON=$(jq -n --arg msg "$ERROR_MESSAGE" '$msg')
+
         # Create a check run with the annotation
         CHECK_RUN_ID=$(curl -s -X POST \
           -H "Authorization: token $GITHUB_TOKEN" \
           -H "Accept: application/vnd.github.v3+json" \
           "https://api.github.com/repos/${{ github.repository }}/check-runs" \
-          -d '{
-            "name": "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }}) [LogAI]",
-            "head_sha": "${{ github.sha }}",
-            "status": "completed",
-            "conclusion": "failure",
-            "output": {
-              "title": "Deployment Test Failed: ${{ env.FRAMEWORK }} (${{ matrix.profile }}) [LogAI Analysis]",
-              "summary": "Deployment test failed for ${{ env.FRAMEWORK }} with profile ${{ matrix.profile }}",
-              "text": "**Job**: ${{ github.job }}\n**Framework**: ${{ env.FRAMEWORK }}\n**Profile**: ${{ matrix.profile }}\n**Namespace**: ${{ needs.deploy-operator.outputs.NAMESPACE }}\n**Analysis Method**: LogAI + Manual Capture\n\n**Error Details**:\n```\n'"${ERROR_MESSAGE}"'\n```\n\n[View Job Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
-              "annotations": [{
-                "path": ".github/workflows/container-validation-backends.yml",
-                "start_line": 593,
-                "end_line": 807,
-                "annotation_level": "failure",
-                "message": "'"${ERROR_MESSAGE}"'",
-                "title": "Deploy test failed for ${{ env.FRAMEWORK }} (${{ matrix.profile }}) [LogAI]"
-              }]
-            }
-          }' | jq -r '.id')
-        
+          -d "$(jq -n \
+            --arg name "Deploy Test: ${{ env.FRAMEWORK }} (${{ matrix.profile }}) [LogAI]" \
+            --arg sha "${{ github.sha }}" \
+            --arg job "${{ github.job }}" \
+            --arg framework "${{ env.FRAMEWORK }}" \
+            --arg profile "${{ matrix.profile }}" \
+            --arg namespace "${{ needs.deploy-operator.outputs.NAMESPACE }}" \
+            --arg error_msg "$ERROR_MESSAGE" \
+            --arg repo "${{ github.repository }}" \
+            --arg run_id "${{ github.run_id }}" \
+            '{
+              "name": $name,
+              "head_sha": $sha,
+              "status": "completed",
+              "conclusion": "failure",
+              "output": {
+                "title": ("Deployment Test Failed: " + $framework + " (" + $profile + ") [LogAI Analysis]"),
+                "summary": ("Deployment test failed for " + $framework + " with profile " + $profile),
+                "text": ("**Job**: " + $job + "\n**Framework**: " + $framework + "\n**Profile**: " + $profile + "\n**Namespace**: " + $namespace + "\n**Analysis Method**: LogAI + Manual Capture\n\n**Error Details**:\n```\n" + $error_msg + "\n```\n\n[View Job Run](https://github.com/" + $repo + "/actions/runs/" + $run_id + ")"),
+                "annotations": [{
+                  "path": ".github/workflows/container-validation-backends.yml",
+                  "start_line": 593,
+                  "end_line": 807,
+                  "annotation_level": "failure",
+                  "message": $error_msg,
+                  "title": ("Deploy test failed for " + $framework + " (" + $profile + ") [LogAI]")
+                }]
+              }
+            }')" | jq -r '.id')
+
         echo "Created check run with ID: $CHECK_RUN_ID"
-        
+
         # Also use the workflow command to create an error annotation
         echo "::error file=.github/workflows/container-validation-backends.yml,line=626,title=Deploy Test Failed (LogAI): ${{ env.FRAMEWORK }} (${{ matrix.profile }})::${ERROR_MESSAGE}"
-        
+
         # Fail the step
         exit 1
     - name: Cleanup
