@@ -40,8 +40,7 @@ jobs:
 
   operator:
     needs: changed-files
-    # Temporarily override skip condition for testing
-    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -117,8 +116,7 @@ jobs:
 
   vllm:
     needs: changed-files
-    # Temporarily override skip condition for testing
-    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -183,8 +181,7 @@ jobs:
 
   sglang:
     needs: changed-files
-    # Temporarily override skip condition for testing
-    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -247,8 +244,7 @@ jobs:
 
   trtllm:
     needs: changed-files
-    # Temporarily override skip condition for testing
-    if: true  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -500,8 +496,7 @@ jobs:
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    # Temporarily override skip condition for testing - run even if dependencies fail
-    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -670,7 +665,7 @@ jobs:
           echo "MANUAL_ERROR_MESSAGE=$ERROR_MESSAGE" >> $GITHUB_ENV
         fi
     
-    - name: Create GitHub Annotation on Failure
+    - name: Check for Job Failure and Create Annotation
       if: always() && steps.deploy-operator-step.outcome == 'failure'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -741,8 +736,7 @@ jobs:
 
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
-    # Temporarily override skip condition for testing - run even if dependencies fail
-    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
@@ -925,7 +919,7 @@ jobs:
           echo "MANUAL_ERROR_MESSAGE=$ERROR_MESSAGE" >> $GITHUB_ENV
         fi
     
-    - name: Create GitHub Annotation on Failure
+    - name: Check for Job Failure and Create Annotation
       if: always() && steps.run-tests.outcome == 'failure'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1017,8 +1011,7 @@ jobs:
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
-    # Temporarily override skip condition for testing - run even if dependencies fail
-    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
@@ -1039,8 +1032,7 @@ jobs:
 
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
-    # Temporarily override skip condition for testing - run even if dependencies fail
-    if: always()  # TODO: Restore to: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
