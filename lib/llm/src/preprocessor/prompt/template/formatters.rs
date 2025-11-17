@@ -6,8 +6,9 @@ use std::sync::Arc;
 use super::tokcfg::{ChatTemplate, raise_exception, strftime_now, tojson};
 use super::{ContextMixins, HfTokenizerConfigJsonFormatter, JinjaEnvironment};
 use either::Either;
-use minijinja::{Environment, Value};
+use minijinja::{Environment, Value, context};
 use tracing;
+use serde_json::json;
 
 /// Replace non-standard Jinja2 block tags with placeholders
 ///
@@ -74,38 +75,36 @@ fn replace_non_standard_blocks(template: &str) -> String {
 /// or accepts simple strings (standard text-only templates).
 ///
 /// This function test-renders the template with both formats:
-/// - Array format: `[{"type": "text", "text": "X"}]`
-/// - String format: `"X"`
+/// - Array format: `[{"type": "text", "text": "template_test"}]`
+/// - String format: `"template_test"`
 ///
 /// If the array format works but string format doesn't produce output,
-/// the template requires arrays (e.g., llava, Qwen-VL multimodal templates).
+/// the template requires arrays (multimodal templates).
 fn detect_content_array_usage(env: &Environment) -> bool {
-    use minijinja::context;
-    use serde_json::json;
 
     // Test with array format
-    let test_array = context! {
-        messages => json!([{"role": "user", "content": [{"type": "text", "text": "X"}]}]),
+    let array_msg = context! {
+        messages => json!([{"role": "user", "content": [{"type": "text", "text": "template_test"}]}]),
         add_generation_prompt => false,
     };
 
     // Test with string format
-    let test_string = context! {
-        messages => json!([{"role": "user", "content": "X"}]),
+    let string_msg = context! {
+        messages => json!([{"role": "user", "content": "template_test"}]),
         add_generation_prompt => false,
     };
 
     let out_array = env
         .get_template("default")
-        .and_then(|t| t.render(&test_array))
+        .and_then(|t| t.render(&array_msg))
         .unwrap_or_default();
     let out_string = env
         .get_template("default")
-        .and_then(|t| t.render(&test_string))
+        .and_then(|t| t.render(&string_msg))
         .unwrap_or_default();
 
     // If array works but string doesn't, template requires arrays
-    out_array.contains("X") && !out_string.contains("X")
+    out_array.contains("template_test") && !out_string.contains("template_test")
 }
 
 impl JinjaEnvironment {

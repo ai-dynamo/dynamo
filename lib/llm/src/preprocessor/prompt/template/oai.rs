@@ -87,7 +87,7 @@ fn may_be_fix_msg_content(messages: serde_json::Value, preserve_arrays: bool) ->
         .iter()
         .map(|msg| {
             match msg.get("content") {
-                // Case 1: String → Array (for multimodal templates)
+                // Case 1: String to Array (for multimodal templates)
                 Some(serde_json::Value::String(text)) if preserve_arrays => {
                     let mut modified_msg = msg.clone();
                     if let Some(msg_object) = modified_msg.as_object_mut() {
@@ -99,7 +99,7 @@ fn may_be_fix_msg_content(messages: serde_json::Value, preserve_arrays: bool) ->
                     }
                     modified_msg
                 }
-                // Case 2: Array → String (for standard templates)
+                // Case 2: Array to String (for standard templates)
                 Some(serde_json::Value::Array(content_array)) if !preserve_arrays => {
                     let is_text_only_array = !content_array.is_empty()
                         && content_array.iter().all(|part| {
