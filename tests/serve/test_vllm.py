@@ -131,7 +131,6 @@ vllm_configs = {
                 expected_response=["LLM"],
                 temperature=0.0,
                 max_tokens=100,
-                timeout=180,
             )
         ],
     ),
@@ -156,7 +155,6 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=["LLM"],
                 max_tokens=100,
-                timeout=180,
             )
         ],
     ),
@@ -184,7 +182,6 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=["LLM"],
                 max_tokens=100,
-                timeout=180,
             ),
             # HTTP URL test
             chat_payload(
@@ -198,7 +195,6 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=["LLM"],
                 max_tokens=100,
-                timeout=180,
             ),
         ],
     ),

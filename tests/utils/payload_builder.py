@@ -86,7 +86,6 @@ def chat_payload(
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
     max_tokens: int = 300,
-    min_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
     stream: bool = False,
 ) -> ChatPayload:
@@ -102,8 +101,6 @@ def chat_payload(
     }
     if temperature is not None:
         body["temperature"] = temperature
-    if min_tokens is not None:
-        body["min_tokens"] = min_tokens
 
     return ChatPayload(
         body=body,
