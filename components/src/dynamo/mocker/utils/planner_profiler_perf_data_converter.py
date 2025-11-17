@@ -43,47 +43,48 @@ from dynamo.runtime.logging import configure_dynamo_logging
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--profile_results_dir", type=str, required=True)
-parser.add_argument("--resolution", type=int, default=100)
-parser.add_argument("--output_dir", type=str, default="")
-args = parser.parse_args()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile_results_dir", type=str, required=True)
+    parser.add_argument("--resolution", type=int, default=100)
+    parser.add_argument("--output_dir", type=str, default="")
+    args = parser.parse_args()
 
-if not args.output_dir:
-    args.output_dir = args.profile_results_dir
+    if not args.output_dir:
+        args.output_dir = args.profile_results_dir
 
-logger.info(
-    f"Converting profile results from {args.profile_results_dir} to {args.output_dir}..."
-)
+    logger.info(
+        f"Converting profile results from {args.profile_results_dir} to {args.output_dir}..."
+    )
 
-# first convert prefill
-prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
+    # first convert prefill
+    prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
 
-prefill_x = np.linspace(
-    prefill_interpolator.ttft_interpolator.x.min(),
-    prefill_interpolator.ttft_interpolator.x.max(),
-    args.resolution,
-)
-prefill_y = prefill_interpolator.ttft_interpolator(prefill_x)
+    prefill_x = np.linspace(
+        prefill_interpolator.ttft_interpolator.x.min(),
+        prefill_interpolator.ttft_interpolator.x.max(),
+        args.resolution,
+    )
+    prefill_y = prefill_interpolator.ttft_interpolator(prefill_x)
 
-result = {
-    "prefill_isl": prefill_x.tolist(),
-    "prefill_ttft_ms": prefill_y.tolist(),
-}
+    result = {
+        "prefill_isl": prefill_x.tolist(),
+        "prefill_ttft_ms": prefill_y.tolist(),
+    }
 
-# then convert decode
-decode_interpolator = DecodeInterpolator(
-    args.profile_results_dir, resolution=args.resolution
-)
+    # then convert decode
+    decode_interpolator = DecodeInterpolator(
+        args.profile_results_dir, resolution=args.resolution
+    )
 
-decode_active_kv_tokens = decode_interpolator.xi * decode_interpolator.max_kv_tokens
-decode_context_length = decode_interpolator.yi
-decode_itl = decode_interpolator.itl_interpolator.transpose()
+    decode_active_kv_tokens = decode_interpolator.xi * decode_interpolator.max_kv_tokens
+    decode_context_length = decode_interpolator.yi
+    decode_itl = decode_interpolator.itl_interpolator.transpose()
 
-result["decode_active_kv_tokens"] = decode_active_kv_tokens.tolist()
-result["decode_context_length"] = decode_context_length.tolist()
-result["decode_itl"] = decode_itl.tolist()
+    result["decode_active_kv_tokens"] = decode_active_kv_tokens.tolist()
+    result["decode_context_length"] = decode_context_length.tolist()
+    result["decode_itl"] = decode_itl.tolist()
 
-np.savez(os.path.join(args.output_dir, "perf_data.npz"), **result)
+    np.savez(os.path.join(args.output_dir, "perf_data.npz"), **result)
 
-logger.info(f"Wrote perf data to {os.path.join(args.output_dir, 'perf_data.npz')}")
+    logger.info(f"Wrote perf data to {os.path.join(args.output_dir, 'perf_data.npz')}")
