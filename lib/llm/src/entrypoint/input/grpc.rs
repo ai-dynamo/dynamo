@@ -94,7 +94,7 @@ pub async fn run(
     // Wait for both servers to complete
     // Both tasks should run indefinitely until cancelled by the shutdown token
     let (grpc_result, http_result) = tokio::join!(grpc_task, http_task);
-    
+
     // Check results - if either failed, propagate the error
     grpc_result.await??;
     http_result.await??;
