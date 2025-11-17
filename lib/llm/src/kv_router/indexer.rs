@@ -380,7 +380,20 @@ impl RadixTree {
                     }
                 };
 
+                let mut current_hash = op.parent_hash;
+
                 for block_id in op.blocks {
+                    if Some(block_id.block_hash) == current_hash {
+                        tracing::warn!(
+                            worker_id = worker.worker_id.to_string(),
+                            dp_rank = worker.dp_rank,
+                            id,
+                            block_hash = ?block_id.block_hash,
+                            "Detected self-referential block insertion; skipping block"
+                        );
+                        break;
+                    }
+
                     let mut inner = current.borrow_mut();
                     let block = match inner.children.get(&block_id.tokens_hash) {
                         Some(block) => block.clone(),
@@ -416,6 +429,7 @@ impl RadixTree {
                     drop(inner);
 
                     current = block;
+                    current_hash = Some(block_id.block_hash);
                 }
                 Ok(())
             }
