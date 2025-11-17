@@ -49,8 +49,6 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
   --modality "$MODALITY" \
-  --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
-  --max-file-size-mb "$MAX_FILE_SIZE_MB" \
   --disaggregation-mode prefill \
   --encode-endpoint "$ENCODE_ENDPOINT" &
 PREFILL_PID=$!
@@ -61,8 +59,6 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$DECODE_ENGINE_ARGS" \
   --modality "$MODALITY" \
-  --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
-  --max-file-size-mb "$MAX_FILE_SIZE_MB" \
   --disaggregation-mode decode &
 DECODE_PID=$!
 
