@@ -750,6 +750,8 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
         PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
     elif [[ "$TRTLLM_INTENTION" == "build" ]]; then
+        TENSORRTLLM_PIP_WHEEL_DIR=${TENSORRTLLM_PIP_WHEEL_DIR:=$DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR}
+        echo "TRTLLM pip wheel output directory is: ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if [ "$DRY_RUN" != "true" ]; then
             GIT_URL_ARG=""
             if [ -n "${TRTLLM_GIT_URL}" ]; then
