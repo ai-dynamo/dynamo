@@ -131,18 +131,19 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		if err == nil {
 			return
 		}
-		logs.Error(err, "Failed to reconcile DynamoComponentDeployment.")
-		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeWarning, "ReconcileError", "Failed to reconcile DynamoComponentDeployment: %v", err)
-		_, err = r.setStatusConditions(ctx, req,
+		reconcileErr := err
+		logs.Error(reconcileErr, "Failed to reconcile DynamoComponentDeployment.")
+		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeWarning, "ReconcileError",
+			"Failed to reconcile DynamoComponentDeployment: %v", reconcileErr)
+		if _, statusErr := r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
 				Status:  metav1.ConditionFalse,
 				Reason:  "Reconciling",
-				Message: fmt.Sprintf("Failed to reconcile DynamoComponentDeployment: %v", err),
+				Message: fmt.Sprintf("Failed to reconcile DynamoComponentDeployment: %v", reconcileErr),
 			},
-		)
-		if err != nil {
-			return
+		); statusErr != nil {
+			logs.Error(statusErr, "Failed to update DynamoComponentDeployment status after reconcile error")
 		}
 	}()
 
@@ -176,7 +177,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 			return ctrl.Result{}, nil
 		}
 
-		// Set Valid condition to True
+		// Set Valid condition to True and persist it
 		meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, metav1.Condition{
 			Type:               "Valid",
 			Status:             metav1.ConditionTrue,
@@ -184,6 +185,11 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 			Reason:             "ValidationPassed",
 			Message:            "DynamoComponentDeployment spec is valid",
 		})
+		if statusErr := r.Status().Update(ctx, dynamoComponentDeployment); statusErr != nil {
+			logs.Error(statusErr, "Failed to update DynamoComponentDeployment status with validation success")
+			err = statusErr
+			return ctrl.Result{}, err
+		}
 	}
 
 	deleted, err := commonController.HandleFinalizer(ctx, dynamoComponentDeployment, r.Client, r)
