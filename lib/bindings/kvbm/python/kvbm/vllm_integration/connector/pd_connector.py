@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Type
+from typing import TYPE_CHECKING, Optional, Type
 
 from kvbm.vllm_integration.connector.dynamo_connector import DynamoConnector
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -126,21 +126,3 @@ class PdConnector(MultiConnector):
             metadata.extra_async_saves = self._extra_async_saves
             self._extra_async_saves = {}
         return metadata
-
-    def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
-        """
-        Called when a request has finished, before its blocks are freed.
-        Delegates to the first connector (DynamoConnector or LMCacheConnector) to forward the tuple result.
-
-        Returns:
-            Tuple of (bool, Optional[dict[str, Any]]):
-            - True if the request is being saved/sent asynchronously and blocks
-              should not be freed until the request_id is returned from get_finished().
-            - Optional KVTransferParams to be included in the request outputs
-              returned by the engine.
-        """
-        return self._connectors[0].request_finished(request, block_ids)
