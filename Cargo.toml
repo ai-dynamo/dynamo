@@ -15,10 +15,10 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/engines/*",
-    "lib/discovery",
     "lib/config",
     "lib/nova",
     "lib/nova-backend",
+    "lib/nova-discovery",
     "lib/kvbm",
     "lib/kvbm-kernels",
 ]
@@ -37,6 +37,7 @@ default-members = [
     "lib/bindings/c",
     "lib/nova",
     "lib/nova-backend",
+    "lib/nova-discovery",
     "lib/kvbm",
 ]
 resolver = "3"
