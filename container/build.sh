@@ -101,6 +101,8 @@ DEFAULT_TENSORRTLLM_INDEX_URL="https://download.pytorch.org/whl/cu130"
 DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc2"
 TENSORRTLLM_PIP_WHEEL=""
 
+SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+SGLANG_BASE_IMAGE_TAG="25.09-cuda13.0-devel-ubuntu24.04"
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # FIXME: NCCL will hang with 25.03, so use 25.01 for now
