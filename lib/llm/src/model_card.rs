@@ -701,7 +701,11 @@ impl HFConfig {
             })
             .or_else(|| {
                 // Maybe it's in generation_config.json
-                crate::file_json_field(&gencfg_path, "eos_token_id")
+                crate::file_json_field::<Vec<TokenIdType>>(&gencfg_path, "eos_token_id")
+                .or_else(|_| {
+                    crate::file_json_field::<TokenIdType>(&gencfg_path, "eos_token_id")
+                    .map(|v| vec![v])
+                })
                 .inspect_err(
                     |err| tracing::warn!(%err, "Missing eos_token_id in generation_config.json"),
                 )
