@@ -444,5 +444,6 @@ curl localhost:8080/v1/chat/completions \
 Output should be similar to
 
 ```
+# Example output
 {"id":"chatcmpl-f3747869-06a2-4d8e-826b-df3358040726","choices":[{"index":0,"message":{"content":"<think>Okay, let's start by developing the character's background. The user wants a detailed background, so I need to cover motivations, skills,","role":"assistant","reasoning_content":null},"finish_reason":"length"}],"created":1763501336,"model":"Qwen/Qwen3-32B","object":"chat.completion","usage":null}
 ```
