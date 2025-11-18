@@ -165,7 +165,15 @@ class AbstractOperation(ABC):
         self._release()
 
     def _release(self) -> None:
-        pass
+        """
+        Private method to release resources.
+        """
+        # Deregister local descriptors from NIXL, allowing them to reused by a future operation.
+        if isinstance(self._local_desc_list, list):
+            for d in self._local_desc_list:
+                d.deregister_memory(self._connection)
+        else:
+            self._local_desc_list.deregister_memory(self._connection)
 
     @property
     def connection(self) -> Connection:
@@ -998,6 +1006,7 @@ class Descriptor:
 
         return serialized.to_descriptor()
 
+    @property
     def metadata(self) -> SerializedDescriptor:
         """
         Serializes the descriptor into a `SerializedDescriptor` object.
@@ -1010,6 +1019,33 @@ class Descriptor:
             )
 
         return self._serialized
+
+    def deregister_memory(self, connection: Connection) -> None:
+        """
+        Deregisters the memory of the descriptor with NIXL.
+        """
+        if not isinstance(connection, Connection):
+            raise TypeError(
+                "Argument `connection` must be `dynamo.nixl_connect.Connection`."
+            )
+        if connection != self._connection:
+            raise RuntimeError(
+                "Descriptor can only be deregistered from the connection it was registered with. "
+                f"Existing connection: {self._connection.name if self._connection is not None else None}, requested connection: {connection.name}."
+            )
+
+        if self._nixl_hndl is None:
+            logger.warning(
+                f"dynamo.nixl_connect.{self.__class__.__name__}: Request to deregister Descriptor {self.__repr__()} cannot be completed because the Descriptor is not registered."
+            )
+            return
+
+        connection._nixl.unregister_memory(self._nixl_hndl)
+        self._nixl_hndl = None
+        self._connection = None
+        logger.debug(
+            f"dynamo.nixl_connect.{self.__class__.__name__}: Unregistered {self.__repr__()} with NIXL."
+        )
 
     def register_memory(
         self,
@@ -1027,8 +1063,8 @@ class Descriptor:
         if self._connection is not None:
             if self._connection != connection:
                 raise RuntimeError(
-                    "Descriptor cannot be registered with more than one connection."
-                    f" Existing connection: {self._connection.name}, new connection: {connection.name}."
+                    "Descriptor cannot be registered with more than one connection. "
+                    f"Existing connection: {self._connection.name}, new connection: {connection.name}."
                 )
             # Descriptor is already registered with this connection.
             return
