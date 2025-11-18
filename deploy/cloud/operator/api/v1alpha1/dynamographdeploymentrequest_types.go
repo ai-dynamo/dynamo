@@ -66,6 +66,16 @@ type ProfilingConfigSpec struct {
 	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
 	// +kubebuilder:validation:Required
 	ProfilerImage string `json:"profilerImage"`
+
+	// OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.
+	// If specified, all profiling artifacts (logs, plots, configs, raw data) will be written
+	// to this PVC instead of an ephemeral emptyDir volume. This allows users to access
+	// complete profiling results after the job completes by mounting the PVC.
+	// The PVC must exist in the same namespace as the DGDR and have ReadWriteOnce access mode.
+	// If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.
+	// Note: ConfigMaps are still created regardless of this setting for planner integration.
+	// +kubebuilder:validation:Optional
+	OutputPVC string `json:"outputPVC,omitempty"`
 }
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
