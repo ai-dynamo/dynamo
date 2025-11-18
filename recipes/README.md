@@ -1,297 +1,282 @@
-# Dynamo Model Serving Recipes
+# Dynamo Production-Ready Recipes
 
-This repository contains production-ready recipes for deploying large language models using the Dynamo platform. Each recipe includes deployment configurations, performance benchmarking, and model caching setup.
+Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA Dynamo.
 
-## Contents
-- [Available Models](#available-models)
-- [Quick Start](#quick-start)
-- [Prerequisites](#prerequisites)
-- Deployment Methods
-   - [Option 1: Automated Deployment](#option-1-automated-deployment)
-   - [Option 2: Manual Deployment](#option-2-manual-deployment)
+> **Prerequisites:** This guide assumes you have already installed the Dynamo Kubernetes Platform.
+> If not, follow the **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** first.
 
+## Available Recipes
 
-## Available Models
-
-| Model Family    | Framework | Deployment Mode      | GPU Requirements | Status | Benchmark |GAIE-integration |
-|-----------------|-----------|---------------------|------------------|--------|-----------|------------------|
-| llama-3-70b     | vllm      | agg                 | 4x H100/H200     | ✅     | ✅        |✅                |
-| llama-3-70b     | vllm      | disagg (1 node)      | 8x H100/H200    | ✅     | ✅        | 🚧               |
-| llama-3-70b     | vllm      | disagg (multi-node)     | 16x H100/H200    | ✅     | ✅        |🚧               |
-| deepseek-r1     | sglang    | disagg (1 node, wide-ep)     | 8x H200          | ✅     | 🚧        |🚧               |
-| deepseek-r1     | sglang    | disagg (multi-node, wide-ep)     | 16x H200        | ✅     | 🚧        |🚧               |
-| gpt-oss-120b    | trtllm    | agg                 | 4x GB200         | ✅     | ✅        |🚧               |
+| Model | Framework | Mode | GPUs | Deployment | Benchmark Recipe | Notes |GAIE integration |
+|-------|-----------|------|------|------------|------------------|-------|------------------|
+| **[Llama-3-70B](llama-3-70b/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization | ✅ | ❌ |
+| **[Llama-3-70B](llama-3-70b/vllm/disagg-single-node/)** | vLLM | Disagg (Single-Node) | 8x H100/H200 | ✅ | ✅ | Prefill + Decode separation | ❌ |
+| **[Llama-3-70B](llama-3-70b/vllm/disagg-multi-node/)** | vLLM | Disagg (Multi-Node) | 16x H100/H200 | ✅ | ✅ | 2 nodes, 8 GPUs each | ❌ |
+| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GPU | ✅ | ✅ | FP8 quantization | ❌ |
+| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x GPU | ✅ | ✅ | Prefill + Decode separation | ❌ |
+| **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
+| **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | TBD | ❌ | ❌ | Engine configs only, no K8s manifest | ❌ |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 8x H200 | ✅ | ❌ | Benchmark recipe pending | ❌ |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | Benchmark recipe pending | ❌ |
+| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 32+4 GB200 | ✅ | ✅ |Multi-node: 8 decode + 1 prefill nodes | ❌ |
 
 **Legend:**
-- ✅ Functional
-- 🚧 Under development
+- **Deployment**: ✅ = Complete `deploy.yaml` manifest available | ❌ = Missing or incomplete
+- **Benchmark Recipe**: ✅ = Includes `perf.yaml` for running AIPerf benchmarks | ❌ = No benchmark recipe provided
 
+## Recipe Structure
 
-**Recipe Directory Structure:**
-Recipes are organized into a directory structure that follows the pattern:
-```text
+Each complete recipe follows this standard structure:
+
+```
 <model-name>/
+├── README.md (optional)           # Model-specific deployment notes
 ├── model-cache/
-│   ├── model-cache.yaml         # PVC for model cache
-│   └── model-download.yaml      # Job for model download
-├── <framework>/
-│   └── <deployment-mode>/
-│       ├── deploy.yaml          # DynamoGraphDeployment CRD and optional configmap for custom configuration
-│       └── perf.yaml (optional) # Performance benchmark
-└── README.md (optional)         # Model documentation
+│   ├── model-cache.yaml          # PersistentVolumeClaim for model storage
+│   └── model-download.yaml       # Job to download model from HuggingFace
+└── <framework>/                  # vllm, sglang, or trtllm
+    └── <deployment-mode>/        # agg, disagg, disagg-single-node, etc.
+        ├── deploy.yaml           # Complete DynamoGraphDeployment manifest
+        └── perf.yaml (optional)  # AIPerf benchmark job
 ```
 
 ## Quick Start
 
-Follow the instructions in the [Prerequisites](#prerequisites) section to set up your environment.
+### Prerequisites
 
-Choose your preferred deployment method: using the `run.sh` script or manual deployment steps.
+**1. Dynamo Platform Installed**
 
+The recipes require the Dynamo Kubernetes Platform to be installed. Follow the installation guide:
 
-## Prerequisites
+- **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** - Quickstart (~10 minutes)
+- **[Detailed Installation Guide](../docs/kubernetes/installation_guide.md)** - Advanced options
 
-### 1. Environment Setup
+**2. GPU Cluster Requirements**
 
-Create a Kubernetes namespace and set environment variable:
-
-```bash
-export NAMESPACE=your-namespace
-kubectl create namespace ${NAMESPACE}
-```
-
-### 2. Deploy Dynamo Platform
-
-Install the Dynamo Cloud Platform following the [Quickstart Guide](../docs/kubernetes/README.md).
-
-### 3. GPU Cluster
-
-Ensure your Kubernetes cluster has:
-- GPU nodes with appropriate GPU types (see model requirements above)
+Ensure your cluster has:
+- GPU nodes matching recipe requirements (see table above)
 - GPU operator installed
-- Sufficient GPU memory and compute resources
+- Appropriate GPU drivers and container runtime
 
-### 4. Container Registry Access
+**3. HuggingFace Access**
 
-Ensure access to NVIDIA container registry for runtime images:
-- `nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z`
-- `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:x.y.z`
-- `nvcr.io/nvidia/ai-dynamo/sglang-runtime:x.y.z`
-
-### 5. HuggingFace Access and Kubernetes Secret Creation
-
-Set up a kubernetes secret with the HuggingFace token for model download:
+Configure authentication to download models:
 
 ```bash
-# Update the token in the secret file
-vim hf_hub_secret/hf_hub_secret.yaml
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
 
-# Apply the secret
-kubectl apply -f hf_hub_secret/hf_hub_secret.yaml -n ${NAMESPACE}
+# Create HuggingFace token secret
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token-here" \
+  -n ${NAMESPACE}
 ```
 
-6. Configure Storage Class
+**4. Storage Configuration**
+
+Update the `storageClassName` in `<model>/model-cache/model-cache.yaml` to match your cluster:
 
 ```bash
-# Check available storage classes
+# Find your storage class name
 kubectl get storageclass
+
+# Edit the model-cache.yaml file and update:
+# spec:
+#   storageClassName: "your-actual-storage-class"
 ```
 
-Replace "your-storage-class-name" with your actual storage class in the file: `<model>/model-cache/model-cache.yaml`
+### Deploy a Recipe
 
-```yaml
-# In <model>/model-cache/model-cache.yaml
-spec:
-  storageClassName: "your-actual-storage-class"  # Replace this
-```
-
-## Option 1: Automated Deployment
-
-Use the `run.sh` script for fully automated deployment:
-
-**Note:** The script automatically:
-- Create model cache PVC and downloads the model
-- Deploy the model service
-- Runs performance benchmark if a `perf.yaml` file is present in the deployment directory
-
-
-#### Script Usage
+**Step 1: Download Model**
 
 ```bash
-./run.sh [OPTIONS] --model <model> --framework <framework> --deployment <deployment-type>
+# Update storageClassName in model-cache.yaml first!
+kubectl apply -f <model>/model-cache/ -n ${NAMESPACE}
+
+# Wait for download to complete (may take 10-60 minutes depending on model size)
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=6000s
+
+# Monitor progress
+kubectl logs -f job/model-download -n ${NAMESPACE}
 ```
 
-**Required Options:**
-- `--model <model>`: Model name matching the directory name in the recipes directory (e.g., llama-3-70b, gpt-oss-120b, deepseek-r1)
-- `--framework <framework>`: Backend framework (`vllm`, `trtllm`, `sglang`)
-- `--deployment <deployment-type>`: Deployment mode (e.g., agg, disagg, disagg-single-node, disagg-multi-node)
-
-**Optional Options:**
-- `--namespace <namespace>`: Kubernetes namespace (default: dynamo)
-- `--dry-run`: Show commands without executing them
-- `-h, --help`: Show help message
-
-**Environment Variables:**
-- `NAMESPACE`: Kubernetes namespace (default: dynamo)
-
-#### Example Usage
-```bash
-# Set up environment
-export NAMESPACE=your-namespace
-kubectl create namespace ${NAMESPACE}
-# Configure HuggingFace token
-kubectl apply -f hf_hub_secret/hf_hub_secret.yaml -n ${NAMESPACE}
-
-# use run.sh script to deploy the model
-# Deploy Llama-3-70B with vLLM (aggregated mode)
-./run.sh --model llama-3-70b --framework vllm --deployment agg
-
-# Deploy GPT-OSS-120B with TensorRT-LLM
-./run.sh --model gpt-oss-120b --framework trtllm --deployment agg
-
-# Deploy DeepSeek-R1 with SGLang (disaggregated mode)
-./run.sh --model deepseek-r1 --framework sglang --deployment disagg
-
-# Deploy with custom namespace
-./run.sh --namespace my-namespace --model llama-3-70b --framework vllm --deployment agg
-
-# Dry run to see what would be executed
-./run.sh --dry-run --model llama-3-70b --framework vllm --deployment agg
-```
-
-## If deploying with Gateway API Inference extension GAIE
-
-1. Follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE.
-
-2. Apply manifests by running a script.
+**Step 2: Deploy Service**
 
 ```bash
-# Match the block size to the cli value in your deployment file deploy.yaml: - "python3 -m dynamo.vllm ... --block-size 128"
-export DYNAMO_KV_BLOCK_SIZE=128
-export EPP_IMAGE=nvcr.io/you/epp:tag
-# Add --gaie argument to the script i.e.:
-./run.sh --model llama-3-70b --framework vllm --gaie agg --deployment agg
-```
-The script will perform gateway checks and apply the manifests.
-
-## Option 2: Manual Deployment
-
-For step-by-step manual deployment follow these steps :
-
-```bash
-# 0. Set up environment (see Prerequisites section)
-export NAMESPACE=your-namespace
-kubectl create namespace ${NAMESPACE}
-kubectl apply -f hf_hub_secret/hf_hub_secret.yaml -n ${NAMESPACE}
-
-# 1. Download model (see Model Download section)
-kubectl apply -n $NAMESPACE -f <model>/model-cache/
-
-# 2. Deploy model (see Deployment section)
-kubectl apply -n $NAMESPACE -f <model>/<framework>/<mode>/deploy.yaml
-
-# 3. Run benchmarks (optional, if perf.yaml exists)
-kubectl apply -n $NAMESPACE -f <model>/<framework>/<mode>/perf.yaml
-```
-
-### Step 1: Download Model
-
-```bash
-# Start the download job
-kubectl apply -n $NAMESPACE -f <model>/model-cache
-
-# Verify job creation
-kubectl get jobs -n $NAMESPACE | grep model-download
-```
-
-Monitor and wait for the model download to complete:
-
-```bash
-
-# Wait for job completion (timeout after 100 minutes)
-kubectl wait --for=condition=Complete job/model-download -n $NAMESPACE --timeout=6000s
-
-# Check job status
-kubectl get job model-download -n $NAMESPACE
-
-# View download logs
-kubectl logs job/model-download -n $NAMESPACE
-```
-
-### Step 2: Deploy Model Service
-
-```bash
-# Navigate to the specific deployment configuration
-cd <model>/<framework>/<deployment-mode>/
-
-# Deploy the model service
-kubectl apply -n $NAMESPACE -f deploy.yaml
-
-# Verify deployment creation
-kubectl get deployments -n $NAMESPACE
-```
-
-#### Wait for Deployment Ready
-
-```bash
-# Get deployment name from the deploy.yaml file
-DEPLOYMENT_NAME=$(grep "name:" deploy.yaml | head -1 | awk '{print $2}')
-
-# Wait for deployment to be ready (timeout after 10 minutes)
-kubectl wait --for=condition=available deployment/$DEPLOYMENT_NAME -n $NAMESPACE --timeout=1200s
+kubectl apply -f <model>/<framework>/<mode>/deploy.yaml -n ${NAMESPACE}
 
 # Check deployment status
-kubectl get deployment $DEPLOYMENT_NAME -n $NAMESPACE
+kubectl get dynamographdeployment -n ${NAMESPACE}
 
 # Check pod status
-kubectl get pods -n $NAMESPACE -l app=$DEPLOYMENT_NAME
+kubectl get pods -n ${NAMESPACE}
+
+# Wait for pods to be ready
+kubectl wait --for=condition=ready pod -l nvidia.com/dynamo-graph-deployment-name=<deployment-name> -n ${NAMESPACE} --timeout=600s
 ```
 
-#### Verify Model Service
+**Step 3: Test Deployment**
 
 ```bash
-# Check if service is running
-kubectl get services -n $NAMESPACE
+# Port forward to access the service locally
+kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}
 
-# Test model endpoint (port-forward to test locally)
-kubectl port-forward service/${DEPLOYMENT_NAME}-frontend 8000:8000 -n $NAMESPACE
-
-# Test the model API (in another terminal)
+# In another terminal, test the endpoint
 curl http://localhost:8000/v1/models
 
-# Stop port-forward when done
-pkill -f "kubectl port-forward"
+# Send a test request
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<model-name>",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 50
+  }'
 ```
 
-### Step 3: Performance Benchmarking (Optional)
-
-Run performance benchmarks to evaluate model performance. Note that benchmarking is only available for models that include a `perf.yaml` file (optional):
-
-#### Launch Benchmark Job
+**Step 4: Run Benchmark (Optional)**
 
 ```bash
-# From the deployment directory
-kubectl apply -n $NAMESPACE -f perf.yaml
+# Only if perf.yaml exists in the recipe directory
+kubectl apply -f <model>/<framework>/<mode>/perf.yaml -n ${NAMESPACE}
 
-# Verify benchmark job creation
-kubectl get jobs -n $NAMESPACE
+# Monitor benchmark progress
+kubectl logs -f job/<benchmark-job-name> -n ${NAMESPACE}
+
+# View results after completion
+kubectl logs job/<benchmark-job-name> -n ${NAMESPACE} | tail -50
 ```
 
-#### Monitor Benchmark Progress
+** Inference Gateway (GAIE) Integration (Optional)**
+
+For Llama-3-70B with vLLM (Aggregated), an example of integration with the Inference Gateway is provided.
+
+Follow to Follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE. Then apply manifests.
 
 ```bash
-# Get benchmark job name
-PERF_JOB_NAME=$(grep "name:" perf.yaml | head -1 | awk '{print $2}')
+export DEPLOY_PATH=llama-3-70b/vllm/agg/
+#DEPLOY_PATH=<model>/<framework>/<mode>/
+kubectl apply -R -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
 
-# Monitor benchmark logs in real-time
-kubectl logs -f job/$PERF_JOB_NAME -n $NAMESPACE
+## Example Deployments
 
-# Wait for benchmark completion (timeout after 100 minutes)
-kubectl wait --for=condition=Complete job/$PERF_JOB_NAME -n $NAMESPACE --timeout=6000s
-```
-
-#### View Benchmark Results
+### Llama-3-70B with vLLM (Aggregated)
 
 ```bash
-# Check final benchmark results
-kubectl logs job/$PERF_JOB_NAME -n $NAMESPACE | tail -50
+export NAMESPACE=dynamo-demo
+kubectl create namespace ${NAMESPACE}
+
+# Create HF token secret
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+
+# Deploy
+kubectl apply -f llama-3-70b/model-cache/ -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=6000s
+kubectl apply -f llama-3-70b/vllm/agg/deploy.yaml -n ${NAMESPACE}
+
+# Test
+kubectl port-forward svc/llama3-70b-agg-frontend 8000:8000 -n ${NAMESPACE}
 ```
+
+### DeepSeek-R1 on GB200 (Multi-node)
+
+See [deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml](deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml) for the complete multi-node WideEP configuration.
+
+## Customization
+
+Each `deploy.yaml` contains:
+- **ConfigMap**: Engine-specific configuration (embedded in the manifest)
+- **DynamoGraphDeployment**: Kubernetes resource definitions
+- **Resource limits**: GPU count, memory, CPU requests/limits
+- **Image references**: Container images with version tags
+
+### Key Customization Points
+
+**Model Configuration:**
+```yaml
+# In deploy.yaml under worker args:
+args:
+  - python3 -m dynamo.vllm --model <your-model-path> --served-model-name <name>
+```
+
+**GPU Resources:**
+```yaml
+resources:
+  limits:
+    gpu: "4"  # Adjust based on your requirements
+  requests:
+    gpu: "4"
+```
+
+**Scaling:**
+```yaml
+services:
+  VllmDecodeWorker:
+    replicas: 2  # Scale to multiple workers
+```
+
+**Router Mode:**
+```yaml
+# In Frontend args:
+args:
+  - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+# Options: round-robin, kv (KV-aware routing)
+```
+
+**Container Images:**
+```yaml
+image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
+# Update version tag as needed
+```
+
+## Troubleshooting
+
+### Common Issues
+
+**Pods stuck in Pending:**
+- Check GPU availability: `kubectl describe node <node-name>`
+- Verify storage class exists: `kubectl get storageclass`
+- Check resource requests vs. available resources
+
+**Model download fails:**
+- Verify HuggingFace token is correct
+- Check network connectivity from cluster
+- Review job logs: `kubectl logs job/model-download -n ${NAMESPACE}`
+
+**Workers fail to start:**
+- Check GPU compatibility (driver version, CUDA version)
+- Verify image pull secrets if using private registries
+- Review pod logs: `kubectl logs <pod-name> -n ${NAMESPACE}`
+
+**For more troubleshooting:**
+- [Kubernetes Deployment Guide](../docs/kubernetes/README.md#troubleshooting)
+- [Observability Documentation](../docs/kubernetes/observability/)
+
+## Related Documentation
+
+- **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** - Platform installation and concepts
+- **[API Reference](../docs/kubernetes/api_reference.md)** - DynamoGraphDeployment CRD specification
+- **[vLLM Backend Guide](../docs/backends/vllm/README.md)** - vLLM-specific features
+- **[SGLang Backend Guide](../docs/backends/sglang/README.md)** - SGLang-specific features
+- **[TensorRT-LLM Backend Guide](../docs/backends/trtllm/README.md)** - TensorRT-LLM features
+- **[Observability](../docs/kubernetes/observability/)** - Monitoring and logging
+- **[Benchmarking Guide](../docs/benchmarks/benchmarking.md)** - Performance testing
+
+## Contributing
+
+We welcome contributions of new recipes! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
+- Recipe submission guidelines
+- Required components checklist
+- Testing and validation requirements
+- Documentation standards
+
+### Recipe Quality Standards
+
+A production-ready recipe must include:
+- ✅ Complete `deploy.yaml` with DynamoGraphDeployment
+- ✅ Model cache PVC and download job
+- ✅ Benchmark recipe (`perf.yaml`) for performance testing
+- ✅ Verification on target hardware
+- ✅ Documentation of GPU requirements
