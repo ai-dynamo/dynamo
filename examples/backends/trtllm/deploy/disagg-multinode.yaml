@@ -90,6 +90,9 @@ spec:
       value: "/models"
   services:
     Frontend:
+      volumeMounts:
+        - name: models
+          mountPoint: /models
       dynamoNamespace: trtllm-disagg
       componentType: frontend
       replicas: 1

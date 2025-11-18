@@ -1,13 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Type
 
 from kvbm.vllm_integration.connector.dynamo_connector import DynamoConnector
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
-    LMCacheConnectorV1,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorMetadata,
@@ -15,8 +12,22 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnector
 from vllm.v1.core.sched.output import SchedulerOutput
 
+# Optional import for LMCache support
+_LMCacheConnectorV1: Optional[Type] = None
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
+        LMCacheConnectorV1,
+    )
+
+    _LMCacheConnectorV1 = LMCacheConnectorV1
+except ImportError:
+    pass
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
+        LMCacheConnectorV1,
+    )
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
@@ -41,9 +52,18 @@ class PdConnector(MultiConnector):
             raise ValueError(
                 f"PdConnector requires exactly two connectors (got {len(self._connectors)})"
             )
-        if not isinstance(self._connectors[0], (DynamoConnector, LMCacheConnectorV1)):
+
+        # Build allowed types for first connector
+        allowed_first_types: list[Type] = [DynamoConnector]
+        if _LMCacheConnectorV1 is not None:
+            allowed_first_types.append(_LMCacheConnectorV1)
+
+        if not isinstance(self._connectors[0], tuple(allowed_first_types)):
+            allowed_names = ["DynamoConnector"]
+            if _LMCacheConnectorV1 is not None:
+                allowed_names.append("LMCacheConnectorV1")
             raise TypeError(
-                f"Expected first connector to be DynamoConnector or LMCacheConnector, "
+                f"Expected first connector to be {' or '.join(allowed_names)}, "
                 f"got {type(self._connectors[0]).__name__}"
             )
         if not isinstance(self._connectors[1], NixlConnector):
