@@ -111,8 +111,12 @@ class PrefillHandler(HandlerBase):
         embeddings_tensor = None
 
         if self.multimodal_processor:
+            # Extract messages from extra_args (set by Rust preprocessor) or fall back to direct field
+            messages = request.get("extra_args", {}).get(
+                "messages", request.get("messages", [])
+            )
             _, _, embedding_paths = self.multimodal_processor.extract_prompt_and_media(
-                request.get("messages", [])
+                messages
             )
             if embedding_paths:
                 if self.encode_client and self.connector:

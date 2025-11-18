@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::connector::Connector;
+use etcd_client::{LeaseKeepAliveStream, LeaseKeeper};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -45,21 +46,53 @@ pub async fn create_lease(
 async fn keep_alive(
     connector: Arc<Connector>,
     lease_id: u64,
-    mut ttl: u64,
+    ttl: u64,
     token: CancellationToken,
 ) -> anyhow::Result<()> {
+    // Deadline when the lease expires
     let mut deadline = Instant::now() + Duration::from_secs(ttl);
 
-    loop {
+    let mut reconnect = true;
+    while reconnect {
         // Try to establish or re-establish the keep-alive stream
+        let (sender, receiver) =
+            match new_keep_alive_stream(&connector, lease_id, &deadline, &token).await? {
+                Some(stream) => stream,
+                None => break, // cancelled
+            };
+
+        // Keep-alive loop with the established stream
+        reconnect = keep_alive_with_stream(
+            &connector,
+            sender,
+            receiver,
+            lease_id,
+            &mut deadline,
+            &token,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Establish a new keep-alive stream with automatic retry and reconnection.
+///
+/// Returns:
+///     `Ok(Some((LeaseKeeper, LeaseKeepAliveStream)))` on success.
+///     `Ok(None)` if cancelled.
+///     `Err` for unrecoverable errors such as deadline exceeded.
+async fn new_keep_alive_stream(
+    connector: &Arc<Connector>,
+    lease_id: u64,
+    deadline: &Instant,
+    token: &CancellationToken,
+) -> anyhow::Result<Option<(LeaseKeeper, LeaseKeepAliveStream)>> {
+    loop {
         let mut lease_client = connector.get_client().lease_client();
-        let (mut heartbeat_sender, mut heartbeat_receiver) = match lease_client
-            .keep_alive(lease_id as i64)
-            .await
-        {
+        match lease_client.keep_alive(lease_id as i64).await {
             Ok((sender, receiver)) => {
                 tracing::debug!(lease_id, "Established keep-alive stream");
-                (sender, receiver)
+                return Ok(Some((sender, receiver))); // success
             }
             Err(e) => {
                 tracing::warn!(lease_id, error = %e, "Failed to establish keep-alive stream");
@@ -68,84 +101,89 @@ async fn keep_alive(
                 tokio::select! {
                     biased;
 
-                    reconnect_result = connector.reconnect(deadline) => {
+                    reconnect_result = connector.reconnect(*deadline) => {
                         match reconnect_result {
-                            Err(e) => return Err(e),
-                            _ => continue,
+                            Err(e) => return Err(e), // cannot reconnect
+                            _ => continue, // retry
                         }
                     }
 
                     _ = token.cancelled() => {
                         tracing::debug!(lease_id, "Cancellation token triggered during reconnection");
-                        return Ok(());
+                        return Ok(None); // cancelled
                     }
                 }
             }
         };
+    }
+}
 
-        // Keep-alive loop with the established stream
-        loop {
-            if deadline < std::time::Instant::now() {
-                anyhow::bail!(
-                    "Unable to refresh lease - deadline exceeded. Check etcd server status"
-                );
+/// Keep-alive loop that maintains the lease using the provided sender and receiver.
+///
+/// Returns:
+///     `Ok(true)` for recoverable errors such as stream closure that warrant reconnection attempts.
+///     `Ok(false)` if cancelled.
+///     `Err` for unrecoverable errors such as lease already expired.
+async fn keep_alive_with_stream(
+    connector: &Arc<Connector>,
+    mut sender: LeaseKeeper,
+    mut receiver: LeaseKeepAliveStream,
+    lease_id: u64,
+    deadline: &mut Instant,
+    token: &CancellationToken,
+) -> anyhow::Result<bool> {
+    loop {
+        let next_renewal = deadline
+            .saturating_duration_since(Instant::now())
+            .div_f64(2.0);
+
+        tokio::select! {
+            biased;
+
+            status = receiver.message() => {
+                match status {
+                    Ok(Some(resp)) => {
+                        tracing::trace!(lease_id, "keep alive response received: {:?}", resp);
+                        // Update deadline from response
+                        let ttl = resp.ttl();
+                        if ttl <= 0 {
+                            tracing::error!(lease_id, "Keep-alive lease expired");
+                            anyhow::bail!("Unable to maintain lease - expired or revoked. Check etcd server status");
+                        }
+                        *deadline = Instant::now() + Duration::from_secs(ttl as u64);
+                    }
+                    Ok(None) => {
+                        tracing::warn!(lease_id, "Keep-alive stream unexpectedly ended");
+                        return Ok(true); // Exit to reconnect
+                    }
+                    Err(e) => {
+                        tracing::warn!(lease_id, error = %e, "Keep-alive stream error");
+                        return Ok(true); // Exit to reconnect
+                    }
+                }
             }
 
-            tokio::select! {
-                biased;
-
-                status = heartbeat_receiver.message() => {
-                    match status {
-                        Ok(Some(resp)) => {
-                            tracing::trace!(lease_id, "keep alive response received: {:?}", resp);
-
-                            // Update ttl and deadline from response
-                            ttl = resp.ttl() as u64;
-                            deadline = Instant::now() + Duration::from_secs(ttl);
-
-                            if resp.ttl() == 0 {
-                                anyhow::bail!("Unable to maintain lease - expired or revoked. Check etcd server status");
-                            }
-                        }
-                        Ok(None) => {
-                            tracing::warn!(lease_id, "Keep-alive stream unexpectedly ended");
-                            break;
-                        }
-                        Err(e) => {
-                            tracing::warn!(lease_id, error = %e, "Keep-alive stream error");
-                            break;
-                        }
-                    }
+            _ = token.cancelled() => {
+                tracing::debug!(lease_id, "cancellation token triggered; revoking lease");
+                let mut lease_client = connector.get_client().lease_client();
+                if let Err(e) = lease_client.revoke(lease_id as i64).await {
+                    tracing::warn!(
+                        lease_id,
+                        error = %e,
+                        "Failed to revoke lease during cancellation. Cleanup may be incomplete."
+                    );
                 }
+                return Ok(false);
+            }
 
-                _ = token.cancelled() => {
-                    tracing::debug!(lease_id, "cancellation token triggered; revoking lease");
-                    if let Err(e) = lease_client.revoke(lease_id as i64).await {
-                        tracing::warn!(
-                            lease_id,
-                            error = %e,
-                            "Failed to revoke lease during cancellation. Cleanup may be incomplete."
-                        );
-                    }
-                    return Ok(());
-                }
-
-                _ = tokio::time::sleep(Duration::from_secs(ttl / 2)) => {
-                    tracing::trace!(lease_id, "sending keep alive");
-
-                    // if we get a error issuing the heartbeat, set the ttl to 0
-                    // this will allow us to poll the response stream once and the cancellation
-                    // token once, then immediately try to tick the heartbeat
-                    // this will repeat until either the heartbeat is reestablished or the deadline
-                    // is exceeded
-                    if let Err(e) = heartbeat_sender.keep_alive().await {
-                        tracing::warn!(
-                            lease_id,
-                            error = %e,
-                            "Unable to send lease heartbeat. Check etcd server status"
-                        );
-                        ttl = 0;
-                    }
+            _ = tokio::time::sleep(next_renewal) => {
+                tracing::trace!(lease_id, "sending keep alive");
+                if let Err(e) = sender.keep_alive().await {
+                    tracing::warn!(
+                        lease_id,
+                        error = %e,
+                        "Unable to send lease heartbeat. Check etcd server status"
+                    );
                 }
             }
         }
