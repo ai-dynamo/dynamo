@@ -1774,6 +1774,18 @@ mod tests {
             KvCacheEventError::InvalidBlockSequence
         ));
 
+        // Cycle further down the chain (A -> B -> A)
+        let result = trie.apply_event(create_store_event(
+            worker_0,
+            3,
+            vec![1, 0],
+            Some(ExternalSequenceBlockHash(0)),
+        ));
+        assert!(matches!(
+            result.unwrap_err(),
+            KvCacheEventError::InvalidBlockSequence
+        ));
+
         // Tree remains unchanged beyond the root block
         assert_eq!(
             trie.root.borrow().children.len(),
