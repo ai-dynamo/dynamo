@@ -881,4 +881,214 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_e2e_with_tools_vllm() {
+        // E2E Parsing test for DeepSeek V3 with tools.
+        let file_path = format!(
+            "{}/vllm/deepseek-v3/chat_completion_stream_tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+
+        // Create a stream from the mock chunks
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        // Parse the response stream with reasoning and tool parsing enabled
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v3".to_string()),
+            Some("deepseek_v3".to_string()),
+        )
+        .await;
+
+        // Verify we got output chunks
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        // Aggregate content from output chunks
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // Assert reasoning content was parsed
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        // Verify tool calls match expectations
+        let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
+        assert_eq!(
+            aggregated.has_tool_calls, expected_has_tool_calls,
+            "Tool calls presence should match expected value"
+        );
+
+        // Verify tool calls
+        assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is ToolCalls
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool call case"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_1_e2e_with_tools_vllm() {
+        // E2E Parsing test for DeepSeek V3.1 with tools.
+        let file_path = format!(
+            "{}/vllm/deepseek-v3.1/chat_completion_stream_tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+
+        // Create a stream from the mock chunks
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        // Parse the response stream with reasoning and tool parsing enabled
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v3_1".to_string()),
+            Some("deepseek_v3_1".to_string()),
+        )
+        .await;
+
+        // Verify we got output chunks
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        // Aggregate content from output chunks
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // Assert reasoning content was parsed
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        // Verify tool calls match expectations
+        let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
+        assert_eq!(
+            aggregated.has_tool_calls, expected_has_tool_calls,
+            "Tool calls presence should match expected value"
+        );
+
+        // Verify tool calls
+        assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is ToolCalls
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool call case"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_e2e_with_no_tools_vllm() {
+        // E2E Parsing test for DeepSeek V3 without tools.
+        let file_path = format!(
+            "{}/vllm/deepseek-v3/chat_completion_stream_no_tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+
+        // Create a stream from the mock chunks
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        // Parse the response stream with reasoning and tool parsing enabled
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v3".to_string()),
+            Some("deepseek_v3".to_string()),
+        )
+        .await;
+
+        // Verify we got output chunks
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        // Aggregate content from output chunks
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // Assert reasoning content was parsed
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        // Verify no tool calls
+        assert!(!aggregated.has_tool_calls, "Should not have any tool calls");
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is Stop
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for non-tool call case"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_1_e2e_with_no_tools_vllm() {
+        // E2E Parsing test for DeepSeek V3.1 without tools.
+        let file_path = format!(
+            "{}/vllm/deepseek-v3.1/chat_completion_stream_no_tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+
+        // Create a stream from the mock chunks
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        // Parse the response stream with reasoning and tool parsing enabled
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v3_1".to_string()),
+            Some("deepseek_v3_1".to_string()),
+        )
+        .await;
+
+        // Verify we got output chunks
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        // Aggregate content from output chunks
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // Assert reasoning content was parsed
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        // Verify no tool calls
+        assert!(!aggregated.has_tool_calls, "Should not have any tool calls");
+
+        // Verify finish_reason is valid: exactly one occurrence, in last chunk, and is Stop
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for non-tool call case"
+        );
+    }
 }
