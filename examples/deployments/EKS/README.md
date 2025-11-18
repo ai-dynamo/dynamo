@@ -2,7 +2,7 @@
 
 This guide covers steps of creating an Amazon EKS cluster, creating a shared storage Amazon EFS and deploying Dynamo Kubernetes Platform and run inference with TRTLLM backend.
 
-[<kbd>Step 1. Create EKS cluster</kbd>](#step-1-create-eks-cluster)
+[Step 1. Create EKS cluster](#step-1-create-eks-cluster)
 
 [Step 2. Install Dynamo Kubernetes Platform](#step-2-install-dynamo-kubernetes-platform)
 
@@ -170,7 +170,7 @@ dynamo-platform-etcd-0                                            1/1     Runnin
 dynamo-platform-nats-0                                            2/2     Running             0          174m
 ```
 
-### Step 3. Deploy a model
+### Step 3. Deploy Dynamo Inference Graph
 
 #### a) Build Dynamo TRTLLM runtime image
 
@@ -392,7 +392,7 @@ spec:
               name: decode-config
 ```
 
-#### Step 4. Deploy Dynamo Inference Graph
+#### d) Deploy Dynamo Inference Graph
 
 ```
 kubectl apply -f <DYNAMO_INFERENCE_GRAPH>.yaml -n dynamo-system
@@ -429,7 +429,7 @@ trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-nzznf      1/1     Runnin
 trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-wnmdn      1/1     Running   0          125m
 ```
 
-#### Step 5. Test the Deployment
+#### e) Test the Deployment
 
 ```
 # Port forward
