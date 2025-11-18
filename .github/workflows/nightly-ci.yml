@@ -92,7 +92,7 @@ jobs:
         id: build-image
         uses: ./.github/actions/docker-build
         with:
-          framework: ${FRAMEWORK}
+          framework: ${{ env.FRAMEWORK }}
           target: framework
           platform: linux/${{ matrix.platform.arch }}
           # base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
