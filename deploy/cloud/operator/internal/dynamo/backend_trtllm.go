@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -197,7 +196,7 @@ func (b *TRTLLMBackend) generateWorkerHostnames(numberOfNodes int32, serviceName
 }
 
 // getGPUsPerNode extracts the number of GPUs per node from resources
-func getGPUsPerNode(resources *common.Resources) int32 {
+func getGPUsPerNode(resources *v1alpha1.Resources) int32 {
 	if resources != nil && resources.Requests != nil && resources.Requests.GPU != "" {
 		if gpus, err := strconv.ParseInt(resources.Requests.GPU, 10, 32); err == nil {
 			return int32(gpus)
