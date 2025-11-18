@@ -1,0 +1,66 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-nvidia-com-v1alpha1-dynamocomponentdeployment
+  failurePolicy: Fail
+  name: vdynamocomponentdeployment.kb.io
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamocomponentdeployments
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-nvidia-com-v1alpha1-dynamographdeployment
+  failurePolicy: Fail
+  name: vdynamographdeployment.kb.io
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamographdeployments
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-nvidia-com-v1alpha1-dynamomodel
+  failurePolicy: Fail
+  name: vdynamomodel.kb.io
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamomodels
+  sideEffects: None
