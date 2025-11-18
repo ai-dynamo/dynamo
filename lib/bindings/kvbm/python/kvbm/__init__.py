@@ -3,10 +3,12 @@
 
 # flake8: noqa
 import logging
+
 logger = logging.getLogger(__name__)
 
 # nixl needs to be loaded before any other imports to ensure that the nixl shared object is available for the KVBM core.
 import nixl
+
 logger.info(f"Loaded nixl API module: {nixl._api}")
 
 from kvbm._core import BlockManager as BlockManager
