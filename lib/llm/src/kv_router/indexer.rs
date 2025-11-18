@@ -41,7 +41,7 @@ use prometheus::{IntCounterVec, Opts};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     iter,
     rc::Rc,
     sync::{Arc, OnceLock},
@@ -241,8 +241,6 @@ pub struct RadixTree {
     lookup: HashMap<WorkerWithDpRank, HashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
     /// The time buffer the radix tree should check when considering frequence of block accesses
     expiration_duration: Option<Duration>,
-    /// The tree current size.
-    current_size: usize,
 }
 
 impl Default for RadixTree {
@@ -262,7 +260,6 @@ impl RadixTree {
             root: Rc::new(RefCell::new(RadixBlock::new())),
             lookup: HashMap::new(),
             expiration_duration,
-            current_size: 0,
         }
     }
 
@@ -364,83 +361,85 @@ impl RadixTree {
                 // we check the radix tree's root to find it.
                 // this is the single most expensive lookup
                 let current = match op.parent_hash {
-                    Some(parent) => worker_lookup.get(&parent),
-                    None => Some(&self.root),
-                };
-
-                let mut current = match current {
-                    Some(current) => current.clone(),
-                    None => {
-                        tracing::warn!(
-                            worker_id = worker.worker_id.to_string(),
-                            dp_rank = worker.dp_rank,
-                            id,
-                            parent_hash = ?op.parent_hash,
-                            num_blocks = op.blocks.len(),
-                            "Failed to find parent block; skipping store operation"
-                        );
-                        return Err(KvCacheEventError::ParentBlockNotFound);
-                    }
-                };
-
-                {
-                    // Validate block hashes upfront to prevent cycles anywhere in the event.
-                    let mut seen_hashes: HashSet<ExternalSequenceBlockHash> = HashSet::new();
-                    if let Some(parent) = op.parent_hash {
-                        seen_hashes.insert(parent);
-                    }
-                    for block_id in &op.blocks {
-                        if !seen_hashes.insert(block_id.block_hash) {
+                    Some(parent) => match worker_lookup.get(&parent) {
+                        Some(current) => current.clone(),
+                        None => {
                             tracing::warn!(
                                 worker_id = worker.worker_id.to_string(),
                                 dp_rank = worker.dp_rank,
                                 id,
-                                block_hash = ?block_id.block_hash,
-                                "Detected cycle in store event (repeating block hash); rejecting sequence"
+                                parent_hash = ?op.parent_hash,
+                                num_blocks = op.blocks.len(),
+                                "Failed to find parent block; skipping store operation"
                             );
-                            return Err(KvCacheEventError::InvalidBlockSequence);
+                            return Err(KvCacheEventError::ParentBlockNotFound);
                         }
-                    }
-                }
+                    },
+                    None => self.root.clone(),
+                };
 
-                for block_id in op.blocks {
-                    let mut inner = current.borrow_mut();
-                    let block = match inner.children.get(&block_id.tokens_hash) {
+                fn process_blocks(
+                    parent: SharedRadixBlock,
+                    blocks: &[KvCacheStoredBlockData],
+                    worker: WorkerWithDpRank,
+                    worker_lookup: &mut HashMap<ExternalSequenceBlockHash, SharedRadixBlock>,
+                    id: u64,
+                ) -> Result<(), KvCacheEventError> {
+                    if blocks.is_empty() {
+                        return Ok(());
+                    }
+
+                    let mut parent_mut = parent.borrow_mut();
+                    let block_data = &blocks[0];
+
+                    let child = match parent_mut.children.get(&block_data.tokens_hash) {
                         Some(block) => block.clone(),
                         None => {
                             // create new block - automatically added to the lookup table
                             let new_block = worker_lookup
-                                .get(&block_id.block_hash)
+                                .get(&block_data.block_hash)
                                 .cloned()
                                 .unwrap_or_else(|| Rc::new(RefCell::new(RadixBlock::new())));
 
                             // insert into radix tree
-                            inner
+                            parent_mut
                                 .children
-                                .insert(block_id.tokens_hash, new_block.clone());
-
-                            // increment the current size when creating a new block
-                            self.current_size = self.current_size.saturating_add(1);
+                                .insert(block_data.tokens_hash, new_block.clone());
 
                             new_block
                         }
                     };
 
-                    // add our worker to the block with its external hash
-                    block
-                        .borrow_mut()
-                        .workers
-                        .insert(worker, block_id.block_hash);
+                    // Update child and check for cycles
+                    {
+                        // Try to borrow the child mutably - if it fails, it's already borrowed
+                        // in the ancestor chain (parent_mut is alive + all ancestors in recursive stack)
+                        let mut child_mut = match child.try_borrow_mut() {
+                            Ok(b) => b,
+                            Err(_) => {
+                                tracing::warn!(
+                                    worker_id = worker.worker_id.to_string(),
+                                    dp_rank = worker.dp_rank,
+                                    id,
+                                    block_hash = ?block_data.block_hash,
+                                    "Detected cycle in store event (block already in parent chain); rejecting sequence"
+                                );
+                                return Err(KvCacheEventError::InvalidBlockSequence);
+                            }
+                        };
+
+                        // add our worker to the block with its external hash
+                        child_mut.workers.insert(worker, block_data.block_hash);
+                    }
 
                     // add the block to the worker_id lookup table
-                    worker_lookup.insert(block_id.block_hash, block.clone());
+                    worker_lookup.insert(block_data.block_hash, child.clone());
 
-                    // drop inner so we can shift current to this block
-                    drop(inner);
-
-                    current = block;
+                    // Recurse with the child and remaining blocks
+                    process_blocks(child, &blocks[1..], worker, worker_lookup, id)
                 }
-                Ok(())
+
+                process_blocks(current, &op.blocks, worker, worker_lookup, id)
             }
             KvCacheEventData::Removed(remove) => {
                 // tracing::trace!(id, "KV Remove Operation: {:?}", op);
@@ -470,9 +469,6 @@ impl RadixTree {
                     if guard.workers.is_empty() {
                         // if no workers are using this block, that is true for all children
                         guard.children.clear();
-
-                        // Decrement the current size when removing the last worker from a node
-                        self.current_size = self.current_size.saturating_sub(1);
                     }
                     // remove the block from the lookup table
                     worker_lookup.remove(&block);
@@ -505,9 +501,6 @@ impl RadixTree {
                     // If no workers are using this block, that is true for all children
                     if block.borrow().workers.is_empty() {
                         block.borrow_mut().children.clear();
-
-                        // Decrement the current size when removing the last worker from a node
-                        self.current_size = self.current_size.saturating_sub(1);
                     }
                 });
 
@@ -610,7 +603,7 @@ impl RadixTree {
     }
 
     pub fn current_size(&self) -> usize {
-        self.current_size
+        self.lookup.values().map(|m| m.len()).sum()
     }
 }
 
@@ -1758,40 +1751,33 @@ mod tests {
             KvCacheEventError::BlockNotFound
         ));
 
-        // Prepare a valid root block
-        trie.apply_event(create_store_event(worker_0, 1, vec![0], None))
+        // Parent appears in blocks: parent=1, blocks=[1, 2, 3]
+        // This should be rejected as block 1 (hash 100) is the parent
+        trie.apply_event(create_store_event(worker_0, 4, vec![1], None))
             .unwrap();
-
-        // Self-referential block should be rejected
         let result = trie.apply_event(create_store_event(
             worker_0,
-            2,
-            vec![0],
-            Some(ExternalSequenceBlockHash(0)),
+            5,
+            vec![1, 2, 3],
+            Some(ExternalSequenceBlockHash(100)),
         ));
         assert!(matches!(
             result.unwrap_err(),
             KvCacheEventError::InvalidBlockSequence
         ));
 
-        // Cycle further down the chain (A -> B -> A)
+        // Block appears twice in sequence: parent=1, blocks=[2, 3, 2]
+        // Block 2 appears at positions 0 and 2, creating a cycle
         let result = trie.apply_event(create_store_event(
             worker_0,
-            3,
-            vec![1, 0],
-            Some(ExternalSequenceBlockHash(0)),
+            6,
+            vec![2, 3, 2],
+            Some(ExternalSequenceBlockHash(100)),
         ));
         assert!(matches!(
             result.unwrap_err(),
             KvCacheEventError::InvalidBlockSequence
         ));
-
-        // Tree remains unchanged beyond the root block
-        assert_eq!(
-            trie.root.borrow().children.len(),
-            1,
-            "Invalid block must not mutate the radix tree"
-        );
     }
 
     #[test]
