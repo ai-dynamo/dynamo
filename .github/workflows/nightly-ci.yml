@@ -182,7 +182,7 @@ jobs:
     env:
       FRAMEWORK: trtllm
       ARCH: arm64
-      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
+      BASE_IMAGE_TAG: '25.06-py3'
       RUNTIME_IMAGE_TAG: '12.9.0-runtime-ubuntu24.04'
       CUDA_VERSION: '129'
       TORCH_BACKEND: 'cu129'
@@ -276,10 +276,10 @@ jobs:
     env:
       FRAMEWORK: sglang
       ARCH: arm64
-      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
-      RUNTIME_IMAGE_TAG: '12.9.0-runtime-ubuntu24.04'
-      CUDA_VERSION: '129'
-      TORCH_BACKEND: 'cu129'
+      BASE_IMAGE_TAG: ''
+      RUNTIME_IMAGE_TAG: ''
+      CUDA_VERSION: ''
+      TORCH_BACKEND: ''
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker Image
@@ -1136,7 +1136,6 @@ jobs:
           name: nightly-results-summary
           path: results.md
           retention-days: 7
-
   # notify-slack:
   #   name: Notify Slack
   #   runs-on: ubuntu-latest
