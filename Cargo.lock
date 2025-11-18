@@ -2722,6 +2722,8 @@ dependencies = [
  "modelexpress-client",
  "modelexpress-common",
  "ndarray",
+ "ndarray-interp",
+ "ndarray-npy",
  "nix 0.26.4",
  "nixl-sys",
  "offset-allocator",
@@ -6528,6 +6530,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndarray-interp"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e43087829efb5ec2736598e88587df286425b59df5a9ce991994cdd2c5855d3f"
+dependencies = [
+ "ndarray",
+ "num-traits",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "ndarray-npy"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b313788c468c49141a9d9b6131fc15f403e6ef4e8446a0b2e18f664ddb278a9"
+dependencies = [
+ "byteorder",
+ "ndarray",
+ "num-complex",
+ "num-traits",
+ "py_literal",
+ "zip 2.4.2",
+]
+
+[[package]]
 name = "neli"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8124,6 +8151,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a3cbdf373972bf78df4d3b518d07003938e2c7d1fb5891e55f9cb6df57009d84"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "py_literal"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "102df7a3d46db9d3891f178dcc826dc270a6746277a9ae6436f8d29fd490a8e1"
+dependencies = [
+ "num-bigint",
+ "num-complex",
+ "num-traits",
+ "pest",
+ "pest_derive",
 ]
 
 [[package]]
@@ -12698,6 +12738,23 @@ dependencies = [
  "indexmap 2.12.0",
  "num_enum",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "zip"
+version = "2.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
+dependencies = [
+ "arbitrary",
+ "crc32fast",
+ "crossbeam-utils",
+ "displaydoc",
+ "flate2",
+ "indexmap 2.12.0",
+ "memchr",
+ "thiserror 2.0.17",
+ "zopfli",
 ]
 
 [[package]]
