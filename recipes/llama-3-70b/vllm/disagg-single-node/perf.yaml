@@ -66,7 +66,7 @@ spec:
                 --concurrency $concurrency \
                 --request-count $((10*concurrency)) \
                 --warmup-request-count $concurrency \
-                --conversation-num 12800 \
+                --num-dataset-entries 12800 \
                 --random-seed 100 \
                 --workers-max $max_threads \
                 -H 'Authorization: Bearer NOT USED' \
