@@ -350,7 +350,7 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
 
     # If user provided their own config, use that
     if c := getattr(config.engine_args, "kv_events_config"):
-        # Ensure enable_kv_cache_events is True (user may have omitted it from JSON)
+        # Warn user that enable_kv_cache_events probably should be True (user may have omitted it from JSON)
         if not c.enable_kv_cache_events:
             logger.warning(
                 "User provided --kv_events_config which set enable_kv_cache_events to False (default). "
