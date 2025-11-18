@@ -3,13 +3,9 @@
 This guide covers steps of creating an Amazon EKS cluster, creating a shared storage Amazon EFS and deploying Dynamo Kubernetes Platform and run inference with TRTLLM backend.
 
 [Step 1. Create EKS cluster](#step-1-create-eks-cluster)
-
 [Step 2. Install Dynamo Kubernetes Platform](#step-2-install-dynamo-kubernetes-platform)
-
 [Step 3. Deploy a model](#step-3-deploy-a-model)
-
 [Step 4. Deploy Dynamo Inference Graph](#step-4-deploy-dynamo-inference-graph)
-
 [Step 5. Test the Deployment](#step-5-test-the-deployment)
 
 ### Step 1. Create EKS cluster
