@@ -34,7 +34,6 @@ import (
 	"k8s.io/utils/ptr"
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -63,15 +62,15 @@ type Autoscaling struct {
 }
 
 type Config struct {
-	Dynamo       *DynamoConfig        `yaml:"dynamo,omitempty"`
-	Resources    *Resources           `yaml:"resources,omitempty"`
-	Traffic      *Traffic             `yaml:"traffic,omitempty"`
-	Autoscaling  *Autoscaling         `yaml:"autoscaling,omitempty"`
-	HttpExposed  bool                 `yaml:"http_exposed,omitempty"`
-	ApiEndpoints []string             `yaml:"api_endpoints,omitempty"`
-	Workers      *int32               `yaml:"workers,omitempty"`
-	TotalGpus    *int32               `yaml:"total_gpus,omitempty"`
-	ExtraPodSpec *common.ExtraPodSpec `yaml:"extraPodSpec,omitempty"`
+	Dynamo       *DynamoConfig          `yaml:"dynamo,omitempty"`
+	Resources    *Resources             `yaml:"resources,omitempty"`
+	Traffic      *Traffic               `yaml:"traffic,omitempty"`
+	Autoscaling  *Autoscaling           `yaml:"autoscaling,omitempty"`
+	HttpExposed  bool                   `yaml:"http_exposed,omitempty"`
+	ApiEndpoints []string               `yaml:"api_endpoints,omitempty"`
+	Workers      *int32                 `yaml:"workers,omitempty"`
+	TotalGpus    *int32                 `yaml:"total_gpus,omitempty"`
+	ExtraPodSpec *v1alpha1.ExtraPodSpec `yaml:"extraPodSpec,omitempty"`
 }
 
 type ServiceConfig struct {
@@ -150,7 +149,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		if component.ComponentType == commonconsts.ComponentTypePlanner {
 			// ensure that the extraPodSpec is not nil
 			if deployment.Spec.ExtraPodSpec == nil {
-				deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{}
+				deployment.Spec.ExtraPodSpec = &v1alpha1.ExtraPodSpec{}
 			}
 			// ensure that the embedded PodSpec struct is not nil
 			if deployment.Spec.ExtraPodSpec.PodSpec == nil {
@@ -231,10 +230,10 @@ func overrideWithDynDeploymentConfig(ctx context.Context, dynamoDeploymentCompon
 			dynamoDeploymentComponent.Spec.Replicas = componentDynConfig.ServiceArgs.Workers
 		}
 		if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Resources != nil {
-			requests := &common.ResourceItem{}
-			limits := &common.ResourceItem{}
+			requests := &v1alpha1.ResourceItem{}
+			limits := &v1alpha1.ResourceItem{}
 			if dynamoDeploymentComponent.Spec.Resources == nil {
-				dynamoDeploymentComponent.Spec.Resources = &common.Resources{
+				dynamoDeploymentComponent.Spec.Resources = &v1alpha1.Resources{
 					Requests: requests,
 					Limits:   limits,
 				}

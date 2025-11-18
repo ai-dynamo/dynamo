@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
 
 from vllm.inputs import TokensPrompt
+from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
@@ -174,6 +175,28 @@ class BaseWorkerHandler(ABC):
 
         return vllm_mm_data if vllm_mm_data else None
 
+    @staticmethod
+    def _build_completion_usage(request_output: RequestOutput) -> Dict[str, Any]:
+        return {
+            "prompt_tokens": (
+                len(request_output.prompt_token_ids)
+                if request_output.prompt_token_ids
+                else None
+            ),
+            "completion_tokens": len(request_output.outputs[0].token_ids),
+            "total_tokens": (
+                len(request_output.prompt_token_ids)
+                + len(request_output.outputs[0].token_ids)
+                if request_output.prompt_token_ids
+                else None
+            ),
+            "prompt_tokens_details": (
+                {"cached_tokens": request_output.num_cached_tokens}
+                if request_output.num_cached_tokens
+                else None
+            ),
+        }
+
     async def generate_tokens(
         self, prompt, sampling_params, request_id, data_parallel_rank=None
     ):
@@ -199,6 +222,11 @@ class BaseWorkerHandler(ABC):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res
+                        )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
                     yield out
@@ -241,18 +269,24 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Build sampling params from request
         sampling_params = build_sampling_params(request, self.default_sampling_params)
 
-        # Extract disaggregated_params from request (set by prefill router in Rust frontend)
-        disaggregated_params = request.get("disaggregated_params")
-        if disaggregated_params:
-            # Prefill was performed - use the disaggregated params
-            if sampling_params.extra_args is None:
-                sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = disaggregated_params.get(
+        prefill_result = request.get("prefill_result")
+        if prefill_result and isinstance(prefill_result, dict):
+            kv_params = prefill_result.get("disaggregated_params", {}).get(
                 "kv_transfer_params"
             )
+        else:
+            kv_params = None
+
+        if kv_params is not None:
+            if sampling_params.extra_args is None:
+                sampling_params.extra_args = {}
+            sampling_params.extra_args["kv_transfer_params"] = kv_params
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"
             )
+        prefill_prompt_tokens_details = (
+            prefill_result.get("prompt_tokens_details") if prefill_result else None
+        )
 
         dp_rank = request.get("dp_rank", None)
 
@@ -261,6 +295,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for tok in self.generate_tokens(
                     prompt, sampling_params, request_id, data_parallel_rank=dp_rank
                 ):
+                    if prefill_result is not None and "completion_usage" in tok:
+                        tok["completion_usage"][
+                            "prompt_tokens_details"
+                        ] = prefill_prompt_tokens_details
                     yield tok
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
@@ -324,6 +362,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                             {"kv_transfer_params": res.kv_transfer_params}
                             if res.kv_transfer_params
                             else None
+                        ),
+                        "completion_usage": BaseWorkerHandler._build_completion_usage(
+                            request_output=res
                         ),
                     }
 
