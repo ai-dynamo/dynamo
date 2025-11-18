@@ -42,7 +42,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
-          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target dev --framework none
+          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target dev --framework none --enable-kvbm
       - name: Start services with docker-compose
         working-directory: ./deploy
         run: |

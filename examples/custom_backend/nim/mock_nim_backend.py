@@ -121,9 +121,9 @@ async def main():
 
     loop = asyncio.get_running_loop()
     if is_static:
-        runtime = DistributedRuntime(loop, "file")
+        runtime = DistributedRuntime(loop, "file", "nats")
     else:
-        runtime = DistributedRuntime(loop, "etcd")
+        runtime = DistributedRuntime(loop, "etcd", "nats")
 
     try:
         await worker(runtime)  # type: ignore[arg-type]
