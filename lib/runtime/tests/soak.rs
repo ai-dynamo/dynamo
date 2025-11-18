@@ -18,7 +18,7 @@ mod integration {
     pub const DEFAULT_NAMESPACE: &str = "dynamo";
 
     use dynamo_runtime::{
-        DistributedRuntime, ErrorContext, Result, Runtime, Worker,
+        DistributedRuntime, Runtime, Worker,
         config::environment_names::testing as env_testing,
         logging,
         pipeline::{
