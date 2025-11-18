@@ -48,17 +48,23 @@ pub struct State {
     manager: Arc<ModelManager>,
 }
 
-impl State {
-    pub fn new(manager: Arc<ModelManager>) -> Self {
-        Self {
-            manager,
-            metrics: Arc::new(Metrics::default()),
-        }
-    }
+#[derive(Default, Builder)]
+#[builder(
+    pattern = "owned",
+    build_fn(private, name = "build_internal"),
+    name = "StateBuilder",
+    vis = "pub"
+)]
+pub(crate) struct StateConfig {
+    #[builder(default, setter(strip_option))]
+    metrics: Option<Arc<Metrics>>,
+    #[builder(default, setter(strip_option))]
+    manager: Option<Arc<ModelManager>>,
+}
 
-    /// Create a new State with a shared metrics object (typically from HTTP service)
-    pub fn with_metrics(manager: Arc<ModelManager>, metrics: Arc<Metrics>) -> Self {
-        Self { manager, metrics }
+impl State {
+    pub fn builder() -> StateBuilder {
+        StateBuilder::default()
     }
 
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
@@ -76,6 +82,21 @@ impl State {
 
     fn is_tensor_model(&self, model: &String) -> bool {
         self.manager.list_tensor_models().contains(model)
+    }
+}
+
+impl StateBuilder {
+    pub fn build(self) -> Result<State, anyhow::Error> {
+        let config = self.build_internal()?;
+
+        Ok(State {
+            manager: config
+                .manager
+                .unwrap_or_else(|| Arc::new(ModelManager::new())),
+            metrics: config
+                .metrics
+                .unwrap_or_else(|| Arc::new(Metrics::default())),
+        })
     }
 }
 
@@ -169,9 +190,12 @@ impl KserveServiceConfigBuilder {
             .build()?;
 
         // Share the HTTP service's model manager and metrics object with gRPC state
-        let shared_model_manager = http_service.state().manager_clone();
-        let shared_metrics = http_service.state().metrics_clone();
-        let state = Arc::new(State::with_metrics(shared_model_manager, shared_metrics));
+        let state = Arc::new(
+            State::builder()
+                .manager(http_service.state().manager_clone())
+                .metrics(http_service.state().metrics_clone())
+                .build()?,
+        );
 
         Ok(KserveService {
             state,
