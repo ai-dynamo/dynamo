@@ -63,7 +63,7 @@ module-name = "kvbm._core"
 manifest-path = "Cargo.toml"
 python-packages = ["kvbm"]
 python-source = "python"
-# Skip auditwheel here - we'll run it manually in Dockerfile with exclusions
+# Skip auditwheel here - we'll run it manually in dynamo/container/Dockerfile with exclusions
 skip-auditwheel = true
 
 [build-system]
