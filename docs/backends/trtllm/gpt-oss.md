@@ -90,14 +90,14 @@ The deployment uses configuration files and command-line arguments to control be
 
 #### Configuration Files
 
-**Prefill Configuration (`recipes/gpt-oss-120b/trtllm/disagg/prefill.yaml`)**:
+**Prefill Configuration (`examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml`)**:
 - `enable_attention_dp: false` - Attention data parallelism disabled for prefill
 - `enable_chunked_prefill: true` - Enables efficient chunked prefill processing
 - `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE layers
 - `cache_transceiver_config.backend: ucx` - Uses UCX for efficient KV cache transfer
 - `cuda_graph_config.max_batch_size: 32` - Maximum batch size for CUDA graphs
 
-**Decode Configuration (`recipes/gpt-oss-120b/trtllm/disagg/decode.yaml`)**:
+**Decode Configuration (`examples/backends/trtllm/engine_configs/gpt-oss-120b/decode.yaml`)**:
 - `enable_attention_dp: true` - Attention data parallelism enabled for decode
 - `disable_overlap_scheduler: false` - Enables overlapping for decode efficiency
 - `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE layers
@@ -145,7 +145,7 @@ python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --model-path /model \
   --served-model-name openai/gpt-oss-120b \
-  --extra-engine-args recipes/gpt-oss-120b/trtllm/disagg/prefill.yaml \
+  --extra-engine-args examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml \
   --dyn-reasoning-parser gpt_oss \
   --dyn-tool-call-parser harmony \
   --disaggregation-mode prefill \
@@ -161,7 +161,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
 CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --model-path /model \
   --served-model-name openai/gpt-oss-120b \
-  --extra-engine-args recipes/gpt-oss-120b/trtllm/disagg/decode.yaml \
+  --extra-engine-args examples/backends/trtllm/engine_configs/gpt-oss-120b/decode.yaml \
   --dyn-reasoning-parser gpt_oss \
   --dyn-tool-call-parser harmony \
   --disaggregation-mode decode \
