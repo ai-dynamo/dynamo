@@ -1085,14 +1085,27 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			}},
 		}
 
-		// Build volumes - use emptyDir for profiling output
-		// The sidecar saves all needed data to ConfigMaps, so persistence is not needed
-		volumes := []corev1.Volume{{
-			Name: VolumeNameProfilingOutput,
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
-		}}
+		// Use PVC if specified, otherwise use emptyDir for profiling output
+		var profilingOutputVolume corev1.Volume
+		if dgdr.Spec.ProfilingConfig.OutputPVC != "" {
+			logger.Info("Using PVC for profiling output", "pvc", dgdr.Spec.ProfilingConfig.OutputPVC)
+			profilingOutputVolume = corev1.Volume{
+				Name: VolumeNameProfilingOutput,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: dgdr.Spec.ProfilingConfig.OutputPVC,
+					},
+				},
+			}
+		} else {
+			profilingOutputVolume = corev1.Volume{
+				Name: VolumeNameProfilingOutput,
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			}
+		}
+		volumes := []corev1.Volume{profilingOutputVolume}
 
 		// Add ConfigMap volume if provided
 		if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
