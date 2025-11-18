@@ -42,6 +42,7 @@ class Config:
     migration_limit: int = 0
     custom_jinja_template: Optional[str] = None
     store_kv: str
+    request_plane: str
 
     # mirror vLLM
     model: str
@@ -177,8 +178,16 @@ def parse_args() -> Config:
     parser.add_argument(
         "--store-kv",
         type=str,
+        choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
         help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
+    parser.add_argument(
+        "--request-plane",
+        type=str,
+        choices=["nats", "http", "tcp"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
     add_config_dump_args(parser)
 
@@ -258,6 +267,7 @@ def parse_args() -> Config:
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv
+    config.request_plane = args.request_plane
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:

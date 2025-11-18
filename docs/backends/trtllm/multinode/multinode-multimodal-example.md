@@ -17,6 +17,8 @@ limitations under the License.
 
 # Example: Multi-node TRTLLM Workers with Dynamo on Slurm for multimodal models
 
+> **Note:** The scripts referenced in this example (such as `srun_aggregated.sh` and `srun_disaggregated.sh`) can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
+
 > [!IMPORTANT]
 > There are some known issues in tensorrt_llm==1.1.0rc5 version for multinode multimodal support. It is important to rebuild the dynamo container with a specific version of tensorrt_llm commit to use multimodal feature.
 >
@@ -34,7 +36,7 @@ limitations under the License.
 >
 > Before running the deployment, you must update the engine configuration files to change `backend: DEFAULT` to `backend: default` (lowercase). Run the following command:
 > ```bash
-> sed -i 's/backend: DEFAULT/backend: default/g' /mnt/recipes/llama4/trtllm/multimodal/prefill.yaml /mnt/recipes/llama4/trtllm/multimodal/decode.yaml
+> sed -i 's/backend: DEFAULT/backend: default/g' /mnt/examples/backends/trtllm/engine_configs/llama4/multimodal/prefill.yaml /mnt/examples/backends/trtllm/engine_configs/llama4/multimodal/decode.yaml
 > ```
 
 
@@ -71,8 +73,8 @@ export IMAGE="<dynamo_trtllm_image>"
 # For example, assuming your cluster had a `/lustre` directory on the host, you
 # could add that as a mount like so:
 #
-# export MOUNTS="${PWD}/../:/mnt,/lustre:/lustre"
-export MOUNTS="${PWD}/../:/mnt"
+# export MOUNTS="${PWD}/../../../../:/mnt,/lustre:/lustre"
+export MOUNTS="${PWD}/../../../../:/mnt"
 
 # Can point to local FS as weel
 # export MODEL_PATH="/location/to/model"
@@ -100,8 +102,8 @@ deployment across 4 nodes:
 
 ```bash
 # Defaults set in srun_disaggregated.sh, but can customize here.
-# export PREFILL_ENGINE_CONFIG="/mnt/recipes/llama4/trtllm/multimodal/prefill.yaml"
-# export DECODE_ENGINE_CONFIG="/mnt/recipes/llama4/trtllm/multimodal/decode.yaml"
+# export PREFILL_ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/llama4/multimodal/prefill.yaml"
+# export DECODE_ENGINE_CONFIG="/mnt/examples/backends/trtllm/engine_configs/llama4/multimodal/decode.yaml"
 
 # Customize NUM_PREFILL_NODES to match the desired parallelism in PREFILL_ENGINE_CONFIG
 # Customize NUM_DECODE_NODES to match the desired parallelism in DECODE_ENGINE_CONFIG
@@ -123,7 +125,7 @@ deployment across 4 nodes:
 
 ## Understanding the Output
 
-1. The `srun_disaggregated.sh` launches three srun jobs instead of two. One for frontend, one for prefill   worker, and one for decode worker.
+1. The `srun_disaggregated.sh` launches three srun jobs instead of two. One for frontend, one for prefill worker, and one for decode worker.
 
 2. The OpenAI frontend will listen for and dynamically discover workers as
    they register themselves with Dynamo's distributed runtime:
