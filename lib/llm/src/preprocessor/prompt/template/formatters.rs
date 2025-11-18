@@ -25,6 +25,41 @@ fn remove_known_non_jinja2_tags(template: &str) -> String {
         .replace("{% endgeneration %}", "")
 }
 
+/// Detects whether a chat template requires message content as arrays (multimodal)
+/// or accepts simple strings (standard text-only templates).
+///
+/// This function test-renders the template with both formats:
+/// - Array format: `[{"type": "text", "text": "template_test"}]`
+/// - String format: `"template_test"`
+///
+/// If the array format works but string format doesn't produce output,
+/// the template requires arrays (multimodal templates).
+fn detect_content_array_usage(env: &Environment) -> bool {
+    // Test with array format
+    let array_msg = context! {
+        messages => json!([{"role": "user", "content": [{"type": "text", "text": "template_test"}]}]),
+        add_generation_prompt => false,
+    };
+
+    // Test with string format
+    let string_msg = context! {
+        messages => json!([{"role": "user", "content": "template_test"}]),
+        add_generation_prompt => false,
+    };
+
+    let out_array = env
+        .get_template("default")
+        .and_then(|t| t.render(&array_msg))
+        .unwrap_or_default();
+    let out_string = env
+        .get_template("default")
+        .and_then(|t| t.render(&string_msg))
+        .unwrap_or_default();
+
+    // If array works but string doesn't, template requires arrays
+    out_array.contains("template_test") && !out_string.contains("template_test")
+}
+
 impl JinjaEnvironment {
     fn env(self) -> Environment<'static> {
         self.env
