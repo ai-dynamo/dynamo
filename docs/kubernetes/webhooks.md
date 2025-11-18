@@ -483,7 +483,7 @@ kubectl logs -n <namespace> deployment/<release>-dynamo-operator | grep webhook
 
 **Symptoms:**
 ```
-Error from server (InternalError): Internal error occurred: failed calling webhook: 
+Error from server (InternalError): Internal error occurred: failed calling webhook:
 Post "https://...webhook-service...:443/validate-...": dial tcp ...:443: connect: connection refused
 ```
 
@@ -520,7 +520,7 @@ kubectl logs -n <namespace> deployment/<release>-dynamo-operator | grep -i error
 
 **Symptoms:**
 ```
-Error from server (InternalError): Internal error occurred: failed calling webhook: 
+Error from server (InternalError): Internal error occurred: failed calling webhook:
 x509: certificate signed by unknown authority
 ```
 
