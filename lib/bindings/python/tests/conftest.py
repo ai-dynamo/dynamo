@@ -402,7 +402,7 @@ def temp_file_store():
         yield tmpdir
 
 
-@pytest.fixture(scope="function", autouse=False)
+@pytest.fixture(scope="function", autouse=False, params=["tcp", "nats"])
 async def runtime(request):
     """
     Create a DistributedRuntime for testing.
@@ -434,7 +434,8 @@ This is required because DistributedRuntime is a process-level singleton.
 """
             )
 
+    request_plane = request.param
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "file", "nats")
+    runtime = DistributedRuntime(loop, "file", request_plane)
     yield runtime
     runtime.shutdown()
