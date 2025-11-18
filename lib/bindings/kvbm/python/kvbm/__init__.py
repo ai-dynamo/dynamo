@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # flake8: noqa
+import nixl
 
 from kvbm._core import BlockManager as BlockManager
 from kvbm._core import KvbmLeader as KvbmLeader
