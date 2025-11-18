@@ -217,6 +217,33 @@ vllm_configs = {
             ),
         ],
     ),
+    "multimodal_agg_llava": VLLMConfig(
+        name="multimodal_agg_llava",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[pytest.mark.gpu_2],
+        model="llava-hf/llava-1.5-7b-hf",
+        script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
+        delayed_start=0,
+        timeout=360,
+        request_payloads=[
+            # HTTP URL test
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["bus"],
+                temperature=0.0,
+            ),
+        ],
+    ),
     # TODO: Update this test case when we have video multimodal support in vllm official components
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
