@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -98,6 +99,14 @@ rules:
   - update
   - watch
 - apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - events.k8s.io
   resources:
   - events
@@ -173,6 +182,7 @@ rules:
   - dynamocomponentdeployments
   - dynamographdeploymentrequests
   - dynamographdeployments
+  - dynamomodels
   verbs:
   - create
   - delete
@@ -187,6 +197,7 @@ rules:
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
+  - dynamomodels/finalizers
   verbs:
   - update
 - apiGroups:
@@ -195,6 +206,7 @@ rules:
   - dynamocomponentdeployments/status
   - dynamographdeploymentrequests/status
   - dynamographdeployments/status
+  - dynamomodels/status
   verbs:
   - get
   - patch

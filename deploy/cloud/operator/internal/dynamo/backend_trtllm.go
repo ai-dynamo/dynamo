@@ -143,12 +143,12 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 
 	// Build mpirun command with explicit SSH configuration and environment variables
 	// Wrap the entire command (trtllm-llmapi-launch + original command) in bash -c for proper shell interpretation
-	wrappedCommand := fmt.Sprintf("bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch %s'", originalCommand)
+	wrappedCommand := fmt.Sprintf("bash -c 'trtllm-llmapi-launch %s'", originalCommand)
 
 	// Generate environment variable flags for mpirun
 	envVarsStr := generateEnvVarFlags(container.Env)
 
-	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s %s",
+	mpirunCmd := fmt.Sprintf("mpirun --allow-run-as-root --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s %s",
 		totalGPUs,
 		workerHosts,
 		commonconsts.MpiRunSshPort,
@@ -181,7 +181,6 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		"ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N ''",
 		// Create SSH daemon config to use custom host keys location and non-privileged port
 		fmt.Sprintf("printf 'Port %d\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config", commonconsts.MpiRunSshPort),
-		"mkdir -p /run/sshd",
 		"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 	}
 

@@ -13,7 +13,9 @@ SGLang allows you to deploy multi-node sized models by adding in the `dist-init-
 
 ```bash
 cd $DYNAMO_ROOT
-docker build -f container/Dockerfile.sglang-wideep . -t dynamo-wideep --no-cache
+./container/build.sh \
+  --framework SGLANG \
+  --tag dynamo-wideep:latest \
 ```
 
 You can use a specific tag from the [lmsys dockerhub](https://hub.docker.com/r/lmsysorg/sglang/tags) by adding `--build-arg SGLANG_IMAGE_TAG=<tag>` to the build command.
@@ -39,6 +41,7 @@ python3 -m dynamo.sglang \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
+  --load-balance-method round_robin \
   --host 0.0.0.0 \
   --mem-fraction-static 0.82
 ```
@@ -60,6 +63,7 @@ python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
   --host 0.0.0.0 \
+  --load-balance-method round_robin \
   --mem-fraction-static 0.82
 ```
 
@@ -80,7 +84,9 @@ python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
   --host 0.0.0.0 \
-  --mem-fraction-static 0.82
+  --prefill-round-robin-balance \
+  --mem-fraction-static 0.82 \
+  --cuda-graph-max-bs 8
 ```
 
 Node 4: Run the remaining 8 shards of the decode worker
@@ -100,7 +106,9 @@ python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
   --host 0.0.0.0 \
-  --mem-fraction-static 0.82
+  --prefill-round-robin-balance \
+  --mem-fraction-static 0.82 \
+  --cuda-graph-max-bs 8
 ```
 
 **Step 2**: Run inference

@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import ctypes
 import logging
 import socket
 import uuid
@@ -769,7 +771,7 @@ class Descriptor:
             raise ValueError("Argument `data` cannot be `None`.")
         if not (
             isinstance(data, torch.Tensor)
-            or isinstance(data, bytes)
+            or isinstance(data, (bytes, bytearray))
             or isinstance(data, tuple)
         ):
             raise TypeError(TYPE_ERROR_MESSAGE)
@@ -826,9 +828,8 @@ class Descriptor:
             )
 
         # Data is `bytes`.
-        elif isinstance(data, bytes):
-            self._data_ptr = id(data)
-            self._data_size = len(data)
+        elif isinstance(data, (bytes, bytearray)):
+            (self._data_ptr, self._data_size) = self._buffer_to_ptr_size(data)
             self._data_ref = data
 
             logger.debug(
@@ -970,6 +971,52 @@ class Descriptor:
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Registered {self.__repr__()} with NIXL."
         )
+
+    def _buffer_to_ptr_size(
+        self,  # Adding a comment here to satisfy the character requirements.
+        data: bytes | bytearray,
+    ) -> tuple[int, int]:
+        """
+        Returns the memory address of the underlying data of a bytes or bytearray object as well as its size.
+
+        Parameters
+        ----------
+        data : bytes | bytearray
+            The bytes or bytearray object to get the data pointer and size from.
+
+        Returns
+        -------
+        tuple[int, int]
+            A tuple containing the memory address of the underlying data and its size.
+        """
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError("Argument `data` must be `bytes` or `bytearray`.")
+
+        cptr = ctypes.c_char_p()
+        size = ctypes.c_size_t()
+
+        # Request the pointer to the underlying data and the buffer's size from ctypes.
+        try:
+            ret = ctypes.pythonapi.PyObject_AsCharBuffer(
+                ctypes.py_object(data),
+                ctypes.byref(cptr),
+                ctypes.byref(size),
+            )
+            # Ensure the call was successful and the pointer is valid.
+            if ret != 0 or cptr.value is None:
+                raise RuntimeError(
+                    f"ctypes.pythonapi.PyObject_AsCharBuffer failed (error: {ret})."
+                )
+            # The resulting pointer is a `char*`, cast it to a `void*` to that ctypes will provide the address.
+            # `c_char_p.value` returns a `bytes`` object instead of the pointer address;
+            # whereas `c_void_p.value` returns the actual pointer address as an `int`.
+            vptr = ctypes.cast(cptr, ctypes.c_void_p)
+
+            return (0, 0) if vptr.value is None else (vptr.value, size.value)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to get memory address of the underlying data and size of `{type(data).__name__}` object via ctypes inspection."
+            ) from e
 
 
 class Device:
@@ -1185,7 +1232,7 @@ class PassiveOperation(AbstractOperation):
                 case _:
                     return
 
-    def metadata(self) -> RdmaMetadata:
+    def metadata(self, hex_encode: bool = False) -> RdmaMetadata:
         """
         Gets the request descriptor for the operation.
         """
@@ -1209,9 +1256,14 @@ class PassiveOperation(AbstractOperation):
                     f"dynamo.nixl_connect.{self.__class__.__name__}: Compressed NIXL metadata is larger than original ({compressed_len} > {original_len})."
                 )
 
+            if not hex_encode:
+                encoded_metadata = base64.b64encode(nixl_metadata).decode("utf-8")
+                encoded_metadata = "b64:" + encoded_metadata
+            else:
+                encoded_metadata = nixl_metadata.hex()
             self._serialized_request = RdmaMetadata(
                 descriptors=descriptors,
-                nixl_metadata=nixl_metadata.hex(),
+                nixl_metadata=encoded_metadata,
                 notification_key=self._notification_key,
                 operation_kind=int(self._operation_kind),
             )
@@ -1471,11 +1523,15 @@ class Remote:
         self._connector = connector
 
         # When `nixl_metadata` is a string, it is assumed to have come from a remote worker
-        # via a `RdmaMetadata` object and therefore can assumed be a hex-encoded, compressed
+        # via a `RdmaMetadata` object and therefore can assumed be a b64-encoded, compressed
         # representation of the NIXL metadata.
         if isinstance(nixl_metadata, str):
-            # Decode the hex-encoded string into bytes.
-            nixl_metadata = bytes.fromhex(nixl_metadata)
+            if nixl_metadata.startswith("b64:"):
+                # Decode the b64-encoded string into bytes.
+                nixl_metadata = base64.b64decode(nixl_metadata[4:])
+            else:
+                # fallback for earlier versions of nixl connect
+                nixl_metadata = bytes.fromhex(nixl_metadata)
             # Decompress the NIXL metadata.
             nixl_metadata = zlib.decompress(nixl_metadata)
 

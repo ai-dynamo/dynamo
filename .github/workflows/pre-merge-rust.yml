@@ -39,11 +39,14 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
+      # removing kvbm from here - it will fail to test with nixl dep enabled
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
     permissions:
       contents: read
     steps:
     - uses: actions/checkout@v4
+      with:
+        lfs: true
     - name: Set up system dependencies
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
@@ -89,11 +92,13 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run', 'lib/kvbm-kernels'] }
     permissions:
       contents: read
     steps:
     - uses: actions/checkout@v4
+      with:
+        lfs: true
     - name: Set up system dependencies
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
@@ -112,7 +117,10 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ runner.os }}-cargo-
     - name: Set up Rust Toolchain Components
-      run: rustup component add clippy
+      run: rustup component add clippy rustfmt
+    - name: Verify Code Formatting
+      working-directory: ${{ matrix.dir }}
+      run: cargo fmt -- --check
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings

@@ -678,7 +678,9 @@ spec:
                   description: ComponentType indicates the role of this component (for example, "main").
                   type: string
                 dynamoNamespace:
-                  description: Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
+                  description: |-
+                    DynamoNamespace is deprecated and will be removed in a future version.
+                    The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
                   type: string
                 envFromSecret:
                   description: |-
@@ -9808,6 +9810,9 @@ spec:
                       x-kubernetes-list-type: map
                   required: []
                   type: object
+                globalDynamoNamespace:
+                  description: GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+                  type: boolean
                 ingress:
                   description: Ingress config to expose the component outside the cluster (or through a service mesh).
                   properties:
@@ -10002,6 +10007,20 @@ spec:
                       format: int32
                       type: integer
                   type: object
+                modelRef:
+                  description: |-
+                    ModelRef references a model that this component serves
+                    When specified, a headless service will be created for endpoint discovery
+                  properties:
+                    name:
+                      description: Name is the base model identifier (e.g., "llama-3-70b-instruct-v1")
+                      type: string
+                    revision:
+                      description: Revision is the model revision/version (optional)
+                      type: string
+                  required:
+                    - name
+                  type: object
                 multinode:
                   description: Multinode is the configuration for multinode components.
                   properties:
@@ -10173,6 +10192,26 @@ spec:
                     Resources requested and limits for this component, including CPU, memory,
                     GPUs/devices, and any runtime-specific resources.
                   properties:
+                    claims:
+                      items:
+                        description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                        properties:
+                          name:
+                            description: |-
+                              Name must match the name of one entry in pod.spec.resourceClaims of
+                              the Pod where this field is used. It makes that resource available
+                              inside a container.
+                            type: string
+                          request:
+                            description: |-
+                              Request is the name chosen for a request in the referenced claim.
+                              If empty, everything from the claim is made available, otherwise
+                              only the result of this request.
+                            type: string
+                        required:
+                          - name
+                        type: object
+                      type: array
                     limits:
                       properties:
                         cpu:

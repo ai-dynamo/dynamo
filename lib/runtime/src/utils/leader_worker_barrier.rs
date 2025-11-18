@@ -27,7 +27,7 @@ async fn wait_for_key_count<T: DeserializeOwned>(
     expected_count: usize,
     timeout: Option<Duration>,
 ) -> Result<HashMap<String, T>, LeaderWorkerBarrierError> {
-    let (_key, _watcher, mut rx) = client
+    let (_key, mut rx) = client
         .kv_get_and_watch_prefix(&key)
         .await
         .map_err(LeaderWorkerBarrierError::EtcdError)?
@@ -85,20 +85,16 @@ async fn create_barrier_key<T: Serialize>(
     client: &Client,
     key: &str,
     data: T,
-    lease_id: Option<i64>,
+    lease_id: Option<u64>,
 ) -> Result<(), LeaderWorkerBarrierError> {
     let serialized_data =
         serde_json::to_vec(&data).map_err(LeaderWorkerBarrierError::SerdeError)?;
 
-    // TODO: This can fail for many reasons, the most common of which is that the key already exists.
-    // Currently, the ETCD client returns a very generic error, so we can't distinguish between the them.
-    // For now, just assume it's because the key already exists.
-    client
-        .kv_create(key, serialized_data, lease_id)
-        .await
-        .map_err(|_| LeaderWorkerBarrierError::IdNotUnique)?;
-
-    Ok(())
+    match client.kv_create(key, serialized_data, lease_id).await {
+        Ok(None) => Ok(()),
+        Ok(Some(_)) => Err(LeaderWorkerBarrierError::IdNotUnique),
+        Err(err) => Err(LeaderWorkerBarrierError::EtcdError(err)),
+    }
 }
 
 /// Waits for a single key to appear (used for completion/abort signals)
@@ -178,7 +174,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         &self,
         client: &Client,
         data: &LeaderData,
-        lease_id: i64,
+        lease_id: u64,
     ) -> Result<(), LeaderWorkerBarrierError> {
         let key = barrier_key(&self.barrier_id, BARRIER_DATA);
         create_barrier_key(client, &key, data, Some(lease_id)).await
@@ -197,7 +193,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         &self,
         client: &Client,
         worker_result: &Result<HashMap<String, WorkerData>, LeaderWorkerBarrierError>,
-        lease_id: i64,
+        lease_id: u64,
     ) -> Result<(), LeaderWorkerBarrierError> {
         if let Ok(worker_result) = worker_result {
             let key = barrier_key(&self.barrier_id, BARRIER_COMPLETE);
@@ -284,7 +280,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         &self,
         client: &Client,
         data: &WorkerData,
-        lease_id: i64,
+        lease_id: u64,
     ) -> Result<String, LeaderWorkerBarrierError> {
         let key = barrier_key(
             &self.barrier_id,

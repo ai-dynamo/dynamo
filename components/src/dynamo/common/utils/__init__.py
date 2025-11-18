@@ -8,9 +8,10 @@ This module contains shared utility functions used across multiple
 Dynamo backends and components.
 
 Submodules:
+    - paths: Workspace directory detection and path utilities
     - prometheus: Prometheus metrics collection and logging utilities
 """
 
-from dynamo.common.utils import prometheus
+from dynamo.common.utils import paths, prometheus
 
-__all__ = ["prometheus"]
+__all__ = ["paths", "prometheus"]

@@ -1,11 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! TODO - we need to reconcile what is in this crate with distributed::transports
+//! Network layer for distributed communication
+//!
+//! Provides request distribution across multiple transport protocols:
+//! - HTTP/2 for standard deployments
+//! - TCP with length-prefixed protocol for high-performance scenarios
+//! - NATS for legacy/messaging-based deployments
 
 pub mod codec;
 pub mod egress;
 pub mod ingress;
+pub mod manager;
 pub mod tcp;
 
 use crate::SystemHealth;
@@ -31,7 +37,7 @@ use ingress::push_handler::WorkHandlerMetrics;
 pub const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
 
 // Add Prometheus metrics types
-use crate::metrics::MetricsRegistry;
+use crate::metrics::MetricsHierarchy;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}

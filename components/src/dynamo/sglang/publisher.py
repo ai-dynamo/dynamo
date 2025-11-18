@@ -58,6 +58,8 @@ class DynamoSglangPublisher:
         # Set default values (can be overridden later if needed)
         self.request_total_slots = 1024
         self.dp_rank = 0
+        # TODO: Get actual GPU blocks from SGLang engine instead of hardcoded value
+        # This hardcoded value causes dynamo_component_kvstats_total_blocks to be incorrect.
         self.num_gpu_block = 1024
 
         # ZMQ setup for receiving scheduler metrics
@@ -96,6 +98,7 @@ class DynamoSglangPublisher:
         )
         kv_stats = KvStats(
             kv_active_blocks=0,
+            # TODO: num_gpu_block to get actual GPU blocks from SGLang engine instead of hardcoded value
             kv_total_blocks=self.num_gpu_block,
             gpu_cache_usage_perc=0.0,
             gpu_prefix_cache_hit_rate=0.0,
@@ -120,10 +123,8 @@ class DynamoSglangPublisher:
             ep = kv_events.get("endpoint")
             zmq_ep = ep.replace("*", get_local_ip_auto()) if ep else None
 
-            lease_id = self.generate_endpoint.lease_id()
-
             zmq_config = ZmqKvEventPublisherConfig(
-                worker_id=lease_id,
+                worker_id=self.generate_endpoint.connection_id(),
                 kv_block_size=self.server_args.page_size,
                 zmq_endpoint=zmq_ep,
             )
@@ -195,6 +196,33 @@ class DynamoSglangPublisher:
         self._record(worker_stats, kv_stats, spec_decode_stats)
 
 
+def setup_prometheus_registry(
+    engine: sgl.Engine, generate_endpoint: Endpoint
+) -> CollectorRegistry:
+    """Set up Prometheus registry for SGLang metrics collection.
+
+    SGLang uses multiprocess architecture where metrics are stored in shared memory.
+    MultiProcessCollector aggregates metrics from all worker processes. The Prometheus
+    registry collects sglang:* metrics which are exposed via the metrics server endpoint
+    (set DYN_SYSTEM_PORT to a positive value to enable, e.g., DYN_SYSTEM_PORT=8081).
+
+    Args:
+        engine: The SGLang engine instance.
+        generate_endpoint: The Dynamo endpoint for generation requests.
+
+    Returns:
+        Configured CollectorRegistry with multiprocess support.
+    """
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry)
+    register_engine_metrics_callback(
+        endpoint=generate_endpoint,
+        registry=registry,
+        metric_prefix_filter="sglang:",
+    )
+    return registry
+
+
 async def setup_sgl_metrics(
     engine: sgl.Engine,
     config: Config,
@@ -218,16 +246,6 @@ async def setup_sgl_metrics(
     )
     publisher.init_engine_metrics_publish()
     publisher.init_kv_event_publish()
-
-    # Register Prometheus metrics callback if enabled
-    if engine.server_args.enable_metrics:
-        # SGLang uses multiprocess architecture where metrics are stored in shared memory.
-        # MultiProcessCollector aggregates metrics from all worker processes.
-        registry = CollectorRegistry()
-        multiprocess.MultiProcessCollector(registry)
-        register_engine_metrics_callback(
-            generate_endpoint, registry, "sglang:", "SGLang"
-        )
 
     task = asyncio.create_task(publisher.run())
     logging.info("SGLang metrics loop started")

@@ -35,7 +35,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use dynamo_runtime::{
     component::Component,
-    metrics::{MetricsRegistry, prometheus_names::kvrouter},
+    metrics::{MetricsHierarchy, prometheus_names::kvrouter},
 };
 use prometheus::{IntCounterVec, Opts};
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,9 @@ pub enum KvRouterError {
 
     #[error("Indexer is dropped request")]
     IndexerDroppedRequest,
+
+    #[error("Prune operation failed: {0}")]
+    PruneFailed(String),
 }
 
 /// Errors that can occur during KV Cache Event processing.
@@ -168,7 +171,7 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
 }
 
 /// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RouterEvent {
     /// The ID of the worker emitting the event.
     worker_id: WorkerId,
@@ -235,6 +238,8 @@ pub struct RadixTree {
     lookup: HashMap<WorkerWithDpRank, HashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
     /// The time buffer the radix tree should check when considering frequence of block accesses
     expiration_duration: Option<Duration>,
+    /// The tree current size.
+    current_size: usize,
 }
 
 impl Default for RadixTree {
@@ -254,6 +259,7 @@ impl RadixTree {
             root: Rc::new(RefCell::new(RadixBlock::new())),
             lookup: HashMap::new(),
             expiration_duration,
+            current_size: 0,
         }
     }
 
@@ -320,6 +326,16 @@ impl RadixTree {
 
         tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
 
+        // Populate tree sizes for all workers that have scores
+        for worker in scores.scores.keys() {
+            let tree_size = self
+                .lookup
+                .get(worker)
+                .expect("worker in scores must exist in lookup table")
+                .len();
+            scores.tree_sizes.insert(*worker, tree_size);
+        }
+
         scores
     }
 
@@ -354,9 +370,10 @@ impl RadixTree {
                     None => {
                         tracing::warn!(
                             worker_id = worker.worker_id.to_string(),
-                            dp_rank = ?worker.dp_rank,
+                            dp_rank = worker.dp_rank,
                             id,
                             parent_hash = ?op.parent_hash,
+                            num_blocks = op.blocks.len(),
                             "Failed to find parent block; skipping store operation"
                         );
                         return Err(KvCacheEventError::ParentBlockNotFound);
@@ -378,6 +395,9 @@ impl RadixTree {
                             inner
                                 .children
                                 .insert(block_id.tokens_hash, new_block.clone());
+
+                            // increment the current size when creating a new block
+                            self.current_size = self.current_size.saturating_add(1);
 
                             new_block
                         }
@@ -412,8 +432,10 @@ impl RadixTree {
                         Some(entry) => entry.clone(),
                         None => {
                             tracing::warn!(
-                                worker_id = worker_id.to_string(),
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
                                 id,
+                                block_hash = ?block,
                                 "Failed to find block to remove; skipping remove operation"
                             );
                             return Err(KvCacheEventError::BlockNotFound);
@@ -425,6 +447,9 @@ impl RadixTree {
                     if guard.workers.is_empty() {
                         // if no workers are using this block, that is true for all children
                         guard.children.clear();
+
+                        // Decrement the current size when removing the last worker from a node
+                        self.current_size = self.current_size.saturating_sub(1);
                     }
                     // remove the block from the lookup table
                     worker_lookup.remove(&block);
@@ -457,6 +482,9 @@ impl RadixTree {
                     // If no workers are using this block, that is true for all children
                     if block.borrow().workers.is_empty() {
                         block.borrow_mut().children.clear();
+
+                        // Decrement the current size when removing the last worker from a node
+                        self.current_size = self.current_size.saturating_sub(1);
                     }
                 });
 
@@ -557,6 +585,10 @@ impl RadixTree {
 
         events
     }
+
+    pub fn current_size(&self) -> usize {
+        self.current_size
+    }
 }
 
 /// Metrics for the KV Indexer.
@@ -589,7 +621,7 @@ impl KvIndexerMetrics {
     /// KV_INDEXER_METRICS to avoid duplicate registration issues.
     pub fn from_component(component: &Component) -> Arc<Self> {
         KV_INDEXER_METRICS.get_or_init(|| {
-            match component.create_intcountervec(
+            match component.metrics().create_intcountervec(
                 kvrouter::KV_CACHE_EVENTS_APPLIED,
                 "Total number of KV cache events applied to index",
                 &["event_type", "status"],
@@ -658,6 +690,8 @@ pub struct OverlapScores {
     pub scores: HashMap<WorkerWithDpRank, u32>,
     // List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
     pub frequencies: Vec<usize>,
+    // Map of worker to their tree size (number of blocks in the tree for that worker)
+    pub tree_sizes: HashMap<WorkerWithDpRank, usize>,
 }
 
 impl Default for OverlapScores {
@@ -676,6 +710,7 @@ impl OverlapScores {
         Self {
             scores: HashMap::new(),
             frequencies: Vec::with_capacity(32),
+            tree_sizes: HashMap::new(),
         }
     }
 
@@ -1203,6 +1238,7 @@ impl KvIndexerInterface for KvIndexerSharded {
                 match match_rx.recv().await {
                     Some(response) => {
                         scores.scores.extend(response.scores);
+                        scores.tree_sizes.extend(response.tree_sizes);
 
                         if response_num == 0 {
                             scores.frequencies = response.frequencies;

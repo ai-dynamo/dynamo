@@ -3,6 +3,7 @@
 
 ARG SGLANG_IMAGE_TAG="v0.5.3.post2"
 ARG BRANCH_TYPE
+ARG CARGO_BUILD_JOBS
 
 FROM scratch AS local_src
 COPY . /src
@@ -11,17 +12,31 @@ FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
 
 WORKDIR /sgl-workspace
 
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
+# Install jq for JSON processing
+RUN apt-get update -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        jq \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dynamo
 # Providing --build-arg BRANCH_TYPE=local will editable install the local dynamo repo
 # Providing --build-arg BRANCH_TYPE=remote will editable install the remote dynamo repo
 # Default is to install the latest published dynamo version
 ARG BRANCH_TYPE
+ARG CARGO_BUILD_JOBS
+
 COPY --from=local_src /src /tmp/local_src
 RUN if [ "$BRANCH_TYPE" = "local" ]; then \
         cp -r /tmp/local_src /sgl-workspace/dynamo; \
     elif [ "$BRANCH_TYPE" = "remote" ]; then \
         git clone https://github.com/ai-dynamo/dynamo.git /sgl-workspace/dynamo; \
     fi
+
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
 # SGLang does not use a venv in their container
 RUN if [ "$BRANCH_TYPE" = "local" ]; then \
@@ -75,4 +90,4 @@ ENV PATH=/usr/local/bin/etcd:$PATH
 # Enable forceful shutdown of inflight requests
 ENV SGL_FORCE_SHUTDOWN=1
 
-WORKDIR /sgl-workspace/dynamo/components/backends/sglang
+WORKDIR /sgl-workspace/dynamo/examples/backends/sglang

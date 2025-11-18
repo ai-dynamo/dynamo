@@ -20,7 +20,7 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import AsyncGenerator, Optional, Union
+from typing import Any, AsyncGenerator, Optional, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
@@ -52,11 +52,6 @@ class DisaggregationMode(Enum):
     ENCODE = "encode"
 
 
-class DisaggregationStrategy(Enum):
-    PREFILL_FIRST = "prefill_first"
-    DECODE_FIRST = "decode_first"
-
-
 @dataclass
 class RequestHandlerConfig:
     """
@@ -68,9 +63,6 @@ class RequestHandlerConfig:
     default_sampling_params: SamplingParams
     publisher: Publisher
     disaggregation_mode: DisaggregationMode
-    disaggregation_strategy: DisaggregationStrategy
-    next_client: object
-    next_router_client: Optional[object] = None
     encode_client: Optional[object] = None
     multimodal_processor: Optional[
         MultimodalRequestProcessor
@@ -79,6 +71,7 @@ class RequestHandlerConfig:
     runtime: Optional[
         DistributedRuntime
     ] = None  # DistributedRuntime reference for graceful shutdown
+    metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
 
 
 class HandlerBase:
@@ -91,10 +84,8 @@ class HandlerBase:
         self.component = config.component
         self.default_sampling_params = config.default_sampling_params
         self.publisher = config.publisher
+        self.metrics_collector = config.metrics_collector
         self.disaggregation_mode = config.disaggregation_mode
-        self.disaggregation_strategy = config.disaggregation_strategy
-        self.next_client = config.next_client
-        self.next_router_client = config.next_router_client
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
@@ -260,7 +251,6 @@ class HandlerBase:
         )
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
-        model_name = request.get("model", "unknown_model")
 
         # Optional test-only logits processing (enable with DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1)
         if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
@@ -286,18 +276,6 @@ class HandlerBase:
                         self.publisher.start()
                         self.first_generation = False
 
-                    # Upon completion, send a final chunk with "stop" as the finish reason.
-                    # This signals to the client that the stream has ended.
-                    if (
-                        res.finished
-                        and self.disaggregation_mode != DisaggregationMode.PREFILL
-                    ):
-                        if self.multimodal_processor:
-                            final_out = self.multimodal_processor.get_stop_response(
-                                request_id, model_name
-                            )
-                            yield final_out
-
                     # If we are not done generating, but there are no outputs, return an error
                     if not res.outputs and not res.finished:
                         yield {"finish_reason": "error", "token_ids": []}
@@ -307,12 +285,9 @@ class HandlerBase:
                     # The engine returns all tokens generated so far. We must calculate the new
                     # tokens generated in this iteration to create the "delta".
                     next_total_toks = len(output.token_ids)
-                    if self.multimodal_processor:
-                        out = self.multimodal_processor.create_response_chunk(
-                            output, num_output_tokens_so_far, request_id, model_name
-                        )
-                    else:
-                        out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
+                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
                     if output.stop_reason:
@@ -328,6 +303,17 @@ class HandlerBase:
                         logging.warning(
                             "Request finished with no finish reason set - this indicates a possible bug"
                         )
+
+                    # Log metrics to TensorRT-LLM MetricsCollector when request finishes
+                    if (
+                        res.finished
+                        and self.metrics_collector
+                        and hasattr(res, "metrics_dict")
+                    ):
+                        try:
+                            self.metrics_collector.log_metrics_dict(res.metrics_dict)
+                        except Exception as e:
+                            logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
 
                     # Yield the chunk to the client and update the token count for the next iteration.
                     yield out

@@ -113,6 +113,9 @@ pub mod frontend_service {
     /// Output sequence length in tokens
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "output_sequence_tokens";
 
+    /// Total number of output tokens generated (counter that updates in real-time)
+    pub const OUTPUT_TOKENS_TOTAL: &str = "output_tokens_total";
+
     /// Time to first token in seconds
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "time_to_first_token_seconds";
 
@@ -324,6 +327,9 @@ pub mod kvbm {
 
     /// The number of offload blocks from host to disk
     pub const OFFLOAD_BLOCKS_H2D: &str = "offload_blocks_h2d";
+
+    /// The number of offload blocks from device to disk (bypassing host memory)
+    pub const OFFLOAD_BLOCKS_D2D: &str = "offload_blocks_d2d";
 
     /// The number of onboard blocks from host to device
     pub const ONBOARD_BLOCKS_H2D: &str = "onboard_blocks_h2d";

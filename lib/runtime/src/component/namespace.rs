@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use futures::{Stream, TryStreamExt};
+use serde::Deserialize;
+use serde::Serialize;
 
-use super::*;
-use crate::metrics::MetricsRegistry;
+use crate::component::Namespace;
+use crate::metrics::{MetricsHierarchy, MetricsRegistry};
+use crate::traits::DistributedRuntimeProvider;
 use crate::traits::events::{EventPublisher, EventSubscriber};
 
 #[async_trait]
@@ -68,31 +72,39 @@ impl EventSubscriber for Namespace {
     }
 }
 
-impl MetricsRegistry for Namespace {
+impl MetricsHierarchy for Namespace {
     fn basename(&self) -> String {
         self.name.clone()
     }
 
-    fn parent_hierarchy(&self) -> Vec<String> {
-        // Build as: [ "" (DRT), non-empty parent basenames from root -> leaf ]
-        let mut names = vec![String::new()]; // Start with empty string for DRT
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        let mut parents = vec![];
 
-        // Collect parent basenames from root to leaf
-        let parent_names: Vec<String> =
-            std::iter::successors(self.parent.as_deref(), |ns| ns.parent.as_deref())
-                .map(|ns| ns.basename())
-                .filter(|name| !name.is_empty())
-                .collect();
+        // Walk up the namespace parent chain (grandparents to immediate parent)
+        let parent_chain: Vec<&Namespace> =
+            std::iter::successors(self.parent.as_deref(), |ns| ns.parent.as_deref()).collect();
 
-        // Append parent names in reverse order (root to leaf)
-        names.extend(parent_names.into_iter().rev());
-        names
+        // Add DRT first (root)
+        parents.push(&*self.runtime as &dyn MetricsHierarchy);
+
+        // Then add parent namespaces in reverse order (root -> leaf)
+        for parent_ns in parent_chain.iter().rev() {
+            parents.push(*parent_ns as &dyn MetricsHierarchy);
+        }
+
+        parents
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        &self.metrics_registry
     }
 }
 
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod tests {
+    use crate::{DistributedRuntime, Runtime};
+
     use super::*;
 
     // todo - make a distributed runtime fixture
