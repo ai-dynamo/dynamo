@@ -24,7 +24,6 @@ cd $DYNAMO_ROOT
   --platform linux/arm64 \
   --tag dynamo-wideep-gb200:latest \
   --build-arg SGLANG_IMAGE_TAG=nightly-dev-20251019-fda0cb2a \
-  --no-cache
 ```
 
 2. You can run this container on each 4xGB200 node using the following command.

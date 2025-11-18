@@ -138,7 +138,6 @@ cd $DYNAMO_ROOT
 ./container/build.sh \
   --framework SGLANG \
   --tag dynamo-sglang:latest \
-  --no-cache
 ```
 
 And then run it using

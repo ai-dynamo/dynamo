@@ -16,7 +16,6 @@ cd $DYNAMO_ROOT
 ./container/build.sh \
   --framework SGLANG \
   --tag dynamo-wideep:latest \
-  --no-cache
 ```
 
 You can use a specific tag from the [lmsys dockerhub](https://hub.docker.com/r/lmsysorg/sglang/tags) by adding `--build-arg SGLANG_IMAGE_TAG=<tag>` to the build command.

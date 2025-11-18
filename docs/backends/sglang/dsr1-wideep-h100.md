@@ -19,7 +19,6 @@ cd $DYNAMO_ROOT
 ./container/build.sh \
   --framework SGLANG \
   --tag dynamo-wideep:latest \
-  --no-cache
 ```
 
 2. You can run this container on each 8xH100 node using the following command.
