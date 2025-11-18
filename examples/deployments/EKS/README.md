@@ -12,6 +12,8 @@ This guide covers steps of creating an Amazon EKS cluster, creating a shared sto
 
 #### a) Open a terminal and create a config file for EKS cluster
 
+We'll create 1 CPU node and 2 GPU nodes. The 2 GPU nodes have EFA enabled. Note that we'll reinstall EFA package to enable GDR. Please change `<CLUSTER_NAME>`, `<CLUSTER_REGION>`, and `<CLUSTER_AZ>`.
+
 ```
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
