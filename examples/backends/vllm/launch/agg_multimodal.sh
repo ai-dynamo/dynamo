@@ -39,8 +39,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Start frontend with Rust OpenAIPreprocessor
-python -m dynamo.frontend --http-port=8000 &
+# run ingress
+# DYN_HTTP_PORT env var is read by dynamo.frontend (defaults to 8000 if not set)
+python -m dynamo.frontend &
 
 # Configure GPU memory optimization for specific models
 EXTRA_ARGS=""

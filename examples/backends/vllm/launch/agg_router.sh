@@ -12,9 +12,9 @@ MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
 
 # run frontend + KV router
+# DYN_HTTP_PORT env var is read by dynamo.frontend (defaults to 8000 if not set)
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port 8000 \
     --router-reset-states &
 
 # run workers

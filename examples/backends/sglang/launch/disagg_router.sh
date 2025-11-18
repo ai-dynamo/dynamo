@@ -45,9 +45,9 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 
 # run ingress
+# DYN_HTTP_PORT env var is read by dynamo.frontend (defaults to 8000 if not set)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend \
- --http-port=8000 \
  --router-mode kv \
  --kv-overlap-score-weight 0 \
  --router-reset-states &

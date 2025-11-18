@@ -20,6 +20,7 @@ etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0
 sleep 2
 
 # Start OpenAI Frontend which will dynamically discover workers when they startup
+# DYN_HTTP_PORT env var is read by dynamo.frontend (defaults to 8000 if not set)
 # NOTE: This is a blocking call.
-python3 -m dynamo.frontend --http-port 8000
+python3 -m dynamo.frontend
 

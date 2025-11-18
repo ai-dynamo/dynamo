@@ -11,9 +11,9 @@ export PYTHONHASHSEED=0
 MODEL="Qwen/Qwen3-0.6B"
 
 # run decode router with kv-overlap-score-weight 0 for pure load balancing
+# DYN_HTTP_PORT env var is read by dynamo.frontend (defaults to 8000 if not set)
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port 8000 \
     --kv-overlap-score-weight 0 \
     --router-reset-states &
 
