@@ -534,7 +534,6 @@ class Connection:
         self._is_initialized = False
         self._name = f"{connector.name}-{number}"
         self._nixl = nixl_api.nixl_agent(self._name)
-        self._agent_metadata: Optional[bytes] = None
 
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Created {self.__repr__()}."
@@ -543,8 +542,7 @@ class Connection:
     def __repr__(self) -> str:
         return str(
             f"{self.__class__.__name__}("
-            f"is_initialized='{self._is_initialized}', "
-            f"metadata=<{0 if self._agent_metadata is None else len(self._agent_metadata)} bytes>, "
+            f"is_initialized={self._is_initialized}, "
             f"name='{self._name}'"
             ")"
         )
@@ -574,12 +572,12 @@ class Connection:
         return self._name
 
     async def initialize(self) -> None:
-        # Only initialize the connector once.
+        # Only initialize the connection once.
         if self._is_initialized:
             return
 
         self._is_initialized = True
-        # This method is a no-op for now, in the future it may be used to initialize the connector.
+        # This method is a no-op for now, in the future it may be used to initialize the connection.
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Initialized {{ name: '{self._name}' }} completed."
         )
@@ -733,7 +731,7 @@ class Connector:
             raise TypeError(
                 "Argument `local_descriptors` must be `Descriptor` or `list[Descriptor]`."
             )
-        if remote_metadata.operation_kind != OperationKind.WRITE:
+        if remote_metadata.operation_kind != OperationKind.WRITE.value:
             raise RuntimeError(
                 "Cannot create a `WriteOperation` to write to a remote `ReadableOperation`."
             )
@@ -938,7 +936,7 @@ class Descriptor:
             raise TypeError(TYPE_ERROR_MESSAGE)
 
     def __del__(self) -> None:
-        if self._nixl_hndl is not None and self._connection is not None:
+        if not (self._nixl_hndl is None or self._connection is None):
             # Unregister the memory with NIXL.
             self._connection._nixl.deregister_memory(self._nixl_hndl)
             self._nixl_hndl = None
@@ -1026,18 +1024,22 @@ class Descriptor:
             )
         if self._data_ptr == 0:
             raise ValueError("Cannot register memory with a null pointer.")
-
-        if not (self._nixl_hndl is None and self._connection is None):
+        if self._connection is not None:
+            if self._connection != connection:
+                raise RuntimeError(
+                    "Descriptor cannot be registered with more than one connection."
+                    f" Existing connection: {self._connection.name}, new connection: {connection.name}."
+                )
+            # Descriptor is already registered with this connection.
             return
 
-        if self._connection is not None and self._connection != connection:
-            raise RuntimeError(
-                "Descriptor cannot be registered with more than one connection."
-                f" Existing connection: {self._connection}, new connection: {connection}."
-            )
+        # When the descriptor is already registered with NIXL, just return.
+        if self._nixl_hndl is not None:
+            return
 
         # Register the memory with NIXL.
         self._connection = connection
+
         if isinstance(self._data_ref, torch.Tensor):
             self._nixl_hndl = connection._nixl.register_memory(self._data_ref)
         else:
@@ -1698,7 +1700,7 @@ class WritableOperation(PassiveOperation):
 
         Raises
         TypeError
-            When `local` is not a `dynamo.nixl_connect.Connector`.
+            When `connection` is not a `dynamo.nixl_connect.Connection`.
         TypeError
             When `local_descriptors` is not a `dynamo.nixl_connect.Descriptor` or `list[dynamo.nixl_connect.Descriptor]`.
         """
@@ -1768,9 +1770,9 @@ class WriteOperation(ActiveOperation):
         TypeError
             When `local_descriptors` is not a `dynamo.nixl_connect.Descriptor` or `list[dynamo.nixl_connect.Descriptor]`.
         """
-        if not isinstance(connection, Connector):
+        if not isinstance(connection, Connection):
             raise TypeError(
-                "Argument `connector` must be `dynamo.nixl_connect.Connector`."
+                "Argument `connection` must be `dynamo.nixl_connect.Connection`."
             )
         if not isinstance(remote_metadata, RdmaMetadata):
             raise TypeError(
