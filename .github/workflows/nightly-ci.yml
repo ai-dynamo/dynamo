@@ -110,7 +110,7 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:main-${FRAMEWORK}-framework-${{ matrix.platform.arch }}
+          push_tag: ai-dynamo/dynamo:main-${{ env.FRAMEWORK }}-framework-${{ matrix.platform.arch }}
           aws_push: 'true'
           azure_push: 'false'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
