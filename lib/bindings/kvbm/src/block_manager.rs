@@ -10,6 +10,7 @@ use dynamo_llm::block_manager::kv_consolidator::KvEventConsolidatorConfig;
 use dynamo_llm::block_manager::offload::filter::FrequencyFilter;
 use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::config::environment_names::kvbm as env_kvbm;
 use pyo3::PyResult;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -53,7 +54,7 @@ fn create_disk_offload_filter(
     runtime: &tokio::runtime::Handle,
 ) -> Result<Option<Arc<FrequencyFilter>>> {
     // Check if disk offload filter is disabled via environment variable
-    let disable_filter = std::env::var("DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER")
+    let disable_filter = std::env::var(env_kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER)
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
