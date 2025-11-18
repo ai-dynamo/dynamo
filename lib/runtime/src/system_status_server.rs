@@ -198,7 +198,7 @@ pub async fn spawn_system_status_server(
                 }),
             )
             .route(
-                "/v1/loras/{lora_name}",
+                "/v1/loras/{*lora_name}",
                 delete({
                     let state = Arc::clone(&server_state);
                     move |path| unload_lora_handler(State(state), path)
@@ -378,12 +378,14 @@ async fn load_lora_handler(
     }
 }
 
-/// Handler for DELETE /v1/loras/{lora_name} - Unload a LoRA adapter
+/// Handler for DELETE /v1/loras/*lora_name - Unload a LoRA adapter
 #[tracing::instrument(skip_all, level = "debug")]
 async fn unload_lora_handler(
     State(state): State<Arc<SystemStatusState>>,
     Path(lora_name): Path<String>,
 ) -> impl IntoResponse {
+    // Strip the leading slash from the wildcard capture
+    let lora_name = lora_name.strip_prefix('/').unwrap_or(&lora_name).to_string();
     tracing::info!("Unloading LoRA: {}", lora_name);
 
     // Call the unload_lora endpoint for each available backend
@@ -391,7 +393,7 @@ async fn unload_lora_handler(
         state.drt(),
         "unload_lora",
         json!({
-            "lora_name": lora_name,
+            "lora_name": lora_name.clone(),
         }),
     )
     .await

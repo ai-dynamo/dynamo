@@ -104,18 +104,37 @@ mod tests {
 
         let cache = LoRACache::new(cache_root.clone());
 
-        // Pre-populate cache
-        let cached_lora = cache_root.join("cached-lora");
-        fs::create_dir(&cached_lora).unwrap();
+        // Pre-populate cache with a LoRA at path "my-loras/test-lora"
+        // This matches the cache key that will be derived from "s3://bucket/my-loras/test-lora"
+        let cached_lora = cache_root.join("my-loras").join("test-lora");
+        fs::create_dir_all(&cached_lora).unwrap();
         fs::write(cached_lora.join("adapter_config.json"), "{}").unwrap();
-        fs::write(cached_lora.join("adapter_model.safetensors"), "cached").unwrap();
+        fs::write(
+            cached_lora.join("adapter_model.safetensors"),
+            "cached_weights",
+        )
+        .unwrap();
 
-        // Create downloader (empty sources since we're testing cache hit)
+        // Create downloader with empty sources - no network fetch possible
         let downloader = LoRADownloader::new(vec![], cache);
 
-        // Note: For cache hit test with non-local URIs, we'd need to test with s3:// URI
-        // but that requires actual S3 or mock. The cache logic is in the downloader.
-        assert!(cached_lora.exists());
+        // Use an S3 URI that maps to the pre-populated cache entry
+        let lora_uri = "s3://bucket/my-loras/test-lora";
+
+        // Call download_if_needed - should hit cache without attempting any downloads
+        let result_path = downloader.download_if_needed(lora_uri).await.unwrap();
+
+        // Assert the returned path equals the cached path
+        assert_eq!(result_path, cached_lora);
+
+        // Verify no new downloads occurred by checking the weights file content is unchanged
+        let weights_content = fs::read_to_string(result_path.join("adapter_model.safetensors"))
+            .unwrap();
+        assert_eq!(weights_content, "cached_weights");
+
+        // Verify the cache directory structure is unchanged
+        assert!(result_path.join("adapter_config.json").exists());
+        assert!(result_path.join("adapter_model.safetensors").exists());
     }
 }
 

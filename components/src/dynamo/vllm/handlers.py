@@ -163,27 +163,19 @@ class BaseWorkerHandler(ABC):
         """
         Load a LoRA adapter dynamically into the vLLM's AsyncLLM engine.
 
-        Supports two request formats:
-
-        New API (with LoRAManager):
+        Request format:
         {
             "lora_name": str,
             "source": {
                 "uri": str  # e.g., "s3://bucket/path" or "file:///path"
             }
         }
-
-        Legacy API:
-        {
-            "lora_name": str,
-            "lora_path": str,
-        }
         """
         try:
             if request is None:
                 yield {
                     "status": "error",
-                    "message": "Request is required with 'lora_name' and either 'source.uri' or 'lora_path'",
+                    "message": "Request is required with 'lora_name' and 'source.uri'",
                 }
                 return
 
@@ -199,47 +191,43 @@ class BaseWorkerHandler(ABC):
             logger.info(f"load_lora request keys: {list(request.keys())}")
             logger.info(f"load_lora request: {request}")
 
-            # Check for new API format (source.uri)
+            # Check for URI-based API format (source.uri)
             source = request.get("source")
-            if source and isinstance(source, dict):
-                lora_uri = source.get("uri")
-                if not lora_uri:
-                    yield {
-                        "status": "error",
-                        "message": "'source.uri' is required when using source-based loading",
-                    }
-                    return
+            if not source or not isinstance(source, dict):
+                yield {
+                    "status": "error",
+                    "message": "'source' object is required in request",
+                }
+                return
 
-                # Use LoRAManager to download from URI
-                if _lora_manager is None:
-                    yield {
-                        "status": "error",
-                        "message": "LoRAManager not initialized. Set DYN_LORA_ENABLED=true to enable URI-based LoRA loading.",
-                    }
-                    return
+            lora_uri = source.get("uri")
+            if not lora_uri:
+                yield {
+                    "status": "error",
+                    "message": "'source.uri' is required in request",
+                }
+                return
 
-                logger.info(f"Downloading LoRA adapter: {lora_name} from {lora_uri}")
-                download_result = await _lora_manager.download_lora(lora_uri)
+            # Use LoRAManager to download from URI
+            if _lora_manager is None:
+                yield {
+                    "status": "error",
+                    "message": "LoRAManager not initialized. Set DYN_LORA_ENABLED=true to enable URI-based LoRA loading.",
+                }
+                return
 
-                if download_result["status"] != "success":
-                    yield {
-                        "status": "error",
-                        "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
-                    }
-                    return
+            logger.info(f"Downloading LoRA adapter: {lora_name} from {lora_uri}")
+            download_result = await _lora_manager.download_lora(lora_uri)
 
-                lora_path = download_result["local_path"]
-                logger.info(f"LoRA downloaded to: {lora_path}")
-            else:
-                # Fall back to legacy API (lora_path)
-                lora_path = request.get("lora_path")
-                if not lora_path:
-                    yield {
-                        "status": "error",
-                        "message": "Either 'source.uri' or 'lora_path' is required in request",
-                    }
-                    return
-                logger.info(f"Loading LoRA adapter: {lora_name} from {lora_path}")
+            if download_result["status"] != "success":
+                yield {
+                    "status": "error",
+                    "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
+                }
+                return
+
+            lora_path = download_result["local_path"]
+            logger.info(f"LoRA downloaded to: {lora_path}")
 
             # Generate deterministic ID from lora_name before using it
             lora_id = lora_name_to_hash_id(lora_name)
@@ -273,7 +261,6 @@ class BaseWorkerHandler(ABC):
                     user_data = {
                         "lora_adapter": True,
                         "lora_id": lora_id,
-                        "lora_path": lora_path,
                     }
 
                     # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
@@ -306,7 +293,6 @@ class BaseWorkerHandler(ABC):
                 "status": "success",
                 "message": f"LoRA adapter '{lora_name}' loaded successfully",
                 "lora_name": lora_name,
-                "lora_path": lora_path,
                 "lora_id": lora_id,
             }
         except Exception as e:

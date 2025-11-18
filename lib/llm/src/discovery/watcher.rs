@@ -234,7 +234,9 @@ impl ModelWatcher {
         let card = match self.manager.remove_model_card(key) {
             Some(card) => card,
             None => {
-                anyhow::bail!("Missing ModelDeploymentCard for {key}");
+                // Card already removed (e.g., by explicit unregister_llm call) - this is fine
+                tracing::debug!("ModelDeploymentCard for {key} already removed");
+                return Ok(None);
             }
         };
         let model_name = card.name().to_string();
