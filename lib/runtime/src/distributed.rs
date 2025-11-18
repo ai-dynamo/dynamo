@@ -464,10 +464,15 @@ pub struct DistributedConfig {
 
 impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
+        let request_plane = RequestPlaneMode::from_env();
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::default()),
-            nats_config: Some(nats::ClientOptions::default()),
-            request_plane: RequestPlaneMode::from_env(),
+            nats_config: if request_plane.is_nats() {
+                Some(nats::ClientOptions::default())
+            } else {
+                None
+            },
+            request_plane,
         }
     }
 
@@ -476,10 +481,15 @@ impl DistributedConfig {
             attach_lease: false,
             ..Default::default()
         };
+        let request_plane = RequestPlaneMode::from_env();
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::new(etcd_config)),
-            nats_config: Some(nats::ClientOptions::default()),
-            request_plane: RequestPlaneMode::from_env(),
+            nats_config: if request_plane.is_nats() {
+                Some(nats::ClientOptions::default())
+            } else {
+                None
+            },
+            request_plane,
         }
     }
 }
