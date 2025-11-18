@@ -26,7 +26,8 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "nixl==0.7.0"
+    "nixl==0.7.0",
+    "pydantic>=2.0",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -42,6 +43,18 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 keywords = ["llm", "genai", "inference", "nvidia", "kvcache", "dynamo"]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3.4",
+    "pytest-mypy",
+    "pytest-asyncio",
+]
+dev = [
+    "kvbm[test]",
+    "maturin>=1.0,<2.0",
+    "patchelf",
+]
 
 [tool.maturin]
 module-name = "kvbm._core"
