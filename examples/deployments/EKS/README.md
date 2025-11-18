@@ -113,7 +113,27 @@ kubectl apply -f <FILENAME>.yaml
 
 ### Step 2. Install Dynamo Kubernetes Platform
 
-#### a) Run below to install
+#### a) Create Secrets
+
+```
+# Create Image Pull Secret
+export DOCKER_SERVER=<ECR_REGISTRY>
+export DOCKER_USERNAME=AWS
+export DOCKER_PASSWORD="$(aws ecr get-login-password --region <ECR_REGION>)"
+
+kubectl create secret docker-registry docker-imagepullsecret \
+  --docker-server=${DOCKER_SERVER} \
+  --docker-username=${DOCKER_USERNAME} \
+  --docker-password=${DOCKER_PASSWORD} \
+  --namespace=dynamo-system
+
+# Create HuggingFace Secret
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=<YOUR_HF_TOKEN> \
+  -n dynamo-system
+```
+
+#### b) Run below to install Dynamo Kubernetes Platform
 ```
 # Install CRDs
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-0.6.0.tgz
@@ -142,27 +162,7 @@ dynamo-platform-nats-0                                            2/2     Runnin
 
 ### Step 3. Deploy a model
 
-#### a) Create Secrets
-
-```
-# Create Image Pull Secret
-export DOCKER_SERVER=<ECR_REGISTRY>
-export DOCKER_USERNAME=AWS
-export DOCKER_PASSWORD="$(aws ecr get-login-password --region <ECR_REGION>)"
-
-kubectl create secret docker-registry docker-imagepullsecret \
-  --docker-server=${DOCKER_SERVER} \
-  --docker-username=${DOCKER_USERNAME} \
-  --docker-password=${DOCKER_PASSWORD} \
-  --namespace=dynamo-system
-
-# Create HuggingFace Secret
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN=<YOUR_HF_TOKEN> \
-  -n dynamo-system
-```
-
-#### b) Build Dynamo TRTLLM runtime image
+#### a) Build Dynamo TRTLLM runtime image
 
 This step can take a few hours depending on your system
 
@@ -173,7 +173,7 @@ cd dynamo/container
 ./build.sh --framework trtllm --use-default-experimental-tensorrtllm-commit --trtllm-use-nixl-kvcache-experimental
 ```
 
-#### c) Push Image to Amazon ECR
+#### b) Push Image to Amazon ECR
 
 ```
 # Create an ECR repository
@@ -185,7 +185,7 @@ docker tag dynamo:latest-trtllm $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
 docker push $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
 ```
 
-#### d) Create Dynamo Inference Graph
+#### c) Create Dynamo Inference Graph
 
 For this example, we'll deploy `Qwen/Qwen3-32B` in disaggregated mode. We'll create 12 prefill workers with TP1 and 1 decode worker with TP4 for a total of 16 x H200 GPUs (p5en.48xlarge). Please change `<DYNAMO_TRTLLM_IMAGE>` to your built image name.
 
@@ -419,7 +419,7 @@ trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-nzznf      1/1     Runnin
 trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-wnmdn      1/1     Running   0          125m
 ```
 
-#### Step 5. Test
+#### Step 5. Test the Deployment
 
 ```
 # Port forward
