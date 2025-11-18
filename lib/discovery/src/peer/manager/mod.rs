@@ -203,9 +203,9 @@ impl PeerDiscoveryManager {
 #[cfg(test)]
 mod tests {
     use crate::peer::{DiscoveryError, WorkerAddress};
+    use crate::test_fixtures::make_test_address;
 
     use super::*;
-    use bytes::Bytes;
     use parking_lot::Mutex as StdMutex;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -214,10 +214,6 @@ mod tests {
 
     // Test timeout duration
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
-
-    fn make_test_address() -> WorkerAddress {
-        WorkerAddress::from_bytes(Bytes::from_static(b"tcp://127.0.0.1:5555"))
-    }
 
     // ============================================================================
     // Mock Discovery Infrastructure

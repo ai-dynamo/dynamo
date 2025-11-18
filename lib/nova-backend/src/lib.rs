@@ -260,7 +260,7 @@ impl NovaBackend {
         }
 
         for priority in &priorities {
-            if !required_transports.contains(&priority) {
+            if !required_transports.contains(priority) {
                 return Err(NovaBackendError::InvalidTransportPriority(format!(
                     "Priority transport not found: {:?}",
                     priority

@@ -158,12 +158,13 @@ impl Drop for P2pDiscoverySystem {
 #[cfg(all(test, feature = "p2p"))]
 mod tests {
     use super::*;
-    use crate::peer::{InstanceId, WorkerAddress};
+    use crate::peer::InstanceId;
     use crate::systems::test_support::{
         checksum_validation, collision_detection, not_found_errors,
         register_and_discover_by_instance_id, register_and_discover_by_worker_id,
     };
     use crate::systems::{DiscoveryQueryError, DiscoverySystem, peer_discovery_handle};
+    use crate::test_fixtures::make_test_address;
     use std::sync::Arc;
 
     fn system_factory(
@@ -223,7 +224,7 @@ mod tests {
             peer_discovery_handle(Arc::clone(&system)).expect("Peer discovery should be available");
 
         let instance_id = InstanceId::new_v4();
-        let address = WorkerAddress::from_bytes(b"127.0.0.1:9000".as_slice());
+        let address = make_test_address();
         let worker_id = instance_id.worker_id();
 
         discovery

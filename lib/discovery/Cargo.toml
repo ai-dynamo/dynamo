@@ -10,6 +10,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+dynamo-identity = { workspace = true }
+dynamo-nova-backend = { workspace = true }
+
 # Core dependencies (always present)
 anyhow = "1.0"
 async-trait = "0.1"

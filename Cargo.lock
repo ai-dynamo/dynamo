@@ -2694,6 +2694,8 @@ dependencies = [
  "clap 4.5.52",
  "dashmap 6.1.0",
  "derive_builder",
+ "dynamo-identity",
+ "dynamo-nova-backend",
  "etcd-client",
  "figment",
  "futures",

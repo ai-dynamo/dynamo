@@ -65,13 +65,19 @@ The peer discovery trait is used by the runtime to translate identifiers into ad
 
 ```rust
 use std::sync::Arc;
+use bytes::Bytes;
 use dynamo_am_discovery::peer::{PeerInfo, WorkerAddress, InstanceId};
 use dynamo_am_discovery::peer::manager::PeerDiscoveryManager;
 use dynamo_am_discovery::systems::DiscoverySystem; // e.g., etcd system builds this
 
 # async fn example(system: Arc<dyn DiscoverySystem>) -> anyhow::Result<()> {
     let local_instance = InstanceId::new_v4();
-    let local_address = WorkerAddress::from_bytes(b"tcp://127.0.0.1:5555".as_slice());
+
+    // Create a WorkerAddress using the builder pattern
+    let mut builder = WorkerAddress::builder();
+    builder.add_entry("endpoint", Bytes::from_static(b"tcp://127.0.0.1:5555"))?;
+    let local_address = builder.build()?;
+
     let local_peer = PeerInfo::new(local_instance, local_address);
 
     // Get one or more implementations of the peer discovery trait

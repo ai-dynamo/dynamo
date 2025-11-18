@@ -10,13 +10,10 @@ use std::future::Future;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::peer::{InstanceId, WorkerAddress};
+use crate::peer::InstanceId;
+use crate::test_fixtures::{make_test_address, make_test_address_with_port};
 
 use super::{DiscoverySystem, peer_discovery_handle};
-
-fn make_test_address() -> WorkerAddress {
-    WorkerAddress::from_bytes(b"127.0.0.1:8080".as_slice())
-}
 
 fn unique_cluster_id(suffix: &str) -> String {
     format!("test-{suffix}-{}", Uuid::new_v4())
@@ -137,8 +134,8 @@ where
         .ok_or_else(|| anyhow!("Peer discovery should be available"))?;
 
     let instance_id = InstanceId::new_v4();
-    let address1 = WorkerAddress::from_bytes(&b"tcp://127.0.0.1:5555"[..]);
-    let address2 = WorkerAddress::from_bytes(&b"tcp://127.0.0.1:6666"[..]);
+    let address1 = make_test_address_with_port(5555);
+    let address2 = make_test_address_with_port(6666);
 
     peer_discovery
         .register_instance(instance_id, address1)

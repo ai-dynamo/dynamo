@@ -292,12 +292,13 @@ impl Drop for EtcdDiscoverySystem {
 #[cfg(all(test, feature = "etcd"))]
 mod tests {
     use super::*;
-    use crate::peer::{InstanceId, WorkerAddress};
+    use crate::peer::InstanceId;
     use crate::systems::DiscoverySystem;
     use crate::systems::test_support::{
         checksum_validation, collision_detection, not_found_errors,
         register_and_discover_by_instance_id, register_and_discover_by_worker_id,
     };
+    use crate::test_fixtures::make_test_address;
     use std::sync::Arc;
 
     // Note: These tests require a running etcd instance
@@ -316,10 +317,6 @@ mod tests {
     /// Helper function to get etcd endpoint for tests
     fn etcd_endpoint() -> String {
         std::env::var("ETCD_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:2379".to_string())
-    }
-
-    fn make_test_address() -> WorkerAddress {
-        WorkerAddress::from_bytes(b"127.0.0.1:8080".as_slice())
     }
 
     fn system_factory(

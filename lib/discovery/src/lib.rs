@@ -3,3 +3,6 @@
 
 pub mod peer;
 pub mod systems;
+
+#[cfg(test)]
+mod test_fixtures;
