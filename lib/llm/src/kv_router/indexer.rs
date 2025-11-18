@@ -1189,16 +1189,23 @@ impl KvIndexerInterface for KvIndexer {
         };
 
         if let Err(e) = self.match_tx.send(req).await {
-            tracing::error!(
-                "Failed to send match request: {:?}; the indexer maybe offline",
-                e
+            tracing::warn!(
+                error = ?e,
+                "Failed to send match request; the indexer maybe offline"
             );
-            return Err(KvRouterError::IndexerOffline);
+            return Ok(OverlapScores::new());
         }
 
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+        match resp_rx.await {
+            Ok(scores) => Ok(scores),
+            Err(e) => {
+                tracing::warn!(
+                    error = ?e,
+                    "Indexer match response dropped; the indexer maybe offline"
+                );
+                Ok(OverlapScores::new())
+            }
+        }
     }
 
     async fn find_matches_for_request(
@@ -1599,13 +1606,17 @@ impl KvIndexerInterface for KvIndexerSharded {
     ) -> Result<OverlapScores, KvRouterError> {
         'match_loop: loop {
             let (match_tx, mut match_rx) = mpsc::channel(self.event_tx.len());
-            self.request_broadcast_tx
-                .send(ShardedMatchRequest {
-                    sequence: sequence.clone(),
-                    early_exit: false,
-                    resp: match_tx,
-                })
-                .map_err(|_| KvRouterError::IndexerOffline)?;
+            if let Err(e) = self.request_broadcast_tx.send(ShardedMatchRequest {
+                sequence: sequence.clone(),
+                early_exit: false,
+                resp: match_tx,
+            }) {
+                tracing::warn!(
+                    error = ?e,
+                    "Failed to broadcast sharded match request; returning empty overlaps"
+                );
+                return Ok(OverlapScores::new());
+            }
 
             let mut scores = OverlapScores::new();
 
@@ -2589,6 +2600,36 @@ mod tests {
         // The third access did not touch the last block
         let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
         assert_eq!(overlap.frequencies, vec![3, 3, 3, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_kv_indexer_returns_empty_scores_when_offline() {
+        setup();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let token = CancellationToken::new();
+        let mut indexer = KvIndexer::new(token.clone(), 32, metrics.clone());
+
+        indexer.shutdown();
+
+        let scores = indexer.find_matches(vec![LocalBlockHash(1)]).await.unwrap();
+        assert!(scores.scores.is_empty());
+        assert!(scores.frequencies.is_empty());
+        assert!(scores.tree_sizes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_kv_indexer_sharded_returns_empty_scores_when_offline() {
+        setup();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let token = CancellationToken::new();
+        let mut indexer = KvIndexerSharded::new(token.clone(), 2, 32, metrics);
+
+        indexer.shutdown();
+
+        let scores = indexer.find_matches(vec![LocalBlockHash(1)]).await.unwrap();
+        assert!(scores.scores.is_empty());
+        assert!(scores.frequencies.is_empty());
+        assert!(scores.tree_sizes.is_empty());
     }
 
     #[test]
