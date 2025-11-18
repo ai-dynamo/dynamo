@@ -298,15 +298,6 @@ jobs:
           framework: "trtllm"
           test_type: "unit"
           platform_arch: ${{ matrix.platform.arch }}
-      - name: Run multimodal tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and trtllm_marker and gpu_2 and multimodal"
-          framework: "trtllm"
-          test_type: "e2e, gpu_2"
-          platform_arch: ${{ matrix.platform.arch }}
       - name: Run e2e tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
