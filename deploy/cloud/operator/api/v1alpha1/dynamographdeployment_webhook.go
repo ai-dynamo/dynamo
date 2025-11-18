@@ -46,8 +46,6 @@ func (r *DynamoGraphDeployment) SetupWebhookWithManager(mgr ctrl.Manager) error 
 		Complete()
 }
 
-//+kubebuilder:webhook:path=/validate-nvidia-com-v1alpha1-dynamographdeployment,mutating=false,failurePolicy=fail,sideEffects=None,groups=nvidia.com,resources=dynamographdeployments,verbs=create;update,versions=v1alpha1,name=vdynamographdeployment.kb.io,admissionReviewVersions=v1
-
 // Validate performs stateless validation on the DynamoGraphDeployment.
 // This can be called from webhooks, controllers, or tests without needing the old object.
 // It validates:

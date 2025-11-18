@@ -46,8 +46,6 @@ func (r *DynamoComponentDeployment) SetupWebhookWithManager(mgr ctrl.Manager) er
 		Complete()
 }
 
-//+kubebuilder:webhook:path=/validate-nvidia-com-v1alpha1-dynamocomponentdeployment,mutating=false,failurePolicy=fail,sideEffects=None,groups=nvidia.com,resources=dynamocomponentdeployments,verbs=create;update,versions=v1alpha1,name=vdynamocomponentdeployment.kb.io,admissionReviewVersions=v1
-
 // Validate performs stateless validation on the DynamoComponentDeployment.
 // This can be called from webhooks, controllers, or tests without needing the old object.
 // It validates:

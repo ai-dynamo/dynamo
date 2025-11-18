@@ -47,8 +47,6 @@ func (r *DynamoModel) SetupWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-//+kubebuilder:webhook:path=/validate-nvidia-com-v1alpha1-dynamomodel,mutating=false,failurePolicy=fail,sideEffects=None,groups=nvidia.com,resources=dynamomodels,verbs=create;update,versions=v1alpha1,name=vdynamomodel.kb.io,admissionReviewVersions=v1
-
 // Validate performs stateless validation on the DynamoModel.
 // This can be called from webhooks, controllers, or tests without needing the old object.
 // It validates:
