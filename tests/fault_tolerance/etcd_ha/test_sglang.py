@@ -148,24 +148,29 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.skip(reason="Broken, temporarily disabled")
 def test_etcd_ha_failover_sglang_aggregated(request, predownload_models):
     """
-    Test ETCD High Availability with leader failover using SGLang.
+    Test ETCD High Availability with repeated node failures and recoveries using SGLang.
 
     This test:
     1. Starts a 3-node ETCD cluster
     2. Starts NATS, frontend, and an SGLang worker
-    3. Sends an inference request to verify the system works
-    4. Terminates the ETCD leader node
-    5. Sends another inference request to verify the system still works
+    3. Cycles through each of the 3 replicas:
+       - Terminate the replica by index
+       - Send inference request to verify system still works
+       - Restart the terminated node
+
+    This ensures testing of:
+    - ETCD leader termination
+    - Frontend/worker disconnection from their connected ETCD replica
     """
     # Step 1: Start NATS server
     with NatsServer(request):
         logger.info("NATS server started successfully")
 
         # Step 2: Start 3-node ETCD cluster
-        with EtcdCluster(request) as etcd_cluster:
+        num_replicas = 3
+        with EtcdCluster(request, num_replicas=num_replicas) as etcd_cluster:
             logger.info("3-node ETCD cluster started successfully")
 
             # Get the endpoints for all ETCD nodes
@@ -182,46 +187,56 @@ def test_etcd_ha_failover_sglang_aggregated(request, predownload_models):
                     # Small wait to ensure worker is fully ready
                     time.sleep(2)
 
-                    # Step 5: Send first inference request to verify system is working
-                    logger.info("Sending first inference request (before failover)")
-                    result1 = send_inference_request("What is 2+2? The answer is")
+                    # Step 5: Send initial inference request to verify system is working
+                    logger.info("Sending initial inference request")
+                    result = send_inference_request("What is 2+2? The answer is")
                     assert (
-                        "4" in result1.lower() or "four" in result1.lower()
-                    ), f"Expected '4' or 'four' in response, got: '{result1}'"
+                        "4" in result.lower() or "four" in result.lower()
+                    ), f"Expected '4' or 'four' in response, got: '{result}'"
 
-                    # Step 6: Identify and terminate the ETCD leader
-                    logger.info("Terminating ETCD leader to test failover")
-                    terminated_idx = etcd_cluster.terminate_leader()
-                    if terminated_idx is None:
-                        pytest.fail("Failed to identify and terminate ETCD leader")
+                    # Step 6: Cycle through each replica to terminate/verify/restart
+                    for i in range(num_replicas):
+                        # Terminate a replica
+                        logger.info(f"Iteration {i}: Terminating replica etcd-{i}")
+                        etcd_cluster.terminate_replica(i)
 
-                    logger.info(f"Terminated ETCD node {terminated_idx}")
+                        # Send inference request to verify system still works
+                        logger.info(
+                            f"Iteration {i}: Sending inference request after termination"
+                        )
+                        result = send_inference_request(
+                            "The capital of France is", max_tokens=20
+                        )
+                        assert (
+                            "paris" in result.lower()
+                        ), f"Iteration {i}: Expected 'Paris' in response, got: '{result}'"
 
-                    # Step 7: Send second inference request to verify system still works
-                    logger.info("Sending second inference request (after failover)")
-                    result2 = send_inference_request("The capital of France is")
-                    assert (
-                        "paris" in result2.lower()
-                    ), f"Expected 'Paris' in response, got: '{result2}'"
+                        # Restart the terminated replica
+                        logger.info(f"Iteration {i}: Restarting replica etcd-{i}")
+                        etcd_cluster.restart_replica(i)
 
 
 @pytest.mark.sglang
 @pytest.mark.gpu_2
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.skip(reason="Broken, temporarily disabled")
 def test_etcd_ha_failover_sglang_disaggregated(
     request, predownload_models, set_ucx_tls_no_mm
 ):
     """
-    Test ETCD High Availability with leader failover in disaggregated mode using SGLang.
+    Test ETCD High Availability with repeated node failures and recoveries in disaggregated mode using SGLang.
 
     This test:
     1. Starts a 3-node ETCD cluster
     2. Starts NATS, frontend, and both prefill and decode SGLang workers
-    3. Sends an inference request to verify the system works
-    4. Terminates the ETCD leader node
-    5. Sends another inference request to verify the system still works
+    3. Cycles through each of the 3 replicas:
+       - Terminate the replica by index
+       - Send inference request to verify system still works
+       - Restart the terminated node
+
+    This ensures testing of:
+    - ETCD leader termination
+    - Frontend/worker disconnection from their connected ETCD replica
 
     Note: This test requires 2 GPUs to run decode and prefill workers on separate GPUs.
     """
@@ -230,7 +245,8 @@ def test_etcd_ha_failover_sglang_disaggregated(
         logger.info("NATS server started successfully")
 
         # Step 2: Start 3-node ETCD cluster
-        with EtcdCluster(request) as etcd_cluster:
+        num_replicas = 3
+        with EtcdCluster(request, num_replicas=num_replicas) as etcd_cluster:
             logger.info("3-node ETCD cluster started successfully")
 
             # Get the endpoints for all ETCD nodes
@@ -251,34 +267,39 @@ def test_etcd_ha_failover_sglang_disaggregated(
                         # Small wait to ensure workers are fully ready
                         time.sleep(2)
 
-                        # Step 6: Send first inference request to verify system is working
-                        logger.info("Sending first inference request (before failover)")
-                        result1 = send_inference_request("What is 2+2? The answer is")
+                        # Step 6: Send initial inference request to verify system is working
+                        logger.info("Sending initial inference request")
+                        result = send_inference_request("What is 2+2? The answer is")
                         assert (
-                            "4" in result1.lower() or "four" in result1.lower()
-                        ), f"Expected '4' or 'four' in response, got: '{result1}'"
+                            "4" in result.lower() or "four" in result.lower()
+                        ), f"Expected '4' or 'four' in response, got: '{result}'"
 
-                        # Step 7: Identify and terminate the ETCD leader
-                        logger.info("Terminating ETCD leader to test failover")
-                        terminated_idx = etcd_cluster.terminate_leader()
-                        if terminated_idx is None:
-                            pytest.fail("Failed to identify and terminate ETCD leader")
+                        # Step 7: Cycle through each replica to terminate/verify/restart
+                        for i in range(num_replicas):
+                            # Terminate a replica
+                            logger.info(f"Iteration {i}: Terminating replica etcd-{i}")
+                            etcd_cluster.terminate_replica(i)
 
-                        logger.info(f"Terminated ETCD node {terminated_idx}")
+                            # Send inference request to verify system still works
+                            logger.info(
+                                f"Iteration {i}: Sending inference request after termination"
+                            )
+                            result = send_inference_request(
+                                "The capital of France is", max_tokens=20
+                            )
+                            assert (
+                                "paris" in result.lower()
+                            ), f"Iteration {i}: Expected 'Paris' in response, got: '{result}'"
 
-                        # Step 8: Send second inference request to verify system still works
-                        logger.info("Sending second inference request (after failover)")
-                        result2 = send_inference_request("The capital of France is")
-                        assert (
-                            "paris" in result2.lower()
-                        ), f"Expected 'Paris' in response, got: '{result2}'"
+                            # Restart the terminated replica
+                            logger.info(f"Iteration {i}: Restarting replica etcd-{i}")
+                            etcd_cluster.restart_replica(i)
 
 
 @pytest.mark.sglang
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.skip(reason="Broken, temporarily disabled")
 def test_etcd_non_ha_shutdown_sglang_aggregated(request, predownload_models):
     """
     Test that frontend and worker shut down when single ETCD node is terminated using SGLang.
@@ -335,7 +356,6 @@ def test_etcd_non_ha_shutdown_sglang_aggregated(request, predownload_models):
 @pytest.mark.gpu_2
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.skip(reason="Broken, temporarily disabled")
 def test_etcd_non_ha_shutdown_sglang_disaggregated(
     request, predownload_models, set_ucx_tls_no_mm
 ):
