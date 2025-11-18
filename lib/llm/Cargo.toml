@@ -148,6 +148,8 @@ base64 = { version = "0.22" }
 image = { version = "0.25" }
 tokio-rayon = {version = "2" }
 ndarray = { version = "0.16" }
+ndarray-npy = { version = "0.9" }
+ndarray-interp = { version = "0.5" }
 
 # Publishers
 zeromq = "0.4.1"
