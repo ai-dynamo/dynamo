@@ -25,6 +25,11 @@ DECODE_MAX_CONCURRENCY = 2000
 # set a prefill maximum number of tokens to 32768 to avoid chunked prefill but not too large to cause activation tensor too large
 PREFILL_MAX_NUM_TOKENS = 32768
 
+# AIPerf benchmarking related defaults
+AIPERF_WARMUP_REQUEST_PER_DP_RANK = 3
+AIPERF_PREFILL_BENCHMARK_OSL = 5
+AIPERF_PREFILL_ATTN_DP_NUM_REQ_RATIO = 4
+
 
 class EngineType(str, Enum):
     PREFILL = "prefill"

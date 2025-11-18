@@ -59,6 +59,7 @@ class Config:
         self.dump_config_to: Optional[str] = None
         self.custom_jinja_template: Optional[str] = None
         self.store_kv: str = ""
+        self.request_plane: str = ""
 
     def __str__(self) -> str:
         return (
@@ -90,7 +91,8 @@ class Config:
             f"tool_call_parser={self.tool_call_parser}, "
             f"dump_config_to={self.dump_config_to}, "
             f"custom_jinja_template={self.custom_jinja_template}, "
-            f"store_kv={self.store_kv}"
+            f"store_kv={self.store_kv}, "
+            f"request_plane={self.request_plane}"
         )
 
 
@@ -283,8 +285,16 @@ def cmd_line_args():
     parser.add_argument(
         "--store-kv",
         type=str,
+        choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
         help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
+    parser.add_argument(
+        "--request-plane",
+        type=str,
+        choices=["nats", "http", "tcp"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
 
     args = parser.parse_args()
@@ -346,6 +356,7 @@ def cmd_line_args():
     config.tool_call_parser = args.dyn_tool_call_parser
     config.dump_config_to = args.dump_config_to
     config.store_kv = args.store_kv
+    config.request_plane = args.request_plane
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:

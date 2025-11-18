@@ -10,100 +10,19 @@ use minijinja::{Environment, Value, context};
 use serde_json::json;
 use tracing;
 
-/// Replace non-standard Jinja2 block tags with placeholders
+/// Remove known non-standard Jinja2 tags from chat templates
 ///
-/// minijinja doesn't expose its tag list publicly - they're hardcoded in a private match statement
-/// in the parser. This list is derived from minijinja v2.12.0's parser.rs implementation.
-/// See: https://github.com/mitsuhiko/minijinja/blob/main/minijinja/src/compiler/parser.rs#L542
-fn replace_non_standard_blocks(template: &str) -> String {
-    use regex::Regex;
-
-    // Standard Jinja2/minijinja tags (cannot be queried from minijinja API)
-    let standard_keywords = [
-        "for",
-        "endfor",
-        "if",
-        "elif",
-        "else",
-        "endif",
-        "block",
-        "endblock",
-        "extends",
-        "include",
-        "import",
-        "from",
-        "macro",
-        "endmacro",
-        "call",
-        "endcall",
-        "set",
-        "endset",
-        "with",
-        "endwith",
-        "filter",
-        "endfilter",
-        "autoescape",
-        "endautoescape",
-        "raw",
-        "endraw",
-        "do",
-    ];
-
-    let re = Regex::new(r"\{%\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*%\}").unwrap();
-    let mut result = template.to_string();
-    let mut replacements = Vec::new();
-
-    for cap in re.captures_iter(template) {
-        let full_match = cap.get(0).unwrap().as_str();
-        let tag_name = cap.get(1).unwrap().as_str();
-
-        if !standard_keywords.contains(&tag_name) {
-            // Non-standard tag (e.g., vLLM's {% generation %}) - replace with placeholder
-            let placeholder = format!("__JINJA_BLOCK_{}", tag_name.to_uppercase());
-            replacements.push((full_match.to_string(), placeholder));
-        }
-    }
-
-    for (original, placeholder) in replacements {
-        result = result.replace(&original, &placeholder);
-    }
-
-    result
-}
-
-/// Detects whether a chat template requires message content as arrays (multimodal)
-/// or accepts simple strings (standard text-only templates).
+/// Some models use custom Jinja2 extensions that minijinja doesn't recognize. These tags
+/// are typically metadata markers that don't affect the rendered output. For example:
+/// - {% generation %} / {% endgeneration %}: Used by vLLM's AssistantTracker to mark
+///   assistant-generated content. The tags themselves don't produce output.
 ///
-/// This function test-renders the template with both formats:
-/// - Array format: `[{"type": "text", "text": "template_test"}]`
-/// - String format: `"template_test"`
-///
-/// If the array format works but string format doesn't produce output,
-/// the template requires arrays (multimodal templates).
-fn detect_content_array_usage(env: &Environment) -> bool {
-    // Test with array format
-    let array_msg = context! {
-        messages => json!([{"role": "user", "content": [{"type": "text", "text": "template_test"}]}]),
-        add_generation_prompt => false,
-    };
-
-    // Test with string format
-    let string_msg = context! {
-        messages => json!([{"role": "user", "content": "template_test"}]),
-        add_generation_prompt => false,
-    };
-
-    let out_array = env
-        .get_template("default")
-        .and_then(|t| t.render(&array_msg))
-        .unwrap_or_default();
-    let out_string = env
-        .get_template("default")
-        .and_then(|t| t.render(&string_msg))
-        .unwrap_or_default();
-
-    // If array works but string doesn't, template requires arrays
-    out_array.contains("template_test") && !out_string.contains("template_test")
+/// By removing these tags before validation, we allow templates with backend-specific
+/// extensions to work with minijinja while maintaining correct output semantics.
+fn remove_known_non_jinja2_tags(template: &str) -> String {
+    template
+        .replace("{% generation %}", "")
+        .replace("{% endgeneration %}", "")
 }
 
 impl JinjaEnvironment {
@@ -161,12 +80,10 @@ impl HfTokenizerConfigJsonFormatter {
                     );
                     supports_add_generation_prompt = Some(true);
                 }
-                // Replace non-standard Jinja2 block tags with placeholders for minijinja validation
-                // Standard Jinja2/minijinja blocks: for, if, block, macro, call, filter, set, with, autoescape, trans
-                // Any other {% tag %} blocks are likely backend-specific extensions (like vLLM's {% generation %})
-                let template_for_validation = replace_non_standard_blocks(x);
-                env.add_template_owned("default", template_for_validation.clone())?;
-                env.add_template_owned("tool_use", template_for_validation)?;
+                // Remove known non-standard tags before validation (they don't affect output)
+                let template_cleaned = remove_known_non_jinja2_tags(x);
+                env.add_template_owned("default", template_cleaned.clone())?;
+                env.add_template_owned("tool_use", template_cleaned)?;
             }
             Either::Right(map) => {
                 for t in map {
@@ -188,9 +105,9 @@ impl HfTokenizerConfigJsonFormatter {
                         } else {
                             supports_add_generation_prompt = Some(false);
                         }
-                        // Replace non-standard Jinja2 block tags with placeholders for minijinja validation
-                        let template_for_validation = replace_non_standard_blocks(v);
-                        env.add_template_owned(k.to_string(), template_for_validation)?;
+                        // Remove known non-standard tags before validation (they don't affect output)
+                        let template_cleaned = remove_known_non_jinja2_tags(v);
+                        env.add_template_owned(k.to_string(), template_cleaned)?;
                     }
                 }
                 if env.templates().count() == 0 {
@@ -229,3 +146,30 @@ impl HfTokenizerConfigJsonFormatter {
 
 //     // fn apply_tool_template()
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_remove_known_non_jinja2_tags() {
+        let template =
+            "USER: {{ message }} ASSISTANT: {% generation %}Reply here{% endgeneration %}";
+        let result = remove_known_non_jinja2_tags(template);
+        assert_eq!(result, "USER: {{ message }} ASSISTANT: Reply here");
+    }
+
+    #[test]
+    fn test_remove_known_non_jinja2_tags_preserves_standard_tags() {
+        let template = "{% for item in items %}{{ item }}{% endfor %}";
+        let result = remove_known_non_jinja2_tags(template);
+        assert_eq!(result, template);
+    }
+
+    #[test]
+    fn test_remove_known_non_jinja2_tags_multiple() {
+        let template = "Start {% generation %}Part 1{% endgeneration %} middle {% generation %}Part 2{% endgeneration %}";
+        let result = remove_known_non_jinja2_tags(template);
+        assert_eq!(result, "Start Part 1 middle Part 2");
+    }
+}
