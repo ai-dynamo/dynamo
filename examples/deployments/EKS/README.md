@@ -200,7 +200,7 @@ docker push $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
 
 #### c) Create Dynamo Inference Graph
 
-For this example, we'll deploy `Qwen/Qwen3-32B` in disaggregated mode. We'll create 12 prefill workers with TP1 and 1 decode worker with TP4 for a total of 16 x H200 GPUs (p5en.48xlarge). Please change `<DYNAMO_TRTLLM_IMAGE>` to your built image name.
+For this example, we'll deploy `Qwen/Qwen3-32B` in disaggregated mode. We'll create 12 prefill workers with TP1 and 1 decode worker with TP4 for a total of 16 x H200 GPUs (p5en.48xlarge). Please change `<DYNAMO_TRTLLM_IMAGE>`.
 
 ```
 apiVersion: v1
