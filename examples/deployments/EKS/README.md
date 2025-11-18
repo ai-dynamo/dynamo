@@ -6,11 +6,7 @@ This guide covers steps of creating an Amazon EKS cluster, creating a shared sto
 
 [Step 2. Install Dynamo Kubernetes Platform](#step-2-install-dynamo-kubernetes-platform)
 
-[Step 3. Deploy a model](#step-3-deploy-a-model)
-
-[Step 4. Deploy Dynamo Inference Graph](#step-4-deploy-dynamo-inference-graph)
-
-[Step 5. Test the Deployment](#step-5-test-the-deployment)
+[Step 3. Deploy Dynamo Inference Graph](#step-3-deploy-dynamo-inference-graph)
 
 ### Step 1. Create EKS cluster
 
