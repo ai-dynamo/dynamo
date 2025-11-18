@@ -282,7 +282,6 @@ def parse_args() -> Config:
                 f"Please ensure the file exists and the path is correct."
             )
 
-    # args.connector can never be None or an empty list, since it's defaulted to ["nixl"]
     normalized = [c.lower() for c in args.connector]
 
     invalid = [c for c in normalized if c not in VALID_CONNECTORS]
@@ -297,7 +296,7 @@ def parse_args() -> Config:
         and engine_args.kv_transfer_config is not None
     )
 
-    if "none" in normalized or "null" in normalized:
+    if not normalized or "none" in normalized or "null" in normalized:
         if len(normalized) > 1:
             raise ValueError(
                 "'none' and 'null' cannot be combined with other connectors"
