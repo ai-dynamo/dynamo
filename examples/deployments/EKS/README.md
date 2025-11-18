@@ -173,9 +173,14 @@ dynamo-platform-nats-0                                            2/2     Runnin
 This step can take a few hours depending on your system
 
 ```
+# Clone Dynamo Repo
 git clone https://github.com/ai-dynamo/dynamo.git -b v0.6.0
 cd dynamo/container
 
+# Change UCX version to master
+vim build.sh # Change line 119 to "NIXL_UCX_REF=master"
+
+# Build image
 ./build.sh --framework trtllm --use-default-experimental-tensorrtllm-commit --trtllm-use-nixl-kvcache-experimental
 ```
 
