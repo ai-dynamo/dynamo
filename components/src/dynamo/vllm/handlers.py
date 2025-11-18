@@ -284,6 +284,31 @@ class BaseWorkerHandler(ABC):
                         f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
                     )
                     logger.error(f"Traceback: {traceback.format_exc()}")
+
+                    # Rollback: remove the LoRA from the engine to maintain consistency
+                    try:
+                        logger.info(
+                            f"Rolling back: removing LoRA '{lora_name}' from engine"
+                        )
+                        await self.engine_client.remove_lora(lora_id)
+                        # Remove from tracking dictionaries
+                        if lora_name in self.lora_name_to_id:
+                            del self.lora_name_to_id[lora_name]
+                        if lora_name in self.lora_name_to_path:
+                            del self.lora_name_to_path[lora_name]
+                        logger.info(f"Successfully rolled back LoRA '{lora_name}'")
+                    except Exception as rollback_error:
+                        logger.error(
+                            f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                        )
+
+                    # Return error status since registration failed
+                    yield {
+                        "status": "error",
+                        "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {str(e)}",
+                        "lora_name": lora_name,
+                    }
+                    return
             else:
                 logger.warning(
                     f"Cannot publish LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}, config={self.config}"
@@ -332,6 +357,7 @@ class BaseWorkerHandler(ABC):
 
             logger.info(f"Unloading LoRA adapter: {lora_name}")
             lora_id = self.lora_name_to_id[lora_name]
+            lora_path = self.lora_name_to_path.get(lora_name)
 
             await self.engine_client.remove_lora(lora_id)
 
@@ -358,6 +384,36 @@ class BaseWorkerHandler(ABC):
                         f"Failed to unregister LoRA {lora_name} ModelDeploymentCard: {e}"
                     )
                     logger.error(f"Traceback: {traceback.format_exc()}")
+
+                    # Rollback: re-add the LoRA to the engine to maintain consistency
+                    try:
+                        logger.info(
+                            f"Rolling back: re-adding LoRA '{lora_name}' to engine"
+                        )
+                        await self.engine_client.add_lora(
+                            LoRARequest(
+                                lora_name=lora_name,
+                                lora_int_id=lora_id,
+                                lora_path=lora_path,
+                            )
+                        )
+                        # Re-add to tracking dictionaries
+                        self.lora_name_to_id[lora_name] = lora_id
+                        if lora_path:
+                            self.lora_name_to_path[lora_name] = lora_path
+                        logger.info(f"Successfully rolled back LoRA '{lora_name}'")
+                    except Exception as rollback_error:
+                        logger.error(
+                            f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                        )
+
+                    # Return error status since unregistration failed
+                    yield {
+                        "status": "error",
+                        "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(e)}",
+                        "lora_name": lora_name,
+                    }
+                    return
             else:
                 logger.warning(
                     f"Cannot unregister LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}"
