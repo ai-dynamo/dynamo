@@ -174,8 +174,8 @@ kubectl port-forward svc/llama3-70b-agg-frontend 8000:8000 -n ${NAMESPACE}
 
 For Llama-3-70B with vLLM (Aggregated), an example of integration with the Inference Gateway is provided.
 
-Follow to Follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE. Then apply manifests.
-Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml
+Follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE. Then apply manifests.
+Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml to be the same as the FrontEnd image.
 
 ```bash
 export DEPLOY_PATH=llama-3-70b/vllm/agg/
