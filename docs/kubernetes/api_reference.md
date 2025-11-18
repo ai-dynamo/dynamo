@@ -465,6 +465,8 @@ _Appears in:_
 | `secretName` _string_ | SecretName is the name of a Kubernetes Secret containing the TLS certificate and key. |  |  |
 
 
+
+
 #### ModelReference
 
 
