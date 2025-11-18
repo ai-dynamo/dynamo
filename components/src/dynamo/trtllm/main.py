@@ -106,7 +106,7 @@ async def worker():
     config = cmd_line_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv)
+    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
@@ -261,7 +261,6 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if modality == "multimodal":
         engine_args["skip_tokenizer_init"] = False
-        model_input = ModelInput.Text
         model_config = AutoConfig.from_pretrained(
             config.model_path, trust_remote_code=True
         )
@@ -332,12 +331,12 @@ async def init(runtime: DistributedRuntime, config: Config):
                 logging.info("TensorRT-LLM MetricsCollector initialized")
 
                 # Register callback to expose TRT-LLM metrics via Dynamo endpoint
-                # Filter out python_/process_ metrics and add trtllm: prefix to remaining metrics
+                # Filter out python_/process_ metrics and add trtllm_ prefix to remaining metrics
                 register_engine_metrics_callback(
                     endpoint=endpoint,
                     registry=REGISTRY,
                     exclude_prefixes=["python_", "process_"],
-                    add_prefix="trtllm:",
+                    add_prefix="trtllm_",
                 )
                 logging.info("TensorRT-LLM Prometheus metrics registered")
             except Exception as e:

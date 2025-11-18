@@ -163,6 +163,12 @@ def parse_args():
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing.",
     )
     parser.add_argument(
+        "--enforce-disagg",
+        action="store_true",
+        default=False,
+        help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
+    )
+    parser.add_argument(
         "--busy-threshold",
         type=float,
         default=None,
@@ -210,8 +216,16 @@ def parse_args():
     parser.add_argument(
         "--store-kv",
         type=str,
+        choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
         help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
+    parser.add_argument(
+        "--request-plane",
+        type=str,
+        choices=["nats", "http", "tcp"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
 
     flags = parser.parse_args()
@@ -247,7 +261,7 @@ async def async_main():
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.store_kv)
+    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -278,7 +292,7 @@ async def async_main():
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
         "router_config": RouterConfig(
-            router_mode, kv_router_config, flags.busy_threshold
+            router_mode, kv_router_config, flags.busy_threshold, flags.enforce_disagg
         ),
     }
 
