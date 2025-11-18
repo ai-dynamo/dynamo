@@ -86,10 +86,6 @@ python -m dynamo.mocker \
   --planner-profile-data mocker_perf_data/perf_data.npz
 ```
 
-**Available pre-swept results:**
-- `components/src/dynamo/planner/utils/pre_swept_results/h200_sxm/vllm/nvidia/Llama-3.1-8B-Instruct-FP8/`
-- `components/src/dynamo/planner/utils/pre_swept_results/h100_sxm/vllm/nvidia/Llama-3.3-70B-Instruct-FP8/`
-
 #### Option 2: Generate from custom profiler runs
 
 To convert your own profiler results into the NPZ format suitable for the mocker, you'll need to run the profiler (see [SLA-driven profiling documentation](../../../../docs/benchmarks/sla_driven_profiling.md) for details). Note that this is generally run in a Kubernetes environment.
