@@ -38,7 +38,7 @@ spec:
 
       containers:
         - name: epp
-          image: nvcr.io/nvstaging/ai-dynamo/epp-inference-extension-dynamo:v0.6.0-1
+          image: nvcr.io/nvstaging/ai-dynamo/dynamo-frontend:0.7.0rc2-amd64
           imagePullPolicy: IfNotPresent
           resources:
             requests:
@@ -73,8 +73,8 @@ spec:
               value: "dynamo-platform-etcd.$(PLATFORM_NAMESPACE):2379" #  update dynamo-platform to appropriate namespace
             - name: NATS_SERVER
               value: "nats://dynamo-platform-nats.$(PLATFORM_NAMESPACE):4222" #  update dynamo-platform to appropriate namespace
-            - name: DYN_NAMESPACE
-              value: "llama3-70b-agg"
+            - name: DYNAMO_NAMESPACE
+              value: "$(POD_NAMESPACE)-llama3-70b-agg"
             - name: DYNAMO_KV_BLOCK_SIZE
               value: "128" # UPDATE to match the --block-size in your deploy.yaml engine command
             - name: USE_STREAMING
