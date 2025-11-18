@@ -92,7 +92,7 @@ python -m dynamo.mocker \
 
 #### Option 2: Generate from custom profiler runs
 
-To convert your own profiler results into the NPZ format suitable for the mocker, you'll need to run the profiler (see [SLA-driven profiling documentation](../../docs/benchmarks/sla_driven_profiling.md) for details). Note that this is generally run in a Kubernetes environment.
+To convert your own profiler results into the NPZ format suitable for the mocker, you'll need to run the profiler (see [SLA-driven profiling documentation](../../../../docs/benchmarks/sla_driven_profiling.md) for details). Note that this is generally run in a Kubernetes environment.
 
 ```bash
 # Run the profiler
