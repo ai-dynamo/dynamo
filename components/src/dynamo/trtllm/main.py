@@ -106,7 +106,7 @@ async def worker():
     config = cmd_line_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv)
+    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
@@ -261,7 +261,6 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if modality == "multimodal":
         engine_args["skip_tokenizer_init"] = False
-        model_input = ModelInput.Text
         model_config = AutoConfig.from_pretrained(
             config.model_path, trust_remote_code=True
         )

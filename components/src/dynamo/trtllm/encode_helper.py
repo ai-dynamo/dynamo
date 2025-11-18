@@ -202,7 +202,10 @@ class EncodeHelper:
             Response dictionary with NIXL metadata and embeddings info, or error response
         """
         # Load embeddings first to get the actual shape
-        messages = request.get("messages", [])
+        # Extract messages from extra_args (set by Rust preprocessor for multimodal) or fall back to direct field
+        messages = request.get("extra_args", {}).get(
+            "messages", request.get("messages", [])
+        )
         _, _, embedding_paths = multimodal_processor.extract_prompt_and_media(messages)
 
         if not embedding_paths:
