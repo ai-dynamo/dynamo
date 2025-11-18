@@ -36,7 +36,7 @@ def build_sampling_params(
     Build SamplingParams from a PreprocessedRequest.
 
     Args:
-        request: The PreprocessedRequest dict with 'sampling_options' and 'stop_conditions'
+        request: The PreprocessedRequest dict with 'sampling_options', 'stop_conditions', and 'output_options'
         default_sampling_params: Default sampling parameters to initialize with
 
     Returns:
@@ -56,6 +56,12 @@ def build_sampling_params(
             # Do not add stop key to sampling params - dynamo handles stop conditions directly
             if key == "stop":
                 continue
+            setattr(sampling_params, key, value)
+
+    # Apply output_options (includes logprobs, prompt_logprobs from echo=true, skip_special_tokens, etc.)
+    output_options = request.get("output_options", {})
+    for key, value in output_options.items():
+        if value is not None and hasattr(sampling_params, key):
             setattr(sampling_params, key, value)
 
     return sampling_params
@@ -186,6 +192,7 @@ class BaseWorkerHandler(ABC):
             )
 
             num_output_tokens_so_far = 0
+            first_batch = True
             try:
                 async for res in gen:
                     # res is vllm's RequestOutput
@@ -196,7 +203,21 @@ class BaseWorkerHandler(ABC):
 
                     output = res.outputs[0]
                     next_total_toks = len(output.token_ids)
-                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
+                    # On first batch, prepend prompt tokens if prompt_logprobs was requested (when echo=true <-> prompt_logprobs=1)
+                    if (
+                        first_batch
+                        and hasattr(res, "prompt_token_ids")
+                        and res.prompt_token_ids
+                        and hasattr(res, "prompt_logprobs")
+                        and res.prompt_logprobs is not None
+                    ):
+                        # Include prompt tokens when prompt_logprobs was requested (echo=true)
+                        out = {"token_ids": res.prompt_token_ids + output.token_ids}
+                        first_batch = False
+                    else:
+                        out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
                     if output.stop_reason:
