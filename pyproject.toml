@@ -135,16 +135,14 @@ known_first_party = ["dynamo"]
 minversion = "8.0"
 tmp_path_retention_policy = "failed"
 
-# NOTE
-# We ignore model.py explcitly here to avoid mypy errors with duplicate modules
-# pytest overrides the default mypy exclude configuration and so we exclude here as well
 addopts = [
     "-ra",
+    "-s",
+    "-v",
     "--showlocals",
     "--strict-markers",
     "--strict-config",
-    "--mypy",
-    "--ignore-glob=*model.py",
+    #"--mypy",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
     "--ignore-glob=*kvbm/python/kvbm*",
@@ -175,6 +173,8 @@ filterwarnings = [
     "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
+    "ignore:.*transformers version.*incompatible with nvidia-modelopt.*:UserWarning", # Ignore transformers/nvidia-modelopt version compatibility warning, we don't currently control nvidia-modelopt install.
+    "ignore:.*TORCH_CUDA_ARCH_LIST is not set.*:UserWarning", # Ignore TORCH_CUDA_ARCH_LIST compilation warning
 ]
 
 
@@ -243,14 +243,12 @@ ignore_missing_imports = true
 
 [tool.sphinx]
 
-# extra-content-head
 extra_content_head = [
    '''
    <script src="https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js" ></script>
    ''',
 ]
 
-#extra-content-footer
 extra_content_footer = [
    '''
    <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
