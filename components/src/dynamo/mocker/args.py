@@ -182,7 +182,7 @@ def parse_args():
         "--planner-profile-data",
         type=Path,
         default=None,
-        help="Path to NPZ file containing performance profiling data from planner_profiler_perf_data_converter.py (default: None, uses hardcoded polynomials)",
+        help="Path to JSON configmap or NPZ file containing performance profiling data from planner_profiler_perf_data_converter.py (default: None, uses hardcoded polynomials)",
     )
     parser.add_argument(
         "--num-workers",
