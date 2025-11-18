@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -26,7 +25,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 
 	if isMultinode {
 		// Apply multinode-specific argument modifications
-		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer)
+		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, component.Resources)
 
 		// Remove probes for multinode worker and leader
 		if role == RoleWorker {
@@ -72,12 +71,12 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 
 // updateVLLMMultinodeArgs will inject Ray-specific flags for tensor parallel multinode deployments
 // OR data parallel flags for data parallel multinode deployments
-func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
+func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources) {
 	expandedArgs := getExpandedArgs(container)
-	if needsRayDistributedLaunch(expandedArgs, container.Resources) {
+	if needsRayDistributedLaunch(expandedArgs, resources) {
 		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
-	} else if needsDataParallelLaunch(expandedArgs, container.Resources) {
-		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer)
+	} else if needsDataParallelLaunch(expandedArgs, resources) {
+		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, resources)
 	} else {
 		logger := log.Log.WithName("vllm-backend")
 		logger.Info("No need to inject Ray-specific or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
@@ -109,10 +108,10 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 	container.Command = []string{"/bin/sh", "-c"} // ensure cmd is a shell
 }
 
-func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
+func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources) {
 	expandedArgs := getExpandedArgs(container)
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-	dataParallelSizeLocal := getContainerGPUs(container.Resources) / getWorldSize(expandedArgs)
+	dataParallelSizeLocal := getContainerGPUs(resources) / getWorldSize(expandedArgs)
 	var startRank string
 	switch role {
 	case RoleWorker:
@@ -134,8 +133,12 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 
 // if world size (within DP rank) > GPU count, then we need to inject ray
 // world size = tensor parallel size * pipeline parallel size
-func needsRayDistributedLaunch(expandedArgs []string, resources corev1.ResourceRequirements) bool {
-	return getWorldSize(expandedArgs) > getContainerGPUs(resources)
+func needsRayDistributedLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
+	containerGPUs := getContainerGPUs(resources)
+	if containerGPUs == 0 {
+		return false
+	}
+	return getWorldSize(expandedArgs) > containerGPUs
 }
 
 func getWorldSize(expandedArgs []string) int64 {
@@ -145,9 +148,13 @@ func getWorldSize(expandedArgs []string) int64 {
 }
 
 // if world size across all DP ranks > GPU count, then we need to inject data parallel multinode coordination
-func needsDataParallelLaunch(expandedArgs []string, resources corev1.ResourceRequirements) bool {
+func needsDataParallelLaunch(expandedArgs []string, resources *v1alpha1.Resources) bool {
 	dataParallelSize := getFlagValue(expandedArgs, dataParallelSizeFlag)
-	return getWorldSize(expandedArgs)*dataParallelSize > getContainerGPUs(resources)
+	containerGPUs := getContainerGPUs(resources)
+	if containerGPUs == 0 {
+		return false
+	}
+	return getWorldSize(expandedArgs)*dataParallelSize > containerGPUs
 }
 
 func getFlagValue(expandedArgs []string, flag string) int64 {
@@ -164,14 +171,12 @@ func getFlagValue(expandedArgs []string, flag string) int64 {
 	return flagValue
 }
 
-func getContainerGPUs(resources corev1.ResourceRequirements) int64 {
-	var containerGPUs int64 = 1
-	// Requests defaults to Limits, doesn't make sense in case where Requests < Limits for gpus
-	for name, quantity := range resources.Limits {
-		if name.String() == consts.KubeResourceGPUNvidia {
-			containerGPUs = quantity.Value()
-			break
-		}
+func getContainerGPUs(resources *v1alpha1.Resources) int64 {
+	if resources == nil || resources.Limits == nil || resources.Limits.GPU == "" {
+		return 0
 	}
-	return containerGPUs
+	if gpus, err := strconv.ParseInt(resources.Limits.GPU, 10, 64); err == nil {
+		return gpus
+	}
+	return 0
 }
