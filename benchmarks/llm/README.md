@@ -563,4 +563,4 @@ For multinode deployments, ensure the fastest interconnect is being used. Miscon
 - **[AIPerf Documentation](https://github.com/triton-inference-server/perf_analyzer/blob/main/genai-perf/docs/tutorial.md)** - Learn more about AIPerf benchmarking
 - **[Dynamo Benchmarking Guide](../../docs/benchmarks/benchmarking.md)** - General benchmarking framework documentation
 - **[Performance Tuning Guide](../../docs/performance/tuning.md)** - Optimize your deployment configuration
-- **[Metrics and Visualization](../../deploy/metrics/k8s/README.md)** - Monitor deployments with Prometheus and Grafana
+- **[Metrics and Visualization](../../docs/observability/prometheus-grafana.md)** - Monitor deployments with Prometheus and Grafana
