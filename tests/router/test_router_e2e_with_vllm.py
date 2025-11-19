@@ -317,6 +317,7 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
 
 @pytest.mark.e2e
 @pytest.mark.vllm
+@pytest.mark.skip(reason="Flaky: NIXL/UCX segfault when initializing multiple workers")
 @pytest.mark.gpu_1
 @pytest.mark.model(MODEL_NAME)
 def test_router_decisions_vllm_multiple_workers(
