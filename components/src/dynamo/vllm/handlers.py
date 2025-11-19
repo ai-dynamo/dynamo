@@ -388,6 +388,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             sampling_params.extra_args = {}
         sampling_params.extra_args["kv_transfer_params"] = {
             "do_remote_decode": True,
+            "do_remote_prefill": False,
+            "remote_engine_id": None,
+            "remote_block_ids": None,
+            "remote_host": None,
+            "remote_port": None,
         }
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
