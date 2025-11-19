@@ -1242,10 +1242,8 @@ impl KvIndexerInterface for KvIndexer {
 
     fn shutdown(&mut self) {
         self.cancel.cancel();
-        if let Some(task) = self.task.take() {
-            if let Err(err) = task.join() {
-                tracing::error!("Failed to join kv indexer task: {:?}", err);
-            }
+        if let Some(Err(err)) = self.task.take().map(|task| task.join()) {
+            tracing::error!("Failed to join kv indexer task: {:?}", err);
         }
     }
 
