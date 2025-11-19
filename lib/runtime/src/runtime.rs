@@ -324,9 +324,9 @@ impl Runtime {
                 tracker.wait_for_completion().await;
             }
 
-            // Phase 3: Now connections will be disconnected to NATS/ETCD by cancelling the main token
+            // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
             tracing::info!(
-                "Phase 3: All endpoints ended gracefully. Connections to NATS/ETCD will now be disconnected"
+                "Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected"
             );
             main_token.cancel();
         });

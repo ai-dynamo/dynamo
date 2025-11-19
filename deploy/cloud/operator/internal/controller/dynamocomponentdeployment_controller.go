@@ -33,8 +33,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"emperror.dev/errors"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
@@ -1003,9 +1003,9 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	resourceAnnotations := getResourceAnnotations(opt.dynamoComponentDeployment)
 	strategyStr := resourceAnnotations[KubeAnnotationDeploymentStrategy]
 	if strategyStr != "" {
-		strategyType := schemas.DeploymentStrategy(strategyStr)
+		strategyType := common.DeploymentStrategy(strategyStr)
 		switch strategyType {
-		case schemas.DeploymentStrategyRollingUpdate:
+		case common.DeploymentStrategyRollingUpdate:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
@@ -1013,11 +1013,11 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 					MaxUnavailable: &defaultMaxUnavailable,
 				},
 			}
-		case schemas.DeploymentStrategyRecreate:
+		case common.DeploymentStrategyRecreate:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RecreateDeploymentStrategyType,
 			}
-		case schemas.DeploymentStrategyRampedSlowRollout:
+		case common.DeploymentStrategyRampedSlowRollout:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
@@ -1025,7 +1025,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 					MaxUnavailable: &[]intstr.IntOrString{intstr.FromInt(0)}[0],
 				},
 			}
-		case schemas.DeploymentStrategyBestEffortControlledRollout:
+		case common.DeploymentStrategyBestEffortControlledRollout:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{

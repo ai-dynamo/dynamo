@@ -58,7 +58,6 @@ async def main():
 
     # Create middle server component
     component = runtime.namespace("demo").component("middle")
-    await component.create_service()
 
     endpoint = component.endpoint("generate")
 

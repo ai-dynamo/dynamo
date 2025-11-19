@@ -36,7 +36,6 @@ async def worker(runtime: DistributedRuntime) -> None:
 async def init(runtime: DistributedRuntime):
     # Create component and endpoint
     component: Component = runtime.namespace("ns556").component("cp556")
-    await component.create_service()
 
     endpoint: Endpoint = component.endpoint("ep556")
 

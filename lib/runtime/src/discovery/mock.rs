@@ -140,6 +140,18 @@ impl Discovery for MockDiscovery {
         Ok(instance)
     }
 
+    async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+        let instance_id = instance.instance_id();
+
+        self.registry
+            .instances
+            .lock()
+            .unwrap()
+            .retain(|i| i.instance_id() != instance_id);
+
+        Ok(())
+    }
+
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
         let instances = self.registry.instances.lock().unwrap();
         Ok(instances
