@@ -12,7 +12,7 @@ This guide covers steps of creating an Amazon EKS cluster, creating a shared sto
 
 #### a) Open a terminal and create a config file for EKS cluster
 
-We'll create 1 CPU node and 2 GPU nodes. The 2 GPU nodes have EFA enabled. Note that we'll reinstall EFA package to enable GDR. Please change `<CLUSTER_NAME>`, `<CLUSTER_REGION>`, and `<CLUSTER_AZ>`.
+Please change `<CLUSTER_NAME>`, `<CLUSTER_REGION>`, and `<CLUSTER_AZ>`. We'll create 1 CPU node and 2 GPU nodes. The 2 GPU nodes have EFA enabled. The GPU instance as shown below is p5en.48xlarge. This has 8 x H200 with a total of 16 EFA devices. Note that we'll reinstall EFA package to enable GDR.
 
 ```
 apiVersion: eksctl.io/v1alpha5
@@ -95,7 +95,7 @@ Follow the steps to create an EFS file system: https://github.com/kubernetes-sig
 
 #### d) Create a config file for StorageClass
 
-You can find your `fileSystemId` from AWS EFS. It starts with `fs-`.
+Please change `<FILE_SYSTEM_ID>`. You can find your `fileSystemId` from AWS EFS. It starts with `fs-`.
 
 ```
 kind: StorageClass
@@ -172,7 +172,7 @@ dynamo-platform-nats-0                                            2/2     Runnin
 
 #### a) Build Dynamo TRTLLM runtime image
 
-This step can take a few hours depending on your system
+This step is optional. You can also use NGC image `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.0` from [here](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=0.6.0). To enable EFA, you need to build from source with latest UCX version as shown below.
 
 ```
 # Clone Dynamo Repo
@@ -182,13 +182,9 @@ cd dynamo/container
 # Change UCX version to master
 vim build.sh # Change line 119 to "NIXL_UCX_REF=master"
 
-# Build image
+# Build image and this can take a few hours depending on your system
 ./build.sh --framework trtllm --use-default-experimental-tensorrtllm-commit --trtllm-use-nixl-kvcache-experimental
-```
 
-#### b) Push Image to Amazon ECR
-
-```
 # Create an ECR repository
 aws ecr get-login-password | docker login --username AWS --password-stdin $DOCKER_SERVER/
 aws ecr create-repository --repository-name <ECR_REPOSITORY_NAME>
@@ -198,9 +194,19 @@ docker tag dynamo:latest-trtllm $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
 docker push $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
 ```
 
-#### c) Create Dynamo Inference Graph
+#### b) Create Dynamo Inference Graph
 
-For this example, we'll deploy `Qwen/Qwen3-32B` in disaggregated mode. We'll create 12 prefill workers with TP1 and 1 decode worker with TP4 for a total of 16 x H200 GPUs (p5en.48xlarge). Please change `<DYNAMO_TRTLLM_IMAGE>`.
+Please change `<DYNAMO_TRTLLM_IMAGE>`. You can either use NGC image or built image. For this example, we'll deploy `Qwen/Qwen3-32B` in disaggregated mode with KV router. We'll create 12 prefill workers with TP1 and 1 decode worker with TP4 for a total of 16 x H200 GPUs (p5en.48xlarge). Note that this p5en.48xlarge has 16 EFA devices so each GPU is given 2 as shown below.
+
+| Optional Environment Variable | Description |
+| :--- | :--- |
+| `DYN_LOG` | Dynamo log verbose level |
+| `TRTLLM_LOG_LEVEL` | TRTLLM log verbose level |
+| `UCX_LOG_LEVEL` | UCX log verbose level |
+| `UCX_PROTO_INFO` | enable or disable log of UCX protocal selection, select `n` or `y` |
+| `NCCL_DEBUG` | NCCL log verbose level |
+| `NCCL_LAUNCH_MODE` | control NCCL launch mode, select `PARALLEL`, `GROUP`, or `AUTO` |
+| `NCCL_NET_SHARED_COMMS` | enable or disable sharing network resources across NCCL communications, select `0` or `1` |
 
 ```
 apiVersion: v1
@@ -296,20 +302,20 @@ spec:
       sharedMemory:
         size: 64Gi
       envs:
+        - name: DYN_LOG
+          value: DEBUG
+        - name: TRTLLM_LOG_LEVEL
+          value: DEBUG
         - name: UCX_LOG_LEVEL
           value: debug
         - name: UCX_PROTO_INFO
           value: "y"
+        - name: NCCL_DEBUG
+          value: WARN
         - name: NCCL_LAUNCH_MODE
           value: PARALLEL
         - name: NCCL_NET_SHARED_COMMS
           value: "0"
-        - name: NCCL_DEBUG
-          value: WARN
-        - name: TRTLLM_LOG_LEVEL
-          value: DEBUG
-        - name: DYN_LOG
-          value: DEBUG
       extraPodSpec:
         mainContainer:
           startupProbe:
@@ -350,20 +356,20 @@ spec:
       sharedMemory:
         size: 64Gi
       envs:
+        - name: DYN_LOG
+          value: DEBUG
+        - name: TRTLLM_LOG_LEVEL
+          value: DEBUG
         - name: UCX_LOG_LEVEL
           value: debug
         - name: UCX_PROTO_INFO
           value: "y"
+        - name: NCCL_DEBUG
+          value: WARN
         - name: NCCL_LAUNCH_MODE
           value: PARALLEL
         - name: NCCL_NET_SHARED_COMMS
           value: "0"
-        - name: NCCL_DEBUG
-          value: WARN
-        - name: TRTLLM_LOG_LEVEL
-          value: DEBUG
-        - name: DYN_LOG
-          value: DEBUG
       extraPodSpec:
         mainContainer:
           startupProbe:
@@ -395,7 +401,7 @@ spec:
               name: decode-config
 ```
 
-#### d) Deploy Dynamo Inference Graph
+#### c) Deploy Dynamo Inference Graph
 
 ```
 kubectl apply -f <DYNAMO_INFERENCE_GRAPH>.yaml -n dynamo-system
@@ -432,7 +438,7 @@ trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-nzznf      1/1     Runnin
 trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-wnmdn      1/1     Running   0          125m
 ```
 
-#### e) Test the Deployment
+#### d) Test the Deployment
 
 ```
 # Port forward
