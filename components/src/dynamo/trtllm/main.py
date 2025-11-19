@@ -41,7 +41,7 @@ from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
+from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import get_publisher
@@ -181,7 +181,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "tensor_parallel_size": config.tensor_parallel_size,
         "pipeline_parallel_size": config.pipeline_parallel_size,
         "moe_expert_parallel_size": config.expert_parallel_size,
-        "backend": "pytorch",
+        "backend": Backend.PYTORCH,
         "skip_tokenizer_init": True,
         "build_config": build_config,
         "kv_cache_config": kv_cache_config,
@@ -226,10 +226,12 @@ async def init(runtime: DistributedRuntime, config: Config):
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
-            arg_map["backend"] = "pytorch"
-        elif arg_map["backend"] != "pytorch":
+            arg_map["backend"] = Backend.PYTORCH
+        elif arg_map["backend"] not in Backend:
             logging.error(
-                "Only pytorch backend is supported for now to publish events and metrics."
+                "Only %s supported for now to publish events and metrics. Got: %s",
+                [b.value for b in Backend],
+                arg_map["backend"],
             )
             sys.exit(1)
 
