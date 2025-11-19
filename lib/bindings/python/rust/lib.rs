@@ -138,6 +138,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
 
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
+    m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
@@ -213,6 +214,13 @@ where
 #[pyo3(text_signature = "(level, message, module, file, line)")]
 fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) {
     logging::log_message(level, message, module, file, line);
+}
+
+/// Generate a deterministic signed int32 ID from a LoRA name using blake3 hash.
+#[pyfunction]
+#[pyo3(text_signature = "(lora_name)")]
+fn lora_name_to_id(lora_name: &str) -> i32 {
+    llm_rs::utils::lora_name_to_id(lora_name)
 }
 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
