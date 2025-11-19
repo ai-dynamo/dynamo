@@ -38,7 +38,7 @@ spec:
 
       containers:
         - name: epp
-          image: nvcr.io/nvstaging/ai-dynamo/dynamo-frontend:0.7.0rc2-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           imagePullPolicy: IfNotPresent
           resources:
             requests:
