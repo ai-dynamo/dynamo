@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional
 import pytest
 
 from tests.router.common import (  # utilities
-    KVRouterProcess,
     _test_python_router_bindings,
     _test_router_basic,
     _test_router_decisions,
@@ -26,10 +25,14 @@ pytestmark = pytest.mark.pre_merge
 
 logger = logging.getLogger(__name__)
 
+
 MODEL_NAME = ROUTER_MODEL_NAME
 NUM_MOCKERS = 2
 SPEEDUP_RATIO = 10.0
-PORT = 8090  # Starting port for mocker instances
+PORTS = [
+    8011,
+    8022,
+]  # Frontend ports: use PORTS[0] for single router, PORTS for multi-router
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
@@ -56,6 +59,7 @@ class MockerProcess:
         request,
         mocker_args: Optional[Dict[str, Any]] = None,
         num_mockers: int = 1,
+        store_backend: str = "etcd",
     ):
         # Generate a unique namespace suffix shared by all mockers
         namespace_suffix = generate_random_suffix()
@@ -80,6 +84,8 @@ class MockerProcess:
                 MODEL_NAME,
                 "--endpoint",
                 self.endpoint,
+                "--store-kv",
+                store_backend,
             ]
 
             # Add individual CLI arguments from mocker_args
@@ -156,13 +162,6 @@ def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     try:
-        # Start KV router (frontend)
-        frontend_port = PORT
-        logger.info(f"Starting KV router frontend on port {frontend_port}")
-
-        kv_router = KVRouterProcess(request, BLOCK_SIZE, frontend_port)
-        kv_router.__enter__()
-
         # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
@@ -171,49 +170,67 @@ def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        # Run basic router test (mocker workers don't need frontend readiness check)
+        # Run basic router test (starts router internally, mocker workers don't need frontend readiness check)
         _test_router_basic(
-            frontend_port=frontend_port,
-            num_workers=NUM_MOCKERS,
+            engine_workers=mockers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=PORTS[0],
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
             wait_for_frontend=False,  # Mocker workers are fast, no need to wait
         )
 
     finally:
-        # Clean up
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
-
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
 
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
-def test_mocker_two_kv_router(request, runtime_services, predownload_tokenizers):
-    """Test two KV routers with mocker engines and consumer lifecycle verification."""
-    logger.info("Starting mocker two KV router test")
+@pytest.mark.parametrize("store_backend", ["etcd", "file"])
+def test_mocker_two_kv_router(
+    request,
+    runtime_services,
+    predownload_tokenizers,
+    file_storage_backend,
+    store_backend,
+):
+    """
+    Test with two KV routers and multiple mocker engine instances.
+    Alternates requests between the two routers to test load distribution.
+    Tests with both etcd and file storage backends.
+    """
+
+    # runtime_services starts etcd and nats
+    logger.info(
+        f"Starting mocker two KV router test with {store_backend} storage backend"
+    )
+
+    # Create mocker args dictionary
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     try:
-        # Start mocker instances
+        # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
-            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            store_backend=store_backend,
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        # Run two-router test with consumer lifecycle verification
-        router_ports = [PORT + 1, PORT + 2]  # 8091 and 8092
+        # Run two-router test (starts KV routers internally and manages their lifecycle)
         _test_router_two_routers(
             engine_workers=mockers,
             block_size=BLOCK_SIZE,
             request=request,
-            router_ports=router_ports,
+            router_ports=PORTS,
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
+            store_backend=store_backend,
         )
 
     finally:
@@ -244,7 +261,7 @@ def test_mocker_kv_router_overload_503(
         mockers.__enter__()
 
         # Run overload 503 test
-        frontend_port = PORT + 10  # Use different port to avoid conflicts
+        frontend_port = PORTS[0] + 10  # Use different port to avoid conflicts
         _test_router_overload_503(
             engine_workers=mockers,
             block_size=4,  # Match the mocker's block size
@@ -297,34 +314,49 @@ def test_kv_push_router_bindings(request, runtime_services, predownload_tokenize
 
 @pytest.mark.pre_merge
 @pytest.mark.model(MODEL_NAME)
-def test_indexers_sync(request, runtime_services, predownload_tokenizers):
-    """Test that two KV routers synchronize their indexer states with mocker engines."""
-    logger.info("Starting indexers sync test")
+@pytest.mark.parametrize("store_backend", ["etcd", "file"])
+def test_indexers_sync(
+    request,
+    runtime_services,
+    predownload_tokenizers,
+    file_storage_backend,
+    store_backend,
+):
+    """
+    Test that two KV routers have synchronized indexer states after processing requests.
+    This test verifies that both routers converge to the same internal state.
+    Tests with both etcd and file storage backends.
+    """
+
+    # runtime_services starts etcd and nats
+    logger.info(f"Starting indexers sync test with {store_backend} storage backend")
+
+    # Create mocker args dictionary
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     try:
         # Start mocker instances
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
-            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            store_backend=store_backend,
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        # Get runtime and create endpoint
-        runtime = get_runtime()
-        namespace = runtime.namespace(mockers.namespace)
-        component = namespace.component(mockers.component_name)
-        endpoint = component.endpoint("generate")
-
-        # Run indexers sync test
+        # Use the common test implementation (creates its own runtimes for each router)
+        # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
         _test_router_indexers_sync(
             engine_workers=mockers,
-            endpoint=endpoint,
             block_size=BLOCK_SIZE,
             model_name=MODEL_NAME,
             num_workers=NUM_MOCKERS,
+            store_backend=store_backend,
         )
+
+        logger.info("Indexers sync test completed successfully")
 
     finally:
         if "mockers" in locals():
@@ -351,7 +383,7 @@ def test_query_instance_id_returns_worker_and_tokens(
         mockers.__enter__()
 
         # Run query_instance_id annotation test
-        frontend_port = PORT + 30  # Use unique port to avoid conflicts
+        frontend_port = PORTS[0] + 30  # Use unique port to avoid conflicts
         _test_router_query_instance_id(
             engine_workers=mockers,
             block_size=BLOCK_SIZE,

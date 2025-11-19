@@ -25,4 +25,3 @@ spec:
     group: inference.networking.x-k8s.io
     kind: InferencePool
     name: llama3-70b-agg-pool
-

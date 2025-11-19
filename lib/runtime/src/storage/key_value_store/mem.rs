@@ -57,7 +57,7 @@ impl MemoryBucket {
 }
 
 impl MemoryStore {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         MemoryStore {
             inner: Arc::new(MemoryStoreInner {
@@ -107,6 +107,8 @@ impl KeyValueStore for MemoryStore {
     fn connection_id(&self) -> u64 {
         self.connection_id
     }
+
+    fn shutdown(&self) {}
 }
 
 #[async_trait]
@@ -205,8 +207,7 @@ impl KeyValueBucket for MemoryBucketRef {
                         yield WatchEvent::Put(item);
                     },
                     Some(MemoryEvent::Delete { key }) => {
-                        let item = KeyValue::new(key, bytes::Bytes::new());
-                        yield WatchEvent::Delete(item);
+                        yield WatchEvent::Delete(Key::from_raw(key));
                     }
                 }
             }
@@ -219,9 +220,36 @@ impl KeyValueBucket for MemoryBucketRef {
             Some(bucket) => Ok(bucket
                 .data
                 .iter()
-                .map(|(k, (_rev, v))| (k.to_string(), v.clone()))
+                .map(|(k, (_rev, v))| ([self.name.clone(), k.to_string()].join("/"), v.clone()))
                 .collect()),
             None => Err(StoreError::MissingBucket(self.name.clone())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use crate::storage::key_value_store::{
+        Key, KeyValueBucket as _, KeyValueStore as _, MemoryStore,
+    };
+
+    #[tokio::test]
+    async fn test_entries_full_path() {
+        let m = MemoryStore::new();
+        let bucket = m.get_or_create_bucket("bucket1", None).await.unwrap();
+        let _ = bucket
+            .insert(&Key::new("key1"), "value1".into(), 0)
+            .await
+            .unwrap();
+        let _ = bucket
+            .insert(&Key::new("key2"), "value2".into(), 0)
+            .await
+            .unwrap();
+        let entries = bucket.entries().await.unwrap();
+        let keys: HashSet<String> = entries.into_keys().collect();
+        assert!(keys.contains("bucket1/key1"));
+        assert!(keys.contains("bucket1/key2"));
     }
 }

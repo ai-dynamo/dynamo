@@ -3,7 +3,6 @@
 
 import logging
 import re
-from typing import Literal
 
 import yaml
 
@@ -22,6 +21,7 @@ from benchmarks.profiler.utils.config import (
 from benchmarks.profiler.utils.defaults import (
     DEFAULT_MODEL_NAME,
     DYNAMO_RUN_DEFAULT_PORT,
+    EngineType,
 )
 from dynamo.planner.defaults import SubComponentType
 
@@ -82,7 +82,7 @@ class SGLangConfigModifier:
     def convert_config(
         cls,
         config: dict,
-        target: Literal["prefill", "decode"],
+        target: EngineType,
         is_moe_model: bool = False,
     ) -> dict:
         cfg = Config.model_validate(config)
@@ -94,7 +94,7 @@ class SGLangConfigModifier:
         if "Planner" in cfg.spec.services:
             del cfg.spec.services["Planner"]
 
-        if target == "prefill":
+        if target == EngineType.PREFILL:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "sglang", SubComponentType.PREFILL
@@ -131,7 +131,7 @@ class SGLangConfigModifier:
 
             worker_service.extraPodSpec.mainContainer.args = args
 
-        elif target == "decode":
+        elif target == EngineType.DECODE:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "sglang", SubComponentType.PREFILL
@@ -292,6 +292,12 @@ class SGLangConfigModifier:
             return DEFAULT_MODEL_NAME
 
         args = break_arguments(args)
+        # Check for --model-path first (primary argument for SGLang)
+        for i, arg in enumerate(args):
+            if arg == "--model-path" and i + 1 < len(args):
+                return args[i + 1]
+
+        # Fall back to --served-model-name if --model-path not found
         for i, arg in enumerate(args):
             if arg == "--served-model-name" and i + 1 < len(args):
                 return args[i + 1]
@@ -347,3 +353,30 @@ class SGLangConfigModifier:
         except Exception as e:
             logger.warning(f"Failed to parse KV cache size from log file. Error: {e}")
         return 0
+
+    @classmethod
+    def set_prefill_config(
+        cls, config: dict, max_batch_size: int, max_num_tokens: int
+    ) -> dict:
+        """
+        Configure prefill-related limits for aggregated prefill runs.
+        - Batch size is applied as server concurrency.
+        - Max tokens is applied as a total token cap to avoid chunked prefill.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="sglang", sub_component_type=SubComponentType.DECODE
+        )
+        args = validate_and_get_worker_args(worker_service, backend="sglang")
+        args = break_arguments(args)
+
+        # Set max concurrency to control effective batch size
+        args = set_argument_value(args, "--max-running-requests", str(max_batch_size))
+
+        # Cap total tokens processed in a batch to avoid chunked prefill
+        args = set_argument_value(args, "--chunked-prefill-size", str(max_num_tokens))
+
+        args = append_argument(args, "--enable-dp-lm-head")
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()

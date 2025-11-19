@@ -316,6 +316,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 .expect("token_ids length exceeds u32::MAX");
 
             self.usage.completion_tokens += token_length;
+
+            // If backend provides completion_usage with prompt token details,
+            // propagate the entire details struct to usage tracking
+            if let Some(prompt_details) = delta
+                .completion_usage
+                .as_ref()
+                .and_then(|usage| usage.prompt_tokens_details.as_ref())
+            {
+                self.usage.prompt_tokens_details = Some(prompt_details.clone());
+            }
         }
 
         let logprobs = self.create_logprobs(

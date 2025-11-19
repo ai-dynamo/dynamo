@@ -8,7 +8,6 @@ from typing import Any, Dict, Optional
 import pytest
 
 from tests.router.common import (  # utilities
-    KVRouterProcess,
     _test_router_basic,
     _test_router_decisions,
     generate_random_suffix,
@@ -20,7 +19,10 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 SPEEDUP_RATIO = 10.0
-PORT = 8090
+PORTS = [
+    8011,
+    8022,
+]  # Frontend ports: use PORTS[0] for single router, PORTS for multi-router
 NUM_REQUESTS = 10
 BLOCK_SIZE = 16
 
@@ -178,17 +180,18 @@ class VLLMProcess:
                 )
 
     def __enter__(self):
-        """Start all vLLM worker processes.
+        """Start all vLLM worker processes with sequential initialization.
 
-        For data parallel setups, all DP ranks must be started simultaneously
-        so they can establish NCCL communication. We start all processes first,
-        then wait for their health checks in parallel.
+        Workers are started sequentially with a delay between each to avoid
+        NIXL/UCX resource contention during initialization. This prevents
+        UCX shared memory handle allocation failures when multiple workers
+        try to initialize simultaneously on the same GPU.
         """
         logger.info(
-            f"[VLLMProcess] Phase 1: Starting {len(self.worker_processes)} worker processes in parallel..."
+            f"[VLLMProcess] Starting {len(self.worker_processes)} worker processes sequentially..."
         )
 
-        # Start all processes first (don't wait for health checks yet)
+        # Start each process sequentially, waiting for NIXL initialization before next
         for i, process in enumerate(self.worker_processes):
             logger.info(f"[VLLMProcess] Starting vLLM worker {i}...")
             try:
@@ -211,6 +214,16 @@ class VLLMProcess:
                     f"[VLLMProcess] Worker {i} launched with PID: {process.proc.pid if process.proc else 'unknown'}"
                 )
                 time.sleep(process.delayed_start)
+
+                # Wait for NIXL initialization before starting next worker
+                # This prevents UCX shared memory contention
+                if i < len(self.worker_processes) - 1:
+                    nixl_init_delay = 5  # seconds
+                    logger.info(
+                        f"[VLLMProcess] Waiting {nixl_init_delay}s for worker {i} to initialize NIXL before starting next worker..."
+                    )
+                    time.sleep(nixl_init_delay)
+
             except Exception:
                 logger.exception(f"[VLLMProcess] Failed to start worker {i}")
                 # Clean up on failure
@@ -221,9 +234,9 @@ class VLLMProcess:
                 raise
 
         logger.info(
-            f"[VLLMProcess] All {len(self.worker_processes)} workers launched. They should now establish NCCL communication."
+            f"[VLLMProcess] All {len(self.worker_processes)} workers launched with sequential initialization."
         )
-        logger.info("[VLLMProcess] Phase 2: Waiting for health checks to complete...")
+        logger.info("[VLLMProcess] Waiting for health checks to complete...")
 
         # Now wait for health checks for all processes
         for i, process in enumerate(self.worker_processes):
@@ -277,13 +290,6 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
     }
 
     try:
-        # Start KV router (frontend)
-        frontend_port = PORT
-        logger.info(f"Starting KV router frontend on port {frontend_port}")
-
-        kv_router = KVRouterProcess(request, BLOCK_SIZE, frontend_port)
-        kv_router.__enter__()
-
         # Start vLLM workers
         logger.info(f"Starting {N_VLLM_WORKERS} vLLM workers")
         vllm_workers = VLLMProcess(
@@ -295,10 +301,12 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
 
-        # Run basic router test (vLLM workers need frontend readiness check)
+        # Run basic router test (starts router internally, vLLM workers need frontend readiness check)
         _test_router_basic(
-            frontend_port=frontend_port,
-            num_workers=N_VLLM_WORKERS,
+            engine_workers=vllm_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=PORTS[0],
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
             wait_for_frontend=True,  # vLLM workers need time to load models
@@ -306,10 +314,6 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
         )
 
     finally:
-        # Clean up
-        if "kv_router" in locals():
-            kv_router.__exit__(None, None, None)
-
         if "vllm_workers" in locals():
             vllm_workers.__exit__(None, None, None)
 

@@ -4,11 +4,15 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import string
+import tempfile
 from typing import Any, Optional
 
 import aiohttp
+import nats
+import pytest
 
 from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
 from tests.utils.managed_process import ManagedProcess
@@ -19,10 +23,41 @@ NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
 
+########################################################
+# Fixtures
+########################################################
+
+
+@pytest.fixture
+def file_storage_backend():
+    """Fixture that sets up and tears down file storage backend.
+
+    Creates a temporary directory for file-based KV storage and sets
+    the DYN_FILE_KV environment variable. Cleans up after the test.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        old_env = os.environ.get("DYN_FILE_KV")
+        os.environ["DYN_FILE_KV"] = tmpdir
+        logger.info(f"Set up file storage backend in: {tmpdir}")
+        yield tmpdir
+        # Cleanup
+        if old_env is not None:
+            os.environ["DYN_FILE_KV"] = old_env
+        else:
+            os.environ.pop("DYN_FILE_KV", None)
+
+
+########################################################
+# Helper Classes
+########################################################
+
+
 class KVRouterProcess(ManagedProcess):
     """Manages the KV router process using dynamo.frontend"""
 
-    def __init__(self, request, block_size: int, frontend_port: int):
+    def __init__(
+        self, request, block_size: int, frontend_port: int, store_backend: str = "etcd"
+    ):
         command = [
             "python3",
             "-m",
@@ -33,6 +68,8 @@ class KVRouterProcess(ManagedProcess):
             "kv",
             "--http-port",
             str(frontend_port),
+            "--store-kv",
+            store_backend,
         ]
 
         super().__init__(
@@ -265,29 +302,64 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8)
     return False
 
 
-def get_runtime():
-    """Get or create a DistributedRuntime instance.
+def get_runtime(store_backend="etcd", request_plane="nats"):
+    """Create a DistributedRuntime instance for testing.
 
-    This handles the case where a worker is already initialized (common in CI)
-    by using the detached() method to reuse the existing runtime.
+    Args:
+        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        request_plane: How frontend talks to backend ("tcp", "http" or "nats"). Defaults to "nats".
     """
     try:
-        # Try to use existing runtime (common in CI where tests run in same process)
-        _runtime_instance = DistributedRuntime.detached()
-        logger.info("Using detached runtime (worker already initialized)")
-    except Exception as e:
-        # If no existing runtime, create a new one
-        logger.info(f"Creating new runtime (detached failed: {e})")
-        try:
-            # Try to get running loop (works in async context)
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop, create a new one (sync context)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        _runtime_instance = DistributedRuntime(loop, False)
+        # Try to get running loop (works in async context)
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop, create a new one (sync context)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return DistributedRuntime(loop, store_backend, request_plane)
 
-    return _runtime_instance
+
+async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):
+    """Check NATS consumers for the KV events stream.
+
+    Args:
+        namespace: The namespace to check consumers for
+        expected_count: Optional expected number of consumers. If provided, asserts if count doesn't match.
+
+    Returns:
+        List of consumer names
+    """
+    component_subject = f"namespace.{namespace}.component.mocker"
+    slugified = component_subject.lower().replace(".", "-").replace("_", "-")
+    stream_name = f"{slugified}-kv-events"
+    logger.info(f"Checking consumers for stream: {stream_name}")
+
+    nc = await nats.connect("nats://localhost:4222")
+    try:
+        js = nc.jetstream()
+        consumer_infos = await js.consumers_info(stream_name)
+        consumer_names = [info.name for info in consumer_infos]
+        logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
+
+        # Log detailed consumer info
+        for info in consumer_infos:
+            logger.info(
+                f"Consumer {info.name}: "
+                f"num_pending={info.num_pending}, "
+                f"num_ack_pending={info.num_ack_pending}, "
+                f"ack_floor={info.ack_floor}, "
+                f"delivered={info.delivered}"
+            )
+
+        if expected_count is not None:
+            assert (
+                len(consumer_names) == expected_count
+            ), f"Expected {expected_count} durable consumers, found {len(consumer_names)}: {consumer_names}"
+            logger.info(f"✓ Verified {expected_count} durable consumers exist")
+
+        return consumer_names
+    finally:
+        await nc.close()
 
 
 async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
@@ -447,55 +519,73 @@ async def send_request_via_python_kv_router(
 
 
 def _test_router_basic(
+    engine_workers,
+    block_size: int,
+    request,
     frontend_port: int,
-    num_workers: int,
     test_payload: dict,
     num_requests: int,
     wait_for_frontend: bool = False,
     frontend_timeout: int = 180,
+    store_backend: str = "etcd",
 ):
-    """Basic router test: wait for workers (optional) and send concurrent requests via HTTP frontend.
+    """Basic router test: start router, wait for workers (optional) and send concurrent requests via HTTP frontend.
+
+    Assumes engine_workers are already initialized. This function manages router lifecycle.
 
     This is a shared test implementation for both mocker and vLLM workers.
     The key difference is that vLLM workers need time to load models and register,
     so they require wait_for_frontend=True.
 
     Args:
-        frontend_port: Port where the frontend HTTP server is running
-        num_workers: Expected number of workers to wait for
+        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        block_size: Block size for KV cache
+        request: Pytest request fixture for managing resources
+        frontend_port: Port to start the frontend HTTP server on
         test_payload: Test payload to send to /v1/chat/completions
         num_requests: Number of concurrent requests to send
         wait_for_frontend: If True, poll /v1/models and /v1/chat/completions until ready
         frontend_timeout: Timeout for frontend readiness check (only used if wait_for_frontend=True)
+        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
 
     Raises:
         AssertionError: If requests fail or frontend doesn't become ready
         TimeoutError: If frontend doesn't become ready within timeout
     """
-    frontend_url = f"http://localhost:{frontend_port}"
+    try:
+        # Start KV router frontend
+        logger.info(f"Starting KV router frontend on port {frontend_port}")
+        kv_router = KVRouterProcess(request, block_size, frontend_port, store_backend)
+        kv_router.__enter__()
 
-    # Wait for workers to register with frontend if needed (vLLM requires this)
-    if wait_for_frontend:
-        logger.info("Waiting for workers to register with frontend...")
+        frontend_url = f"http://localhost:{frontend_port}"
+
+        # Wait for workers to register with frontend if needed (vLLM requires this)
+        if wait_for_frontend:
+            logger.info("Waiting for workers to register with frontend...")
+            asyncio.run(
+                wait_for_frontend_ready(
+                    frontend_url=frontend_url,
+                    expected_num_workers=engine_workers.num_workers,
+                    timeout=frontend_timeout,
+                )
+            )
+
+        # Send concurrent requests to the frontend
+        logger.info(f"Sending {num_requests} concurrent requests to frontend...")
         asyncio.run(
-            wait_for_frontend_ready(
-                frontend_url=frontend_url,
-                expected_num_workers=num_workers,
-                timeout=frontend_timeout,
+            send_inflight_requests(
+                [f"{frontend_url}/v1/chat/completions"],
+                test_payload,
+                num_requests,
             )
         )
 
-    # Send concurrent requests to the frontend
-    logger.info(f"Sending {num_requests} concurrent requests to frontend...")
-    asyncio.run(
-        send_inflight_requests(
-            [f"{frontend_url}/v1/chat/completions"],
-            test_payload,
-            num_requests,
-        )
-    )
+        logger.info(f"Successfully completed {num_requests} requests")
 
-    logger.info(f"Successfully completed {num_requests} requests")
+    finally:
+        if "kv_router" in locals():
+            kv_router.__exit__(None, None, None)
 
 
 def _test_router_two_routers(
@@ -505,6 +595,7 @@ def _test_router_two_routers(
     router_ports: list[int],
     test_payload: dict,
     num_requests: int,
+    store_backend: str = "etcd",
 ):
     """Test two KV routers with alternating requests and consumer lifecycle verification.
 
@@ -523,6 +614,7 @@ def _test_router_two_routers(
         router_ports: List of two port numbers for the routers (e.g., [8091, 8092])
         test_payload: Test payload to send to /v1/chat/completions
         num_requests: Number of concurrent requests to send
+        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
 
     Raises:
         AssertionError: If consumer lifecycle verification fails
@@ -535,7 +627,7 @@ def _test_router_two_routers(
         # Start two KV routers on different ports
         for port in router_ports:
             logger.info(f"Starting KV router frontend on port {port}")
-            kv_router = KVRouterProcess(request, block_size, port)
+            kv_router = KVRouterProcess(request, block_size, port, store_backend)
             kv_router.__enter__()
             kv_routers.append(kv_router)
 
@@ -777,6 +869,7 @@ def _test_router_query_instance_id(
     request,
     frontend_port: int,
     test_payload: dict,
+    store_backend: str = "etcd",
 ):
     """Test query_instance_id annotation returns worker_instance_id and token_data without routing.
 
@@ -798,6 +891,7 @@ def _test_router_query_instance_id(
         request: Pytest request fixture for managing resources
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
+        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
 
     Raises:
         AssertionError: If annotation response structure is incorrect or contains generation content
@@ -807,7 +901,7 @@ def _test_router_query_instance_id(
     try:
         # Start KV router (frontend)
         logger.info(f"Starting KV router frontend on port {frontend_port}")
-        kv_router = KVRouterProcess(request, block_size, frontend_port)
+        kv_router = KVRouterProcess(request, block_size, frontend_port, store_backend)
         kv_router.__enter__()
 
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
@@ -1119,16 +1213,16 @@ def _test_router_overload_503(
 
 def _test_router_indexers_sync(
     engine_workers,
-    endpoint,
     block_size: int,
     model_name: str,
     num_workers: int,
+    store_backend: str = "etcd",
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
     Assumes engine_workers are already initialized. This test:
-    1. Creates first KvPushRouter and sends 25 requests (triggers snapshot at threshold=20)
-    2. Creates second KvPushRouter (should sync from NATS snapshot)
+    1. Creates first KvPushRouter (with its own runtime) and sends 25 requests (triggers snapshot at threshold=20)
+    2. Creates second KvPushRouter (with its own runtime, should sync from NATS snapshot)
     3. Sends 25 requests to second router
     4. Verifies NATS object store contains the snapshot
     5. Dumps states from both routers and compares them (should be identical)
@@ -1137,10 +1231,10 @@ def _test_router_indexers_sync(
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
-        endpoint: Dynamo endpoint for the workers
         block_size: Block size for KV cache
         model_name: Model name to use for requests
         num_workers: Expected number of workers
+        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
 
     Raises:
         AssertionError: If router states don't synchronize correctly or snapshot is missing
@@ -1152,7 +1246,7 @@ def _test_router_indexers_sync(
         # Create KvRouterConfig with lower snapshot threshold for testing
         kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
 
-        async def send_requests_to_router(router, num_requests, router_name):
+        async def send_requests_to_router(router, num_requests, router_name, endpoint):
             # Now send the actual requests
             tasks = []
             for i in range(num_requests):
@@ -1187,22 +1281,31 @@ def _test_router_indexers_sync(
             )
             return successful
 
-        # Launch first router
-        logger.info("Creating first KV router")
+        # Create first runtime and endpoint for router 1
+        logger.info("Creating first KV router with its own runtime")
+        runtime1 = get_runtime(store_backend)
+        namespace1 = runtime1.namespace(engine_workers.namespace)
+        component1 = namespace1.component(engine_workers.component_name)
+        endpoint1 = component1.endpoint("generate")
+
         kv_push_router1 = KvPushRouter(
-            endpoint=endpoint,
+            endpoint=endpoint1,
             block_size=block_size,
             kv_router_config=kv_router_config,
         )
 
         # Wait for workers to be ready
-        await wait_for_workers_ready(endpoint, kv_push_router1, num_workers, model_name)
+        await wait_for_workers_ready(
+            endpoint1, kv_push_router1, num_workers, model_name
+        )
 
         # Send 25 requests to first router
         logger.info("Sending 25 requests to first router")
 
         # Send requests to first router
-        successful1 = await send_requests_to_router(kv_push_router1, 25, "Router 1")
+        successful1 = await send_requests_to_router(
+            kv_push_router1, 25, "Router 1", endpoint1
+        )
         assert (
             successful1 == 25
         ), f"Expected 25 successful requests to router 1, got {successful1}"
@@ -1211,17 +1314,24 @@ def _test_router_indexers_sync(
         logger.info("Waiting for 1 second before creating second router")
         await asyncio.sleep(1)
 
-        # Launch second router - will automatically sync with the first router's state
-        logger.info("Creating second KV router")
+        # Create second runtime and endpoint for router 2
+        logger.info("Creating second KV router with its own runtime")
+        runtime2 = get_runtime(store_backend)
+        namespace2 = runtime2.namespace(engine_workers.namespace)
+        component2 = namespace2.component(engine_workers.component_name)
+        endpoint2 = component2.endpoint("generate")
+
         kv_push_router2 = KvPushRouter(
-            endpoint=endpoint,
+            endpoint=endpoint2,
             block_size=block_size,
             kv_router_config=kv_router_config,
         )
 
         # Send 25 requests to second router with initial retry loop
         logger.info("Sending 25 requests to second router")
-        successful2 = await send_requests_to_router(kv_push_router2, 25, "Router 2")
+        successful2 = await send_requests_to_router(
+            kv_push_router2, 25, "Router 2", endpoint2
+        )
         assert (
             successful2 == 25
         ), f"Expected 25 successful requests to router 2, got {successful2}"
@@ -1347,6 +1457,27 @@ def _test_router_indexers_sync(
             assert False, error_msg
 
         logger.info("Successfully verified that both router states are equal")
+
+        # Verify NATS consumers are created (while routers are still alive)
+        logger.info("Verifying NATS consumers exist for both routers")
+        component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
+        slugified = component_subject.lower().replace(".", "-").replace("_", "-")
+        stream_name = f"{slugified}-kv-events"
+
+        nc = await nats.connect("nats://localhost:4222")
+        try:
+            js = nc.jetstream()
+            consumer_infos = await js.consumers_info(stream_name)
+            consumer_names = [info.name for info in consumer_infos]
+            logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
+
+            assert len(consumer_names) == 2, (
+                f"Expected 2 durable consumers (one per router), "
+                f"found {len(consumer_names)}: {consumer_names}"
+            )
+            logger.info("✓ Verified 2 durable consumers exist (one per router)")
+        finally:
+            await nc.close()
 
     # Run the async test
     asyncio.run(test_sync())

@@ -26,6 +26,7 @@
 
    kubernetes/api_reference.md
    kubernetes/deployment/create_deployment.md
+   kubernetes/deployment/dynamomodel-guide.md
 
    kubernetes/fluxcd.md
    kubernetes/grove.md
@@ -72,6 +73,7 @@
    backends/vllm/deepseek-r1.md
    backends/vllm/gpt-oss.md
    backends/vllm/multi-node.md
+   backends/vllm/multimodal.md
    backends/vllm/prometheus.md
 
    benchmarks/kv-router-ab-testing.md

@@ -153,19 +153,41 @@ impl ToolCallConfig {
     }
 
     pub fn deepseek_v3_1() -> Self {
+        // The whole tool calls block is wrapped between
+        // <｜tool▁calls▁begin｜> ... <｜tool▁calls▁end｜>
+        // regardless of number of tool calls. For external use of this
+        // config, we want them to only be operating on the whole block,
+        // so the tool parser can properly consume all tool call tokens.
+        // https://huggingface.co/deepseek-ai/DeepSeek-V3.1#toolcall
         Self {
             format: ToolCallParserType::Json,
             json: JsonParserConfig {
                 tool_call_start_tokens: vec![
                     "<｜tool▁calls▁begin｜>".to_string(),
-                    "<｜tool▁call▁begin｜>".to_string(),
+                    // "<｜tool▁call▁begin｜>".to_string(),
                 ],
                 tool_call_end_tokens: vec![
                     "<｜tool▁calls▁end｜>".to_string(),
-                    "<｜tool▁call▁end｜>".to_string(),
+                    // "<｜tool▁call▁end｜>".to_string(),
                 ],
                 tool_call_separator_tokens: vec!["<｜tool▁sep｜>".to_string()],
                 parser_type: JsonParserType::DeepseekV31,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn deepseek_v3() -> Self {
+        // DeepSeek V3 format:
+        // <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>{type}<｜tool▁sep｜>{function_name}\n```json\n{arguments}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+        // There are some differences between DeepSeek V3 and DeepSeek V3.1
+        Self {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec!["<｜tool▁calls▁begin｜>".to_string()],
+                tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
+                tool_call_separator_tokens: vec!["<｜tool▁sep｜>".to_string()],
+                parser_type: JsonParserType::DeepseekV3,
                 ..Default::default()
             },
         }
