@@ -77,7 +77,7 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: cpu-amd-m5-2xlarge }
+          - { arch: amd64, runner: cpu-amd-m5-4xlarge }
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
     name: vllm-framework (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
@@ -123,7 +123,7 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: cpu-amd-m5-2xlarge }
+          - { arch: amd64, runner: cpu-amd-m5-4xlarge }
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
     name: sglang-framework (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
@@ -135,7 +135,7 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: cpu-amd-m5-2xlarge }
+          - { arch: amd64, runner: cpu-amd-m5-4xlarge }
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
     name: trtllm-framework (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
