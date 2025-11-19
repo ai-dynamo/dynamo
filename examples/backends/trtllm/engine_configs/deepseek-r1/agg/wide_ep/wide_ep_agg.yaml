@@ -11,7 +11,7 @@ moe_config:
   #   moe_max_num_tokens = max_batch_size * moe_expert_parallel_size
   #   4096 = 256 * 16
   # moe_max_num_tokens: 4096
-  load_balancer: /mnt/recipes/deepseek-r1/trtllm/agg/wide_ep/eplb.yaml
+  load_balancer: /mnt/examples/backends/trtllm/engine_configs/deepseek-r1/agg/wide_ep/eplb.yaml
 
 tensor_parallel_size: 16
 moe_expert_parallel_size: 16

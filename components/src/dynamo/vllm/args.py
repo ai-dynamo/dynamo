@@ -315,10 +315,16 @@ def parse_args() -> Config:
 
 def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
+    if config.is_decode_worker:
+        logger.info(
+            f"Decode worker detected (is_decode_worker={config.is_decode_worker}): "
+            f"kv_events_config disabled (decode workers don't publish KV events)"
+        )
+        return None
 
     # If prefix caching is not enabled, no events config needed
-    if not config.engine_args.enable_prefix_caching or config.is_decode_worker:
-        logger.info("No kv_events_config required")
+    if not config.engine_args.enable_prefix_caching:
+        logger.info("No kv_events_config required: prefix caching is disabled")
         return None
 
     # There is a bug with KV events publishing when LORA is enabled.
@@ -341,6 +347,12 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
 
     # If user provided their own config, use that
     if c := getattr(config.engine_args, "kv_events_config"):
+        # Warn user that enable_kv_cache_events probably should be True (user may have omitted it from JSON)
+        if not c.enable_kv_cache_events:
+            logger.warning(
+                "User provided --kv_events_config which set enable_kv_cache_events to False (default). "
+                "To publish events, explicitly set enable_kv_cache_events to True."
+            )
         logger.info(f"Using user-provided kv_events_config {c}")
         return c
 

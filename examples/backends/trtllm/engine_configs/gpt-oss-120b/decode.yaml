@@ -12,18 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-# NOTE: Update the namespace field below to match your deployment namespace
-apiVersion: v1
-kind: Service
-metadata:
-  name: llama3-70b-agg-epp
-spec:
-  selector:
-    app: llama3-70b-agg-epp
-  ports:
-    - protocol: TCP
-      port: 9002
-      targetPort: 9002
-      appProtocol: http2
-  type: ClusterIP
+enable_attention_dp: true
+disable_overlap_scheduler: false
+moe_config:
+    backend: CUTLASS
+cuda_graph_config:
+    enable_padding: true
+cache_transceiver_config:
+  backend: UCX
+  max_tokens_in_buffer: 65536
+print_iter_log: false
+stream_interval: 10

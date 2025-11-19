@@ -663,13 +663,14 @@ impl OpenAIPreprocessor {
                         let annotated_usage = Annotated::<Resp> {
                             id: None,
                             data: Some(usage_chunk),
-                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
+                            event: None,
                             comment: None,
                         };
 
                         tracing::trace!(
                             request_id = inner.context.id(),
-                            "Sending final usage chunk for OpenAI compliance"
+                            "Sending final usage chunk for OpenAI compliance, annotated_usage: {:?}",
+                            annotated_usage
                         );
 
                         Some((annotated_usage, inner))
