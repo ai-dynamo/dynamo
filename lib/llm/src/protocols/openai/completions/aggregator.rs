@@ -86,8 +86,8 @@ impl DeltaAggregator {
                     if let Some(system_fingerprint) = delta.inner.system_fingerprint {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
-                    // Preserve nvext from first chunk that has it (typically contains worker_id)
-                    if aggregator.nvext.is_none() && delta.inner.nvext.is_some() {
+                    // Aggregate nvext field (take the last non-None value)
+                    if delta.inner.nvext.is_some() {
                         aggregator.nvext = delta.inner.nvext;
                     }
 

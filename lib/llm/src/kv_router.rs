@@ -19,6 +19,7 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 pub mod approx;
 pub mod indexer;
@@ -633,10 +634,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             prefill_marked = true;
                         }
 
+                        yield item.clone();
+
                         // Inject worker_id in first item's disaggregated_params if requested
                         if first_item && should_populate_worker_id {
                             if let Some(ref mut data) = item.data {
-                                use serde_json::json;
                                 // Add worker_id to disaggregated_params
                                 let worker_id_json = json!({
                                     "prefill_worker_id": prefill_worker_id,
@@ -653,8 +655,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             }
                             first_item = false;
                         }
-
-                        yield item;
                     }
                 }
             }
