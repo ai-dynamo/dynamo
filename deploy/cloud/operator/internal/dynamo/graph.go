@@ -625,6 +625,7 @@ type MultinodeDeployer interface {
 	GetLeaderHostname(serviceName string) string
 	GetHostNames(serviceName string, numberOfNodes int32) []string
 	GetNodeRank() (string, bool) // returns (rank, needsShellInterpretation)
+	NeedsDNSWait() bool          // returns true if DNS wait is needed to launch multinode components
 }
 
 // BackendFactory creates backend instances based on the framework type
