@@ -44,16 +44,6 @@
    fault_tolerance/request_migration.md
    fault_tolerance/request_cancellation.md
 
-   backends/trtllm/multinode/multinode-examples.md
-   backends/trtllm/multinode/multinode-multimodal-example.md
-   backends/trtllm/llama4_plus_eagle.md
-   backends/trtllm/kv-cache-transfer.md
-   backends/trtllm/multimodal_support.md
-   backends/trtllm/multimodal_epd.md
-   backends/trtllm/gemma3_sliding_window_attention.md
-   backends/trtllm/gpt-oss.md
-   backends/trtllm/prometheus.md
-
    backends/sglang/multinode-examples.md
    backends/sglang/dsr1-wideep-gb200.md
    backends/sglang/dsr1-wideep-h100.md
@@ -63,6 +53,16 @@
    backends/sglang/sgl-hicache-example.md
    backends/sglang/sglang-disaggregation.md
    backends/sglang/prometheus.md
+
+   backends/trtllm/multinode/multinode-examples.md
+   backends/trtllm/multinode/multinode-multimodal-example.md
+   backends/trtllm/llama4_plus_eagle.md
+   backends/trtllm/kv-cache-transfer.md
+   backends/trtllm/multimodal_support.md
+   backends/trtllm/multimodal_epd.md
+   backends/trtllm/gemma3_sliding_window_attention.md
+   backends/trtllm/gpt-oss.md
+   backends/trtllm/prometheus.md
 
    examples/README.md
    examples/runtime/hello_world/README.md
