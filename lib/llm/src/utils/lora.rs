@@ -32,7 +32,6 @@ mod tests {
         assert_eq!(id1, id2);
     }
 
-
     #[test]
     fn test_lora_id_stability_across_version() {
         let id1 = lora_name_to_id("test_lora");
