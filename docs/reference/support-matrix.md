@@ -64,10 +64,10 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Build Dependency** | **Version**                                                                      |
 | :------------------- | :------------------------------------------------------------------------------- |
-| **TensorRT-LLM**     | 1.1.0rc5                                                                         |
 | **NIXL**             | 0.7.0                                                                            |
-| **vLLM**             | 0.10.1.1                                                                         |
 | **SGLang**           | 0.5.3rc0                                                                         |
+| **TensorRT-LLM**     | 1.1.0rc5                                                                         |
+| **vLLM**             | 0.10.1.1                                                                         |
 
 > [!Important]
 > Specific versions of TensorRT-LLM supported by Dynamo are subject to change. Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] will fail.

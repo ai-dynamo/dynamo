@@ -44,10 +44,10 @@ The PD approach is a more traditional, aggregated method where the inference eng
 
 ## Inference Framework Support Matrix
 
-Dynamo supports multimodal capabilities across leading LLM inference backends, including **vLLM**, **TensorRT-LLM (TRT-LLM)**, and **SGLang**. The table below details the current support level for EPD/PD and various media types for each stack.
+Dynamo supports multimodal capabilities across leading LLM inference backends, including **SGLang**, **TensorRT-LLM (TRT-LLM)**, and **vLLM**. The table below details the current support level for EPD/PD and various media types for each stack.
 
 | Stack | EPD Support | PD Support | Image | Video | Audio |
 | --------- | --------- | --------- | --------- |---------| --------- |
-| **vLLM** | ✅  | ✅  | ✅  | ✅  | 🚧 |
-| **TRT-LLM** | ✅  (Currently via precomputed Embeddings URL) | ✅  | ✅  | ❌  | ❌  |
 | **SGLang** | ✅  | ❌  | ✅  | ❌  | ❌  |
+| **TRT-LLM** | ✅  (Currently via precomputed Embeddings URL) | ✅  | ✅  | ❌  | ❌  |
+| **vLLM** | ✅  | ✅  | ✅  | ✅  | 🚧 |

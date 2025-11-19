@@ -40,7 +40,7 @@ High-throughput, low-latency inference framework designed for serving generative
 
 Large language models are quickly outgrowing the memory and compute budget of any single GPU. Tensor-parallelism solves the capacity problem by spreading each layer across many GPUs—and sometimes many servers—but it creates a new one: how do you coordinate those shards, route requests, and share KV cache fast enough to feel like one accelerator? This orchestration gap is exactly what NVIDIA Dynamo is built to close.
 
-Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLang or others) and captures LLM-specific capabilities such as:
+Dynamo is designed to be inference engine agnostic (supports SGLang, TRT-LLM, vLLM or others) and captures LLM-specific capabilities such as:
 
 - **Disaggregated prefill & decode inference** – Maximizes GPU throughput and facilitates trade off between throughput and latency.
 - **Dynamic GPU scheduling** – Optimizes performance based on fluctuating demand
@@ -54,20 +54,20 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 
 ## Framework Support Matrix
 
-| Feature                                                                                           | vLLM | SGLang | TensorRT-LLM |
-| ------------------------------------------------------------------------------------------------- | ---- | ------ | ------------ |
-| [**Disaggregated Serving**](/docs/design_docs/disagg_serving.md)                                 | ✅   | ✅     | ✅           |
-| [**Conditional Disaggregation**](/docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧   | 🚧     | 🚧           |
-| [**KV-Aware Routing**](/docs/router/kv_cache_routing.md)                                    | ✅   | ✅     | ✅           |
-| [**Load Based Planner**](docs/planner/load_planner.md)                                      | 🚧   | 🚧     | 🚧           |
-| [**SLA-Based Planner**](docs/planner/sla_planner.md)                                        | ✅   | ✅     | ✅           |
-| [**KVBM**](docs/kvbm/kvbm_architecture.md)                                               | ✅   | 🚧     | ✅           |
+| Feature                                                                                           | SGLang | TensorRT-LLM | vLLM |
+| ------------------------------------------------------------------------------------------------- | ------ | ------------ | ---- |
+| [**Disaggregated Serving**](/docs/design_docs/disagg_serving.md)                                 | ✅     | ✅           | ✅   |
+| [**Conditional Disaggregation**](/docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧     | 🚧           | 🚧   |
+| [**KV-Aware Routing**](/docs/router/kv_cache_routing.md)                                    | ✅     | ✅           | ✅   |
+| [**Load Based Planner**](docs/planner/load_planner.md)                                      | 🚧     | 🚧           | 🚧   |
+| [**SLA-Based Planner**](docs/planner/sla_planner.md)                                        | ✅     | ✅           | ✅   |
+| [**KVBM**](docs/kvbm/kvbm_architecture.md)                                               | 🚧     | ✅           | ✅   |
 
 To learn more about each framework and their capabilities, check out each framework's README!
 
-- **[vLLM](docs/backends/vllm/README.md)**
 - **[SGLang](docs/backends/sglang/README.md)**
 - **[TensorRT-LLM](docs/backends/trtllm/README.md)**
+- **[vLLM](docs/backends/vllm/README.md)**
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
@@ -111,7 +111,7 @@ To run locally without etcd, pass `--store-kv file` to both the frontend and wor
 
 ## 2. Select an engine
 
-We publish Python wheels specialized for each of our supported engines: vllm, sglang, and trtllm. The examples that follow use SGLang; continue reading for other engines.
+We publish Python wheels specialized for each of our supported engines: sglang, trtllm, and vllm. The examples that follow use SGLang; continue reading for other engines.
 
 ```
 uv venv venv
@@ -119,7 +119,7 @@ source venv/bin/activate
 uv pip install pip
 
 # Choose one
-uv pip install "ai-dynamo[sglang]"  #replace with [vllm], [trtllm], etc.
+uv pip install "ai-dynamo[sglang]"  #replace with [trtllm], [vllm], etc.
 ```
 
 ## 3. Run Dynamo

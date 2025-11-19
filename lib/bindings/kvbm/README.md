@@ -17,7 +17,7 @@ limitations under the License.
 
 # Dynamo KVBM
 
-The Dynamo KVBM is a distributed KV-cache block management system designed for scalable LLM inference. It cleanly separates memory management from inference runtimes (vLLM, TensorRT-LLM, and SGLang), enabling GPU↔CPU↔Disk/Remote tiering, asynchronous block offload/onboard, and efficient block reuse.
+The Dynamo KVBM is a distributed KV-cache block management system designed for scalable LLM inference. It cleanly separates memory management from inference runtimes (SGLang, TensorRT-LLM, and vLLM), enabling GPU↔CPU↔Disk/Remote tiering, asynchronous block offload/onboard, and efficient block reuse.
 
 ![A block diagram showing a layered architecture view of Dynamo KV Block manager.](../../../docs/images/kvbm-architecture.png)
 
@@ -26,7 +26,7 @@ The Dynamo KVBM is a distributed KV-cache block management system designed for s
 
 - **Distributed KV-Cache Management:** Unified GPU↔CPU↔Disk↔Remote tiering for scalable LLM inference.
 - **Async Offload & Reuse:** Seamlessly move KV blocks between memory tiers using GDS-accelerated transfers powered by NIXL, without recomputation.
-- **Runtime-Agnostic:** Works out-of-the-box with vLLM, TensorRT-LLM, and SGLang via lightweight connectors.
+- **Runtime-Agnostic:** Works out-of-the-box with SGLang, TensorRT-LLM, and vLLM via lightweight connectors.
 - **Memory-Safe & Modular:** RAII lifecycle and pluggable design for reliability, portability, and backend extensibility.
 
 ## Build and Installation
