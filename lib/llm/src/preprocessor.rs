@@ -339,6 +339,14 @@ impl OpenAIPreprocessor {
 
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
+
+            // Preserve original messages in extra_args for multimodal workers that need them
+            // (e.g., TRT-LLM multimodal processor needs raw messages for proper tokenization)
+            let messages_json = serde_json::to_value(&messages)?;
+            let extra_args = serde_json::json!({
+                "messages": messages_json
+            });
+            builder.extra_args(Some(extra_args));
         }
 
         Ok(())
@@ -655,13 +663,14 @@ impl OpenAIPreprocessor {
                         let annotated_usage = Annotated::<Resp> {
                             id: None,
                             data: Some(usage_chunk),
-                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
+                            event: None,
                             comment: None,
                         };
 
                         tracing::trace!(
                             request_id = inner.context.id(),
-                            "Sending final usage chunk for OpenAI compliance"
+                            "Sending final usage chunk for OpenAI compliance, annotated_usage: {:?}",
+                            annotated_usage
                         );
 
                         Some((annotated_usage, inner))
@@ -764,7 +773,7 @@ impl OpenAIPreprocessor {
         let jail = JailedStream::builder()
             .tool_call_parser(tool_call_parser)
             .build();
-        jail.apply(stream)
+        jail.apply_with_finish_reason(stream)
     }
 
     // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility

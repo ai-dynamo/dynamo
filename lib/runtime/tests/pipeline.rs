@@ -3,17 +3,23 @@
 
 #![allow(dead_code)]
 
+use anyhow::Error;
 use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 
 use dynamo_runtime::engine::ResponseStream;
-use dynamo_runtime::{
-    Error,
-    pipeline::{
-        AsyncEngine, Data, Event, ManyOut, Operator, ServiceBackend, ServiceEngine,
-        ServiceFrontend, SingleIn, async_trait, *,
-    },
+use dynamo_runtime::pipeline::{
+    AsyncEngine,
+    Data,
+    Event,
+    ManyOut,
+    Operator,
+    ServiceBackend,
+    ServiceEngine,
+    ServiceFrontend,
+    SingleIn,
+    *, // TODO remove the star
 };
 
 mod common;
@@ -46,7 +52,7 @@ pub enum Annotated<T: Data> {
 /// to the output stream
 struct PreprocesOperator {}
 
-#[async_trait]
+#[async_trait::async_trait]
 impl
     Operator<
         SingleIn<String>,

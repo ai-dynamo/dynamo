@@ -219,3 +219,41 @@ When disabled, you can manually specify secrets as you would for a normal pod sp
 ```
 
 This automatic discovery eliminates the need to manually configure image pull secrets for each deployment.
+
+## Step 6: Deploy LoRA Adapters (Optional)
+
+After your base model deployment is running, you can deploy LoRA adapters using the `DynamoModel` custom resource. This allows you to fine-tune and extend your models without modifying the base deployment.
+
+To add a LoRA adapter to your deployment, link it using `modelRef` in your worker configuration:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-deployment
+spec:
+  services:
+    Worker:
+      modelRef:
+        name: Qwen/Qwen3-0.6B  # Base model identifier
+      componentType: worker
+      # ... rest of worker config
+```
+
+Then create a `DynamoModel` resource for your LoRA:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoModel
+metadata:
+  name: my-lora
+spec:
+  modelName: my-custom-lora
+  baseModelName: Qwen/Qwen3-0.6B  # Must match modelRef.name above
+  modelType: lora
+  source:
+    uri: s3://my-bucket/loras/my-lora
+```
+
+**For complete details on managing models and LoRA adapters, see:**
+📖 **[Managing Models with DynamoModel Guide](./dynamomodel-guide.md)**

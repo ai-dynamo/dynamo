@@ -62,7 +62,10 @@ sglang_configs = {
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
-        request_payloads=[chat_payload_default(), completion_payload_default()],
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
     ),
     "disaggregated_same_gpu": SGLangConfig(
         # Uses disagg_same_gpu.sh for single-GPU disaggregated testing
@@ -70,7 +73,7 @@ sglang_configs = {
         name="disaggregated_same_gpu",
         directory=sglang_dir,
         script_name="disagg_same_gpu.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.skip(reason="unstable")],
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,

@@ -13,7 +13,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 TEST_END_TO_END = os.environ.get("TEST_END_TO_END", 0)
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def test_register(runtime: DistributedRuntime):
     component = runtime.namespace("test").component("tensor")
     await component.create_service()

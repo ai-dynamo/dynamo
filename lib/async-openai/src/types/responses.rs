@@ -102,6 +102,8 @@ pub enum ContentType {
     InputImage(InputImage),
     /// A video input to the model.
     InputVideo(InputVideo),
+    /// An audio input to the model.
+    InputAudio(InputAudio),
     /// A file input to the model.
     InputFile(InputFile),
 }
@@ -149,6 +151,24 @@ pub struct InputVideo {
     /// in a data URL.
     #[serde(skip_serializing_if = "Option::is_none")]
     video_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[builder(
+    name = "InputAudioArgs",
+    pattern = "mutable",
+    setter(into, strip_option),
+    default
+)]
+#[builder(build_fn(error = "OpenAIError"))]
+pub struct InputAudio {
+    /// The ID of the file to be sent to the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_id: Option<String>,
+    /// The URL of the audio to be sent to the model. A fully qualified URL or base64 encoded audio
+    /// in a data URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]

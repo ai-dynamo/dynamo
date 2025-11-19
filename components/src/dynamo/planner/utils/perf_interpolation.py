@@ -247,7 +247,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile_results_dir", type=str, required=True)
+    parser.add_argument("--profile-results-dir", type=str, required=True)
     parser.add_argument("--isl", type=int, default=3000)
     parser.add_argument("--osl", type=int, default=150)
     parser.add_argument("--ttft", type=float, default=100.0, help="in milliseconds")

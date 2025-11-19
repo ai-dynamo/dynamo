@@ -39,7 +39,7 @@ import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
@@ -102,11 +102,13 @@ async def get_engine_runtime_config(
         return runtime_config
 
 
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
-    # Set up signal handler for graceful shutdown
-    loop = asyncio.get_running_loop()
+async def worker():
+    config = cmd_line_args()
 
+    loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
+
+    # Set up signal handler for graceful shutdown
     def signal_handler():
         # Schedule the shutdown coroutine instead of calling it directly
         asyncio.create_task(graceful_shutdown(runtime))
@@ -116,7 +118,6 @@ async def worker(runtime: DistributedRuntime):
 
     logging.info("Signal handlers set up for graceful shutdown")
 
-    config = cmd_line_args()
     await init(runtime, config)
 
 
@@ -241,6 +242,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     default_sampling_params = SamplingParams()
     default_sampling_params._setup(tokenizer)
     default_sampling_params.stop = None
+    # Enable perf metrics so prompt_tokens_details can be returned
+    if hasattr(default_sampling_params, "return_perf_metrics"):
+        default_sampling_params.return_perf_metrics = True
+
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode for unified frontend support
@@ -260,7 +265,6 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if modality == "multimodal":
         engine_args["skip_tokenizer_init"] = False
-        model_input = ModelInput.Text
         model_config = AutoConfig.from_pretrained(
             config.model_path, trust_remote_code=True
         )
@@ -331,12 +335,12 @@ async def init(runtime: DistributedRuntime, config: Config):
                 logging.info("TensorRT-LLM MetricsCollector initialized")
 
                 # Register callback to expose TRT-LLM metrics via Dynamo endpoint
-                # Filter out python_/process_ metrics and add trtllm: prefix to remaining metrics
+                # Filter out python_/process_ metrics and add trtllm_ prefix to remaining metrics
                 register_engine_metrics_callback(
                     endpoint=endpoint,
                     registry=REGISTRY,
                     exclude_prefixes=["python_", "process_"],
-                    add_prefix="trtllm:",
+                    add_prefix="trtllm_",
                 )
                 logging.info("TensorRT-LLM Prometheus metrics registered")
             except Exception as e:
@@ -356,6 +360,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             connector=connector,
             runtime=runtime,  # Pass runtime for graceful shutdown
             metrics_collector=metrics_collector,
+            kv_block_size=config.kv_block_size,
         )
 
         # Register the model with runtime config

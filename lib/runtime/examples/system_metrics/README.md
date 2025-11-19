@@ -180,7 +180,7 @@ if enable_custom_metrics {
 
 ```bash
 # Run the system metrics example
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 cargo run --bin system_server
+DYN_SYSTEM_PORT=8081 cargo run --bin system_server
 ```
 The server will start an system status server on the specified port (8081 in this example) that exposes the Prometheus metrics endpoint at `/metrics`.
 
@@ -189,7 +189,7 @@ To Run an actual LLM frontend + server (aggregated example), launch both of them
 ```
 python -m dynamo.frontend &
 
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching &
+DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching &
 ```
 Then make curl requests to the frontend (see the [main README](../../../../README.md))
 

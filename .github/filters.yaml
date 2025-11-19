@@ -35,7 +35,6 @@ vllm: &vllm
 
 sglang: &sglang
   - 'container/Dockerfile.sglang'
-  - 'container/Dockerfile.sglang-wideep'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
   - 'container/build.sh'

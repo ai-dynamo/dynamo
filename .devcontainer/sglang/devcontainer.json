@@ -8,7 +8,7 @@
         "SPDX-License-Identifier: Apache-2.0"
     ],
     "name": "Dynamo SGLANG Dev Container",
-    "remoteUser": "ubuntu", // Matches our container user
+    "remoteUser": "dynamo", // Matches our container user
     "updateRemoteUserUID": true, // Updates the UID of the remote user to match the host user, avoids permission errors
     "image": "dynamo:latest-sglang-local-dev", // Use the latest SGLANG dev image
     "runArgs": [
@@ -71,11 +71,11 @@
     },
     "mounts": [
         // These are for convenience, so that the history and pre-commit cache are persisted between sessions
-        "source=dynamo-bashhistory,target=/home/ubuntu/.commandhistory,type=volume",
-        "source=dynamo-precommit-cache,target=/home/ubuntu/.cache/pre-commit,type=volume",
+        "source=dynamo-bashhistory,target=/home/dynamo/.commandhistory,type=volume",
+        "source=dynamo-precommit-cache,target=/home/dynamo/.cache/pre-commit,type=volume",
         // Default mounts
         "source=/tmp/,target=/tmp/,type=bind"
         // Uncomment this to reuse your Hugging Face cache
-        //"source=${localEnv:HOME}/.cache/huggingface,target=/home/ubuntu/.cache/huggingface,type=bind"
+        //"source=${localEnv:HOME}/.cache/huggingface,target=/home/dynamo/.cache/huggingface,type=bind"
     ]
 }

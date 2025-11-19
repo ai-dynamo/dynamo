@@ -5,26 +5,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # Running DeepSeek-R1 Disaggregated with WideEP on GB200s
 
-Dynamo supports SGLang's GB200 implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://lmsys.org/blog/2025-06-16-gb200-part-1/) for more details. We provide a Dockerfile for this in `container/Dockerfile.sglang-wideep` and a sample configuration that demonstrates WideEP and P/D  disaggregation. To run the exact configuration shown in the blog post, you can view the commands created by the SGLang team [here](https://github.com/sgl-project/sglang/issues/7227). In this example, we will run 1 prefill worker on 2 GB200 nodes (4 GPUs each) and 1 decode worker on 2 GB200 nodes (total 8 GPUs).
+Dynamo supports SGLang's GB200 implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://lmsys.org/blog/2025-06-16-gb200-part-1/) for more details. We provide a sample configuration that demonstrates WideEP and P/D  disaggregation. To run the exact configuration shown in the blog post, you can view the commands created by the SGLang team [here](https://github.com/sgl-project/sglang/issues/7227). In this example, we will run 1 prefill worker on 2 GB200 nodes (4 GPUs each) and 1 decode worker on 2 GB200 nodes (total 8 GPUs).
 
 ## Instructions
 
-1. Build the Dynamo container using the latest published dynamo version and stable sglang version. If you want to build from a local dynamo repo, you can add `--build-arg BRANCH_TYPE=local` to the build command. If you want to build from a remote dynamo repo, you can add `--build-arg BRANCH_TYPE=remote` to the build command. If you want to use a specific tag for the default sglang version, you can add `--build-arg SGLANG_IMAGE_TAG=<tag>` to the build command.
+1. Build the Dynamo container for ARM64 (GB200) using the `build.sh` script.
 
 > [!Note]
-> Please ensure that you are building this on an ARM64 machine. The correct SGLang image will be selected automatically via the multi-arch manifest.
-
-> [!Note]
-> Please use `--build-arg SGLANG_IMAGE_TAG=nightly-dev-20251019-fda0cb2a` to build the container due to a bug that we found with the DeepEP version being installed. This was fixed in [PR 11773](https://github.com/sgl-project/sglang/pull/11773). When SGLang releases a version > `0.5.3.post3` we will update these instructions.
+> Please ensure that you are building this on an ARM64 machine. The build script will automatically configure the correct platform and build arguments for SGLang on ARM64/GB200.
 
 ```bash
 cd $DYNAMO_ROOT
-docker build \
-  -f container/Dockerfile.sglang-wideep \
-  -t dynamo-wideep-gb200 \
-  --build-arg SGLANG_IMAGE_TAG=nightly-dev-20251019-fda0cb2a \
-  --no-cache \
-  .
+./container/build.sh \
+  --framework SGLANG \
+  --platform linux/arm64 \
+  --tag dynamo-wideep-gb200:latest
 ```
 
 2. You can run this container on each 4xGB200 node using the following command.

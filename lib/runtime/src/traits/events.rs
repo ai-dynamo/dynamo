@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
-use crate::Result;
+use anyhow::Result;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 // #[async_trait]
 // pub trait Publisher: Debug + Clone + Send + Sync {

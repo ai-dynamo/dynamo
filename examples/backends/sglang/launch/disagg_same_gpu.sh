@@ -41,7 +41,7 @@ python3 -m dynamo.frontend --router-mode kv --http-port=8000 &
 DYNAMO_PID=$!
 
 # run prefill worker with metrics on port 8081
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=8081 \
 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
@@ -71,7 +71,7 @@ echo "Waiting for prefill worker to initialize..."
 sleep 5
 
 # run decode worker with metrics on port 8082 (foreground)
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8082 \
+DYN_SYSTEM_PORT=8082 \
 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \

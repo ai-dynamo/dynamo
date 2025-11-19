@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{Ok, Result};
+use dynamo_runtime::config::environment_names::model::huggingface as env_hf;
 
 use dynamo_llm::model_card::{ModelDeploymentCard, PromptContextMixin};
 use dynamo_llm::preprocessor::prompt::PromptFormatter;
@@ -39,7 +40,7 @@ use std::path::PathBuf;
 /// - Returns an error if `HF_TOKEN` environment variable is not set
 /// - Returns an error if `HF_TOKEN` environment variable is empty or whitespace-only
 fn get_hf_token() -> Result<String> {
-    let token = std::env::var("HF_TOKEN")
+    let token = std::env::var(env_hf::HF_TOKEN)
         .map_err(|_| anyhow::anyhow!("HF_TOKEN environment variable is not set"))?;
 
     if token.trim().is_empty() {

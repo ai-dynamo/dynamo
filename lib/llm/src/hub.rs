@@ -9,8 +9,7 @@ use modelexpress_client::{
 };
 use modelexpress_common::download as mx;
 
-/// Example: export MODEL_EXPRESS_URL=http://localhost:8001
-const MODEL_EXPRESS_ENDPOINT_ENV_VAR: &str = "MODEL_EXPRESS_URL";
+use dynamo_runtime::config::environment_names::model as env_model;
 
 /// Download a model using ModelExpress client. The client first requests for the model
 /// from the server and fallbacks to direct download in case of server failure.
@@ -21,7 +20,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     let model_name = name.display().to_string();
 
     let mut config: MxClientConfig = MxClientConfig::default();
-    if let Ok(endpoint) = env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR) {
+    if let Ok(endpoint) = env::var(env_model::model_express::MODEL_EXPRESS_URL) {
         config = config.with_endpoint(endpoint);
     }
 
@@ -92,17 +91,17 @@ async fn mx_download_direct(model_name: &str, ignore_weights: bool) -> anyhow::R
 fn get_model_express_cache_dir() -> PathBuf {
     // Check HF_HUB_CACHE environment variable
     // reference: https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables#hfhubcache
-    if let Ok(cache_path) = env::var("HF_HUB_CACHE") {
+    if let Ok(cache_path) = env::var(env_model::huggingface::HF_HUB_CACHE) {
         return PathBuf::from(cache_path);
     }
 
     // Check HF_HOME environment variable (standard Hugging Face cache directory)
     // reference: https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables#hfhome
-    if let Ok(hf_home) = env::var("HF_HOME") {
+    if let Ok(hf_home) = env::var(env_model::huggingface::HF_HOME) {
         return PathBuf::from(hf_home).join("hub");
     }
 
-    if let Ok(cache_path) = env::var("MODEL_EXPRESS_CACHE_PATH") {
+    if let Ok(cache_path) = env::var(env_model::model_express::MODEL_EXPRESS_CACHE_PATH) {
         return PathBuf::from(cache_path);
     }
 
@@ -136,14 +135,14 @@ mod tests {
         // Test that HF_HOME is respected when set
         unsafe {
             // Clear other cache env vars to ensure HF_HOME is tested
-            env::remove_var("HF_HUB_CACHE");
-            env::remove_var("MODEL_EXPRESS_CACHE_PATH");
-            env::set_var("HF_HOME", "/custom/cache/path");
+            env::remove_var(env_model::huggingface::HF_HUB_CACHE);
+            env::remove_var(env_model::model_express::MODEL_EXPRESS_CACHE_PATH);
+            env::set_var(env_model::huggingface::HF_HOME, "/custom/cache/path");
             let cache_dir = get_model_express_cache_dir();
             assert_eq!(cache_dir, PathBuf::from("/custom/cache/path/hub"));
 
             // Clean up
-            env::remove_var("HF_HOME");
+            env::remove_var(env_model::huggingface::HF_HOME);
         }
     }
 }

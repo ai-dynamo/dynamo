@@ -4,7 +4,6 @@
 import json
 import logging
 import re
-from typing import Literal
 
 import yaml
 
@@ -24,6 +23,7 @@ from benchmarks.profiler.utils.config import (
 from benchmarks.profiler.utils.defaults import (
     DEFAULT_MODEL_NAME,
     DYNAMO_RUN_DEFAULT_PORT,
+    EngineType,
 )
 from dynamo.planner.defaults import SubComponentType
 
@@ -84,7 +84,7 @@ class TrtllmConfigModifier:
     def convert_config(
         cls,
         config: dict,
-        target: Literal["prefill", "decode"],
+        target: EngineType,
         is_moe_model: bool = False,
     ) -> dict:
         if is_moe_model:
@@ -101,7 +101,7 @@ class TrtllmConfigModifier:
         if "Planner" in cfg.spec.services:
             del cfg.spec.services["Planner"]
 
-        if target == "prefill":
+        if target == EngineType.PREFILL:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "trtllm", SubComponentType.PREFILL
@@ -157,7 +157,7 @@ class TrtllmConfigModifier:
 
             worker_service.extraPodSpec.mainContainer.args = args
 
-        elif target == "decode":
+        elif target == EngineType.DECODE:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "trtllm", SubComponentType.PREFILL
@@ -347,3 +347,30 @@ class TrtllmConfigModifier:
             "Could not find KV cache size in TRT-LLM logs, using default value of 100000"
         )
         return 100000  # Default fallback value for TRT-LLM
+
+    @classmethod
+    def set_prefill_config(
+        cls, config: dict, max_batch_size: int, max_num_tokens: int
+    ) -> dict:
+        """
+        Configure prefill-related limits for aggregated prefill runs.
+        For TRT-LLM we set these via --override-engine-args JSON:
+        - max_batch_size
+        - max_num_tokens
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="trtllm", sub_component_type=SubComponentType.DECODE
+        )
+        args = validate_and_get_worker_args(worker_service, backend="trtllm")
+        args = break_arguments(args)
+
+        # Parse existing override-engine-args (if any) and update
+        override_dict, args = parse_override_engine_args(args)
+        override_dict["max_batch_size"] = int(max_batch_size)
+        override_dict["max_num_tokens"] = int(max_num_tokens)
+        override_str = json.dumps(override_dict)
+        args = append_argument(args, ["--override-engine-args", override_str])
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()

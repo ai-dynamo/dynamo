@@ -130,7 +130,7 @@ Example 4: Multiple component in a pipeline.
 
 In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.generate` (possibly multiple instances of this) and `deepseek-distill-llama8b.decode.generate`.
 
-For output it is always only `out=auto`. This tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on `--router-mode` flag). The exception is static workers, see that section.
+For output it is always only `out=auto`. This tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on `--router-mode` flag).
 
 ### KV-aware routing
 
@@ -333,7 +333,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 
    # 1. Decorate a function to get the runtime
    #
-   @dynamo_worker(static=False)
+   @dynamo_worker()
    async def worker(runtime: DistributedRuntime):
 
     # 2. Register ourselves on the network

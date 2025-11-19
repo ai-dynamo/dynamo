@@ -89,8 +89,8 @@ fn parse_sinks_from_env(
 }
 
 /// spawn one worker per sink; each subscribes to the bus (off hot path)
-pub fn spawn_workers_from_env(drt: Option<&dynamo_runtime::DistributedRuntime>) {
-    let nats_client = drt.and_then(|d| d.nats_client());
+pub fn spawn_workers_from_env(drt: &dynamo_runtime::DistributedRuntime) {
+    let nats_client = drt.nats_client();
     let sinks = parse_sinks_from_env(nats_client);
     for sink in sinks {
         let name = sink.name();

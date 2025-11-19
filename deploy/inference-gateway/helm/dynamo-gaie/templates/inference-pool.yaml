@@ -21,7 +21,7 @@ spec:
   targetPortNumber: {{ .Values.inferencePool.port }}
   selector:
     nvidia.com/dynamo-component: Frontend
-    nvidia.com/dynamo-namespace: {{ .Values.dynamoNamespace }}
+    nvidia.com/dynamo-namespace: {{ include "dynamo-gaie.dynamoNamespace" . }}
   extensionRef:
     failureMode: FailOpen
     group: ""

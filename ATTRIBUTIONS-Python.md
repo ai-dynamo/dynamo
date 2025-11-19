@@ -441,7 +441,7 @@ License: `Apache`
   - `Homepage`: https://github.com/huggingface/accelerate
 
 
-## aiconfigurator (0.2.0)
+## aiconfigurator (0.4.0)
 
 ### Licenses
 License: `Apache-2.0`

@@ -78,7 +78,7 @@ class KubernetesMonitor:
             "-n",
             self.namespace,
             "--selector",
-            f"nvidia.com/dynamo-namespace={self.deployment_name}",
+            f"nvidia.com/dynamo-namespace={self.namespace}-{self.deployment_name}",
             "-o",
             "json",
         ]

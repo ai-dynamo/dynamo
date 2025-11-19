@@ -277,6 +277,9 @@ async fn test_http_service() {
     let cancel_token = token.clone();
     let task = tokio::spawn(async move { service.run(token.clone()).await });
 
+    // Wait for the service to be ready before proceeding
+    wait_for_service_ready(port).await;
+
     let registry = Registry::new();
 
     // TODO: Shouldn't this test know the card before it registers a model?

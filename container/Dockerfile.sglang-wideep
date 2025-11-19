@@ -12,6 +12,9 @@ FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
 
 WORKDIR /sgl-workspace
 
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
 # Install jq for JSON processing
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

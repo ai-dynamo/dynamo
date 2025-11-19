@@ -113,6 +113,9 @@ pub mod frontend_service {
     /// Output sequence length in tokens
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "output_sequence_tokens";
 
+    /// Total number of output tokens generated (counter that updates in real-time)
+    pub const OUTPUT_TOKENS_TOTAL: &str = "output_tokens_total";
+
     /// Time to first token in seconds
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "time_to_first_token_seconds";
 

@@ -20,7 +20,6 @@ metadata:
   name: epp-config
   labels:
     app.kubernetes.io/name: dynamo-gaie
-    app.kubernetes.io/instance: llama3-70b-agg
 data:
   epp-config-dynamo.yaml: |
     apiVersion: inference.networking.x-k8s.io/v1alpha1

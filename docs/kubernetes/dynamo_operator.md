@@ -12,6 +12,7 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 - **Controllers:**
   - `DynamoGraphDeploymentController`: Watches `DynamoGraphDeployment` CRs and orchestrates graph deployments.
   - `DynamoComponentDeploymentController`: Watches `DynamoComponentDeployment` CRs and handles individual component deployments.
+  - `DynamoModelController`: Watches `DynamoModel` CRs and manages model lifecycle (e.g., loading LoRA adapters).
 
 - **Workflow:**
   1. A custom resource is created by the user or API server.
@@ -100,9 +101,19 @@ kubectl get lease -n my-namespace dynamo-operator-namespace-scope \
 
 ## Custom Resource Definitions (CRDs)
 
+Dynamo provides the following Custom Resources:
+
+- **DynamoGraphDeployment (DGD)**: Deploys complete inference pipelines
+- **DynamoComponentDeployment (DCD)**: Deploys individual components
+- **DynamoModel**: Manages model lifecycle (e.g., loading LoRA adapters)
+
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
 **📖 [Dynamo CRD API Reference](./api_reference.md)**
+
+For a user-focused guide on deploying and managing models with DynamoModel, see:
+
+**📖 [Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
 
 ## Installation
 

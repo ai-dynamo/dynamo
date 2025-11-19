@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{ErrorContext, Result, error};
+use anyhow::{Context, Result};
 use etcd_client::ConnectOptions;
 use parking_lot::RwLock;
 use std::{sync::Arc, time::Duration};
@@ -76,9 +76,7 @@ impl Connector {
         loop {
             backoff_state.apply_backoff(deadline).await;
             if std::time::Instant::now() >= deadline {
-                return Err(error!(
-                    "Unable to reconnect to ETCD cluster: deadline exceeded"
-                ));
+                anyhow::bail!("Unable to reconnect to ETCD cluster: deadline exceeded");
             }
 
             match Self::connect(&self.etcd_urls, &self.connect_options).await {

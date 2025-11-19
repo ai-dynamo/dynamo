@@ -66,29 +66,47 @@ spec:
         - -m
         - dynamo.frontend
         {{- end }}
-        {{ if $serviceSpec.resources }}
+        {{- if $serviceSpec.resources }}
+        {{- $hasResources := false }}
+        {{- if or $serviceSpec.resources.requests $serviceSpec.resources.limits }}
+        {{- $hasResources = true }}
+        {{- end }}
+        {{- if $hasResources }}
         resources:
+          {{- if $serviceSpec.resources.requests }}
+          {{- $requestsGpuResourceName := "nvidia.com/gpu" }}
+          {{- if $serviceSpec.resources.requests.gpuType }}
+          {{- $requestsGpuResourceName = $serviceSpec.resources.requests.gpuType }}
+          {{- end }}
           requests:
-            {{ if $serviceSpec.resources.cpu }}
-            cpu: "{{ $serviceSpec.resources.cpu }}"
-            {{ end }}
-            {{ if $serviceSpec.resources.memory }}
-            memory: "{{ $serviceSpec.resources.memory }}"
-            {{ end }}
-            {{ if $serviceSpec.resources.gpu }}
-            nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
-            {{ end }}
+            {{- if $serviceSpec.resources.requests.cpu }}
+            cpu: "{{ $serviceSpec.resources.requests.cpu }}"
+            {{- end }}
+            {{- if $serviceSpec.resources.requests.memory }}
+            memory: "{{ $serviceSpec.resources.requests.memory }}"
+            {{- end }}
+            {{- if $serviceSpec.resources.requests.gpu }}
+            {{ $requestsGpuResourceName }}: "{{ $serviceSpec.resources.requests.gpu }}"
+            {{- end }}
+          {{- end }}
+          {{- if $serviceSpec.resources.limits }}
+          {{- $limitsGpuResourceName := "nvidia.com/gpu" }}
+          {{- if $serviceSpec.resources.limits.gpuType }}
+          {{- $limitsGpuResourceName = $serviceSpec.resources.limits.gpuType }}
+          {{- end }}
           limits:
-            {{ if $serviceSpec.resources.cpu }}
-            cpu: "{{ $serviceSpec.resources.cpu }}"
-            {{ end }}
-            {{ if $serviceSpec.resources.memory }}
-            memory: "{{ $serviceSpec.resources.memory }}"
-            {{ end }}
-            {{ if $serviceSpec.resources.gpu }}
-            nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
-            {{ end }}
-        {{ end }}
+            {{- if $serviceSpec.resources.limits.cpu }}
+            cpu: "{{ $serviceSpec.resources.limits.cpu }}"
+            {{- end }}
+            {{- if $serviceSpec.resources.limits.memory }}
+            memory: "{{ $serviceSpec.resources.limits.memory }}"
+            {{- end }}
+            {{- if $serviceSpec.resources.limits.gpu }}
+            {{ $limitsGpuResourceName }}: "{{ $serviceSpec.resources.limits.gpu }}"
+            {{- end }}
+          {{- end }}
+        {{- end }}
+        {{- end }}
         {{- if $serviceSpec.envFromSecret }}
         envFrom:
         - secretRef:

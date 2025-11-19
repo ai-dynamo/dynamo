@@ -33,7 +33,7 @@ class RequestType(BaseModel):
     text: str
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def init_planner(runtime: DistributedRuntime, args):
     await asyncio.sleep(INIT_PLANNER_START_DELAY)
 

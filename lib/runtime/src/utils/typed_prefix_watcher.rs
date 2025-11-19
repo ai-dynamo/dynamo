@@ -6,8 +6,8 @@
 //! This module provides reusable patterns for watching etcd prefixes and maintaining
 //! HashMap-based state that automatically updates based on etcd events.
 
-use crate::Result;
 use crate::transports::etcd::{Client as EtcdClient, WatchEvent};
+use anyhow::Result;
 use etcd_client::KeyValue;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;

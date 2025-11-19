@@ -4,6 +4,7 @@
 use std::env;
 
 use clap::{CommandFactory as _, Parser};
+use dynamo_runtime::config::environment_names::logging as env_logging;
 
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_run::Output;
@@ -25,7 +26,7 @@ Example:
 See `docs/guides/dynamo_run.md` in the repo for full details.
 "#;
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|grpc|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|auto|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--context-length=N] [--kv-cache-block-size=16] [--extra-engine-args=args.json] [--static-worker] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--router-temperature=0.0] [--use-kv-events] [--max-num-batched-tokens=1.0] [--migration-limit=0] [--verbosity (-v|-vv)]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|grpc|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|auto|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--context-length=N] [--kv-cache-block-size=16] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--router-temperature=0.0] [--use-kv-events] [--max-num-batched-tokens=1.0] [--migration-limit=0] [--verbosity (-v|-vv)]";
 
 fn main() -> anyhow::Result<()> {
     // Set log level based on verbosity flag
@@ -44,7 +45,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     if log_level != "info" {
-        unsafe { std::env::set_var("DYN_LOG", log_level) };
+        unsafe { std::env::set_var(env_logging::DYN_LOG, log_level) };
     }
 
     logging::init();
@@ -138,5 +139,5 @@ fn is_in_dynamic(in_opt: &Input) -> bool {
 }
 
 fn is_out_dynamic(out_opt: &Option<Output>) -> bool {
-    matches!(out_opt, Some(Output::Auto) | Some(Output::Static(_)))
+    matches!(out_opt, Some(Output::Auto))
 }

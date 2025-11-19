@@ -4,10 +4,10 @@ This recipe is for running DeepSeek R1 with SGLang in disaggregated mode. It is 
 
 ## Container
 
-Use the Dockerfile in `container/Dockerfile.sglang-wideep` to build the container, or
+Build the container using the `build.sh` script:
 
 ```bash
-./container/build.sh --framework sglang-wideep
+./container/build.sh --framework SGLANG
 ```
 
 Dynamo commits after `1b3eed4b6a0e735d4ecec6681f4c0b89f2112167` (Sep 18, 2025) are required.

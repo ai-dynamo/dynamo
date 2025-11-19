@@ -13,7 +13,9 @@ SGLang allows you to deploy multi-node sized models by adding in the `dist-init-
 
 ```bash
 cd $DYNAMO_ROOT
-docker build -f container/Dockerfile.sglang-wideep . -t dynamo-wideep --no-cache
+./container/build.sh \
+  --framework SGLANG \
+  --tag dynamo-wideep:latest \
 ```
 
 You can use a specific tag from the [lmsys dockerhub](https://hub.docker.com/r/lmsysorg/sglang/tags) by adding `--build-arg SGLANG_IMAGE_TAG=<tag>` to the build command.

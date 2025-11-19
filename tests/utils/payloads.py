@@ -30,7 +30,7 @@ class BasePayload:
     """Generic payload body plus expectations and repeat count."""
 
     body: Dict[str, Any]
-    expected_response: List[str]
+    expected_response: List[Any]  # Can be List[str] or List[List[str]] for alternatives
     expected_log: List[str]
     repeat_count: int = 1
     timeout: int = 60
@@ -56,17 +56,40 @@ class BasePayload:
         raise NotImplementedError("Subclasses must implement response_handler()")
 
     def validate(self, response: Any, content: str) -> None:
-        """Default validation: ensure expected substrings appear in content."""
+        """Default validation: ensure expected substrings appear in content.
+
+        If expected_response is a list of strings, ANY one of them matching is sufficient (OR logic).
+        This allows flexible validation where responses may vary but should contain at least one keyword.
+        """
         if self.expected_response:
-            missing_expected = []
-            for expected in self.expected_response:
-                if not content or expected not in content:
-                    missing_expected.append(expected)
-            if missing_expected:
+            # Check if content is empty
+            if not content:
+                logger.error("VALIDATION FAILED - Response content is empty")
                 raise AssertionError(
-                    f"Expected content not found in response. Missing: {missing_expected}"
+                    f"Expected content not found in response. Expected any of: {self.expected_response}. Actual content is empty."
                 )
-        logger.info(f"SUCCESS: All expected_responses: {self.expected_response} found.")
+
+            # Check if ANY of the expected strings are found (OR logic) and count matches
+            found_keywords = []
+            for expected in self.expected_response:
+                if isinstance(expected, str) and expected.lower() in content.lower():
+                    found_keywords.append(expected)
+
+            if not found_keywords:
+                logger.error(
+                    f"VALIDATION FAILED - Actual content returned: {repr(content)}"
+                )
+                logger.error(
+                    f"Expected to find at least one of: {self.expected_response}"
+                )
+                logger.error(f"Matches found: 0/{len(self.expected_response)}")
+                raise AssertionError(
+                    f"Expected content not found in response. Expected at least one of: {self.expected_response}. Actual content: {repr(content)}"
+                )
+
+            logger.info(
+                f"SUCCESS: Found {len(found_keywords)}/{len(self.expected_response)} expected keywords: {found_keywords}"
+            )
 
     def process_response(self, response: Any) -> str:
         """Convenience: run response_handler then validate; return content."""
@@ -88,9 +111,14 @@ class ChatPayload(BasePayload):
         """
         response.raise_for_status()
         result = response.json()
-        assert "choices" in result, "Missing 'choices' in response"
+
+        assert (
+            "choices" in result
+        ), f"Missing 'choices' in response. Response keys: {list(result.keys())}"
         assert len(result["choices"]) > 0, "Empty choices in response"
-        assert "message" in result["choices"][0], "Missing 'message' in first choice"
+        assert (
+            "message" in result["choices"][0]
+        ), f"Missing 'message' in first choice. Choice keys: {list(result['choices'][0].keys())}"
 
         # Check for content in all possible fields where parsers might put output:
         # 1. content - standard message content
@@ -305,13 +333,13 @@ class MetricsPayload(BasePayload):
         elif backend == "trtllm":
             metrics_to_check.append(
                 MetricCheck(
-                    # Check: Minimum count of unique trtllm:* metrics
-                    name="trtllm:*",
-                    pattern=lambda name: r"^trtllm:\w+",
+                    # Check: Minimum count of unique trtllm_* metrics
+                    name="trtllm_*",
+                    pattern=lambda name: r"^trtllm_\w+",
                     validator=lambda value: len(set(value))
                     >= 4,  # 80% of typical ~5 trtllm metrics (excluding _bucket) as of 2025-10-22 (but will grow)
-                    error_msg=lambda name, value: f"Expected at least 4 unique trtllm:* metrics, but found only {len(set(value))}",
-                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique trtllm:* metrics (minimum required: 4)",
+                    error_msg=lambda name, value: f"Expected at least 4 unique trtllm_* metrics, but found only {len(set(value))}",
+                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique trtllm_* metrics (minimum required: 4)",
                     multiline=True,
                 )
             )

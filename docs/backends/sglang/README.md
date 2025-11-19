@@ -135,11 +135,9 @@ We are in the process of shipping pre-built docker containers that contain insta
 
 ```bash
 cd $DYNAMO_ROOT
-docker build \
-  -f container/Dockerfile.sglang-wideep \
-  -t dynamo-sglang \
-  --no-cache \
-  .
+./container/build.sh \
+  --framework SGLANG \
+  --tag dynamo-sglang:latest \
 ```
 
 And then run it using

@@ -6,6 +6,7 @@
 import logging
 import os
 import shutil
+import tempfile
 
 import numpy as np
 import pytest
@@ -22,8 +23,13 @@ class DynamoFrontendProcess(ManagedProcess):
         log_dir = f"{request.node.name}_frontend"
         shutil.rmtree(log_dir, ignore_errors=True)
 
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
+        env = os.environ.copy()
+        env.pop("DYN_SYSTEM_PORT", None)
+
         super().__init__(
             command=command,
+            env=env,
             display_output=True,
             terminate_existing=True,
             log_dir=log_dir,
@@ -39,7 +45,6 @@ class EchoTensorWorkerProcess(ManagedProcess):
 
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = "8083"
 
@@ -86,6 +91,25 @@ def extract_params(param_map) -> dict:
     return result
 
 
+@pytest.fixture
+def file_storage_backend():
+    """Fixture that sets up and tears down file storage backend.
+
+    Creates a temporary directory for file-based KV storage and sets
+    the DYN_FILE_KV environment variable. Cleans up after the test.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        old_env = os.environ.get("DYN_FILE_KV")
+        os.environ["DYN_FILE_KV"] = tmpdir
+        logger.info(f"Set up file storage backend in: {tmpdir}")
+        yield tmpdir
+        # Cleanup
+        if old_env is not None:
+            os.environ["DYN_FILE_KV"] = old_env
+        else:
+            os.environ.pop("DYN_FILE_KV", None)
+
+
 @pytest.mark.e2e
 @pytest.mark.pre_merge
 @pytest.mark.parametrize(
@@ -97,7 +121,7 @@ def extract_params(param_map) -> dict:
     ],
     ids=["no_params", "numeric_param", "mixed_params"],
 )
-def test_request_parameters(start_services, request_params):
+def test_request_parameters(file_storage_backend, start_services, request_params):
     """Test gRPC request-level parameters are echoed through tensor models.
 
     The worker acts as an identity function: echoes input tensors unchanged and

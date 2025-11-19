@@ -10,7 +10,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -20,5 +20,6 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [workspace.dependencies]
 # local or crates.io
+anyhow = "1"
 dynamo-runtime = { path = "../" }
 prometheus = { version = "0.14" }

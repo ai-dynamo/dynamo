@@ -54,17 +54,22 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
-        docker run --runtime=nvidia --rm --gpus all -w /workspace \
+        docker run --runtime=nvidia --gpus all -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
-          -v "$(pwd)/test-results:/test-results" \
           ${{ inputs.image_tag }} \
-          bash -c "pytest -v --tb=short --basetemp=/tmp --junitxml=/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+        # Copy test results from container to host
+        docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/test-results . || echo "Failed to copy test results"
+
+        # Clean up container
+        docker rm -f ${{ env.CONTAINER_ID }}_pytest || echo "Failed to clean up container"
 
         # Always continue to results processing
         exit 0

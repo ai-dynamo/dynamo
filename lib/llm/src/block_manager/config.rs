@@ -3,6 +3,8 @@
 
 use super::events::EventManager;
 use super::*;
+use dynamo_runtime::config::environment_names::kvbm::cpu_cache as env_cpu_cache;
+use dynamo_runtime::config::environment_names::kvbm::disk_cache as env_disk_cache;
 use prometheus::Registry;
 
 #[derive(Debug, Clone)]
@@ -229,26 +231,28 @@ impl KvBlockManagerConfig {
 /// - AND CPU cache env vars are NOT set (`DYN_KVBM_CPU_CACHE_GB` or `DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS`)
 ///   OR their values are zero (treated as not set)
 pub fn should_bypass_cpu_cache() -> bool {
-    let cpu_cache_gb_set = std::env::var("DYN_KVBM_CPU_CACHE_GB")
+    let cpu_cache_gb_set = std::env::var(env_cpu_cache::DYN_KVBM_CPU_CACHE_GB)
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map(|v| v > 0)
         .unwrap_or(false);
-    let cpu_cache_override_set = std::env::var("DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .map(|v| v > 0)
-        .unwrap_or(false);
-    let disk_cache_gb_set = std::env::var("DYN_KVBM_DISK_CACHE_GB")
+    let cpu_cache_override_set =
+        std::env::var(env_cpu_cache::DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS)
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|v| v > 0)
+            .unwrap_or(false);
+    let disk_cache_gb_set = std::env::var(env_disk_cache::DYN_KVBM_DISK_CACHE_GB)
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map(|v| v > 0)
         .unwrap_or(false);
-    let disk_cache_override_set = std::env::var("DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .map(|v| v > 0)
-        .unwrap_or(false);
+    let disk_cache_override_set =
+        std::env::var(env_disk_cache::DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS)
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|v| v > 0)
+            .unwrap_or(false);
 
     let cpu_cache_set = cpu_cache_gb_set || cpu_cache_override_set;
     let disk_cache_set = disk_cache_gb_set || disk_cache_override_set;

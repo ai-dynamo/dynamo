@@ -364,12 +364,15 @@ kubectl apply -f benchmarks/incluster/benchmark_job.yaml -n $NAMESPACE
 
 ### Step 3: Retrieve Results
 ```bash
-# Download results from PVC (recommended)
-python3 -m deploy.utils.download_pvc_results \
-  --namespace $NAMESPACE \
-  --output-dir ./benchmarks/results/<benchmark-name> \
-  --folder /data/results/<benchmark-name> \
-  --no-config
+# Create access pod (skip this step if access pod is already running)
+kubectl apply -f deploy/utils/manifests/pvc-access-pod.yaml -n $NAMESPACE
+kubectl wait --for=condition=Ready pod/pvc-access-pod -n $NAMESPACE --timeout=60s
+
+# Download the results
+kubectl cp $NAMESPACE/pvc-access-pod:/data/results/<benchmark-name> ./benchmarks/results/<benchmark-name>
+
+# Cleanup
+kubectl delete pod pvc-access-pod -n $NAMESPACE
 ```
 
 ### Step 4: Generate Plots

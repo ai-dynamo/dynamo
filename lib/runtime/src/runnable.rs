@@ -11,7 +11,7 @@ use std::{
     task::{Context, Poll},
 };
 
-pub use crate::{Error, Result};
+pub use anyhow::{Error, Result};
 pub use async_trait::async_trait;
 pub use tokio::task::JoinHandle;
 pub use tokio_util::sync::CancellationToken;

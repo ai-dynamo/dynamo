@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Observability stack for Dynamo: metrics, tracing, and visualization.
+# Requires deploy/docker-compose.yml to be running for NATS and etcd connectivity.
+#
+# Usage:
+#   docker compose -f deploy/docker-observability.yml up -d
+
+version: '3.8'
+
+networks:
+  server:
+    external: true
+    name: deploy_server
+
+volumes:
+  grafana-data:
+  tempo-data:
+
+services:
+  # DCGM stands for Data Center GPU Manager: https://developer.nvidia.com/dcgm
+  # dcgm-exporter is a tool from NVIDIA that exposes DCGM metrics in Prometheus format.
+  dcgm-exporter:
+    image: nvidia/dcgm-exporter:4.2.3-4.1.3-ubi9
+    ports:
+      # Expose dcgm-exporter on port 9401 both inside and outside the container
+      # to avoid conflicts with other dcgm-exporter instances in distributed environments.
+      # To access DCGM metrics:
+      # Outside the container: curl http://localhost:9401/metrics (or the host IP)
+      # Inside the container (container-to-container): curl http://dcgm-exporter:9401/metrics
+      - 9401:9401
+    cap_add:
+      - SYS_ADMIN
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      # dcgm uses NVIDIA_VISIBLE_DEVICES variable but normally it is CUDA_VISIBLE_DEVICES
+      - NVIDIA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-all}
+      - DCGM_EXPORTER_LISTEN=:9401
+    runtime: nvidia  # Specify the NVIDIA runtime
+    networks:
+      - server
+
+  # The exporter translates from /varz and other stats to Prometheus metrics
+  nats-prometheus-exporter:
+    image: natsio/prometheus-nats-exporter:0.17.3
+    command: ["-varz", "-connz", "-routez", "-subz", "-gatewayz", "-leafz", "-jsz=all", "http://nats-server:8222"]
+    ports:
+      - 7777:7777
+    networks:
+      - server
+
+  # To access Prometheus from another machine, you may need to disable te firewall on your host. On Ubuntu:
+  # sudo ufw allow 9090/tcp
+  prometheus:
+    image: prom/prometheus:v3.4.1
+    container_name: prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      # These provide the web console functionality
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    # Example to pull from the /query endpoint:
+    # {__name__=~"DCGM.*", job="dcgm-exporter"}
+    ports:
+      - "9090:9090"
+    networks:
+      - server
+    extra_hosts:
+    - "host.docker.internal:host-gateway"
+    depends_on:
+      - dcgm-exporter
+      - nats-prometheus-exporter
+
+  # Tempo - Distributed tracing backend
+  tempo:
+    image: grafana/tempo:2.8.2
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    user: root
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo.yaml
+      - tempo-data:/tmp/tempo
+    ports:
+      - "3200:3200"   # Tempo HTTP
+      - "4317:4317"   # OTLP gRPC receiver (accessible from host)
+      - "4318:4318"   # OTLP HTTP receiver (accessible from host)
+    networks:
+      - server
+
+  # Grafana - Visualization and dashboards
+  # Supports both Prometheus (metrics) and Tempo (tracing) datasources
+  # Default credentials: dynamo/dynamo
+  # To access Grafana from another machine, you may need to disable te firewall on your host. On Ubuntu:
+  # sudo ufw allow 3000/tcp
+  grafana:
+    image: grafana/grafana:12.2.0
+    container_name: grafana
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana_dashboards:/etc/grafana/provisioning/dashboards
+      - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/prometheus.yml
+      - ./observability/tempo-datasource.yml:/etc/grafana/provisioning/datasources/tempo.yml
+    environment:
+      - GF_SERVER_HTTP_PORT=3000
+      # do not make it admin/admin, because you will be prompted to change the password every time
+      - GF_SECURITY_ADMIN_USER=dynamo
+      - GF_SECURITY_ADMIN_PASSWORD=dynamo
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+      # Default min interval is 5s, but can be configured lower
+      - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=2s
+      # Disable password change requirement
+      - GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION=false
+      - GF_SECURITY_ADMIN_PASSWORD_POLICY=false
+      - GF_AUTH_DISABLE_LOGIN_FORM=false
+      - GF_AUTH_DISABLE_SIGNOUT_MENU=false
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    networks:
+      - server
+    depends_on:
+      - prometheus
+      - tempo
+

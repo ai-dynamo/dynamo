@@ -93,7 +93,7 @@ class RequestHandler:
             count = next_count
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     await init(runtime, cmd_line_args())
 

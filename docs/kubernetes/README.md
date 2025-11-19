@@ -203,7 +203,7 @@ args:
   - python3 -m dynamo.trtllm
     --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
     --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-    --extra-engine-args /workspace/recipes/deepseek-r1-distill-llama-8b/agg.yaml
+    --extra-engine-args /workspace/examples/backends/trtllm/engine_configs/deepseek-r1-distill-llama-8b/agg.yaml
 ```
 
 Key customization points include:
@@ -217,6 +217,7 @@ Key customization points include:
 
 - **[Examples](../examples/README.md)** - Complete working examples
 - **[Create Custom Deployments](./deployment/create_deployment.md)** - Build your own CRDs
+- **[Managing Models with DynamoModel](./deployment/dynamomodel-guide.md)** - Deploy LoRA adapters and manage models
 - **[Operator Documentation](./dynamo_operator.md)** - How the platform works
 - **[Helm Charts](../../deploy/helm/README.md)** - For advanced users
 - **[GitOps Deployment with FluxCD](./fluxcd.md)** - For advanced users

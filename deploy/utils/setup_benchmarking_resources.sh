@@ -70,9 +70,9 @@ log "Applying benchmarking manifests to namespace $NAMESPACE"
 export NAMESPACE  # ensure envsubst can see it
 for mf in "$(dirname "$0")/manifests"/*.yaml; do
   if [[ -f "$mf" ]]; then
-    # Skip pvc-access-pod.yaml as it's managed by inject_manifest.py
+    # Skip pvc-access-pod.yaml as it's created on-demand by users
     if [[ "$(basename "$mf")" == "pvc-access-pod.yaml" ]]; then
-      log "Skipping $mf (managed by inject_manifest.py)"
+      log "Skipping $mf (created on-demand when accessing PVC)"
       continue
     fi
 

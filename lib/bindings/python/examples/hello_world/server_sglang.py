@@ -80,7 +80,7 @@ class RequestHandler:
             num_output_tokens_so_far = next_total_toks
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     await init(runtime, cmd_line_args())
 

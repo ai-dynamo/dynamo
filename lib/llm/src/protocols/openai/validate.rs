@@ -66,6 +66,9 @@ pub const MAX_N: u8 = 128;
 /// Allowed range of values for `n` (number of choices)
 pub const N_RANGE: (u8, u8) = (MIN_N, MAX_N);
 
+/// Maximum allowed total number of choices (batch_size × n)
+pub const MAX_TOTAL_CHOICES: usize = 128;
+
 /// Minimum allowed value for OpenAI's `logit_bias` values
 pub const MIN_LOGIT_BIAS: f32 = -100.0;
 /// Maximum allowed value for OpenAI's `logit_bias` values
@@ -257,6 +260,21 @@ pub fn validate_n(n: Option<u8>) -> Result<(), anyhow::Error> {
         && !(MIN_N..=MAX_N).contains(&value)
     {
         anyhow::bail!("n must be between {} and {}, got {}", MIN_N, MAX_N, value);
+    }
+    Ok(())
+}
+
+/// Validates total choices (batch_size × n) doesn't exceed maximum
+pub fn validate_total_choices(batch_size: usize, n: u8) -> Result<(), anyhow::Error> {
+    let total_choices = batch_size * (n as usize);
+    if total_choices > MAX_TOTAL_CHOICES {
+        anyhow::bail!(
+            "Total choices (batch_size × n = {} × {} = {}) exceeds maximum of {}",
+            batch_size,
+            n,
+            total_choices,
+            MAX_TOTAL_CHOICES
+        );
     }
     Ok(())
 }

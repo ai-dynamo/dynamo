@@ -11,7 +11,41 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Parse command line arguments
+ENABLE_OTEL=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --enable-otel)
+            ENABLE_OTEL=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "Options:"
+            echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  -h, --help           Show this help message"
+            echo ""
+            echo "Note: System metrics are enabled by default on ports:"
+            echo "  8081 (router), 8082-8083 (prefill workers), 8084-8085 (decode workers)"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+# Enable tracing if requested
+if [ "$ENABLE_OTEL" = true ]; then
+    export DYN_LOGGING_JSONL=true
+    export OTEL_EXPORT_ENABLED=1
+    export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
+fi
+
 # run ingress
+OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend \
  --http-port=8000 \
  --router-mode kv \
@@ -20,6 +54,7 @@ python3 -m dynamo.frontend \
 DYNAMO_PID=$!
 
 # run prefill router
+OTEL_SERVICE_NAME=dynamo-router-prefill DYN_SYSTEM_PORT=8081 \
 python3 -m dynamo.router \
   --endpoint dynamo.prefill.generate \
   --block-size 64 \
@@ -28,6 +63,7 @@ python3 -m dynamo.router \
 PREFILL_ROUTER_PID=$!
 
 # run prefill worker
+OTEL_SERVICE_NAME=dynamo-worker-prefill-1 DYN_SYSTEM_PORT=8082 \
 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -37,10 +73,12 @@ python3 -m dynamo.sglang \
   --disaggregation-mode prefill \
   --host 0.0.0.0 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
-  --disaggregation-transfer-backend nixl &
+  --disaggregation-transfer-backend nixl \
+  --enable-metrics &
 PREFILL_PID=$!
 
 # run prefill worker
+OTEL_SERVICE_NAME=dynamo-worker-prefill-2 DYN_SYSTEM_PORT=8083 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -50,10 +88,12 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --disaggregation-mode prefill \
   --host 0.0.0.0 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558"}' \
-  --disaggregation-transfer-backend nixl &
+  --disaggregation-transfer-backend nixl \
+  --enable-metrics &
 PREFILL_PID=$!
 
 # run decode worker
+OTEL_SERVICE_NAME=dynamo-worker-decode-1 DYN_SYSTEM_PORT=8084 \
 CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -63,10 +103,12 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --disaggregation-mode decode \
   --host 0.0.0.0 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5560"}' \
-  --disaggregation-transfer-backend nixl &
+  --disaggregation-transfer-backend nixl \
+  --enable-metrics &
 PREFILL_PID=$!
 
 # run decode worker
+OTEL_SERVICE_NAME=dynamo-worker-decode-2 DYN_SYSTEM_PORT=8085 \
 CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -76,4 +118,5 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --disaggregation-mode decode \
   --host 0.0.0.0 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559"}' \
-  --disaggregation-transfer-backend nixl
+  --disaggregation-transfer-backend nixl \
+  --enable-metrics

@@ -38,7 +38,7 @@ class TemplateVerificationHandler:
         yield {"token_ids": response_tokens}
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def main(runtime: DistributedRuntime):
     """Main worker function for template verification."""
 

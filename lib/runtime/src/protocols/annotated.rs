@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::*;
-use crate::{Result, error};
-use maybe_error::MaybeError;
+use super::maybe_error::MaybeError;
+use anyhow::{Result, anyhow as error};
+use serde::{Deserialize, Serialize};
 
 pub trait AnnotationsProvider {
     fn annotations(&self) -> Option<Vec<String>>;

@@ -28,7 +28,6 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
-use tracing as log;
 
 // Core message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,11 +115,11 @@ impl Server {
         // but we also propagate the error to the caller's cancellation token
         let watch_task = tokio::spawn(async move {
             let result = primary_task.await.inspect_err(|e| {
-                log::error!("zmq server/router task failed: {}", e);
+                tracing::error!("zmq server/router task failed: {}", e);
                 cancel_token.cancel();
             })?;
             result.inspect_err(|e| {
-                log::error!("zmq server/router task failed: {}", e);
+                tracing::error!("zmq server/router task failed: {}", e);
                 cancel_token.cancel();
             })
         });
@@ -156,7 +155,7 @@ impl Server {
         // let port = addr.as_socket().map(|s| s.port());
 
         // if let Some(port) = port {
-        //     log::info!("Server listening on port {}", port);
+        //     tracing::info!("Server listening on port {}", port);
         // }
 
         loop {
@@ -169,7 +168,7 @@ impl Server {
                             frames
                         },
                         Some(Err(e)) => {
-                            log::warn!("Error receiving message: {}", e);
+                            tracing::warn!("Error receiving message: {}", e);
                             continue;
                         }
                         None => break,
@@ -177,7 +176,7 @@ impl Server {
                 }
 
                 _ = token.cancelled() => {
-                    log::info!("Server shutting down");
+                    tracing::info!("Server shutting down");
                     break;
                 }
             };
@@ -203,7 +202,7 @@ impl Server {
                 // first we try to send the data eagerly without blocking
                 let action = match tx.try_send(message.into()) {
                     Ok(_) => {
-                        log::trace!(
+                        tracing::trace!(
                             request_id,
                             "response data sent eagerly to stream: {} bytes",
                             message_size
@@ -212,11 +211,14 @@ impl Server {
                     }
                     Err(e) => match e {
                         mpsc::error::TrySendError::Closed(_) => {
-                            log::info!(request_id, "response stream was closed");
+                            tracing::info!(request_id, "response stream was closed");
                             StreamAction::Close
                         }
                         mpsc::error::TrySendError::Full(data) => {
-                            log::warn!(request_id, "response stream is full; backpressue alert");
+                            tracing::warn!(
+                                request_id,
+                                "response stream is full; backpressure alert"
+                            );
                             // todo - add timeout - we are blocking all other streams
                             if (tx.send(data).await).is_err() {
                                 StreamAction::Close
@@ -245,7 +247,7 @@ impl Server {
             } else {
                 // increment bytes_dropped
                 // increment messages_dropped
-                log::trace!(request_id, "no active stream for request_id");
+                tracing::trace!(request_id, "no active stream for request_id");
             }
         }
 

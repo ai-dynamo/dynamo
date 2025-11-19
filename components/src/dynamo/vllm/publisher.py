@@ -26,6 +26,8 @@ class NullStatLogger(StatLoggerBase):
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
         engine_idx: int = 0,
+        *args,
+        **kwargs,
     ):
         pass
 

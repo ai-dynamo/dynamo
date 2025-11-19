@@ -9,7 +9,7 @@ mod leader;
 mod worker;
 
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
-pub use transfer::BlockTransferHandler;
+pub use transfer::{BlockTransferHandler, BlockTransferHandlerV1, BlockTransferHandlerV2};
 pub use utils::{
     BlockTransferPool, BlockTransferRequest, ConnectorRequestLeader, ConnectorTransferType,
 };

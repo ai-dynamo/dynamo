@@ -473,8 +473,6 @@ pub struct OutputOptions {
     pub prompt_logprobs: Option<u32>,
 
     /// Whether to skip special tokens in the output.
-    /// spaces_between_special_tokens: Whether to add spaces between special
-    /// tokens in the output.  Defaults to True.
     pub skip_special_tokens: Option<bool>,
 
     /// If true, the Context object will contain the prompt that was pass to

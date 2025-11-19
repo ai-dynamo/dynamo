@@ -219,6 +219,7 @@ mod tests {
             index: None,
             disaggregated_params: None,
             extra_args: None,
+            completion_usage: None,
         })
     }
 

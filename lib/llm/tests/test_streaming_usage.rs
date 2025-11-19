@@ -7,12 +7,17 @@ use dynamo_async_openai::types::{
     ChatCompletionRequestUserMessageContent, ChatCompletionStreamOptions,
     CreateChatCompletionRequest,
 };
+use dynamo_async_openai::types::{
+    CompletionUsage as AoaiCompletionUsage, CreateCompletionRequestArgs, Prompt,
+    PromptTokensDetails,
+};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::llm_backend::{BackendOutput, FinishReason};
 use dynamo_llm::protocols::openai::ParsingOptions;
 use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, aggregator::ChatCompletionAggregator,
 };
+use dynamo_llm::protocols::openai::completions::NvCreateCompletionRequest;
 use dynamo_runtime::engine::{AsyncEngineContext, AsyncEngineStream};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::StreamExt;
@@ -82,8 +87,17 @@ impl AsyncEngineContext for MockContext {
 fn create_mock_backend_stream(
     ctx: Arc<dyn AsyncEngineContext>,
 ) -> Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>> {
-    let outputs = vec![
-        // First chunk with "Hello"
+    let outputs = build_backend_outputs_with_cached_tokens(None);
+
+    let stream = stream::iter(outputs.into_iter().map(Annotated::from_data));
+
+    use dynamo_runtime::engine::ResponseStream;
+    ResponseStream::new(Box::pin(stream), ctx)
+}
+
+/// Build three backend outputs: "Hello", " world", "!" with optional cached_tokens on the final chunk
+fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<BackendOutput> {
+    vec![
         BackendOutput {
             token_ids: vec![15339],
             tokens: vec![Some("Hello".to_string())],
@@ -93,8 +107,8 @@ fn create_mock_backend_stream(
             top_logprobs: None,
             finish_reason: None,
             index: Some(0),
+            completion_usage: None,
         },
-        // Second chunk with " world"
         BackendOutput {
             token_ids: vec![1917],
             tokens: vec![Some(" world".to_string())],
@@ -104,8 +118,8 @@ fn create_mock_backend_stream(
             top_logprobs: None,
             finish_reason: None,
             index: Some(0),
+            completion_usage: None,
         },
-        // Third chunk with "!" and finish_reason
         BackendOutput {
             token_ids: vec![0],
             tokens: vec![Some("!".to_string())],
@@ -115,11 +129,27 @@ fn create_mock_backend_stream(
             top_logprobs: None,
             finish_reason: Some(FinishReason::Stop),
             index: Some(0),
+            completion_usage: cached_tokens.map(|ct| AoaiCompletionUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                prompt_tokens_details: Some(PromptTokensDetails {
+                    audio_tokens: None,
+                    cached_tokens: Some(ct),
+                }),
+                completion_tokens_details: None,
+            }),
         },
-    ];
+    ]
+}
 
+/// Create a backend stream from standard outputs with optional cached_tokens in the final chunk
+fn create_backend_stream_with_cached_tokens(
+    ctx: Arc<dyn AsyncEngineContext>,
+    cached_tokens: Option<u32>,
+) -> Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>> {
+    let outputs = build_backend_outputs_with_cached_tokens(cached_tokens);
     let stream = stream::iter(outputs.into_iter().map(Annotated::from_data));
-
     use dynamo_runtime::engine::ResponseStream;
     ResponseStream::new(Box::pin(stream), ctx)
 }
@@ -308,6 +338,31 @@ async fn test_streaming_with_usage_false() {
     }
 }
 
+/// Helper to create a completion request with optional stream_options
+fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCompletionRequest {
+    let inner = {
+        let mut builder = CreateCompletionRequestArgs::default();
+        builder
+            .model("test-model")
+            .prompt(Prompt::String("Hello".to_string()))
+            .stream(stream);
+        if let Some(include) = include_usage {
+            builder.stream_options(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                include_usage: include,
+            });
+        }
+        builder.build().unwrap()
+    };
+
+    NvCreateCompletionRequest {
+        inner,
+        common: Default::default(),
+        nvext: None,
+        metadata: None,
+        unsupported_fields: Default::default(),
+    }
+}
+
 /// Helper to create a non-streaming chat completion request
 fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
     let messages = vec![ChatCompletionRequestMessage::User(
@@ -402,5 +457,197 @@ async fn test_nonstreaming_has_usage_field() {
         usage.total_tokens,
         usage.prompt_tokens + usage.completion_tokens,
         "Total tokens should equal prompt_tokens + completion_tokens"
+    );
+}
+
+#[tokio::test]
+async fn test_cmpl_streaming_with_usage_true_no_backend_usage() {
+    // Completions: stream=true, include_usage=true, but backend does not send completion_usage
+    let request = create_cmpl_request(Some(true), true);
+    let request_id = "cmpl-usage-none-1".to_string();
+    let response_generator = Box::new(request.response_generator(request_id));
+
+    // Mock backend stream (no completion_usage in any chunk)
+    let ctx = Arc::new(MockContext::new());
+    let backend_stream = create_mock_backend_stream(ctx.clone());
+
+    // Transform
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+    );
+
+    let chunks: Vec<_> = transformed_stream.collect().await;
+    // Expect 3 content chunks + 1 usage-only chunk
+    assert_eq!(chunks.len(), 4, "Should have 3 content + 1 usage chunk");
+
+    // First 3 chunks: usage must be None
+    for (i, chunk) in chunks.iter().take(3).enumerate() {
+        if let Some(resp) = &chunk.data {
+            assert!(
+                resp.inner.usage.is_none(),
+                "Content chunk {} should have usage: None",
+                i
+            );
+            assert!(
+                !resp.inner.choices.is_empty(),
+                "Content chunk {} should have choices",
+                i
+            );
+        }
+    }
+
+    // Final usage chunk: usage present with counts; prompt_tokens_details None (no backend usage)
+    if let Some(final_resp) = &chunks[3].data {
+        assert!(
+            final_resp.inner.choices.is_empty(),
+            "Usage-only chunk must have empty choices"
+        );
+        let usage = final_resp
+            .inner
+            .usage
+            .as_ref()
+            .expect("Usage must be present");
+        assert_eq!(
+            usage.completion_tokens, 3,
+            "Aggregated completion tokens should be 3"
+        );
+        assert!(
+            usage.prompt_tokens_details.is_none(),
+            "prompt_tokens_details should be None when backend does not send usage"
+        );
+    } else {
+        panic!("Final chunk should be present");
+    }
+}
+
+#[tokio::test]
+async fn test_cmpl_streaming_with_cached_tokens_propagation() {
+    // Completions: include_usage=true, backend provides cached_tokens -> must propagate
+    let request = create_cmpl_request(Some(true), true);
+    let request_id = "cmpl-usage-cached-1".to_string();
+    let mut response_generator = Box::new(request.response_generator(request_id));
+
+    // Build a backend stream where the final chunk carries completion_usage with cached_tokens
+    let ctx = Arc::new(MockContext::new());
+    let backend_stream = create_backend_stream_with_cached_tokens(ctx.clone(), Some(7));
+
+    // Align ISL so total usage gets computed correctly
+    response_generator.update_isl(0);
+
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+    );
+    let chunks: Vec<_> = transformed_stream.collect().await;
+
+    // Expect 4 chunks total
+    assert_eq!(chunks.len(), 4, "Should have 3 content + 1 usage chunk");
+
+    // Final usage chunk should include cached_tokens propagated
+    if let Some(final_resp) = &chunks[3].data {
+        let usage = final_resp
+            .inner
+            .usage
+            .as_ref()
+            .expect("Usage must be present on final chunk");
+        let cached = usage
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens);
+        assert_eq!(
+            cached,
+            Some(7),
+            "cached_tokens must propagate to final usage chunk"
+        );
+    } else {
+        panic!("Final chunk should be present");
+    }
+}
+
+#[tokio::test]
+async fn test_chat_streaming_with_cached_tokens_propagation() {
+    // Chat Completions: include_usage=true, backend provides cached_tokens -> must propagate
+    let request = create_chat_request(Some(true));
+    let request_id = "chat-usage-cached-1".to_string();
+    let mut response_generator = Box::new(request.response_generator(request_id));
+
+    let ctx = Arc::new(MockContext::new());
+    let backend_stream = create_backend_stream_with_cached_tokens(ctx.clone(), Some(5));
+
+    // Align ISL if needed
+    response_generator.update_isl(0);
+
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+    );
+    let chunks: Vec<_> = transformed_stream.collect().await;
+
+    assert_eq!(chunks.len(), 4, "Should have 3 content + 1 usage chunk");
+    if let Some(final_resp) = &chunks[3].data {
+        let usage = final_resp.usage.as_ref().expect("Usage must be present");
+        let cached = usage
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens);
+        assert_eq!(
+            cached,
+            Some(5),
+            "cached_tokens must propagate for chat completions"
+        );
+    } else {
+        panic!("Final chunk should be present");
+    }
+}
+
+#[tokio::test]
+async fn test_cmpl_nonstreaming_has_usage_and_cached_tokens() {
+    // Non-streaming completions must include usage in final aggregated response and propagate cached_tokens
+    let mut request = create_cmpl_request(None, false);
+    // Simulate preprocessor behavior for non-streaming
+    let original_stream_flag = request.inner.stream.unwrap_or(false);
+    request.enable_usage_for_nonstreaming(original_stream_flag);
+
+    let request_id = "cmpl-nonstream-usage".to_string();
+    let response_generator = Box::new(request.response_generator(request_id));
+
+    // Mock backend stream with 3 chunks, last carries completion_usage with cached_tokens
+    let ctx = Arc::new(MockContext::new());
+    let backend_stream = create_backend_stream_with_cached_tokens(ctx.clone(), Some(9));
+
+    // Transform to OpenAI completion stream
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+    );
+
+    // Aggregate into a single non-streaming response
+    let parsing = ParsingOptions::default();
+    let result =
+        dynamo_llm::protocols::openai::completions::NvCreateCompletionResponse::from_annotated_stream(
+            transformed_stream,
+            parsing,
+        )
+        .await;
+    assert!(result.is_ok(), "Aggregation should succeed");
+    let resp = result.unwrap();
+    let usage = resp
+        .inner
+        .usage
+        .expect("usage must be present for non-streaming");
+    assert_eq!(
+        usage.completion_tokens, 3,
+        "completion_tokens must aggregate"
+    );
+    let cached = usage.prompt_tokens_details.and_then(|d| d.cached_tokens);
+    assert_eq!(
+        cached,
+        Some(9),
+        "cached_tokens must propagate to non-streaming response"
     );
 }

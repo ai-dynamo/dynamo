@@ -24,4 +24,12 @@ resources:
   kind: DynamoGraphDeployment
   path: github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: nvidia.com
+  kind: DynamoModel
+  path: github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

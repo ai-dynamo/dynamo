@@ -4,14 +4,16 @@
 //! Interface to a traditional key-value store such as etcd.
 //! "key_value_store" spelt out because in AI land "KV" means something else.
 
-use std::collections::HashMap;
-use std::fmt;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::HashMap, path::PathBuf};
+use std::{env, fmt};
 
 use crate::CancellationToken;
 use crate::slug::Slug;
+use crate::transports::etcd as etcd_transport;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -22,10 +24,15 @@ mod nats;
 pub use nats::NATSStore;
 mod etcd;
 pub use etcd::EtcdStore;
+mod file;
+pub use file::FileStore;
 
 const WATCH_SEND_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// A key that is safe to use directly in the KV store.
+///
+/// TODO: Need to re-think this. etcd uses slash separators, so we often use from_raw
+/// to avoid the slug. But other impl's, particularly file, need a real slug.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Key(String);
 
@@ -95,7 +102,7 @@ impl KeyValue {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WatchEvent {
     Put(KeyValue),
-    Delete(KeyValue),
+    Delete(Key),
 }
 
 #[async_trait]
@@ -112,6 +119,57 @@ pub trait KeyValueStore: Send + Sync {
     async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError>;
 
     fn connection_id(&self) -> u64;
+
+    fn shutdown(&self);
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum KeyValueStoreSelect {
+    // Box it because it is significantly bigger than the other variants
+    Etcd(Box<etcd_transport::ClientOptions>),
+    File(PathBuf),
+    #[default]
+    Memory,
+    // Nats not listed because likely we want to remove that impl. It is not currently used and not well tested.
+}
+
+impl fmt::Display for KeyValueStoreSelect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeyValueStoreSelect::Etcd(opts) => {
+                let urls = opts.etcd_url.join(",");
+                write!(f, "Etcd({urls})")
+            }
+            KeyValueStoreSelect::File(path) => write!(f, "File({})", path.display()),
+            KeyValueStoreSelect::Memory => write!(f, "Memory"),
+        }
+    }
+}
+
+impl FromStr for KeyValueStoreSelect {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<KeyValueStoreSelect> {
+        match s {
+            "etcd" => Ok(Self::Etcd(Box::default())),
+            "file" => {
+                let root = env::var("DYN_FILE_KV")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| env::temp_dir().join("dynamo_store_kv"));
+                Ok(Self::File(root))
+            }
+            "mem" => Ok(Self::Memory),
+            x => anyhow::bail!("Unknown key-value store type '{x}'"),
+        }
+    }
+}
+
+impl TryFrom<String> for KeyValueStoreSelect {
+    type Error = anyhow::Error;
+
+    fn try_from(s: String) -> anyhow::Result<KeyValueStoreSelect> {
+        s.parse()
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -119,6 +177,7 @@ pub enum KeyValueStoreEnum {
     Memory(MemoryStore),
     Nats(NATSStore),
     Etcd(EtcdStore),
+    File(FileStore),
 }
 
 impl KeyValueStoreEnum {
@@ -133,6 +192,7 @@ impl KeyValueStoreEnum {
             Memory(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
             Nats(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
             Etcd(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
+            File(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
         })
     }
 
@@ -154,6 +214,10 @@ impl KeyValueStoreEnum {
                 .get_bucket(bucket_name)
                 .await?
                 .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
+            File(x) => x
+                .get_bucket(bucket_name)
+                .await?
+                .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
         };
         Ok(maybe_bucket)
     }
@@ -164,12 +228,23 @@ impl KeyValueStoreEnum {
             Memory(x) => x.connection_id(),
             Etcd(x) => x.connection_id(),
             Nats(x) => x.connection_id(),
+            File(x) => x.connection_id(),
+        }
+    }
+
+    fn shutdown(&self) {
+        use KeyValueStoreEnum::*;
+        match self {
+            Memory(x) => x.shutdown(),
+            Etcd(x) => x.shutdown(),
+            Nats(x) => x.shutdown(),
+            File(x) => x.shutdown(),
         }
     }
 }
 
 #[derive(Clone)]
-pub struct KeyValueStoreManager(Arc<KeyValueStoreEnum>);
+pub struct KeyValueStoreManager(pub Arc<KeyValueStoreEnum>);
 
 impl Default for KeyValueStoreManager {
     fn default() -> Self {
@@ -185,6 +260,10 @@ impl KeyValueStoreManager {
 
     pub fn etcd(etcd_client: crate::transports::etcd::Client) -> Self {
         Self::new(KeyValueStoreEnum::Etcd(EtcdStore::new(etcd_client)))
+    }
+
+    pub fn file<P: Into<PathBuf>>(root: P) -> Self {
+        Self::new(KeyValueStoreEnum::File(FileStore::new(root)))
     }
 
     fn new(s: KeyValueStoreEnum) -> KeyValueStoreManager {
@@ -302,6 +381,12 @@ impl KeyValueStoreManager {
         }
         Ok(outcome)
     }
+
+    /// Cleanup any temporary state.
+    /// TODO: Should this be async? Take &mut self?
+    pub fn shutdown(&self) {
+        self.0.shutdown()
+    }
 }
 
 /// An online storage for key-value config values.
@@ -365,6 +450,9 @@ pub enum StoreError {
 
     #[error("Internal etcd error: {0}")]
     EtcdError(String),
+
+    #[error("Internal filesystem error: {0}")]
+    FilesystemError(String),
 
     #[error("Key Value Error: {0} for bucket '{1}'")]
     KeyValueError(String, String),

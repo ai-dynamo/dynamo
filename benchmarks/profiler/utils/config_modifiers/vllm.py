@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from typing import Literal
 
 import yaml
 
@@ -20,6 +19,7 @@ from benchmarks.profiler.utils.config import (
 from benchmarks.profiler.utils.defaults import (
     DEFAULT_MODEL_NAME,
     DYNAMO_RUN_DEFAULT_PORT,
+    EngineType,
 )
 from dynamo.planner.defaults import SubComponentType
 
@@ -79,7 +79,7 @@ class VllmV1ConfigModifier:
     def convert_config(
         cls,
         config: dict,
-        target: Literal["prefill", "decode"],
+        target: EngineType,
         is_moe_model: bool = False,
     ) -> dict:
         if is_moe_model:
@@ -96,7 +96,7 @@ class VllmV1ConfigModifier:
         if "Planner" in cfg.spec.services:
             del cfg.spec.services["Planner"]
 
-        if target == "prefill":
+        if target == EngineType.PREFILL:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "vllm", SubComponentType.PREFILL
@@ -133,7 +133,7 @@ class VllmV1ConfigModifier:
 
             worker_service.extraPodSpec.mainContainer.args = args
 
-        elif target == "decode":
+        elif target == EngineType.DECODE:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "vllm", SubComponentType.PREFILL
@@ -303,3 +303,27 @@ class VllmV1ConfigModifier:
                 f"Failed to parse KV cache size from line: {line}. Error: {e}"
             )
         return 0
+
+    @classmethod
+    def set_prefill_config(
+        cls, config: dict, max_batch_size: int, max_num_tokens: int
+    ) -> dict:
+        """
+        Configure prefill-related limits for aggregated prefill runs.
+        vLLM uses --max-num-seqs to limit concurrency and
+        --max-num-batched-tokens to cap total tokens per step.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="vllm", sub_component_type=SubComponentType.DECODE
+        )
+        args = validate_and_get_worker_args(worker_service, backend="vllm")
+        args = break_arguments(args)
+
+        # Concurrency / batch size
+        args = set_argument_value(args, "--max-num-seqs", str(max_batch_size))
+        # Token cap per step
+        args = set_argument_value(args, "--max-num-batched-tokens", str(max_num_tokens))
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()

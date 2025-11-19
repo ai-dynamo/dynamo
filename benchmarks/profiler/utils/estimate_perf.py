@@ -36,7 +36,7 @@ class AIConfiguratorPerfEstimator:
 
     def __init__(
         self,
-        model_name: str,  # e.g. "QWEN3_32B"
+        hf_id: str,  # e.g. "Qwen/Qwen3-32B"
         system: str,  # e.g. "h200_sxm"
         backend: str,  # e.g. "trtllm"
         version: str,  # e.g. "0.20.0"
@@ -44,6 +44,11 @@ class AIConfiguratorPerfEstimator:
         aiconfigurator = _try_import_aiconfigurator()
 
         logger.info("Loading aiconfigurator database. This might take a few seconds...")
+        if not version:
+            version = aiconfigurator.sdk.perf_database.get_latest_database_version(
+                system,
+                backend,
+            )
         self.database = aiconfigurator.sdk.perf_database.get_database(
             system=system,
             backend=backend,
@@ -56,10 +61,7 @@ class AIConfiguratorPerfEstimator:
         logger.info("aiconfigurator database loaded.")
 
         self.backend = aiconfigurator.sdk.backends.factory.get_backend(backend)
-
-        # This is the aiconfigurator model name (such as QWEN3_32B or DEEPSEEK_V3)
-        # rather than the HF model name.
-        self.model_name = model_name
+        self.hf_id = hf_id
 
     def _get_model(self, **model_config_kwargs):
         aiconfigurator = _try_import_aiconfigurator()
@@ -67,7 +69,7 @@ class AIConfiguratorPerfEstimator:
         # NOTE: MOE models error out unless moe_tp_size and moe_ep_size are provided.
         model_config = aiconfigurator.sdk.config.ModelConfig(**model_config_kwargs)
         model = aiconfigurator.sdk.models.get_model(
-            self.model_name, model_config, self.backend
+            self.hf_id, model_config, self.backend
         )
         return model
 

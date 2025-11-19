@@ -105,9 +105,10 @@ COPY --from=vllm_source /usr/local/lib/python3.12/dist-packages ${VIRTUAL_ENV}/l
 RUN if [ -f ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable__.pplx_kernels-0.0.1.pth ]; then \
         echo "/opt/vllm/ep_kernels_workspace/pplx-kernels/src" > ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable__.pplx_kernels-0.0.1.pth; \
     fi && \
-    if [ -f ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable__.deep_ep-0.0.1.pth ]; then \
-        echo "/opt/vllm/ep_kernels_workspace/DeepEP" > ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable__.deep_ep-0.0.1.pth; \
-    fi && \
+    # Fix ALL DeepEP .pth files (version-agnostic using find since version includes git hash)
+    find ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages -name "__editable__.deep_ep*.pth" -exec sed -i 's|/vllm-workspace|/opt/vllm|g' {} \; && \
+    # Fix DeepEP finder modules (these contain the actual hardcoded MAPPING paths)
+    find ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages -name "__editable___deep_ep*_finder.py" -exec sed -i "s|'/vllm-workspace|'/opt/vllm|g" {} \; && \
     # Also check for any other .pth files that might reference /vllm-workspace
     find ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages -name "*.pth" -exec sed -i 's|/vllm-workspace|/opt/vllm|g' {} \;
 

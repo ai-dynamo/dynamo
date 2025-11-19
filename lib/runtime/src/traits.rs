@@ -16,7 +16,7 @@ pub trait DistributedRuntimeProvider {
 
 impl RuntimeProvider for DistributedRuntime {
     fn rt(&self) -> &Runtime {
-        &self.runtime
+        self.runtime()
     }
 }
 

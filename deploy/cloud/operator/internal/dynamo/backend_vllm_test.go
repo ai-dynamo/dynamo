@@ -3,12 +3,12 @@ package dynamo
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestVLLMBackend_UpdateContainer(t *testing.T) {
@@ -21,6 +21,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 		component           *v1alpha1.DynamoComponentDeploymentSharedSpec
 		multinodeDeployer   MultinodeDeployer
 		initialContainer    *corev1.Container
+		gpuCount            int64 // GPU count for the test case
 		expectedArgs        []string
 		expectNotModified   bool // If true, container args should not change
 		expectProbesRemoved bool // If true, probes should be nil
@@ -32,6 +33,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
+			gpuCount:          0,
 			expectNotModified: true,
 		},
 		{
@@ -40,7 +42,8 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			role:                RoleLeader,
 			component:           &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer:   &GroveMultinodeDeployer{},
-			initialContainer:    &corev1.Container{Command: []string{"python3", "-m", "dynamo.vllm"}, Args: []string{"--model", "test", tensorParallelSizeFlag, "8"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("4")}}},
+			initialContainer:    &corev1.Container{Command: []string{"python3", "-m", "dynamo.vllm"}, Args: []string{"--model", "test", tensorParallelSizeFlag, "8"}},
+			gpuCount:            4,
 			expectedArgs:        []string{fmt.Sprintf("ray start --head --port=%s && python3 -m dynamo.vllm --model test %s 8", VLLMPort, tensorParallelSizeFlag)},
 			expectProbesRemoved: true,
 		},
@@ -50,7 +53,8 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			role:                RoleWorker,
 			component:           &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer:   &GroveMultinodeDeployer{},
-			initialContainer:    &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", "--model", "test", tensorParallelSizeFlag, "8"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("4")}}},
+			initialContainer:    &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", "--model", "test", tensorParallelSizeFlag, "8"}},
+			gpuCount:            4,
 			expectedArgs:        []string{"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block"},
 			expectProbesRemoved: true,
 		},
@@ -60,7 +64,8 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			role:                RoleWorker,
 			component:           &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer:   &LWSMultinodeDeployer{},
-			initialContainer:    &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "8"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("4")}}},
+			initialContainer:    &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "8"}},
+			gpuCount:            4,
 			expectedArgs:        []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 			expectProbesRemoved: true,
 		},
@@ -71,6 +76,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Args: []string{}},
+			gpuCount:          0,
 			expectNotModified: true, // Should not modify empty args
 		},
 		{
@@ -80,6 +86,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.frontend"}},
+			gpuCount:          0,
 			expectNotModified: true,
 		},
 	}
@@ -89,6 +96,15 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
 			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
+
+			// Create resources from GPU count and set in component
+			if tt.gpuCount > 0 {
+				tt.component.Resources = &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
+						GPU: strconv.FormatInt(tt.gpuCount, 10),
+					},
+				}
+			}
 
 			// Call UpdateContainer
 			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
@@ -119,6 +135,7 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 		role              Role
 		multinodeDeployer MultinodeDeployer
 		initialContainer  *corev1.Container
+		gpuCount          int64 // GPU count for the test case
 		expectedArgs      []string
 		description       string
 	}{
@@ -128,6 +145,7 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			role:              RoleMain,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{"python3 -m dynamo.vllm"}},
+			gpuCount:          0,
 			expectedArgs:      []string{"python3 -m dynamo.vllm"},
 			description:       "Single node should not modify shell commands",
 		},
@@ -136,7 +154,8 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			numberOfNodes:     2,
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8", dataParallelSizeFlag)}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("4")}}},
+			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8", dataParallelSizeFlag)}},
+			gpuCount:          4,
 			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-size-local 4 --data-parallel-rpc-port 13445 --data-parallel-start-rank 0 --data-parallel-size 8"},
 			description:       "Shell commands should use regex injection for python commands",
 		},
@@ -145,7 +164,8 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			numberOfNodes:     2,
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("echo blah | wc -l && python3 -m dynamo.vllm %s 8 && ls -al", dataParallelSizeFlag)}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("4")}}},
+			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("echo blah | wc -l && python3 -m dynamo.vllm %s 8 && ls -al", dataParallelSizeFlag)}},
+			gpuCount:          4,
 			expectedArgs:      []string{"echo blah | wc -l && python3 -m dynamo.vllm --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-size-local 4 --data-parallel-rpc-port 13445 --data-parallel-start-rank 0 --data-parallel-size 8 && ls -al"},
 			description:       "Complex shell commands should inject flags only into python part",
 		},
@@ -154,7 +174,8 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			numberOfNodes:     2,
 			role:              RoleLeader,
 			multinodeDeployer: &LWSMultinodeDeployer{},
-			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8", dataParallelSizeFlag)}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("4")}}},
+			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8", dataParallelSizeFlag)}},
+			gpuCount:          4,
 			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-address $(LWS_LEADER_ADDRESS) --data-parallel-size-local 4 --data-parallel-rpc-port 13445 --data-parallel-start-rank 0 --data-parallel-size 8"},
 			description:       "LWS shell commands should use LWS variables",
 		},
@@ -163,7 +184,8 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			numberOfNodes:     2,
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8 | tee /tmp/log", dataParallelSizeFlag)}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("4")}}},
+			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8 | tee /tmp/log", dataParallelSizeFlag)}},
+			gpuCount:          4,
 			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-size-local 4 --data-parallel-rpc-port 13445 --data-parallel-start-rank 0 --data-parallel-size 8 | tee /tmp/log"},
 			description:       "Shell commands with pipes should inject flags before pipe",
 		},
@@ -173,7 +195,17 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			expectedCommand := append([]string{}, tt.initialContainer.Command...)
 
-			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentSharedSpec{}, "test-service", tt.multinodeDeployer)
+			// Create component with resources from GPU count
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
+			if tt.gpuCount > 0 {
+				component.Resources = &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
+						GPU: strconv.FormatInt(tt.gpuCount, 10),
+					},
+				}
+			}
+
+			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, component, "test-service", tt.multinodeDeployer)
 
 			if !reflect.DeepEqual(tt.initialContainer.Args, tt.expectedArgs) {
 				t.Errorf("UpdateContainer() args = %v, want %v", tt.initialContainer.Args, tt.expectedArgs)
@@ -296,6 +328,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 		role              Role
 		multinodeDeployer MultinodeDeployer
 		initialContainer  *corev1.Container
+		gpuCount          int64 // GPU count for the test case
 		expectedArgs      []string
 		expectNotModified bool
 	}{
@@ -303,14 +336,16 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			name:              "leader prepends ray start --head",
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8")}}},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
+			gpuCount:          8,
 			expectedArgs:      []string{fmt.Sprintf("ray start --head --port=%s && python3 -m dynamo.vllm %s 16", VLLMPort, tensorParallelSizeFlag)},
 		},
 		{
 			name:              "leader prepends distributed data parallel flags",
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "16"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8")}}},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "16"}},
+			gpuCount:          8,
 			expectedArgs:      []string{fmt.Sprintf("exec python3 -m dynamo.vllm %s 16 --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-size-local 8 --data-parallel-rpc-port 13445 --data-parallel-start-rank 0", dataParallelSizeFlag)},
 		},
 		{
@@ -318,34 +353,39 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Args: []string{}},
+			gpuCount:          0,
 			expectNotModified: true,
 		},
 		{
 			name:              "worker with ray distributed launch Grove",
 			role:              RoleWorker,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8")}}},
+			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
+			gpuCount:          8,
 			expectedArgs:      []string{"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block"},
 		},
 		{
 			name:              "worker with data parallel launch Grove",
 			role:              RoleWorker,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "16"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8")}}},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "16"}},
+			gpuCount:          8,
 			expectedArgs:      []string{fmt.Sprintf("exec python3 -m dynamo.vllm %s 16 --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-size-local 8 --data-parallel-rpc-port 13445 --data-parallel-start-rank $(( 8 * $((GROVE_PCLQ_POD_INDEX + 1)) ))", dataParallelSizeFlag)},
 		},
 		{
 			name:              "worker with data parallel launch Grove, tp > 1",
 			role:              RoleWorker,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "8", tensorParallelSizeFlag, "2"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8")}}},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "8", tensorParallelSizeFlag, "2"}},
+			gpuCount:          8,
 			expectedArgs:      []string{fmt.Sprintf("exec python3 -m dynamo.vllm %s 8 %s 2 --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-size-local 4 --data-parallel-rpc-port 13445 --data-parallel-start-rank $(( 4 * $((GROVE_PCLQ_POD_INDEX + 1)) ))", dataParallelSizeFlag, tensorParallelSizeFlag)},
 		},
 		{
 			name:              "worker with ray distributed launch LWS",
 			role:              RoleWorker,
 			multinodeDeployer: &LWSMultinodeDeployer{},
-			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8")}}},
+			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
+			gpuCount:          8,
 			expectedArgs:      []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 		},
 		{
@@ -353,6 +393,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			role:              RoleMain,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.frontend"}},
+			gpuCount:          0,
 			expectNotModified: true,
 		},
 	}
@@ -362,8 +403,19 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
 			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
+
+			// Create resources from GPU count
+			var resources *v1alpha1.Resources
+			if tt.gpuCount > 0 {
+				resources = &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
+						GPU: strconv.FormatInt(tt.gpuCount, 10),
+					},
+				}
+			}
+
 			// Call updateVLLMMultinodeArgs
-			updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer)
+			updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, resources)
 
 			if tt.expectNotModified {
 				// Args should not have changed

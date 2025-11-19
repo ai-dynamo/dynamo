@@ -61,6 +61,10 @@ class DynamoFrontendProcess(ManagedProcess):
     def __init__(self, request):
         command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
 
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
+        env = os.environ.copy()
+        env.pop("DYN_SYSTEM_PORT", None)
+
         log_dir = f"{request.node.name}_frontend"
 
         # Clean up any existing log directory from previous runs
@@ -73,6 +77,7 @@ class DynamoFrontendProcess(ManagedProcess):
 
         super().__init__(
             command=command,
+            env=env,
             display_output=True,
             terminate_existing=True,
             log_dir=log_dir,
@@ -101,7 +106,6 @@ class VllmWorkerProcess(ManagedProcess):
 
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = "8083"
 

@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_runtime::protocols::ENDPOINT_SCHEME;
 use std::fmt;
 
 pub enum Output {
@@ -10,13 +9,6 @@ pub enum Output {
 
     /// Listen for models on nats/etcd, add/remove dynamically
     Auto,
-
-    /// Static remote: The dyn://namespace.component.endpoint name of a remote worker we expect to
-    /// exists. THIS DISABLES AUTO-DISCOVERY. Only this endpoint will be connected.
-    /// `--model-name and `--model-path` must also be set.
-    ///
-    /// A static remote setup avoids having to run etcd.
-    Static(String),
 
     #[cfg(feature = "mistralrs")]
     MistralRs,
@@ -37,11 +29,6 @@ impl TryFrom<&str> for Output {
 
             "dyn" | "auto" => Ok(Output::Auto),
 
-            endpoint_path if endpoint_path.starts_with(ENDPOINT_SCHEME) => {
-                let path = endpoint_path.strip_prefix(ENDPOINT_SCHEME).unwrap();
-                Ok(Output::Static(path.to_string()))
-            }
-
             e => Err(anyhow::anyhow!("Invalid out= option '{e}'")),
         }
     }
@@ -57,7 +44,6 @@ impl fmt::Display for Output {
             Output::Echo => "echo",
 
             Output::Auto => "auto",
-            Output::Static(endpoint) => &format!("{ENDPOINT_SCHEME}{endpoint}"),
         };
         write!(f, "{s}")
     }

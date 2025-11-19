@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/discovery"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -75,6 +76,9 @@ type Config struct {
 	RBAC RBACConfig
 	// ExcludedNamespaces is a thread-safe set of namespaces to exclude (cluster-wide mode only)
 	ExcludedNamespaces ExcludedNamespacesInterface
+
+	// DiscoveryBackend is the discovery backend to use. By default, will rely on ETCD for discovery. Can be set to "kubernetes" to use Kubernetes API for service discovery.
+	DiscoveryBackend string
 }
 
 // RBACConfig holds configuration for RBAC management
@@ -151,6 +155,19 @@ func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName
 
 	logger.Info("API group not available", "group", groupName)
 	return false
+}
+
+// For DGD, pass in the meta annotations
+// For DCD, pass in the spec annotations
+func (c Config) IsK8sDiscoveryEnabled(annotations map[string]string) bool {
+	return c.GetDiscoveryBackend(annotations) == "kubernetes"
+}
+
+func (c Config) GetDiscoveryBackend(annotations map[string]string) string {
+	if dgdDiscoveryBackend, exists := annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
+		return dgdDiscoveryBackend
+	}
+	return c.DiscoveryBackend
 }
 
 func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {
