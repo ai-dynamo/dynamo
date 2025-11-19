@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-accelerate==1.6.0
+# For Multimodal EPD (required for device_map="auto" in vision model loading)
+accelerate
 aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@5554d2eb8206738c66048bf2d72183e9bcd85759
 aiofiles
 aiperf @ git+https://github.com/ai-dynamo/aiperf.git@4d3fa29403c8f75da22a14f1f7b3aeb27db9288f
