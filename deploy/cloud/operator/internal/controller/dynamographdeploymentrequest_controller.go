@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -202,17 +203,8 @@ data:
 EOF
 sed 's/^/    /' {{.OutputPath}}/{{.OutputFile}} >> /tmp/cm.yaml
 
-# Add profiling data directories to ConfigMap for long-term storage
-# Find all interpolation directories and add their raw_data.npz files
-for dir in {{.OutputPath}}/*/interpolation; do
-  if [ -d "$dir" ]; then
-    dirname=$(basename $(dirname "$dir"))
-    if [ -f "$dir/raw_data.npz" ]; then
-      echo "  ${dirname}_raw_data.npz: |" >> /tmp/cm.yaml
-      base64 "$dir/raw_data.npz" | sed 's/^/    /' >> /tmp/cm.yaml
-    fi
-  fi
-done
+# Note: Profiling data (raw_data.npz converted to JSON) is included in the
+# generated DGD YAML as a separate ConfigMap by the profiler, no need to add it here
 
 kubectl apply -f /tmp/cm.yaml
 echo "Saved profiling output to ConfigMap {{.ConfigMapName}}"
@@ -405,6 +397,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 	// Record spec generation event
 	r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonSpecGenerated, MessageSpecGenerated)
 
+	// Create additional resources (ConfigMaps) immediately after profiling
+	// This ensures that the `planner-profile-data` ConfigMap is available for both auto and manual deployment
+	targetNamespace := dgdr.Namespace
+	if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.Namespace != "" {
+		targetNamespace = dgdr.Spec.DeploymentOverrides.Namespace
+	}
+	if err := r.createAdditionalResources(ctx, dgdr, targetNamespace); err != nil {
+		logger.Error(err, "Failed to create additional resources after profiling")
+		// Don't fail the DGDR, just log the error - ConfigMaps can be created manually
+		r.Recorder.Event(dgdr, corev1.EventTypeWarning, "ConfigMapCreationFailed",
+			fmt.Sprintf("Failed to create ConfigMaps from profiling output: %v", err))
+	}
+
 	// If autoApply is enabled, transition to Deploying state
 	if dgdr.Spec.AutoApply {
 		logger.Info("AutoApply enabled, transitioning to Deploying state")
@@ -479,20 +484,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingState(ctx contex
 
 	// Check if we need to create DGD
 	if dgdr.Status.Deployment == nil || !dgdr.Status.Deployment.Created {
-		// Determine target namespace for deployment
-		targetNamespace := dgdr.Namespace
-		if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.Namespace != "" {
-			targetNamespace = dgdr.Spec.DeploymentOverrides.Namespace
-		}
-
-		// Deploy additional resources (ConfigMaps) from the profiling output first
-		if err := r.createAdditionalResources(ctx, dgdr, targetNamespace); err != nil {
-			logger.Error(err, "Failed to create additional resources")
-			r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageDeploymentCreationFailed,
-				fmt.Sprintf("Failed to create additional resources: %v", err))
-			return ctrl.Result{}, err
-		}
-
 		return r.createDGD(ctx, dgdr)
 	}
 
@@ -1094,13 +1085,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			}},
 		}
 
-		// Build volumes - use dynamo-pvc for profiling output so data persists for the Planner
+		// Build volumes - use emptyDir for profiling output
+		// The sidecar saves all needed data to ConfigMaps, so persistence is not needed
 		volumes := []corev1.Volume{{
 			Name: VolumeNameProfilingOutput,
 			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: "dynamo-pvc",
-				},
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		}}
 
@@ -1151,9 +1141,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				Template: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						ServiceAccountName: ServiceAccountProfilingJob,
-						RestartPolicy:      corev1.RestartPolicyNever,
-						Containers:         []corev1.Container{profilerContainer, sidecarContainer},
-						Volumes:            volumes,
+						RestartPolicy:      corev1.RestartPolicyNever, SecurityContext: &corev1.PodSecurityContext{
+							RunAsNonRoot: ptr.To(true),        // Enforces that container cannot run as root
+							RunAsUser:    ptr.To[int64](1000), // Run as UID 1000 (non-privileged user)
+							RunAsGroup:   ptr.To[int64](1000), // Run with GID 1000 (non-privileged group)
+							FSGroup:      ptr.To[int64](1000), // Volume files owned by GID 1000
+						},
+						Containers: []corev1.Container{profilerContainer, sidecarContainer},
+						Volumes:    volumes,
 						ImagePullSecrets: []corev1.LocalObjectReference{
 							{Name: "nvcr-imagepullsecret"},
 						},

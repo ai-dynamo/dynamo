@@ -20,7 +20,6 @@
 package v1alpha1
 
 import (
-	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -74,7 +73,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// Resources requested and limits for this component, including CPU, memory,
 	// GPUs/devices, and any runtime-specific resources.
-	Resources *dynamoCommon.Resources `json:"resources,omitempty"`
+	Resources *Resources `json:"resources,omitempty"`
 	// Autoscaling config for this component (replica range, target utilization, etc.).
 	Autoscaling *Autoscaling `json:"autoscaling,omitempty"`
 	// Envs defines additional environment variables to inject into the component containers.
@@ -88,17 +87,22 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Ingress config to expose the component outside the cluster (or through a service mesh).
 	Ingress *IngressSpec `json:"ingress,omitempty"`
 
+	// ModelRef references a model that this component serves
+	// When specified, a headless service will be created for endpoint discovery
+	// +optional
+	ModelRef *ModelReference `json:"modelRef,omitempty"`
+
 	// SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).
 	SharedMemory *SharedMemorySpec `json:"sharedMemory,omitempty"`
 
 	// +optional
 	// ExtraPodMetadata adds labels/annotations to the created Pods.
-	ExtraPodMetadata *dynamoCommon.ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
+	ExtraPodMetadata *ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
 	// +optional
 	// ExtraPodSpec allows to override the main pod spec configuration.
 	// It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field
 	// that allows overriding the main container configuration.
-	ExtraPodSpec *dynamoCommon.ExtraPodSpec `json:"extraPodSpec,omitempty"`
+	ExtraPodSpec *ExtraPodSpec `json:"extraPodSpec,omitempty"`
 
 	// LivenessProbe to detect and restart unhealthy containers.
 	LivenessProbe *corev1.Probe `json:"livenessProbe,omitempty"`
@@ -273,4 +277,15 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
 
 func (s *DynamoComponentDeployment) GetParentGraphDeploymentNamespace() string {
 	return s.GetNamespace()
+}
+
+// ModelReference identifies a model served by this component
+type ModelReference struct {
+	// Name is the base model identifier (e.g., "llama-3-70b-instruct-v1")
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Revision is the model revision/version (optional)
+	// +optional
+	Revision string `json:"revision,omitempty"`
 }

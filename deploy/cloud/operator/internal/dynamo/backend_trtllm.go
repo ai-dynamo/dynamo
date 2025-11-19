@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -181,7 +180,6 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		"ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N ''",
 		// Create SSH daemon config to use custom host keys location and non-privileged port
 		fmt.Sprintf("printf 'Port %d\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config", commonconsts.MpiRunSshPort),
-		"mkdir -p /run/sshd",
 		"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 	}
 
@@ -198,7 +196,7 @@ func (b *TRTLLMBackend) generateWorkerHostnames(numberOfNodes int32, serviceName
 }
 
 // getGPUsPerNode extracts the number of GPUs per node from resources
-func getGPUsPerNode(resources *common.Resources) int32 {
+func getGPUsPerNode(resources *v1alpha1.Resources) int32 {
 	if resources != nil && resources.Requests != nil && resources.Requests.GPU != "" {
 		if gpus, err := strconv.ParseInt(resources.Requests.GPU, 10, 32); err == nil {
 			return int32(gpus)
