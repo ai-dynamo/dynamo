@@ -65,6 +65,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secrets"
+	internalwebhook "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook"
+	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook/validation"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	//+kubebuilder:scaffold:imports
 )
@@ -613,26 +615,43 @@ func main() {
 		if ctrlConfig.RestrictedNamespace == "" {
 			// Cluster-wide mode: inject the same ExcludedNamespaces used by controllers
 			setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
-			nvidiacomv1alpha1.SetWebhookExcludedNamespaces(ctrlConfig.ExcludedNamespaces)
+			internalwebhook.SetExcludedNamespaces(ctrlConfig.ExcludedNamespaces)
 		} else {
 			// Namespace-restricted mode: no exclusion checking needed (validators not wrapped)
 			setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
 				"restrictedNamespace", ctrlConfig.RestrictedNamespace)
-			nvidiacomv1alpha1.SetWebhookExcludedNamespaces(nil)
+			internalwebhook.SetExcludedNamespaces(nil)
 		}
 
-		if err = (&nvidiacomv1alpha1.DynamoComponentDeployment{}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "DynamoComponentDeployment")
+		// Register validation webhook handlers
+		setupLog.Info("Registering validation webhooks")
+
+		dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
+		if err = dcdHandler.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoComponentDeployment")
 			os.Exit(1)
 		}
-		if err = (&nvidiacomv1alpha1.DynamoGraphDeployment{}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "DynamoGraphDeployment")
+
+		dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler()
+		if err = dgdHandler.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment")
 			os.Exit(1)
 		}
-		if err = (&nvidiacomv1alpha1.DynamoModel{}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "DynamoModel")
+
+		dmHandler := webhookvalidation.NewDynamoModelHandler()
+		if err = dmHandler.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoModel")
 			os.Exit(1)
 		}
+
+		isClusterWide := ctrlConfig.RestrictedNamespace == ""
+		dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(isClusterWide)
+		if err = dgdrHandler.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest")
+			os.Exit(1)
+		}
+
+		setupLog.Info("Validation webhooks registered successfully")
 	}
 	//+kubebuilder:scaffold:builder
 

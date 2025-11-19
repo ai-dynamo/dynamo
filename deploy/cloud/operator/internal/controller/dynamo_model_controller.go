@@ -42,6 +42,7 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/modelendpoint"
+	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook/validation"
 )
 
 const (
@@ -98,7 +99,8 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Validate the DynamoModel spec (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
-		if err := model.Validate(); err != nil {
+		validator := webhookvalidation.NewDynamoModelValidator(model)
+		if _, err := validator.Validate(); err != nil {
 			logs.Error(err, "DynamoModel validation failed, refusing to reconcile")
 
 			// Set validation error condition

@@ -38,6 +38,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
+	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook/validation"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -149,7 +150,8 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	// Validate the DynamoComponentDeployment spec (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
-		if validationErr := dynamoComponentDeployment.Validate(); validationErr != nil {
+		validator := webhookvalidation.NewDynamoComponentDeploymentValidator(dynamoComponentDeployment)
+		if _, validationErr := validator.Validate(); validationErr != nil {
 			logs.Error(validationErr, "DynamoComponentDeployment validation failed, refusing to reconcile")
 
 			// Set validation error condition

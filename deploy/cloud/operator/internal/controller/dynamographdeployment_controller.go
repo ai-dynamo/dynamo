@@ -49,6 +49,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
+	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook/validation"
 	rbacv1 "k8s.io/api/rbac/v1"
 )
 
@@ -152,7 +153,8 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	// Validate the DynamoGraphDeployment spec (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
-		if validationErr := dynamoDeployment.Validate(); validationErr != nil {
+		validator := webhookvalidation.NewDynamoGraphDeploymentValidator(dynamoDeployment)
+		if _, validationErr := validator.Validate(); validationErr != nil {
 			logger.Error(validationErr, "DynamoGraphDeployment validation failed, refusing to reconcile")
 
 			// Set validation error state and reason (defer will update status)

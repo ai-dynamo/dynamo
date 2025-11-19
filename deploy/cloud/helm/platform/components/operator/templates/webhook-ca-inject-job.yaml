@@ -199,7 +199,7 @@ spec:
           fi
 
           echo "📝 Patching ValidatingWebhookConfiguration..."
-          # Patch both webhooks (DynamoComponentDeployment and DynamoGraphDeployment)
+          # Patch all webhooks (DynamoComponentDeployment, DynamoGraphDeployment, DynamoModel, DynamoGraphDeploymentRequest)
           kubectl patch validatingwebhookconfiguration ${WEBHOOK_NAME} \
             --type='json' -p="[
               {
@@ -210,6 +210,16 @@ spec:
               {
                 \"op\": \"add\",
                 \"path\": \"/webhooks/1/clientConfig/caBundle\",
+                \"value\": \"${CA_BUNDLE}\"
+              },
+              {
+                \"op\": \"add\",
+                \"path\": \"/webhooks/2/clientConfig/caBundle\",
+                \"value\": \"${CA_BUNDLE}\"
+              },
+              {
+                \"op\": \"add\",
+                \"path\": \"/webhooks/3/clientConfig/caBundle\",
                 \"value\": \"${CA_BUNDLE}\"
               }
             ]"
