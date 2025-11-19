@@ -324,7 +324,7 @@ jobs:
 
   unit-vllm-amd64:
     name: Unit vLLM (amd64)
-    needs: build-vllm-amd64
+    #needs: build-vllm-amd64
     runs-on: cpu-amd-m5-2xlarge
     timeout-minutes: 45
     steps:
@@ -336,15 +336,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -356,7 +353,7 @@ jobs:
 
   unit-vllm-arm64:
     name: Unit vLLM (arm64)
-    needs: build-vllm-arm64
+    #needs: build-vllm-arm64
     runs-on: cpu-arm-r8g-4xlarge
     timeout-minutes: 45
     steps:
@@ -368,15 +365,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -400,15 +394,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -432,15 +423,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -464,15 +452,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -496,15 +481,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -528,15 +510,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
@@ -560,15 +539,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
@@ -592,15 +568,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
@@ -624,15 +597,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
@@ -656,15 +626,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
@@ -688,15 +655,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
@@ -720,15 +684,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
@@ -752,15 +713,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
@@ -784,15 +742,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
@@ -816,15 +771,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -848,15 +800,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -880,15 +829,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -912,15 +858,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -944,15 +887,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -976,15 +916,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -1008,15 +945,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -1040,15 +974,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -1072,15 +1003,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -1104,15 +1032,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -1136,15 +1061,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -1168,15 +1090,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -1200,15 +1119,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -1232,15 +1148,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -1264,15 +1177,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
@@ -1296,15 +1206,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
       - name: Run Component Tests (router)
         uses: ./.github/actions/pytest
         with:
@@ -1328,15 +1235,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
       - name: Run Component Tests (planner)
         uses: ./.github/actions/pytest
         with:
@@ -1360,15 +1264,12 @@ jobs:
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Pull nightly image
-        uses: ./.github/actions/docker-pull-image
-        with:
-          provider: 'aws'
-          repository: ${{ env.REGISTRY_IMAGE }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
       - name: Run Component Tests (kvbm)
         uses: ./.github/actions/pytest
         with:
