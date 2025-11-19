@@ -113,6 +113,39 @@ impl LocalEventSystem {
         self.new_event()
     }
 
+    /// Waits for the event to complete (triggered or poisoned).
+    ///
+    /// # Cancellation Safety
+    ///
+    /// This method is **cancellation safe** and can be used in `tokio::select!` statements.
+    /// If the future is dropped before completion, the internal waiter count is properly
+    /// decremented via the `Drop` implementation of `LocalWaiter`.
+    ///
+    /// # Performance Considerations
+    ///
+    /// Each call to `wait` performs a `DashMap` lookup and acquires a mutex lock to register
+    /// a waiter. When using `wait` in a loop with `tokio::select!`, consider pinning the
+    /// future to avoid repeated lookups:
+    ///
+    /// ```rust,ignore
+    /// // Efficient: Lookup happens once
+    /// let wait_fut = system.wait(handle);
+    /// tokio::pin!(wait_fut);
+    ///
+    /// loop {
+    ///     tokio::select! {
+    ///         result = &mut wait_fut => break result,
+    ///         _ = other_event.tick() => continue,
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The handle does not belong to this worker
+    /// - The event is unknown (invalid handle)
+    /// - The event was poisoned (returns `EventPoison` error)
     pub async fn wait(self: &Arc<Self>, handle: EventHandle) -> Result<()> {
         self.ensure_local_handle(handle)?;
         self.wait_local(handle).await
