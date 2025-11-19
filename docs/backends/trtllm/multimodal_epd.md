@@ -23,9 +23,13 @@ To enable it build the dynamo container with the `--tensorrtllm-commit` flag, fo
 ```bash
 cd $DYNAMO_HOME/examples/backends/trtllm
 
-# Launch 3-worker EPD flow with NIXL
+# Launch 3-worker EPD flow with NIXL.
 ./launch/epd_disagg.sh
 ```
+
+## Pre-requsites
+
+This script is specifically designed to work on 8 node H200 and `Llama-4-Maverick-17B-128E-Instruct` model with assumption that you already have a model specific embedding file ready.
 
 ## Configuration
 
