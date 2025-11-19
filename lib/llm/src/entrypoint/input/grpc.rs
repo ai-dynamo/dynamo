@@ -86,18 +86,16 @@ pub async fn run(
         }
     };
 
-    // Spawn both HTTP (for metrics) and gRPC servers concurrently
+    // Run both HTTP (for metrics) and gRPC servers concurrently
     let http_service = grpc_service.http_service().clone();
-    let grpc_task = grpc_service.spawn(distributed_runtime.primary_token());
-    let http_task = http_service.spawn(distributed_runtime.primary_token());
+    let shutdown_token = distributed_runtime.primary_token();
 
-    // Wait for both servers to complete
+    // Wait for both servers to complete, propagating the first error if any occurs
     // Both tasks should run indefinitely until cancelled by the shutdown token
-    let (grpc_result, http_result) = tokio::join!(grpc_task, http_task);
-
-    // Check results - if either failed, propagate the error
-    grpc_result.await??;
-    http_result.await??;
+    tokio::try_join!(
+        grpc_service.run(shutdown_token.clone()),
+        http_service.run(shutdown_token)
+    )?;
 
     distributed_runtime.shutdown(); // Cancel primary token
     Ok(())
