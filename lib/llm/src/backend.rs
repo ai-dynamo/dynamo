@@ -243,6 +243,7 @@ impl
                     //mdcsum: mdcsum.clone(),
                     index: data.index,
                     completion_usage: data.completion_usage,
+                    disaggregated_params: data.disaggregated_params,
                 })
             })
         });
