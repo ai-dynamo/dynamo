@@ -158,11 +158,10 @@ spec:
             - --data-parallel-hybrid-lb
             - --max-model-len
             - "1048"
-            - --gpu-memory-utilization
-            - "0.75"
             - --enable-expert-parallel
             - --async-scheduling
             - --enable-dbo
+            - --enforce-eager
             - --dbo-decode-token-threshold
             - "32"
             - --enable-eplb
