@@ -446,6 +446,41 @@ impl LocalModel {
 
         Ok(())
     }
+
+    /// Helper associated function for bindings to detach a model
+    /// without having a LocalModel instance.
+    pub async fn detach_model_from_endpoint(endpoint: &Endpoint) -> anyhow::Result<()> {
+        let drt = endpoint.drt();
+        let instance_id = drt.connection_id();
+
+        let namespace = endpoint.component().namespace().name().to_string();
+        let component = endpoint.component().name().to_string();
+        let endpoint_name = endpoint.name().to_string();
+
+        tracing::info!(
+            "Unregistering model from discovery: namespace={}, component={}, endpoint={}, instance_id={:x}",
+            namespace,
+            component,
+            endpoint_name,
+            instance_id
+        );
+
+        use dynamo_runtime::discovery::DiscoveryInstance;
+        let instance = DiscoveryInstance::Model {
+            namespace,
+            component,
+            endpoint: endpoint_name,
+            instance_id,
+            card_json: serde_json::Value::Null,
+        };
+
+        let discovery = drt.discovery();
+        discovery.unregister(instance).await?;
+
+        tracing::info!("Successfully unregistered model from discovery");
+
+        Ok(())
+    }
 }
 
 /// A random endpoint to use for internal communication
