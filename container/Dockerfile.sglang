@@ -360,7 +360,7 @@ COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/whee
 RUN python3 -m pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    nixl[cu13]==0.7.1 \
     && cd /opt/dynamo/benchmarks \
     && python3 -m pip install --no-cache . \
     && cd - \
