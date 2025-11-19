@@ -196,6 +196,7 @@ markers = [
     "trtllm: marks tests as requiring trtllm",
     "trtllm_marker: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
+    "multimodal: marks tests as multimodal (image/video) tests",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
     "kvbm: marks tests for KV behavior and model determinism",
