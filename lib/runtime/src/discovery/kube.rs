@@ -131,9 +131,7 @@ impl Discovery for KubeDiscoveryClient {
                 tracing::info!("Unregistering endpoint instance={:?}", instance);
                 metadata.unregister_endpoint(&instance)?;
             }
-            DiscoveryInstance::Model {
-                ..
-            } => {
+            DiscoveryInstance::Model { .. } => {
                 tracing::info!("Unregistering model card instance={:?}", instance);
                 metadata.unregister_model_card(&instance)?;
             }
