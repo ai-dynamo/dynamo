@@ -30,7 +30,7 @@ spec:
         limits:
           gpu: "8"
       volumeMounts:
-        - name: model-cache-pvc
+        - name: model-cache
           mountPoint: /opt/model
       sharedMemory:
         size: 80Gi
