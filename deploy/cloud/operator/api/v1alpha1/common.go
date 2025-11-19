@@ -65,3 +65,53 @@ type SharedMemorySpec struct {
 	Disabled bool              `json:"disabled,omitempty"`
 	Size     resource.Quantity `json:"size,omitempty"`
 }
+
+type ResourceItem struct {
+	// CPU specifies the CPU resource request/limit (e.g., "1000m", "2")
+	CPU string `json:"cpu,omitempty"`
+	// Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
+	Memory string `json:"memory,omitempty"`
+	// GPU indicates the number of GPUs to request.
+	// Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+	GPU string `json:"gpu,omitempty"`
+	// GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"
+	// By default if not specified, the GPU type is "nvidia.com/gpu"
+	GPUType string `json:"gpuType,omitempty"`
+	// Custom specifies additional custom resource requests/limits
+	Custom map[string]string `json:"custom,omitempty"`
+}
+
+// Resources defines requested and limits for a component, including CPU, memory,
+// GPUs/devices, and any runtime-specific resources.
+type Resources struct {
+	// Requests specifies the minimum resources required by the component
+	Requests *ResourceItem `json:"requests,omitempty"`
+	// Limits specifies the maximum resources allowed for the component
+	Limits *ResourceItem `json:"limits,omitempty"`
+	// Claims specifies resource claims for dynamic resource allocation
+	Claims []corev1.ResourceClaim `json:"claims,omitempty"`
+}
+
+type DeploymentTargetHPAConf struct {
+	CPU         *int32  `json:"cpu,omitempty"`
+	GPU         *int32  `json:"gpu,omitempty"`
+	Memory      *string `json:"memory,omitempty"`
+	QPS         *int64  `json:"qps,omitempty"`
+	MinReplicas *int32  `json:"min_replicas,omitempty"`
+	MaxReplicas *int32  `json:"max_replicas,omitempty"`
+}
+
+type LabelItemSchema struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type ExtraPodMetadata struct {
+	Annotations map[string]string `json:"annotations,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+}
+
+type ExtraPodSpec struct {
+	*corev1.PodSpec `json:",inline"`
+	MainContainer   *corev1.Container `json:"mainContainer,omitempty"`
+}

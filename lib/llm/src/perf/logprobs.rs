@@ -972,6 +972,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion.chunk".to_string(),
             usage: None,
+            nvext: None,
         }
     }
 
@@ -1009,6 +1010,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion.chunk".to_string(),
             usage: None,
+            nvext: None,
         }
     }
 
@@ -1349,6 +1351,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion.chunk".to_string(),
             usage: None,
+            nvext: None,
         };
 
         let logprobs = response.extract_logprobs_by_choice();
@@ -1563,6 +1566,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion.chunk".to_string(),
             usage: None,
+            nvext: None,
         }
     }
 

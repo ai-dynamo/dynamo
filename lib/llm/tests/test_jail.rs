@@ -46,6 +46,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
                 service_tier: None,
+                nvext: None,
             };
 
             Annotated {
@@ -84,6 +85,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
                 service_tier: None,
+                nvext: None,
             };
 
             Annotated {
@@ -126,6 +128,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
                 service_tier: None,
+                nvext: None,
             };
 
             Annotated {
@@ -169,6 +172,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
                 service_tier: None,
+                nvext: None,
             };
 
             Annotated {
@@ -212,6 +216,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
                 service_tier: None,
+                nvext: None,
             };
 
             Annotated {
@@ -2050,6 +2055,7 @@ mod parallel_jail_tests {
             object: "chat.completion.chunk".to_string(),
             usage: None,
             service_tier: None,
+            nvext: None,
         };
 
         Annotated {

@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::config::HealthStatus;
+use crate::config::environment_names::logging as env_logging;
+use crate::config::environment_names::runtime::canary as env_canary;
+use crate::config::environment_names::runtime::system as env_system;
 use crate::logging::make_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::metrics::prometheus_names::{nats_client, nats_service};
@@ -307,6 +310,8 @@ mod tests {
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
     use super::*;
+    use crate::config::environment_names::logging as env_logging;
+    use crate::config::environment_names::runtime::canary as env_canary;
     use crate::distributed::distributed_test_utils::create_test_drt_async;
     use crate::metrics::MetricsHierarchy;
     use anyhow::Result;
@@ -317,7 +322,7 @@ mod integration_tests {
     #[tokio::test]
     async fn test_uptime_from_system_health() {
         // Test that uptime is available from SystemHealth
-        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
             let drt = create_test_drt_async().await;
 
             // Get uptime from SystemHealth
@@ -336,7 +341,7 @@ mod integration_tests {
     #[tokio::test]
     async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
-        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
             let drt = create_test_drt_async().await;
             // SystemStatusState is already created in distributed.rs
             // so we don't need to create it again here
@@ -374,7 +379,7 @@ mod integration_tests {
     #[tokio::test]
     async fn test_uptime_gauge_updates() {
         // Test that the uptime gauge is properly updated and increases over time
-        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
             let drt = create_test_drt_async().await;
 
             // Get initial uptime
@@ -406,7 +411,7 @@ mod integration_tests {
     #[tokio::test]
     async fn test_http_requests_fail_when_system_disabled() {
         // Test that system status server is not running when disabled
-        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
             let drt = create_test_drt_async().await;
 
             // Verify that system status server info is None when disabled
@@ -460,13 +465,13 @@ mod integration_tests {
         #[allow(clippy::redundant_closure_call)]
         temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_PORT", Some("0")),
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
                 (
-                    "DYN_SYSTEM_STARTING_HEALTH_STATUS",
+                    env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
                     Some(starting_health_status),
                 ),
-                ("DYN_SYSTEM_HEALTH_PATH", custom_health_path),
-                ("DYN_SYSTEM_LIVE_PATH", custom_live_path),
+                (env_system::DYN_SYSTEM_HEALTH_PATH, custom_health_path),
+                (env_system::DYN_SYSTEM_LIVE_PATH, custom_live_path),
             ],
             (async || {
                 let drt = Arc::new(create_test_drt_async().await);
@@ -542,10 +547,10 @@ mod integration_tests {
         #[allow(clippy::redundant_closure_call)]
         let _ = temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_PORT", Some("0")),
-                ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready")),
-                ("DYN_LOGGING_JSONL", Some("1")),
-                ("DYN_LOG", Some("trace")),
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
+                (env_logging::DYN_LOGGING_JSONL, Some("1")),
+                (env_logging::DYN_LOG, Some("trace")),
             ],
             (async || {
                 // TODO Add proper testing for
@@ -596,9 +601,9 @@ mod integration_tests {
         const ENDPOINT_HEALTH_CONFIG: &str = "[\"generate\"]";
         temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_PORT", Some("0")),
-                ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
-                ("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Some(ENDPOINT_HEALTH_CONFIG)),
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("notready")),
+                (env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS, Some(ENDPOINT_HEALTH_CONFIG)),
             ],
             async {
                 let drt = Arc::new(create_test_drt_async().await);
@@ -610,7 +615,7 @@ mod integration_tests {
                 assert!(
                     system_info_opt.is_some(),
                     "System status server was not spawned by DRT. Expected DRT to spawn server when DYN_SYSTEM_PORT is set to a positive value, but system_status_server_info() returned None. Environment: DYN_SYSTEM_PORT={:?}",
-                    std::env::var("DYN_SYSTEM_PORT")
+                    std::env::var(env_system::DYN_SYSTEM_PORT)
                 );
 
                 // Get the system status server info from DRT - this should never fail now due to above check
@@ -704,8 +709,8 @@ mod integration_tests {
         // use reqwest for HTTP requests
         temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_PORT", Some("0")),
-                ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready")),
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
             ],
             async {
                 let drt = Arc::new(create_test_drt_async().await);
@@ -756,15 +761,18 @@ mod integration_tests {
 
         temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_PORT", Some("0")),
-                ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
                 (
-                    "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+                    env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
+                    Some("notready"),
+                ),
+                (
+                    env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
                     Some("[\"test.endpoint\"]"),
                 ),
                 // Enable health check with short intervals for testing
                 ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
-                ("DYN_CANARY_WAIT_TIME", Some("1")), // Send canary after 1 second of inactivity
+                (env_canary::DYN_CANARY_WAIT_TIME, Some("1")), // Send canary after 1 second of inactivity
                 ("DYN_HEALTH_CHECK_REQUEST_TIMEOUT", Some("1")), // Immediately timeout to mimic unresponsiveness
                 ("RUST_LOG", Some("info")),                      // Enable logging for test
             ],

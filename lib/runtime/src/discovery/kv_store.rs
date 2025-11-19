@@ -247,7 +247,7 @@ impl Discovery for KVStoreDiscovery {
             MODELS_BUCKET
         };
 
-        tracing::debug!(
+        tracing::trace!(
             "KVStoreDiscovery::list_and_watch: Starting watch for query={:?}, prefix={}, bucket={}",
             query,
             prefix,
@@ -264,47 +264,18 @@ impl Discovery for KVStoreDiscovery {
             cancel_token,
         );
 
-        tracing::debug!(
-            "KVStoreDiscovery::list_and_watch: Got watch receiver for bucket={}",
-            bucket_name
-        );
-
         // Create a stream that filters and transforms WatchEvents to DiscoveryEvents
         let stream = async_stream::stream! {
-            let mut event_count = 0;
-            tracing::debug!("KVStoreDiscovery::list_and_watch: Stream started, waiting for events on prefix={}", prefix);
             while let Some(event) = rx.recv().await {
-                event_count += 1;
-                tracing::debug!(
-                    "KVStoreDiscovery::list_and_watch: Received event #{} for prefix={}",
-                    event_count,
-                    prefix
-                );
                 let discovery_event = match event {
                     WatchEvent::Put(kv) => {
-                        tracing::debug!(
-                            "KVStoreDiscovery::list_and_watch: Put event, key={}, prefix={}, matches={}",
-                            kv.key_str(),
-                            prefix,
-                            Self::matches_prefix(kv.key_str(), &prefix, bucket_name)
-                        );
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(kv.key_str(), &prefix, bucket_name) {
-                            tracing::debug!(
-                                "KVStoreDiscovery::list_and_watch: Skipping key {} (doesn't match prefix {})",
-                                kv.key_str(),
-                                prefix
-                            );
                             continue;
                         }
 
                         match Self::parse_instance(kv.value()) {
                             Ok(instance) => {
-                                tracing::debug!(
-                                    "KVStoreDiscovery::list_and_watch: Emitting Added event for instance_id={}, key={}",
-                                    instance.instance_id(),
-                                    kv.key_str()
-                                );
                                 Some(DiscoveryEvent::Added(instance))
                             },
                             Err(e) => {
@@ -319,18 +290,8 @@ impl Discovery for KVStoreDiscovery {
                     }
                     WatchEvent::Delete(kv) => {
                         let key_str = kv.as_ref();
-                        tracing::debug!(
-                            "KVStoreDiscovery::list_and_watch: Delete event, key={}, prefix={}",
-                            key_str,
-                            prefix
-                        );
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(key_str, &prefix, bucket_name) {
-                            tracing::debug!(
-                                "KVStoreDiscovery::list_and_watch: Skipping deleted key {} (doesn't match prefix {})",
-                                key_str,
-                                prefix
-                            );
                             continue;
                         }
 
@@ -342,11 +303,6 @@ impl Discovery for KVStoreDiscovery {
                             Some(instance_id_hex) => {
                                 match u64::from_str_radix(instance_id_hex, 16) {
                                     Ok(instance_id) => {
-                                        tracing::debug!(
-                                            "KVStoreDiscovery::list_and_watch: Emitting Removed event for instance_id={}, key={}",
-                                            instance_id,
-                                            key_str
-                                        );
                                         Some(DiscoveryEvent::Removed(instance_id))
                                     }
                                     Err(e) => {
@@ -371,19 +327,10 @@ impl Discovery for KVStoreDiscovery {
                 };
 
                 if let Some(event) = discovery_event {
-                    tracing::debug!("KVStoreDiscovery::list_and_watch: Yielding event: {:?}", event);
                     yield Ok(event);
-                } else {
-                    tracing::debug!("KVStoreDiscovery::list_and_watch: Event was filtered out (None)");
                 }
             }
-            tracing::debug!("KVStoreDiscovery::list_and_watch: Stream ended after {} events for prefix={}", event_count, prefix);
         };
-
-        tracing::debug!(
-            "KVStoreDiscovery::list_and_watch: Returning stream for query={:?}",
-            query
-        );
         Ok(Box::pin(stream))
     }
 }

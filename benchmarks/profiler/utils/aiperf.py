@@ -20,6 +20,12 @@ import random
 import subprocess
 from typing import Optional, Tuple
 
+from benchmarks.profiler.utils.defaults import (
+    AIPERF_PREFILL_ATTN_DP_NUM_REQ_RATIO,
+    AIPERF_PREFILL_BENCHMARK_OSL,
+    AIPERF_WARMUP_REQUEST_PER_DP_RANK,
+)
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 console_handler = logging.StreamHandler()
@@ -37,7 +43,7 @@ def _get_common_aiperf_cmd(
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     tokenizer="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     base_url="http://localhost:8000",
-    warmup_request_count: int = 3,
+    warmup_request_count: int = AIPERF_WARMUP_REQUEST_PER_DP_RANK,
 ):
     return [
         "aiperf",
@@ -74,11 +80,11 @@ def get_prefill_aiperf_cmd(
     seed=100,
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     tokenizer="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    osl=5,
+    osl=AIPERF_PREFILL_BENCHMARK_OSL,
     base_url="http://localhost:8000",
     concurrency: int = 1,
     request_count: int = 1,
-    warmup_request_count: int = 3,
+    warmup_request_count: int = AIPERF_WARMUP_REQUEST_PER_DP_RANK,
 ):
     return _get_common_aiperf_cmd(
         artifact_dir,
@@ -116,6 +122,7 @@ def get_decode_aiperf_cmd(
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     tokenizer="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     base_url="http://localhost:8000",
+    warmup_request_count: int = AIPERF_WARMUP_REQUEST_PER_DP_RANK,
 ):
     return _get_common_aiperf_cmd(
         artifact_dir,
@@ -123,6 +130,7 @@ def get_decode_aiperf_cmd(
         model,
         tokenizer,
         base_url,
+        warmup_request_count=warmup_request_count,
     ) + [
         "--synthetic-input-tokens-mean",
         str(isl),
@@ -207,7 +215,7 @@ def get_prefill_ttft(
     tokenizer: str,
     base_url: str = "http://localhost:8000",
     attention_dp_size: int = 1,
-    attn_dp_num_req_ratio: int = 4,
+    attn_dp_num_req_ratio: int = AIPERF_PREFILL_ATTN_DP_NUM_REQ_RATIO,
 ) -> Optional[float]:
     """
     Run prefill benchmark and extract TTFT (ms). Returns None on failure.
@@ -218,6 +226,7 @@ def get_prefill_ttft(
     """
     # DEP-aware measurement (waves of size attention_dp_size)
     if attention_dp_size > 1:
+        assert attn_dp_num_req_ratio > 0, "attn_dp_num_req_ratio must be greater than 0"
         total_concurrency = attention_dp_size * attn_dp_num_req_ratio
         logger.info(
             f"DEP prefill measurement: isl={isl}, attn_dp={attention_dp_size}, attn_dp_num_req_ratio={attn_dp_num_req_ratio}, "
@@ -232,9 +241,16 @@ def get_prefill_ttft(
             base_url=base_url,
             concurrency=total_concurrency,
             request_count=total_concurrency,
+            warmup_request_count=AIPERF_WARMUP_REQUEST_PER_DP_RANK * attention_dp_size,
         )
         try:
             max_ttft = float(aiperf_result["time_to_first_token"]["max"])
+            # subtract the decoding time in-between prefill runs
+            max_ttft -= (
+                float(aiperf_result["inter_token_latency"]["avg"])
+                * (AIPERF_PREFILL_BENCHMARK_OSL - 1)
+                * (attn_dp_num_req_ratio - 1)
+            )
             return max_ttft / float(attn_dp_num_req_ratio)
         except (KeyError, TypeError, ValueError):
             logger.warning(
@@ -266,6 +282,7 @@ def get_decode_itl_and_thpt_per_gpu(
     tokenizer: str,
     base_url: str = "http://localhost:8000",
     num_gpus: int = 1,
+    attention_dp_size: int = 1,
 ) -> Tuple[Optional[float], Optional[float]]:
     """
     Run decode benchmark and extract (ITL ms, throughput per GPU).
@@ -279,6 +296,7 @@ def get_decode_itl_and_thpt_per_gpu(
         model_name,
         tokenizer,
         base_url=base_url,
+        warmup_request_count=AIPERF_WARMUP_REQUEST_PER_DP_RANK * attention_dp_size,
     )
     if aiperf_result is None:
         return None, None
@@ -300,6 +318,7 @@ def benchmark_decode(
     model_name,
     tokenizer,
     base_url="http://localhost:8000",
+    warmup_request_count: int = AIPERF_WARMUP_REQUEST_PER_DP_RANK,
 ):
     logger.info(f"Profiling decode with num_request {num_request}...")
 
@@ -316,6 +335,7 @@ def benchmark_decode(
         model=model_name,
         tokenizer=tokenizer,
         base_url=base_url,
+        warmup_request_count=warmup_request_count,
     )
     aiperf_process = subprocess.Popen(
         aiperf_cmd,

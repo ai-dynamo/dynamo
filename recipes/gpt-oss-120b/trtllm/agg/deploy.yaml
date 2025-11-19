@@ -46,7 +46,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: my-registry/trtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:my-tag
       replicas: 1
     TrtllmWorker:
       componentType: main
@@ -81,7 +81,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: my-registry/trtllm-runtime:my-tag
+          image: my-registry/tensorrtllm-runtime:my-tag
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"

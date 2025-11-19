@@ -20,11 +20,10 @@ metadata:
   name: llama3-70b-agg-epp
 spec:
   selector:
-    app: llama3-70b-agg
+    app: llama3-70b-agg-epp
   ports:
     - protocol: TCP
       port: 9002
       targetPort: 9002
       appProtocol: http2
   type: ClusterIP
-
