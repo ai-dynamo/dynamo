@@ -14,7 +14,6 @@ async def get_metrics_runtime(runtime, endpoint_name):
     """Helper to create a unique metrics runtime for each test."""
     namespace = runtime.namespace("test_metrics_ns")
     component = namespace.component("test_metrics_comp")
-    await component.create_service()
     endpoint = component.endpoint(endpoint_name)
     return endpoint.metrics
 

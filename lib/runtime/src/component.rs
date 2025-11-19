@@ -33,6 +33,7 @@ use std::fmt;
 
 use crate::{
     config::HealthStatus,
+    distributed::RequestPlaneMode,
     metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
     service::ServiceSet,
     transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
@@ -78,18 +79,22 @@ pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
-    NatsTcp(String),
+    #[serde(rename = "nats_tcp")]
+    Nats(String),
+    Http(String),
+    Tcp(String),
 }
 
 #[derive(Default)]
 pub struct RegistryInner {
-    services: HashMap<String, Service>,
-    stats_handlers: HashMap<String, Arc<parking_lot::Mutex<HashMap<String, EndpointStatsHandler>>>>,
+    pub(crate) services: HashMap<String, Service>,
+    pub(crate) stats_handlers:
+        HashMap<String, Arc<parking_lot::Mutex<HashMap<String, EndpointStatsHandler>>>>,
 }
 
 #[derive(Clone)]
 pub struct Registry {
-    inner: Arc<tokio::sync::Mutex<RegistryInner>>,
+    pub(crate) inner: Arc<tokio::sync::Mutex<RegistryInner>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -369,6 +374,7 @@ impl Component {
         unimplemented!("collect_stats")
     }
 
+    // Gather NATS metrics
     pub async fn add_stats_service(&mut self) -> anyhow::Result<()> {
         let service_name = self.service_name();
 
@@ -382,7 +388,10 @@ impl Component {
             .services
             .contains_key(&service_name)
         {
-            anyhow::bail!("Service {service_name} already exists");
+            // The NATS service is per component, but it is called from `serve_endpoint`, and there
+            // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
+            tracing::trace!("Service {service_name} already exists");
+            return Ok(());
         }
 
         let Some(nats_client) = self.drt.nats_client() else {
@@ -397,18 +406,24 @@ impl Component {
             // Normal case
             guard.services.insert(service_name.clone(), nats_service);
             guard.stats_handlers.insert(service_name.clone(), stats_reg);
+
+            tracing::info!("Added NATS / stats service {service_name}");
+
             drop(guard);
         } else {
             drop(guard);
             let _ = nats_service.stop().await;
-            return Err(anyhow::anyhow!(
-                "Service create race for {service_name}, now already exists"
-            ));
+            // The NATS service is per component, but it is called from `serve_endpoint`, and there
+            // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
+            return Ok(());
         }
 
-        // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
         if let Err(err) = self.start_scraping_nats_service_component_metrics() {
-            tracing::debug!(service_name, error = %err, "Metrics registration failed");
+            tracing::debug!(
+                "Metrics registration failed for '{}': {}",
+                self.service_name(),
+                err
+            );
         }
         Ok(())
     }

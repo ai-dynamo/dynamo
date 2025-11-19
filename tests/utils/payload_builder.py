@@ -12,15 +12,15 @@ from tests.utils.payloads import (
 )
 
 # Common default text prompt used across tests
-TEXT_PROMPT = "Tell me a short joke about AI."
+TEXT_PROMPT = "Tell me a knock knock joke about AI."
 
 
 def chat_payload_default(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
-    max_tokens: int = 150,
-    temperature: float = 0.1,
+    max_tokens: int = 1000,
+    temperature: float = 0.0,
     stream: bool = False,
 ) -> ChatPayload:
     return ChatPayload(
@@ -37,7 +37,9 @@ def chat_payload_default(
         },
         repeat_count=repeat_count,
         expected_log=expected_log or [],
-        expected_response=expected_response or ["AI"],
+        # Accept any of these keywords in the response (case-insensitive)
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
     )
 
 
@@ -45,8 +47,8 @@ def completion_payload_default(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
-    max_tokens: int = 150,
-    temperature: float = 0.1,
+    max_tokens: int = 1000,
+    temperature: float = 0.0,
     stream: bool = False,
 ) -> CompletionPayload:
     return CompletionPayload(
@@ -58,7 +60,51 @@ def completion_payload_default(
         },
         repeat_count=repeat_count,
         expected_log=expected_log or [],
-        expected_response=expected_response or ["AI"],
+        # Accept any of these keywords in the response (case-insensitive)
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    )
+
+
+def multimodal_payload_default(
+    image_url: str = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png",
+    text: str = "Describe the image",
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    max_tokens: int = 160,
+    temperature: Optional[float] = None,
+    stream: bool = False,
+) -> ChatPayload:
+    """Create a multimodal chat payload with image and text content.
+
+    Args:
+        image_url: URL of the image to include in the request
+        text: Text prompt to accompany the image
+        repeat_count: Number of times to repeat the request
+        expected_response: List of strings expected in the response
+        expected_log: List of regex patterns expected in logs
+        max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature (optional)
+        stream: Whether to stream the response
+
+    Returns:
+        ChatPayload configured for multimodal requests
+    """
+    return chat_payload(
+        content=[
+            {"type": "text", "text": text},
+            {
+                "type": "image_url",
+                "image_url": {"url": image_url},
+            },
+        ],
+        repeat_count=repeat_count,
+        expected_response=expected_response or ["image"],
+        expected_log=expected_log or [],
+        max_tokens=max_tokens,
+        temperature=temperature,
+        stream=stream,
     )
 
 

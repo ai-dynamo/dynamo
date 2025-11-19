@@ -93,7 +93,6 @@ async def worker(runtime: DistributedRuntime):
     namespace, comp_name, endpoint_name = parts
 
     component = runtime.namespace(namespace).component(comp_name)
-    await component.create_service()
 
     stats_endpoint = component.endpoint(endpoint_name)
     print(
@@ -121,9 +120,9 @@ async def main():
 
     loop = asyncio.get_running_loop()
     if is_static:
-        runtime = DistributedRuntime(loop, "file")
+        runtime = DistributedRuntime(loop, "file", "nats")
     else:
-        runtime = DistributedRuntime(loop, "etcd")
+        runtime = DistributedRuntime(loop, "etcd", "nats")
 
     try:
         await worker(runtime)  # type: ignore[arg-type]

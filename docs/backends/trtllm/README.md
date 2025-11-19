@@ -158,7 +158,7 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 ```bash
 cd $DYNAMO_HOME/examples/backends/trtllm
 
-export AGG_ENGINE_ARGS=./recipes/deepseek-r1/trtllm/agg/mtp/mtp_agg.yaml
+export AGG_ENGINE_ARGS=./engine_configs/deepseek-r1/agg/mtp/mtp_agg.yaml
 export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
 # nvidia/DeepSeek-R1-FP4 is a large model
 export MODEL_PATH="nvidia/DeepSeek-R1-FP4"

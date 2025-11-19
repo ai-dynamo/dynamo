@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::OpenAIError;
 
-use super::{ImageDetail, ImageUrl, VideoUrl};
+use super::{AudioUrl, ImageDetail, ImageUrl, VideoUrl};
 
 #[derive(Clone, Serialize, Debug, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -115,6 +115,7 @@ pub enum MessageContent {
     ImageFile(MessageContentImageFileObject),
     ImageUrl(MessageContentImageUrlObject),
     VideoUrl(MessageContentVideoUrlObject),
+    AudioUrl(MessageContentAudioUrlObject),
     Refusal(MessageContentRefusalObject),
 }
 
@@ -206,6 +207,11 @@ pub struct MessageContentVideoUrlObject {
 }
 
 #[derive(Clone, Serialize, Debug, Deserialize, PartialEq)]
+pub struct MessageContentAudioUrlObject {
+    pub audio_url: AudioUrl,
+}
+
+#[derive(Clone, Serialize, Debug, Deserialize, PartialEq)]
 pub struct MessageRequestContentTextObject {
     /// Text content to be sent to the model
     pub text: String,
@@ -228,6 +234,7 @@ pub enum MessageContentInput {
     ImageFile(MessageContentImageFileObject),
     ImageUrl(MessageContentImageUrlObject),
     VideoUrl(MessageContentVideoUrlObject),
+    AudioUrl(MessageContentAudioUrlObject),
 }
 #[derive(Clone, Serialize, Default, Debug, Deserialize, Builder, PartialEq)]
 #[builder(name = "CreateMessageRequestArgs")]
@@ -298,6 +305,7 @@ pub enum MessageDeltaContent {
     ImageFile(MessageDeltaContentImageFileObject),
     ImageUrl(MessageDeltaContentImageUrlObject),
     VideoUrl(MessageDeltaContentVideoUrlObject),
+    AudioUrl(MessageDeltaContentAudioUrlObject),
     Text(MessageDeltaContentTextObject),
     Refusal(MessageDeltaContentRefusalObject),
 }
@@ -379,4 +387,12 @@ pub struct MessageDeltaContentVideoUrlObject {
     pub index: u32,
 
     pub video_url: Option<VideoUrl>,
+}
+
+#[derive(Clone, Serialize, Debug, Deserialize, PartialEq)]
+pub struct MessageDeltaContentAudioUrlObject {
+    /// The index of the content part in the message.
+    pub index: u32,
+
+    pub audio_url: Option<AudioUrl>,
 }

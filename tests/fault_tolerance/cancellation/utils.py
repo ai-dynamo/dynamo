@@ -388,6 +388,6 @@ def poll_for_pattern(
         time.sleep(poll_interval_ms / 1000.0)
         iteration += 1
 
-    pytest.fail(
+    raise AssertionError(
         f"Failed to find '{pattern}' pattern after {max_iterations} iterations ({max_wait_ms}ms)"
     )

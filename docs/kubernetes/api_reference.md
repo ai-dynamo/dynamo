@@ -123,6 +123,8 @@ _Appears in:_
 | `created` _boolean_ | Created indicates whether the DGD has been successfully created.<br />Used to prevent recreation if the DGD is manually deleted by users. |  |  |
 
 
+
+
 #### DynamoComponentDeployment
 
 
@@ -423,6 +425,41 @@ _Appears in:_
 | `ready` _boolean_ | Ready indicates whether the endpoint is ready to serve traffic<br />For LoRA models: true if the POST /loras request succeeded with a 2xx status code<br />For base models: always false (no probing performed) |  |  |
 
 
+#### ExtraPodMetadata
+
+
+
+
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `annotations` _object (keys:string, values:string)_ |  |  |  |
+| `labels` _object (keys:string, values:string)_ |  |  |  |
+
+
+#### ExtraPodSpec
+
+
+
+
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `mainContainer` _[Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core)_ |  |  |  |
+
+
 #### IngressSpec
 
 
@@ -463,6 +500,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `secretName` _string_ | SecretName is the name of a Kubernetes Secret containing the TLS certificate and key. |  |  |
+
+
 
 
 #### ModelReference
@@ -556,6 +595,46 @@ _Appears in:_
 | `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1" |  | Required: \{\} <br /> |
 
 
+#### ResourceItem
+
+
+
+
+
+
+
+_Appears in:_
+- [Resources](#resources)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `cpu` _string_ | CPU specifies the CPU resource request/limit (e.g., "1000m", "2") |  |  |
+| `memory` _string_ | Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi") |  |  |
+| `gpu` _string_ | GPU indicates the number of GPUs to request.<br />Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment. |  |  |
+| `gpuType` _string_ | GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"<br />By default if not specified, the GPU type is "nvidia.com/gpu" |  |  |
+| `custom` _object (keys:string, values:string)_ | Custom specifies additional custom resource requests/limits |  |  |
+
+
+#### Resources
+
+
+
+Resources defines requested and limits for a component, including CPU, memory,
+GPUs/devices, and any runtime-specific resources.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `requests` _[ResourceItem](#resourceitem)_ | Requests specifies the minimum resources required by the component |  |  |
+| `limits` _[ResourceItem](#resourceitem)_ | Limits specifies the maximum resources allowed for the component |  |  |
+| `claims` _[ResourceClaim](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourceclaim-v1-core) array_ | Claims specifies resource claims for dynamic resource allocation |  |  |
+
+
 #### SharedMemorySpec
 
 
@@ -599,6 +678,8 @@ The Dynamo operator automatically applies default values to various fields when 
 
 - **Health Probes**: Startup, liveness, and readiness probes are configured differently for frontend, worker, and planner components. For example, worker components receive a startup probe with a 2-hour timeout (720 failures × 10 seconds) to accommodate long model loading times.
 
+- **Security Context**: All components receive `fsGroup: 1000` by default to ensure proper file permissions for mounted volumes. This can be overridden via the `extraPodSpec.securityContext` field.
+
 - **Shared Memory**: All components receive an 8Gi shared memory volume mounted at `/dev/shm` by default (can be disabled or resized via the `sharedMemory` field).
 
 - **Environment Variables**: Components automatically receive environment variables like `DYN_NAMESPACE`, `DYN_PARENT_DGD_K8S_NAME`, `DYNAMO_PORT`, and backend-specific variables.
@@ -615,6 +696,50 @@ All components receive the following pod-level defaults unless overridden:
 
 - **`terminationGracePeriodSeconds`**: `60` seconds
 - **`restartPolicy`**: `Always`
+
+## Security Context
+
+The operator automatically applies default security context settings to all components to ensure proper file permissions, particularly for mounted volumes:
+
+- **`fsGroup`**: `1000` - Sets the group ownership of mounted volumes and any files created in those volumes
+
+This default ensures that non-root containers can write to mounted volumes (like model caches or persistent storage) without permission issues. The `fsGroup` setting is particularly important for:
+- Model downloads and caching
+- Compilation cache directories
+- Persistent volume claims (PVCs)
+- SSH key generation in multinode deployments
+
+### Overriding Security Context
+
+To override the default security context, specify your own `securityContext` in the `extraPodSpec` of your component:
+
+```yaml
+services:
+  YourWorker:
+    extraPodSpec:
+      securityContext:
+        fsGroup: 2000  # Custom group ID
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+```
+
+**Important**: When you provide *any* `securityContext` object in `extraPodSpec`, the operator will not inject any defaults. This gives you complete control over the security context, including the ability to run as root (by omitting `runAsNonRoot` or setting it to `false`).
+
+### OpenShift and Security Context Constraints
+
+In OpenShift environments with Security Context Constraints (SCCs), you may need to omit explicit UID/GID values to allow OpenShift's admission controllers to assign them dynamically:
+
+```yaml
+services:
+  YourWorker:
+    extraPodSpec:
+      securityContext:
+        # Omit fsGroup to let OpenShift assign it based on SCC
+        # OpenShift will inject the appropriate UID range
+```
+
+Alternatively, if you want to keep the default `fsGroup: 1000` behavior and are certain your cluster allows it, you don't need to specify anything - the operator defaults will work.
 
 ## Shared Memory Configuration
 
@@ -732,6 +857,7 @@ The operator automatically injects environment variables based on component type
 
 - **`DYN_SYSTEM_PORT`**: `9090` (automatically enables the system metrics server)
 - **`DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS`**: `["generate"]`
+- **`DYN_SYSTEM_ENABLED`**: `true` (needed for runtime images 0.6.1 and older)
 
 ### Planner Components
 
@@ -809,7 +935,7 @@ Default container ports are configured based on component type:
 
 For users who want to understand the implementation details or contribute to the operator, the default values described in this document are set in the following source files:
 
-- **Health Probes & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, environment variables, shared memory, and pod configurations
+- **Health Probes, Security Context & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, security context, environment variables, shared memory, and pod configurations
 - **Component-Specific Defaults**:
   - [`internal/dynamo/component_frontend.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_frontend.go)
   - [`internal/dynamo/component_worker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_worker.go)
@@ -825,5 +951,6 @@ For users who want to understand the implementation details or contribute to the
 
 - All these defaults can be overridden by explicitly specifying values in your DynamoComponentDeployment or DynamoGraphDeployment resources
 - User-specified probes (via `livenessProbe`, `readinessProbe`, or `startupProbe` fields) take precedence over operator defaults
+- For security context, if you provide *any* `securityContext` in `extraPodSpec`, no defaults will be injected, giving you full control
 - For multinode deployments, some defaults are modified or removed as described above to accommodate distributed execution patterns
 - The `extraPodSpec.mainContainer` field can be used to override probe configurations set by the operator
