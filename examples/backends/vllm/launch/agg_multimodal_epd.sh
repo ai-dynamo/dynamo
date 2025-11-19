@@ -63,12 +63,6 @@ else
     exit 1
 fi
 
-# Check and install accelerate if needed (required for device_map="auto" in vision model loading)
-if ! python -c "import accelerate" &> /dev/null; then
-    echo "Installing accelerate..."
-    pip install accelerate
-fi
-
 # Start frontend (HTTP endpoint)
 python -m dynamo.frontend --http-port=8000 &
 

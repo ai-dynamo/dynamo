@@ -69,11 +69,6 @@ echo "Model: $MODEL_NAME"
 echo "Prompt Template: $PROMPT_TEMPLATE"
 echo "=================================================="
 
-# Check and install accelerate if needed (required for device_map="auto" in vision model loading)
-if ! python -c "import accelerate" &> /dev/null; then
-    echo "Installing accelerate..."
-    pip install accelerate
-fi
 
 # Start frontend (no router mode)
 echo "Starting frontend..."

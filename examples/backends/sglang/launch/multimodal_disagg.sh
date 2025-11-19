@@ -59,12 +59,6 @@ if [[ -n "$SERVED_MODEL_NAME" ]]; then
     SERVED_MODEL_ARG="--served-model-name $SERVED_MODEL_NAME"
 fi
 
-# Check and install accelerate if needed (required for device_map="auto" in vision model loading)
-if ! python3 -c "import accelerate" &> /dev/null; then
-    echo "Installing accelerate..."
-    pip install accelerate
-fi
-
 # run ingress
 python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
