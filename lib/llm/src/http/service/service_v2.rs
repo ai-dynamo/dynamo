@@ -205,6 +205,18 @@ impl HttpService {
         self.state().manager()
     }
 
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn is_tls_enabled(&self) -> bool {
+        self.enable_tls
+    }
+
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
         let this = self.clone();
         tokio::spawn(async move { this.run(cancel_token).await })
@@ -367,6 +379,7 @@ impl HttpServiceConfigBuilder {
         let mut routes = vec![
             metrics::router(registry, var(HTTP_SVC_METRICS_PATH_ENV).ok()),
             super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok()),
+            super::metrics_endpoints::list_metrics_endpoints_router(state.clone(), None),
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
             super::busy_threshold::busy_threshold_router(state.clone(), None),

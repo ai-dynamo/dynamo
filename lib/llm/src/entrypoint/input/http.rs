@@ -23,6 +23,8 @@ pub async fn run(
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
+    // Extract namespace before engine_config is moved
+    let namespace_for_metrics = local_model.namespace().unwrap_or("frontend").to_string();
     let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
         (Some(tls_cert_path), Some(tls_key_path)) => {
             if !tls_cert_path.exists() {
@@ -140,6 +142,24 @@ pub async fn run(
             .map(|rd| rd.to_string())
             .collect::<Vec<String>>()
     );
+
+    // Register frontend metrics endpoint with discovery
+    // Use the model's namespace if available, otherwise use a default namespace
+    let protocol = if http_service.is_tls_enabled() { "https" } else { "http" };
+    let metrics_url = format!("{}://{}:{}/metrics", protocol, http_service.host(), http_service.port());
+    let metrics_spec = dynamo_runtime::discovery::DiscoverySpec::MetricsEndpoint {
+        namespace: namespace_for_metrics,
+        url: metrics_url.clone(),
+    };
+    
+    match distributed_runtime.discovery().register(metrics_spec).await {
+        Ok(_) => {
+            tracing::info!("Registered frontend metrics endpoint: {}", metrics_url);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to register frontend metrics endpoint: {}", e);
+        }
+    }
 
     // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
     // Start custom backend metrics polling if configured
