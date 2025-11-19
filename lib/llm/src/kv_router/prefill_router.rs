@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
-        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator,
-        PushRouter, RouterMode, ServerStreamingEngine, SingleIn, async_trait,
+        AsyncEngine, AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter,
+        RouterMode, ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -270,6 +270,7 @@ impl
         // Extract request data while preserving context
         let (req, context) = request.into_parts();
         let request_id = context.id().to_string();
+        let engine_ctx = context.context();
 
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
@@ -280,12 +281,24 @@ impl
         let prefill_context = Context::with_id(prefill_req, request_id.clone());
 
         // Link the prefill context as a child so that kill signals propagate
-        context.controller().link_child(prefill_context.context());
+        engine_ctx.link_child(prefill_context.context());
 
         let prefill_request = prefill_context;
 
-        // Attempt prefill and handle results
-        match self.call_prefill(prefill_request).await {
+        // Attempt prefill
+        let prefill_result = self.call_prefill(prefill_request).await;
+
+        // Abort if cancelled during prefill
+        if engine_ctx.is_stopped() || engine_ctx.is_killed() {
+            tracing::debug!("Abort entering decode after context is stopped or killed");
+            return Err(anyhow::anyhow!(
+                "Context id {} is stopped or killed",
+                engine_ctx.id()
+            ));
+        }
+
+        // Handle prefill result
+        match prefill_result {
             Ok(prefill_result) => {
                 tracing::debug!("Prefill succeeded, using disaggregated params for decode");
 
