@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
@@ -39,6 +40,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		errMsg          string
 		wantWarnings    bool
 		expectedWarning string
+		errContains     bool
 	}{
 		{
 			name: "valid request",
@@ -260,6 +262,28 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			wantWarnings:    true,
 			expectedWarning: "spec.profilingConfig.config.deployment.model (different-model) will be overwritten by spec.model (llama-3-8b)",
 		},
+		{
+			name: "multiple errors (missing profiler image, missing config, and enableGpuDiscovery for namespace-restricted)",
+			request: &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgdr",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:              "llama-3-8b",
+					Backend:            "vllm",
+					EnableGpuDiscovery: true,
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "",
+						Config:        nil,
+					},
+				},
+			},
+			isClusterWide: false,
+			wantErr:       true,
+			errMsg:        "spec.profilingConfig.profilerImage is required\nspec.profilingConfig.config is required and must not be empty\nspec.enableGpuDiscovery can only be set to true for cluster-wide operators",
+			errContains:   true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -272,8 +296,20 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				return
 			}
 
-			if tt.wantErr && err.Error() != tt.errMsg {
-				t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+			if tt.wantErr {
+				if tt.errContains {
+					// For multiple errors, check that all expected error messages are present
+					errStr := err.Error()
+					for _, expectedMsg := range strings.Split(tt.errMsg, "\n") {
+						if !strings.Contains(errStr, expectedMsg) {
+							t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() error message = %v, want to contain %v", errStr, expectedMsg)
+						}
+					}
+				} else {
+					if err.Error() != tt.errMsg {
+						t.Errorf("DynamoGraphDeploymentRequestValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+					}
+				}
 			}
 
 			if tt.wantWarnings && len(warnings) == 0 {

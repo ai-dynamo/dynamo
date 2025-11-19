@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"errors"
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
@@ -92,26 +93,28 @@ func (v *DynamoGraphDeploymentValidator) validatePVCs() error {
 
 // validatePVC validates a single PVC configuration.
 func (v *DynamoGraphDeploymentValidator) validatePVC(index int, pvc *nvidiacomv1alpha1.PVC) error {
+	var err error
+
+	// Validate name is not nil
+	if pvc.Name == nil || *pvc.Name == "" {
+		err = errors.Join(err, fmt.Errorf("spec.pvcs[%d].name is required", index))
+	}
+
 	// Check if create is true
 	if pvc.Create != nil && *pvc.Create {
 		// Validate required fields when create is true
 		if pvc.StorageClass == "" {
-			return fmt.Errorf("spec.pvcs[%d].storageClass is required when create is true", index)
+			err = errors.Join(err, fmt.Errorf("spec.pvcs[%d].storageClass is required when create is true", index))
 		}
 
 		if pvc.Size.IsZero() {
-			return fmt.Errorf("spec.pvcs[%d].size is required when create is true", index)
+			err = errors.Join(err, fmt.Errorf("spec.pvcs[%d].size is required when create is true", index))
 		}
 
 		if pvc.VolumeAccessMode == "" {
-			return fmt.Errorf("spec.pvcs[%d].volumeAccessMode is required when create is true", index)
+			err = errors.Join(err, fmt.Errorf("spec.pvcs[%d].volumeAccessMode is required when create is true", index))
 		}
 	}
 
-	// Validate name is not nil
-	if pvc.Name == nil || *pvc.Name == "" {
-		return fmt.Errorf("spec.pvcs[%d].name is required", index)
-	}
-
-	return nil
+	return err
 }

@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
@@ -36,10 +37,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	)
 
 	tests := []struct {
-		name       string
-		deployment *nvidiacomv1alpha1.DynamoGraphDeployment
-		wantErr    bool
-		errMsg     string
+		name        string
+		deployment  *nvidiacomv1alpha1.DynamoGraphDeployment
+		wantErr     bool
+		errMsg      string
+		errContains bool
 	}{
 		{
 			name: "valid deployment with services",
@@ -252,6 +254,28 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			errMsg:  "spec.pvcs[0].name is required",
 		},
 		{
+			name: "pvc with multiple errors (name, storageClass, size, volumeAccessMode all missing)",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					PVCs: []nvidiacomv1alpha1.PVC{
+						{
+							Create: &trueVal,
+						},
+					},
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "spec.pvcs[0].name is required\nspec.pvcs[0].storageClass is required when create is true\nspec.pvcs[0].size is required when create is true\nspec.pvcs[0].volumeAccessMode is required when create is true",
+			errContains: true,
+		},
+		{
 			name: "valid pvc with create=true",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -331,8 +355,20 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				return
 			}
 
-			if tt.wantErr && err.Error() != tt.errMsg {
-				t.Errorf("DynamoGraphDeploymentValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+			if tt.wantErr {
+				if tt.errContains {
+					// For multiple errors, check that all expected error messages are present
+					errStr := err.Error()
+					for _, expectedMsg := range strings.Split(tt.errMsg, "\n") {
+						if !strings.Contains(errStr, expectedMsg) {
+							t.Errorf("DynamoGraphDeploymentValidator.Validate() error message = %v, want to contain %v", errStr, expectedMsg)
+						}
+					}
+				} else {
+					if err.Error() != tt.errMsg {
+						t.Errorf("DynamoGraphDeploymentValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+					}
+				}
 			}
 		})
 	}
