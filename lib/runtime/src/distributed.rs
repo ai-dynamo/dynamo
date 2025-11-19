@@ -114,7 +114,10 @@ impl DistributedRuntime {
             KeyValueStoreSelect::Memory => (None, KeyValueStoreManager::memory()),
         };
 
-        let nats_client = Some(nats_config.clone().connect().await?);
+        let nats_client = match nats_config {
+            Some(nc) => Some(nc.connect().await?),
+            None => None,
+        };
 
         // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
@@ -455,16 +458,21 @@ impl DistributedRuntime {
 #[derive(Dissolve)]
 pub struct DistributedConfig {
     pub store_backend: KeyValueStoreSelect,
-    pub nats_config: nats::ClientOptions,
+    pub nats_config: Option<nats::ClientOptions>,
     pub request_plane: RequestPlaneMode,
 }
 
 impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
+        let request_plane = RequestPlaneMode::from_env();
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::default()),
-            nats_config: nats::ClientOptions::default(),
-            request_plane: RequestPlaneMode::from_env(),
+            nats_config: if request_plane.is_nats() {
+                Some(nats::ClientOptions::default())
+            } else {
+                None
+            },
+            request_plane,
         }
     }
 
@@ -473,10 +481,15 @@ impl DistributedConfig {
             attach_lease: false,
             ..Default::default()
         };
+        let request_plane = RequestPlaneMode::from_env();
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::new(etcd_config)),
-            nats_config: nats::ClientOptions::default(),
-            request_plane: RequestPlaneMode::from_env(),
+            nats_config: if request_plane.is_nats() {
+                Some(nats::ClientOptions::default())
+            } else {
+                None
+            },
+            request_plane,
         }
     }
 }
@@ -538,6 +551,10 @@ impl RequestPlaneMode {
             .and_then(|s| s.parse().ok())
             .unwrap_or_default()
     }
+
+    pub fn is_nats(&self) -> bool {
+        matches!(self, RequestPlaneMode::Nats)
+    }
 }
 
 pub mod distributed_test_utils {
@@ -553,7 +570,7 @@ pub mod distributed_test_utils {
         let rt = crate::Runtime::from_current().unwrap();
         let config = super::DistributedConfig {
             store_backend: KeyValueStoreSelect::Memory,
-            nats_config: nats::ClientOptions::default(),
+            nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
         };
         super::DistributedRuntime::new(rt, config).await.unwrap()

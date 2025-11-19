@@ -93,7 +93,6 @@ async def worker(runtime: DistributedRuntime):
     namespace, comp_name, endpoint_name = parts
 
     component = runtime.namespace(namespace).component(comp_name)
-    await component.create_service()
 
     stats_endpoint = component.endpoint(endpoint_name)
     print(
