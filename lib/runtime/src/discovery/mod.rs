@@ -57,6 +57,12 @@ pub enum DiscoveryQuery {
         component: String,
         endpoint: String,
     },
+    /// Query all metrics endpoints in the system
+    AllMetricsEndpoints,
+    /// Query all metrics endpoints in a specific namespace
+    NamespacedMetricsEndpoints {
+        namespace: String,
+    },
 }
 
 /// Specification for registering objects in the discovery plane
@@ -79,6 +85,11 @@ pub enum DiscoverySpec {
         /// This allows lib/runtime to remain independent of lib/llm types
         /// DiscoverySpec.from_model() and DiscoveryInstance.deserialize_model() are ergonomic helpers to create and deserialize the model card.
         card_json: serde_json::Value,
+    },
+    /// Metrics endpoint specification for registration
+    MetricsEndpoint {
+        namespace: String,
+        url: String,
     },
 }
 
@@ -130,6 +141,11 @@ impl DiscoverySpec {
                 instance_id,
                 card_json,
             },
+            Self::MetricsEndpoint { namespace, url } => DiscoveryInstance::MetricsEndpoint {
+                namespace,
+                instance_id,
+                url,
+            },
         }
     }
 }
@@ -150,6 +166,12 @@ pub enum DiscoveryInstance {
         /// This allows lib/runtime to remain independent of lib/llm types
         card_json: serde_json::Value,
     },
+    /// Registered metrics endpoint instance
+    MetricsEndpoint {
+        namespace: String,
+        instance_id: u64,
+        url: String,
+    },
 }
 
 impl DiscoveryInstance {
@@ -158,6 +180,7 @@ impl DiscoveryInstance {
         match self {
             Self::Endpoint(inst) => inst.instance_id,
             Self::Model { instance_id, .. } => *instance_id,
+            Self::MetricsEndpoint { instance_id, .. } => *instance_id,
         }
     }
 
@@ -171,6 +194,9 @@ impl DiscoveryInstance {
             Self::Model { card_json, .. } => Ok(serde_json::from_value(card_json.clone())?),
             Self::Endpoint(_) => {
                 anyhow::bail!("Cannot deserialize model from Endpoint instance")
+            }
+            Self::MetricsEndpoint { .. } => {
+                anyhow::bail!("Cannot deserialize model from MetricsEndpoint instance")
             }
         }
     }
@@ -212,4 +238,75 @@ pub trait Discovery: Send + Sync {
         query: DiscoveryQuery,
         cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metrics_endpoint_serialization() {
+        let instance = DiscoveryInstance::MetricsEndpoint {
+            namespace: "test-namespace".to_string(),
+            instance_id: 12345,
+            url: "http://localhost:8080/metrics".to_string(),
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&instance).unwrap();
+        println!("Serialized: {}", json);
+
+        // Deserialize back
+        let deserialized: DiscoveryInstance = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(instance, deserialized);
+
+        // Verify fields
+        match deserialized {
+            DiscoveryInstance::MetricsEndpoint {
+                namespace,
+                instance_id,
+                url,
+            } => {
+                assert_eq!(namespace, "test-namespace");
+                assert_eq!(instance_id, 12345);
+                assert_eq!(url, "http://localhost:8080/metrics");
+            }
+            _ => panic!("Expected MetricsEndpoint variant"),
+        }
+    }
+
+    #[test]
+    fn test_metrics_endpoint_spec_with_instance_id() {
+        let spec = DiscoverySpec::MetricsEndpoint {
+            namespace: "test-ns".to_string(),
+            url: "http://localhost:8080/metrics".to_string(),
+        };
+
+        let instance = spec.with_instance_id(999);
+
+        match instance {
+            DiscoveryInstance::MetricsEndpoint {
+                namespace,
+                instance_id,
+                url,
+            } => {
+                assert_eq!(namespace, "test-ns");
+                assert_eq!(instance_id, 999);
+                assert_eq!(url, "http://localhost:8080/metrics");
+            }
+            _ => panic!("Expected MetricsEndpoint variant"),
+        }
+    }
+
+    #[test]
+    fn test_metrics_endpoint_instance_id() {
+        let instance = DiscoveryInstance::MetricsEndpoint {
+            namespace: "test-ns".to_string(),
+            instance_id: 777,
+            url: "http://localhost:8080/metrics".to_string(),
+        };
+
+        assert_eq!(instance.instance_id(), 777);
+    }
 }
