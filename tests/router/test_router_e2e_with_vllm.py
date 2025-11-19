@@ -303,6 +303,7 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
             num_requests=NUM_REQUESTS,
             wait_for_frontend=True,  # vLLM workers need time to load models
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
+            store_backend="etcd",  # Explicit for clarity
         )
 
     finally:
