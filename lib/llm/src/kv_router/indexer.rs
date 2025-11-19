@@ -283,7 +283,6 @@ impl RadixTree {
         let mut current = self.root.clone();
         let now = Instant::now();
 
-
         #[cfg(feature = "failpoints")]
         fail::fail_point!("radix_tree_find_matches_panic", |_| panic!(
             "Forced RadixTree panic on find_matches for tests"
