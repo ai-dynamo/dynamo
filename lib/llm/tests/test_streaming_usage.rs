@@ -108,6 +108,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             finish_reason: None,
             index: Some(0),
             completion_usage: None,
+            disaggregated_params: None,
         },
         BackendOutput {
             token_ids: vec![1917],
@@ -119,6 +120,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             finish_reason: None,
             index: Some(0),
             completion_usage: None,
+            disaggregated_params: None,
         },
         BackendOutput {
             token_ids: vec![0],
@@ -139,6 +141,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
                 }),
                 completion_tokens_details: None,
             }),
+            disaggregated_params: None,
         },
     ]
 }
