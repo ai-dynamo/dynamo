@@ -262,12 +262,12 @@ class NoFailureChecker(BaseChecker):
         )
         self.logger.info("╚" + "═" * 78 + "╝")
         self.logger.info("")
-        
+
         # Verify no failures were injected
         self.logger.info("─" * 80)
         self.logger.info("1.1 Verifying No Failures Were Injected")
         self.logger.info("─" * 80)
-        
+
         if context.affected_pods:
             # If affected_pods is not None/empty, failures were injected
             affected_count = sum(len(pods) for pods in context.affected_pods.values())
@@ -280,7 +280,7 @@ class NoFailureChecker(BaseChecker):
                 f"Baseline scenario failed: {affected_count} pod(s) were affected by failures. "
                 "Expected no failures for baseline test."
             )
-        
+
         self.logger.info("✓ Verified: No pods were affected by failures")
         self.logger.info(
             "✓ STAGE 1 COMPLETE: Baseline scenario verified (no failures injected)\n"
