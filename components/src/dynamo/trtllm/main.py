@@ -240,6 +240,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Populate default sampling params from the model
     tokenizer = tokenizer_factory(arg_map["model"])
     default_sampling_params = SamplingParams()
+
+    # Enable perf metrics so prompt_tokens_details can be returned
+    if hasattr(default_sampling_params, "return_perf_metrics"):
+        default_sampling_params.return_perf_metrics = True
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode for unified frontend support
