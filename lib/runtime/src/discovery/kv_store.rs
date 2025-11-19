@@ -16,6 +16,7 @@ use crate::storage::kv;
 
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
+const METRICS_ENDPOINTS_BUCKET: &str = "v1/metrics-endpoints";
 
 /// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
@@ -39,6 +40,11 @@ impl KVStoreDiscovery {
     /// Build the key path for a model (relative to bucket, not absolute)
     fn model_key(namespace: &str, component: &str, endpoint: &str, instance_id: u64) -> String {
         format!("{}/{}/{}/{:x}", namespace, component, endpoint, instance_id)
+    }
+
+    /// Build the key path for a metrics endpoint (relative to bucket, not absolute)
+    fn metrics_endpoint_key(namespace: &str, instance_id: u64) -> String {
+        format!("{}/{:x}", namespace, instance_id)
     }
 
     /// Extract prefix for querying based on discovery query
@@ -80,6 +86,10 @@ impl KVStoreDiscovery {
                 endpoint,
             } => {
                 format!("{}/{}/{}/{}", MODELS_BUCKET, namespace, component, endpoint)
+            }
+            DiscoveryQuery::AllMetricsEndpoints => METRICS_ENDPOINTS_BUCKET.to_string(),
+            DiscoveryQuery::NamespacedMetricsEndpoints { namespace } => {
+                format!("{}/{}", METRICS_ENDPOINTS_BUCKET, namespace)
             }
         }
     }
@@ -188,6 +198,21 @@ impl Discovery for KVStoreDiscovery {
                     );
                 }
                 (MODELS_BUCKET, key)
+            }
+            DiscoveryInstance::MetricsEndpoint {
+                namespace,
+                instance_id,
+                url,
+            } => {
+                let key = Self::metrics_endpoint_key(namespace, *instance_id);
+                tracing::debug!(
+                    "KVStoreDiscovery::register: Registering metrics endpoint instance_id={}, namespace={}, url={}, key={}",
+                    instance_id,
+                    namespace,
+                    url,
+                    key
+                );
+                (METRICS_ENDPOINTS_BUCKET, key)
             }
         };
 
@@ -306,8 +331,10 @@ impl Discovery for KVStoreDiscovery {
         let prefix = Self::query_prefix(&query);
         let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
             INSTANCES_BUCKET
-        } else {
+        } else if prefix.starts_with(MODELS_BUCKET) {
             MODELS_BUCKET
+        } else {
+            METRICS_ENDPOINTS_BUCKET
         };
 
         // Get bucket - if it doesn't exist, return empty list
@@ -342,8 +369,10 @@ impl Discovery for KVStoreDiscovery {
         let prefix = Self::query_prefix(&query);
         let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
             INSTANCES_BUCKET
-        } else {
+        } else if prefix.starts_with(MODELS_BUCKET) {
             MODELS_BUCKET
+        } else {
+            METRICS_ENDPOINTS_BUCKET
         };
 
         tracing::trace!(
@@ -577,6 +606,133 @@ mod tests {
                     assert_eq!(inst.endpoint, "ep1");
                 }
                 _ => panic!("Expected Endpoint instance"),
+            },
+            _ => panic!("Expected Added event"),
+        }
+
+        register_task.await.unwrap();
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_kv_store_discovery_register_metrics_endpoint() {
+        let store = KeyValueStoreManager::memory();
+        let cancel_token = CancellationToken::new();
+        let client = KVStoreDiscovery::new(store, cancel_token);
+
+        let spec = DiscoverySpec::MetricsEndpoint {
+            namespace: "test-ns".to_string(),
+            url: "http://localhost:8080/metrics".to_string(),
+        };
+
+        let instance = client.register(spec).await.unwrap();
+
+        match instance {
+            DiscoveryInstance::MetricsEndpoint {
+                namespace,
+                url,
+                instance_id,
+            } => {
+                assert_eq!(namespace, "test-ns");
+                assert_eq!(url, "http://localhost:8080/metrics");
+                assert_eq!(instance_id, client.instance_id());
+            }
+            _ => panic!("Expected MetricsEndpoint instance"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_kv_store_discovery_list_metrics_endpoints() {
+        let store = KeyValueStoreManager::memory();
+        let cancel_token = CancellationToken::new();
+        let client = KVStoreDiscovery::new(store, cancel_token);
+
+        // Register metrics endpoints in different namespaces
+        // Note: A single instance (same instance_id) can register metrics endpoints in multiple namespaces
+        let spec1 = DiscoverySpec::MetricsEndpoint {
+            namespace: "ns1".to_string(),
+            url: "http://localhost:8080/metrics".to_string(),
+        };
+        client.register(spec1).await.unwrap();
+
+        let spec2 = DiscoverySpec::MetricsEndpoint {
+            namespace: "ns2".to_string(),
+            url: "http://localhost:8081/metrics".to_string(),
+        };
+        client.register(spec2).await.unwrap();
+
+        let spec3 = DiscoverySpec::MetricsEndpoint {
+            namespace: "ns3".to_string(),
+            url: "http://localhost:8082/metrics".to_string(),
+        };
+        client.register(spec3).await.unwrap();
+
+        // List all metrics endpoints
+        let all = client.list(DiscoveryQuery::AllMetricsEndpoints).await.unwrap();
+        assert_eq!(all.len(), 3);
+
+        // List namespaced metrics endpoints
+        let ns1 = client
+            .list(DiscoveryQuery::NamespacedMetricsEndpoints {
+                namespace: "ns1".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(ns1.len(), 1);
+
+        let ns2 = client
+            .list(DiscoveryQuery::NamespacedMetricsEndpoints {
+                namespace: "ns2".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(ns2.len(), 1);
+
+        let ns3 = client
+            .list(DiscoveryQuery::NamespacedMetricsEndpoints {
+                namespace: "ns3".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(ns3.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_kv_store_discovery_watch_metrics_endpoints() {
+        let store = KeyValueStoreManager::memory();
+        let cancel_token = CancellationToken::new();
+        let client = Arc::new(KVStoreDiscovery::new(store, cancel_token.clone()));
+
+        // Start watching before registering
+        let mut stream = client
+            .list_and_watch(DiscoveryQuery::AllMetricsEndpoints, None)
+            .await
+            .unwrap();
+
+        let client_clone = client.clone();
+        let register_task = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+            let spec = DiscoverySpec::MetricsEndpoint {
+                namespace: "test-ns".to_string(),
+                url: "http://localhost:8080/metrics".to_string(),
+            };
+            client_clone.register(spec).await.unwrap();
+        });
+
+        // Wait for the added event
+        let event = stream.next().await.unwrap().unwrap();
+        match event {
+            DiscoveryEvent::Added(instance) => match instance {
+                DiscoveryInstance::MetricsEndpoint {
+                    namespace,
+                    url,
+                    ..
+                } => {
+                    assert_eq!(namespace, "test-ns");
+                    assert_eq!(url, "http://localhost:8080/metrics");
+                }
+                _ => panic!("Expected MetricsEndpoint instance"),
             },
             _ => panic!("Expected Added event"),
         }

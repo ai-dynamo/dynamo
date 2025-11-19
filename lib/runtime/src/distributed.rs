@@ -240,6 +240,23 @@ impl DistributedRuntime {
                         .system_status_server
                         .set(Arc::new(system_status_server_info))
                         .expect("System status server info should only be set once");
+
+                    // Register metrics endpoint with discovery
+                    // Use "system" namespace for the system status server's metrics endpoint
+                    let metrics_url = format!("http://{}/metrics", addr);
+                    let metrics_spec = crate::discovery::DiscoverySpec::MetricsEndpoint {
+                        namespace: "system".to_string(),
+                        url: metrics_url.clone(),
+                    };
+                    
+                    match distributed_runtime.discovery_client.register(metrics_spec).await {
+                        Ok(_) => {
+                            tracing::info!("Registered system metrics endpoint: {}", metrics_url);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to register system metrics endpoint: {}", e);
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("System status server startup failed: {}", e);

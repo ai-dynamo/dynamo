@@ -104,20 +104,44 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             },
         ) => inst_ns == namespace && inst_comp == component && inst_ep == endpoint,
 
+        // Metrics endpoint matching
+        (DiscoveryInstance::MetricsEndpoint { .. }, DiscoveryQuery::AllMetricsEndpoints) => true,
+        (
+            DiscoveryInstance::MetricsEndpoint {
+                namespace: inst_ns, ..
+            },
+            DiscoveryQuery::NamespacedMetricsEndpoints { namespace },
+        ) => inst_ns == namespace,
+
         // Cross-type matches return false
         (
             DiscoveryInstance::Endpoint(_),
             DiscoveryQuery::AllModels
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
-            | DiscoveryQuery::EndpointModels { .. },
+            | DiscoveryQuery::EndpointModels { .. }
+            | DiscoveryQuery::AllMetricsEndpoints
+            | DiscoveryQuery::NamespacedMetricsEndpoints { .. },
         ) => false,
         (
             DiscoveryInstance::Model { .. },
             DiscoveryQuery::AllEndpoints
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
-            | DiscoveryQuery::Endpoint { .. },
+            | DiscoveryQuery::Endpoint { .. }
+            | DiscoveryQuery::AllMetricsEndpoints
+            | DiscoveryQuery::NamespacedMetricsEndpoints { .. },
+        ) => false,
+        (
+            DiscoveryInstance::MetricsEndpoint { .. },
+            DiscoveryQuery::AllEndpoints
+            | DiscoveryQuery::NamespacedEndpoints { .. }
+            | DiscoveryQuery::ComponentEndpoints { .. }
+            | DiscoveryQuery::Endpoint { .. }
+            | DiscoveryQuery::AllModels
+            | DiscoveryQuery::NamespacedModels { .. }
+            | DiscoveryQuery::ComponentModels { .. }
+            | DiscoveryQuery::EndpointModels { .. },
         ) => false,
     }
 }
@@ -187,6 +211,7 @@ impl Discovery for MockDiscovery {
                     match i {
                         DiscoveryInstance::Endpoint(inst) => inst.instance_id,
                         DiscoveryInstance::Model { instance_id, .. } => *instance_id,
+                        DiscoveryInstance::MetricsEndpoint { instance_id, .. } => *instance_id,
                     }
                 }).collect();
 
@@ -195,6 +220,7 @@ impl Discovery for MockDiscovery {
                     let id = match &instance {
                         DiscoveryInstance::Endpoint(inst) => inst.instance_id,
                         DiscoveryInstance::Model { instance_id, .. } => *instance_id,
+                        DiscoveryInstance::MetricsEndpoint { instance_id, .. } => *instance_id,
                     };
                     if known_instances.insert(id) {
                         yield Ok(DiscoveryEvent::Added(instance));
@@ -268,6 +294,7 @@ mod tests {
         registry.instances.lock().unwrap().retain(|i| match i {
             DiscoveryInstance::Endpoint(inst) => inst.instance_id != 1,
             DiscoveryInstance::Model { instance_id, .. } => *instance_id != 1,
+            DiscoveryInstance::MetricsEndpoint { instance_id, .. } => *instance_id != 1,
         });
 
         let event = stream.next().await.unwrap().unwrap();

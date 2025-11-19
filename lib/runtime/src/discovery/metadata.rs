@@ -21,6 +21,8 @@ pub struct DiscoveryMetadata {
     endpoints: HashMap<String, DiscoveryInstance>,
     /// Registered model card instances (key: "namespace/component/endpoint")
     model_cards: HashMap<String, DiscoveryInstance>,
+    /// Registered metrics endpoint instances (key: "namespace/instance_id")
+    metrics_endpoints: HashMap<String, DiscoveryInstance>,
 }
 
 impl DiscoveryMetadata {
@@ -29,6 +31,7 @@ impl DiscoveryMetadata {
         Self {
             endpoints: HashMap::new(),
             model_cards: HashMap::new(),
+            metrics_endpoints: HashMap::new(),
         }
     }
 
@@ -87,6 +90,21 @@ impl DiscoveryMetadata {
             anyhow::bail!("Cannot unregister non-model-card instance as model card")
         }
     }
+    /// Register a metrics endpoint instance
+    pub fn register_metrics_endpoint(&mut self, instance: DiscoveryInstance) -> Result<()> {
+        if let DiscoveryInstance::MetricsEndpoint {
+            ref namespace,
+            instance_id,
+            ..
+        } = instance
+        {
+            let key = format!("{}/{:x}", namespace, instance_id);
+            self.metrics_endpoints.insert(key, instance);
+            Ok(())
+        } else {
+            anyhow::bail!("Cannot register non-metrics-endpoint instance as metrics endpoint")
+        }
+    }
 
     /// Get all registered endpoints
     pub fn get_all_endpoints(&self) -> Vec<DiscoveryInstance> {
@@ -98,11 +116,17 @@ impl DiscoveryMetadata {
         self.model_cards.values().cloned().collect()
     }
 
-    /// Get all registered instances (endpoints and model cards)
+    /// Get all registered metrics endpoints
+    pub fn get_all_metrics_endpoints(&self) -> Vec<DiscoveryInstance> {
+        self.metrics_endpoints.values().cloned().collect()
+    }
+
+    /// Get all registered instances (endpoints, model cards, and metrics endpoints)
     pub fn get_all(&self) -> Vec<DiscoveryInstance> {
         self.endpoints
             .values()
             .chain(self.model_cards.values())
+            .chain(self.metrics_endpoints.values())
             .cloned()
             .collect()
     }
@@ -119,6 +143,9 @@ impl DiscoveryMetadata {
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
             | DiscoveryQuery::EndpointModels { .. } => self.get_all_model_cards(),
+
+            DiscoveryQuery::AllMetricsEndpoints
+            | DiscoveryQuery::NamespacedMetricsEndpoints { .. } => self.get_all_metrics_endpoints(),
         };
 
         filter_instances(all_instances, query)
@@ -137,7 +164,7 @@ fn filter_instances(
     query: &DiscoveryQuery,
 ) -> Vec<DiscoveryInstance> {
     match query {
-        DiscoveryQuery::AllEndpoints | DiscoveryQuery::AllModels => instances,
+        DiscoveryQuery::AllEndpoints | DiscoveryQuery::AllModels | DiscoveryQuery::AllMetricsEndpoints => instances,
 
         DiscoveryQuery::NamespacedEndpoints { namespace } => instances
             .into_iter()
@@ -212,6 +239,14 @@ fn filter_instances(
                     endpoint: ep,
                     ..
                 } => ns == namespace && comp == component && ep == endpoint,
+                _ => false,
+            })
+            .collect(),
+
+        DiscoveryQuery::NamespacedMetricsEndpoints { namespace } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::MetricsEndpoint { namespace: ns, .. } => ns == namespace,
                 _ => false,
             })
             .collect(),
@@ -343,5 +378,85 @@ mod tests {
         assert_eq!(metadata.get_all_endpoints().len(), 3);
         assert_eq!(metadata.get_all_model_cards().len(), 2);
         assert_eq!(metadata.get_all().len(), 5);
+    }
+
+    #[test]
+    fn test_metadata_register_metrics_endpoint() {
+        let mut metadata = DiscoveryMetadata::new();
+
+        // Add a metrics endpoint
+        let instance = DiscoveryInstance::MetricsEndpoint {
+            namespace: "test-ns".to_string(),
+            instance_id: 123,
+            url: "http://localhost:8080/metrics".to_string(),
+        };
+
+        metadata.register_metrics_endpoint(instance).unwrap();
+
+        assert_eq!(metadata.get_all_metrics_endpoints().len(), 1);
+        assert_eq!(metadata.get_all().len(), 1);
+    }
+
+    #[test]
+    fn test_metadata_filter_metrics_endpoints() {
+        let mut metadata = DiscoveryMetadata::new();
+
+        // Register metrics endpoints
+        for i in 0..3 {
+            let instance = DiscoveryInstance::MetricsEndpoint {
+                namespace: "ns1".to_string(),
+                instance_id: i,
+                url: format!("http://localhost:808{}/metrics", i),
+            };
+            metadata.register_metrics_endpoint(instance).unwrap();
+        }
+
+        for i in 0..2 {
+            let instance = DiscoveryInstance::MetricsEndpoint {
+                namespace: "ns2".to_string(),
+                instance_id: i + 100,
+                url: format!("http://localhost:808{}/metrics", i + 100),
+            };
+            metadata.register_metrics_endpoint(instance).unwrap();
+        }
+
+        // Filter all metrics endpoints
+        let all = metadata.filter(&DiscoveryQuery::AllMetricsEndpoints);
+        assert_eq!(all.len(), 5);
+
+        // Filter by namespace
+        let ns1 = metadata.filter(&DiscoveryQuery::NamespacedMetricsEndpoints {
+            namespace: "ns1".to_string(),
+        });
+        assert_eq!(ns1.len(), 3);
+
+        let ns2 = metadata.filter(&DiscoveryQuery::NamespacedMetricsEndpoints {
+            namespace: "ns2".to_string(),
+        });
+        assert_eq!(ns2.len(), 2);
+    }
+
+    #[test]
+    fn test_metadata_serde_with_metrics_endpoints() {
+        let mut metadata = DiscoveryMetadata::new();
+
+        // Add a metrics endpoint
+        let instance = DiscoveryInstance::MetricsEndpoint {
+            namespace: "test-ns".to_string(),
+            instance_id: 456,
+            url: "http://localhost:8080/metrics".to_string(),
+        };
+
+        metadata.register_metrics_endpoint(instance).unwrap();
+
+        // Serialize
+        let json = serde_json::to_string(&metadata).unwrap();
+
+        // Deserialize
+        let deserialized: DiscoveryMetadata = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.metrics_endpoints.len(), 1);
+        assert_eq!(deserialized.endpoints.len(), 0);
+        assert_eq!(deserialized.model_cards.len(), 0);
     }
 }
