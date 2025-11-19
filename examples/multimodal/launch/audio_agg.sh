@@ -49,38 +49,9 @@ else
 fi
 
 # Check and install required dependencies for audio multimodal models
-echo "Checking audio multimodal dependencies..."
-DEPS_MISSING=false
-
-# Check for accelerate
-if ! python -c "import accelerate" &> /dev/null; then
-    echo "  accelerate not found"
-    DEPS_MISSING=true
-else
-    echo "  ✓ accelerate is installed"
-fi
-
-# Check for vllm with audio support
-if ! python -c "import vllm" &> /dev/null; then
-    echo "  vllm not found"
-    DEPS_MISSING=true
-else
-    # Check if audio dependencies are available (librosa is a key audio dependency)
-    if ! python -c "import librosa" &> /dev/null; then
-        echo "  vllm audio dependencies not found"
-        DEPS_MISSING=true
-    else
-        echo "  ✓ vllm with audio support is installed"
-    fi
-fi
-
-# Install missing dependencies
-if [ "$DEPS_MISSING" = true ]; then
+if ! python -c "import accelerate" &> /dev/null || ! python -c "import vllm" &> /dev/null || ! python -c "import librosa" &> /dev/null; then
     echo "Installing missing dependencies..."
     pip install 'vllm[audio]' accelerate
-    echo "Dependencies installed successfully"
-else
-    echo "All required dependencies are already installed"
 fi
 
 # run ingress
