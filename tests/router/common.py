@@ -9,6 +9,7 @@ import string
 from typing import Any, Optional
 
 import aiohttp
+import nats
 
 from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
 from tests.utils.managed_process import ManagedProcess
@@ -17,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
+
+
+########################################################
+# Helper Classes
+########################################################
 
 
 class KVRouterProcess(ManagedProcess):
