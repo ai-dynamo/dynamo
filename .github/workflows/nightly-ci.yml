@@ -32,6 +32,8 @@ jobs:
     name: Build Dynamo Base (amd64)
     runs-on: cpu-amd-m5-2xlarge
     timeout-minutes: 120
+    env:
+      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker Image
@@ -41,6 +43,7 @@ jobs:
           framework: none
           target: dev
           platform: linux/amd64
+          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -74,6 +77,8 @@ jobs:
     name: Build Dynamo Base (arm64)
     runs-on: cpu-arm-r8g-4xlarge
     timeout-minutes: 120
+    env:
+      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker Image
@@ -83,6 +88,7 @@ jobs:
           framework: none
           target: dev
           platform: linux/arm64
+          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -120,12 +126,18 @@ jobs:
     env:
       FRAMEWORK: vllm
       ARCH: amd64
-      BASE_IMAGE_TAG: ''
-      RUNTIME_IMAGE_TAG: ''
-      CUDA_VERSION: ''
-      TORCH_BACKEND: ''
+      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
+      RUNTIME_IMAGE_TAG: '12.9.0-runtime-ubuntu24.04'
+      CUDA_VERSION: '129'
+      TORCH_BACKEND: 'cu129'
     steps:
       - uses: actions/checkout@v4
+      - name: Login to ECR
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -180,6 +192,12 @@ jobs:
       TORCH_BACKEND: 'cu129'
     steps:
       - uses: actions/checkout@v4
+      - name: Login to ECR
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -228,12 +246,18 @@ jobs:
     env:
       FRAMEWORK: trtllm
       ARCH: amd64
-      BASE_IMAGE_TAG: ''
-      RUNTIME_IMAGE_TAG: ''
-      CUDA_VERSION: ''
-      TORCH_BACKEND: ''
+      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
+      RUNTIME_IMAGE_TAG: '12.9.1-runtime-ubuntu24.04'
+      CUDA_VERSION: '129'
+      TORCH_BACKEND: 'cu129'
     steps:
       - uses: actions/checkout@v4
+      - name: Login to ECR
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -283,6 +307,12 @@ jobs:
       TORCH_BACKEND: 'cu129'
     steps:
       - uses: actions/checkout@v4
+      - name: Login to ECR
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -326,12 +356,18 @@ jobs:
     env:
       FRAMEWORK: sglang
       ARCH: amd64
-      BASE_IMAGE_TAG: ''
-      RUNTIME_IMAGE_TAG: ''
-      CUDA_VERSION: ''
-      TORCH_BACKEND: ''
+      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
+      RUNTIME_IMAGE_TAG: '12.9.1-cudnn-runtime-ubuntu24.04'
+      CUDA_VERSION: '129'
+      TORCH_BACKEND: 'cu129'
     steps:
       - uses: actions/checkout@v4
+      - name: Login to ECR
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -381,6 +417,12 @@ jobs:
       TORCH_BACKEND: ''
     steps:
       - uses: actions/checkout@v4
+      - name: Login to ECR
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
