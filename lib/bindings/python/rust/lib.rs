@@ -141,6 +141,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(unregister_llm, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
@@ -327,6 +328,18 @@ fn register_llm<'p>(
             .await
             .map_err(to_pyerr)?;
 
+        Ok(())
+    })
+}
+
+/// Unregister a model from the endpoint.
+#[pyfunction]
+#[pyo3(signature = (endpoint))]
+fn unregister_llm<'p>(py: Python<'p>, endpoint: Endpoint) -> PyResult<Bound<'p, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        LocalModel::detach_model_from_endpoint(&endpoint.inner)
+            .await
+            .map_err(to_pyerr)?;
         Ok(())
     })
 }
