@@ -2,5 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod prefix_matcher;
+pub mod lora;
 
 pub use prefix_matcher::{MarkerMatcher, MatchResult};
