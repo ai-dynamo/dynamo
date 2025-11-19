@@ -86,9 +86,19 @@ impl EndpointConfigBuilder {
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
 
-        // insert the stats handler. depends on NATS.
-        if let Some(stats_handler) = stats_handler {
+        // Determine request plane mode
+        let request_plane_mode = endpoint.drt().request_plane();
+        if request_plane_mode.is_nats() {
+            // We only need the service if we want NATS metrics
             endpoint.component.add_stats_service().await?;
+        }
+        tracing::info!(
+            "Endpoint starting with request plane mode: {:?}",
+            request_plane_mode
+        );
+
+        // Insert the stats handler. depends on NATS.
+        if let Some(stats_handler) = stats_handler {
             let registry = endpoint.drt().component_registry().inner.lock().await;
             let handler_map = registry
                 .stats_handlers
@@ -99,13 +109,6 @@ impl EndpointConfigBuilder {
                 .lock()
                 .insert(endpoint.subject_to(connection_id), stats_handler);
         }
-
-        // Determine request plane mode
-        let request_plane_mode = endpoint.drt().request_plane();
-        tracing::info!(
-            "Endpoint starting with request plane mode: {:?}",
-            request_plane_mode
-        );
 
         // This creates a child token of the runtime's endpoint_shutdown_token. That token is
         // cancelled first as part of graceful shutdown. See Runtime::shutdown.
