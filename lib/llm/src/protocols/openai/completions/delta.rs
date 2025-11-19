@@ -189,6 +189,7 @@ impl DeltaGenerator {
                 logprobs,
             }],
             usage: None, // Always None for chunks with content/choices
+            nvext: None, // Will be populated by router layer if needed
         };
 
         NvCreateCompletionResponse { inner }
@@ -211,6 +212,7 @@ impl DeltaGenerator {
             system_fingerprint: self.system_fingerprint.clone(),
             choices: vec![], // Empty choices for usage-only chunk
             usage: Some(usage),
+            nvext: None, // Will be populated by router layer if needed
         };
 
         NvCreateCompletionResponse { inner }
@@ -261,7 +263,42 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
         // create choice
         let index = delta.index.unwrap_or(0);
-        let response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
+        let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
+
+        // Extract worker_id from disaggregated_params and inject into nvext if present
+        if let Some(worker_id_json) = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("worker_id"))
+        {
+            use crate::protocols::openai::nvext::{NvExtResponse, WorkerIdInfo};
+
+            let prefill_worker_id = worker_id_json
+                .get("prefill_worker_id")
+                .and_then(|v| v.as_u64());
+            let decode_worker_id = worker_id_json
+                .get("decode_worker_id")
+                .and_then(|v| v.as_u64());
+
+            let worker_id_info = WorkerIdInfo {
+                prefill_worker_id,
+                decode_worker_id,
+            };
+
+            let nvext_response = NvExtResponse {
+                worker_id: Some(worker_id_info),
+            };
+
+            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+                response.inner.nvext = Some(nvext_json);
+                tracing::debug!(
+                    "Injected worker_id into completions nvext: prefill={:?}, decode={:?}",
+                    prefill_worker_id,
+                    decode_worker_id
+                );
+            }
+        }
+
         Ok(response)
     }
 

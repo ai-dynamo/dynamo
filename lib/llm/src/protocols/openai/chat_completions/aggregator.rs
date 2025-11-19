@@ -34,6 +34,8 @@ pub struct DeltaAggregator {
     error: Option<String>,
     /// Optional service tier information for the response.
     service_tier: Option<dynamo_async_openai::types::ServiceTierResponse>,
+    /// Aggregated nvext field from stream responses
+    nvext: Option<serde_json::Value>,
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
@@ -97,6 +99,7 @@ impl DeltaAggregator {
             choices: HashMap::new(),
             error: None,
             service_tier: None,
+            nvext: None,
         }
     }
 
@@ -138,6 +141,11 @@ impl DeltaAggregator {
                     }
                     if let Some(system_fingerprint) = delta.system_fingerprint {
                         aggregator.system_fingerprint = Some(system_fingerprint);
+                    }
+
+                    // Aggregate nvext field (take the last non-None value)
+                    if delta.nvext.is_some() {
+                        aggregator.nvext = delta.nvext;
                     }
 
                     // Aggregate choices incrementally.
@@ -247,6 +255,7 @@ impl DeltaAggregator {
             system_fingerprint: aggregator.system_fingerprint,
             choices,
             service_tier: aggregator.service_tier,
+            nvext: aggregator.nvext,
         };
 
         Ok(response)
@@ -411,6 +420,7 @@ mod tests {
             system_fingerprint: None,
             choices: vec![choice],
             object: "chat.completion".to_string(),
+            nvext: None,
         };
 
         Annotated {
@@ -633,6 +643,7 @@ mod tests {
                 },
             ],
             object: "chat.completion".to_string(),
+            nvext: None,
         };
 
         // Wrap it in Annotated and create a stream
