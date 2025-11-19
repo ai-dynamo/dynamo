@@ -121,6 +121,9 @@ NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
 NO_CACHE=""
 
+# Dynamo base image (pre-built to avoid rebuilding common components)
+DYNAMO_BASE_IMAGE_INPUT=""
+
 # sccache configuration for S3
 USE_SCCACHE=""
 SCCACHE_BUCKET=""
@@ -201,6 +204,14 @@ get_options() {
         --base-image-tag)
             if [ "$2" ]; then
                 BASE_IMAGE_TAG=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --dynamo-base-image)
+            if [ "$2" ]; then
+                DYNAMO_BASE_IMAGE_INPUT=$2
                 shift
             else
                 missing_requirement "$1"
@@ -842,13 +853,22 @@ fi
 if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
     # Follow 2-step build process for all frameworks
     if [[ $FRAMEWORK != "NONE" ]]; then
-        # Define base image tag before using it
-        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
-        # Start base image build
-        echo "======================================"
-        echo "Starting Build 1: Base Image"
-        echo "======================================"
-        $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        # Check if a pre-built base image was provided
+        if [[ -n "${DYNAMO_BASE_IMAGE_INPUT:-}" ]]; then
+            # Use the pre-built base image
+            DYNAMO_BASE_IMAGE="${DYNAMO_BASE_IMAGE_INPUT}"
+            echo "======================================"
+            echo "Using Pre-built Base Image: ${DYNAMO_BASE_IMAGE}"
+            echo "======================================"
+        else
+            # Define base image tag before using it
+            DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+            # Start base image build
+            echo "======================================"
+            echo "Starting Build 1: Base Image"
+            echo "======================================"
+            $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        fi
         # Start framework build
         echo "======================================"
         echo "Starting Build 2: Framework Image"

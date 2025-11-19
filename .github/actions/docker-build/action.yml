@@ -49,6 +49,9 @@ inputs:
   torch_backend:
     description: 'Optional override for TORCH_BACKEND build-arg (e.g., cu129)'
     required: false
+  dynamo_base_image:
+    description: 'Pre-built Dynamo base image to use instead of building from scratch'
+    required: false
 
 outputs:
   image_tag:
@@ -108,6 +111,9 @@ runs:
         fi
         if [ -n "${{ inputs.torch_backend }}" ]; then
           EXTRA_ARGS+=" --build-arg TORCH_BACKEND=${{ inputs.torch_backend }}"
+        fi
+        if [ -n "${{ inputs.dynamo_base_image }}" ]; then
+          EXTRA_ARGS+=" --dynamo-base-image ${{ inputs.dynamo_base_image }}"
         fi
 
         ./container/build.sh --tag "$IMAGE_TAG" \
