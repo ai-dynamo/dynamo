@@ -145,7 +145,7 @@ vllm_configs = {
         request_payloads=[
             chat_payload(
                 [
-                    {"type": "text", "text": "What is in this image?"},
+                    {"type": "text", "text": "What text do you see in the image?"},
                     {
                         "type": "image_url",
                         "image_url": {"url": MULTIMODAL_IMG_URL},
@@ -165,12 +165,17 @@ vllm_configs = {
         marks=[pytest.mark.gpu_2],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
-        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
+        script_args=[
+            "--model",
+            "Qwen/Qwen2.5-VL-7B-Instruct",
+            "--max-model-len",
+            "4096",
+        ],
         timeout=360,
         request_payloads=[
             chat_payload(
                 [
-                    {"type": "text", "text": "What is in this image?"},
+                    {"type": "text", "text": "What text do you see in the image?"},
                     {
                         "type": "image_url",
                         "image_url": {"url": MULTIMODAL_IMG_URL},
@@ -195,7 +200,7 @@ vllm_configs = {
             # Base64-encoded image
             chat_payload(
                 [
-                    {"type": "text", "text": "What is in this image?"},
+                    {"type": "text", "text": "What text do you see in the image?"},
                     {
                         "type": "image_url",
                         "image_url": {
@@ -210,7 +215,7 @@ vllm_configs = {
             # HTTP URL test
             chat_payload(
                 [
-                    {"type": "text", "text": "What is in this image?"},
+                    {"type": "text", "text": "What text do you see in the image?"},
                     {
                         "type": "image_url",
                         "image_url": {"url": MULTIMODAL_IMG_URL},
