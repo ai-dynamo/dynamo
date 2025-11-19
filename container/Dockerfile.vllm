@@ -71,6 +71,8 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 # Use dynamo base image (see /container/Dockerfile for more details)
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 
+COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+
 ARG PYTHON_VERSION
 
 RUN apt-get update -y \
@@ -94,9 +96,6 @@ RUN apt-get update -y \
 # generic dev name .so so we symlink .s0.1 -> .so
 RUN ln -sf /usr/lib/aarch64-linux-gnu/libmlx5.so.1 /usr/lib/aarch64-linux-gnu/libmlx5.so || true
 
-### VIRTUAL ENVIRONMENT SETUP ###
-
-COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
@@ -266,7 +265,7 @@ $LD_LIBRARY_PATH
 
 # Copy local files
 COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
-COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
+COPY --chown=dynamo: benchmarks/ /workspace/benchmarks/
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
 ARG ENABLE_KVBM
@@ -278,10 +277,8 @@ RUN uv pip install \
     && if [ "${ENABLE_KVBM}" = "true" ]; then \
         uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
        fi \
-    && cd /opt/dynamo/benchmarks \
-    && UV_GIT_LFS=1 uv pip install --no-cache . \
-    && cd - \
-    && rm -rf /opt/dynamo/benchmarks
+    && cd /workspace/benchmarks \
+    && UV_GIT_LFS=1 uv pip install --no-cache .
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \

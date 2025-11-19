@@ -306,12 +306,6 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && chown -R dynamo: /opt/dynamo /home/dynamo /workspace \
     && chmod -R g+w /opt/dynamo /home/dynamo/.cache /workspace
 
-# Switch to dynamo user
-USER dynamo
-ENV HOME=/home/dynamo \
-    DYNAMO_HOME=/opt/dynamo \
-    CARGO_TARGET_DIR=/opt/dynamo/target
-
 # NIXL environment variables
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
@@ -322,13 +316,11 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/l
 COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
 COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 
 # Copy built artifacts
-COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
-COPY --chown=dynamo: --from=wheel_builder $CARGO_HOME $CARGO_HOME
-
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 ##############################################
 ########## Dev entrypoint image ##############
@@ -337,7 +329,6 @@ COPY --chown=dynamo: --from=wheel_builder $CARGO_HOME $CARGO_HOME
 FROM runtime AS dev
 
 # Application environment variables
-
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
         # required for AIC perf files
@@ -354,6 +345,12 @@ RUN apt-get update -y \
     # Add sudo privileges to dynamo user
     && echo "dynamo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dynamo \
     && chmod 0440 /etc/sudoers.d/dynamo
+
+# Switch to dynamo user
+USER dynamo
+ENV HOME=/home/dynamo \
+    DYNAMO_HOME=/opt/dynamo \
+    CARGO_TARGET_DIR=/opt/dynamo/target
 
 # Create and activate virtual environment
 ARG PYTHON_VERSION
