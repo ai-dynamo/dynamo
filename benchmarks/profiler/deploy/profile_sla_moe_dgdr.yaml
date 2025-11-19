@@ -13,8 +13,14 @@ spec:
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
+    profilerImage: "nvcr.io/nvidian/dynamo-dev/sglang-runtime:0.7.0rc5.1"
     config:
+      # Hardware configuration for DeepSeek-R1
+      hardware:
+        min_num_gpus_per_engine: 8   # Minimum 8 GPUs
+        max_num_gpus_per_engine: 16  # Maximum 16 GPUs to test
+        num_gpus_per_node: 8         # GPUs per node (for multinode)
+
       # Sweep/profiling configuration
       sweep:
         # Standard online profiling (not using AI Configurator)
@@ -36,7 +42,7 @@ spec:
 
   # Deployment overrides for the auto-created DGD
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
+    workersImage: "nvcr.io/nvidian/dynamo-dev/sglang-runtime:0.7.0rc5.1"
 
   # Automatically create DynamoGraphDeployment after profiling
   autoApply: true
