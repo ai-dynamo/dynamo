@@ -64,7 +64,7 @@ impl EndpointConfigBuilder {
 
     pub async fn start(self) -> Result<()> {
         let (
-            endpoint,
+            mut endpoint,
             handler,
             stats_handler,
             metrics_labels,
@@ -86,38 +86,31 @@ impl EndpointConfigBuilder {
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
 
-        let registry = endpoint.drt().component_registry().inner.lock().await;
-
-        // Note: NATS service group is no longer needed here as the NetworkManager
-        // handles all transport-specific initialization internally
-        let _group = registry
-            .services
-            .get(&service_name)
-            .map(|service| service.group(endpoint.component.service_name()))
-            .ok_or(anyhow::anyhow!("Service not found"))?;
-
-        // get the stats handler map
-        let handler_map = registry
-            .stats_handlers
-            .get(&service_name)
-            .cloned()
-            .expect("no stats handler registry; this is unexpected");
-
-        drop(registry);
-
-        // insert the stats handler
-        if let Some(stats_handler) = stats_handler {
-            handler_map
-                .lock()
-                .insert(endpoint.subject_to(connection_id), stats_handler);
-        }
-
         // Determine request plane mode
         let request_plane_mode = endpoint.drt().request_plane();
+        if request_plane_mode.is_nats() {
+            // We only need the service if we want NATS metrics.
+            // TODO: This is called for every endpoint of a component. Ideally we only call it once
+            // on the component.
+            endpoint.component.add_stats_service().await?;
+        }
         tracing::info!(
             "Endpoint starting with request plane mode: {:?}",
             request_plane_mode
         );
+
+        // Insert the stats handler. depends on NATS.
+        if let Some(stats_handler) = stats_handler {
+            let registry = endpoint.drt().component_registry().inner.lock().await;
+            let handler_map = registry
+                .stats_handlers
+                .get(&service_name)
+                .cloned()
+                .expect("no stats handler registry; this is unexpected");
+            handler_map
+                .lock()
+                .insert(endpoint.subject_to(connection_id), stats_handler);
+        }
 
         // This creates a child token of the runtime's endpoint_shutdown_token. That token is
         // cancelled first as part of graceful shutdown. See Runtime::shutdown.

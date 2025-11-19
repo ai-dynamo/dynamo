@@ -260,7 +260,6 @@ async def worker(runtime: DistributedRuntime):
 
     # Create service component - use "router" as component name
     component = runtime.namespace(namespace).component("router")
-    await component.create_service()
 
     # Create handler
     handler = StandaloneRouterHandler(

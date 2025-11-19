@@ -478,7 +478,12 @@ impl DistributedRuntime {
 
         let runtime_config = DistributedConfig {
             store_backend: selected_kv_store,
-            nats_config: dynamo_runtime::transports::nats::ClientOptions::default(),
+            // We only need NATS here to monitor it's metrics, so only if it's our request plane.
+            nats_config: if request_plane.is_nats() {
+                Some(dynamo_runtime::transports::nats::ClientOptions::default())
+            } else {
+                None
+            },
             request_plane,
         };
         let inner = runtime
@@ -562,15 +567,6 @@ impl Component {
         Ok(Endpoint {
             inner,
             event_loop: self.event_loop.clone(),
-        })
-    }
-
-    /// NATS specific stats/metrics call
-    fn create_service<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let mut inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.add_stats_service().await.map_err(to_pyerr)?;
-            Ok(())
         })
     }
 

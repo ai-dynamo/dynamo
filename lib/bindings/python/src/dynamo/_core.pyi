@@ -101,12 +101,6 @@ class Component:
 
     ...
 
-    async def create_service(self) -> None:
-        """
-        Create a service
-        """
-        ...
-
     def endpoint(self, name: str) -> Endpoint:
         """
         Create an endpoint
@@ -403,8 +397,7 @@ class WorkerMetricsPublisher:
 
     def create_endpoint(self, component: Component, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
         """
-        Similar to Component.create_service, but only service created through
-        this method will interact with KV router of the same component.
+        Only service created through this method will interact with KV router of the same component.
 
         Args:
             component: The component to create the endpoint for
