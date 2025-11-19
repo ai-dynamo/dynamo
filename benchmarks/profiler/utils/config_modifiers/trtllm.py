@@ -61,9 +61,18 @@ class TrtllmConfigModifier:
                 args = validate_and_get_worker_args(worker_service, backend="trtllm")
                 args = break_arguments(args)
 
-                # Update both --model-path and --served-model-name
-                args = set_argument_value(args, "--model-path", model_name)
-                args = set_argument_value(args, "--served-model-name", model_name)
+                # Check if --model-path is already set (e.g., pointing to a local model cache)
+                # If so, preserve it and only update --served-model-name
+                # Otherwise, set both --model-path and --served-model-name to model_name
+                if "--model-path" in args:
+                    logger.info(
+                        f"Preserving existing --model-path in config, only updating --served-model-name to {model_name}"
+                    )
+                    args = set_argument_value(args, "--served-model-name", model_name)
+                else:
+                    # Update both --model-path and --served-model-name
+                    args = set_argument_value(args, "--model-path", model_name)
+                    args = set_argument_value(args, "--served-model-name", model_name)
 
                 worker_service.extraPodSpec.mainContainer.args = args
             except (ValueError, KeyError):

@@ -57,8 +57,15 @@ class VllmV1ConfigModifier:
                 args = validate_and_get_worker_args(worker_service, backend="vllm")
                 args = break_arguments(args)
 
-                # Update --model (vllm uses --model instead of --model-path and --served-model-name)
-                args = set_argument_value(args, "--model", model_name)
+                # Check if --model is already set (e.g., pointing to a local model cache)
+                # If so, preserve it (vllm uses --model for both path and serving name)
+                # Otherwise, set --model to model_name
+                if "--model" not in args:
+                    logger.info(f"Setting --model to {model_name}")
+                    # Update --model (vllm uses --model instead of --model-path and --served-model-name)
+                    args = set_argument_value(args, "--model", model_name)
+                else:
+                    logger.info("Preserving existing --model in config")
 
                 worker_service.extraPodSpec.mainContainer.args = args
             except (ValueError, KeyError):
