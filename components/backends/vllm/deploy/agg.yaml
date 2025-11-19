@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg
+spec:
+  pvcs:
+    - name: dynamo-checkpoint-pvc
+      create: false
+  services:
+    Frontend:
+      dynamoNamespace: vllm-agg
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: mmshin613/dynamo:vllm-nov-13-01
+    VllmDecodeWorker:
+      dynamoNamespace: vllm-agg
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      volumeMounts: 
+        - name: dynamo-checkpoint-pvc
+          mountPoint: /workspace/checkpoints
+      envs:
+        - name: ENABLE_CHECKPOINTING
+          value: "true"
+        - name: CHECKPOINT_DIR
+          value: "/workspace/checkpoints"
+      extraPodSpec:
+        nodeSelector:
+          platform.centml.ai/instance-type: large
+        tolerations:
+          - key: "dedicated_compute"
+            operator: "Exists"
+            effect: "NoSchedule"
+        mainContainer:
+          image: mmshin613/dynamo:vllm-nov-13-01
+          workingDir: /workspace/components/backends/vllm
+          command:
+          # - sleep
+          # - infinity
+          - python3
+          args:
+          - -m
+          - dynamo.vllm
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --connector 
+          - "none"
+          - --disable-log-stats
+          securityContext:
+            privileged: true

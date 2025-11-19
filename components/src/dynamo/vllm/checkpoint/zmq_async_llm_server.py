@@ -365,4 +365,3 @@ def run_async_llm_server(socket_url: str, vllm_config_pickle: bytes,
         print(f"AsyncLLM server failed: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)
-

@@ -203,15 +203,20 @@ RUN apt-get update && \
         # prometheus dependencies
         ca-certificates \
         # DeepGemm uses 'cuobjdump' which does not come with CUDA image
-        cuda-command-line-tools-12-8 \
-        # For CRIU installation
-        software-properties-common \
-        iptables
+        cuda-command-line-tools-12-8
+
     
-# Install CRIU for checkpointing support
-RUN add-apt-repository ppa:criu/ppa && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends criu && \
+# Install CRIU 4.2 from source
+RUN git clone https://github.com/checkpoint-restore/criu && \
+    cd criu && \
+    git checkout 1d08ff8ca7b2a8bee5238e80bddd52a627c637cf && \
+    # Install CRIU build dependencies using official script
+    ./contrib/dependencies/apt-packages.sh && \
+    # Build and install CRIU
+    make install && \
+    cd .. && \
+    rm -rf criu && \
+    apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image

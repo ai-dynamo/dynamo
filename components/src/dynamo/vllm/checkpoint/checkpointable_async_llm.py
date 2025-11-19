@@ -1,13 +1,13 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 import asyncio
 import contextlib
 import errno
-import json
+import fcntl
+import logging
 import multiprocessing
 import os
 import pty
-import re
 import subprocess
 import sys
 import threading
@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Mapping
 from typing import Any, Optional, Union
-import logging
+
 import cloudpickle
 import msgspec
 import zmq
@@ -37,11 +37,20 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import RequestOutputCollector
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory
-
 from .utils import (
-    find_gpu_worker_pids,
-    collect_process_tree_pids,
+    validate_cuda_process_tree, get_processes_with_nvidia_fds,
+    assert_no_nvidia_fds_in_tree, format_cuda_checkpoint_results,
+    checkpoint_cuda_processes_from_pids,
+    format_cuda_restore_results,
+    restore_cuda_processes_from_pids,
+    ensure_dummy_criu_libdir,
+    snapshot_dev_shm_files_for_tree,
+    precreate_dev_shm_files,
+    read_comm, read_cmdline, collect_process_tree_pids,
     verify_processes_exited, get_tty_info,
+    get_gpu_uuids, create_gpu_device_map,
+    get_cache_directories, save_cache_directories, restore_cache_directories,
+    get_primary_ip_address, set_ip_nonlocal_bind, add_ip_to_loopback,
 )
 from .metadata import CheckpointMetadata
 from .zmq_async_llm_server import (
@@ -680,16 +689,12 @@ class CheckpointableAsyncLLM(AsyncLLM):
         return not self.is_running
 
     @property
-    def errored(self) -> bool:
-        # Synchronous property - cannot make async RPC call
-        # Return False as default; actual error handling is via exceptions
-        return False
+    async def errored(self) -> bool:
+        return await self._get_property("errored")
 
     @property
-    def dead_error(self) -> BaseException:
-        # Synchronous property - cannot make async RPC call
-        # Return a default exception; actual error handling is via exceptions
-        return RuntimeError("Engine error - check logs for details")
+    async def dead_error(self):
+        return await self._get_property("dead_error")
 
     # CRIU-specific methods
     async def criu_checkpoint(
@@ -722,16 +727,70 @@ class CheckpointableAsyncLLM(AsyncLLM):
         root_pid = self.process.pid
 
         # Validate that only leaf processes have CUDA contexts
-        logger.info("Getting CUDA process tree...")
-        cuda_pids = find_gpu_worker_pids(root_pid)
+        logger.info("Validating CUDA process tree...")
+        valid_cuda_pids, invalid_cuda_pids = validate_cuda_process_tree(root_pid)
 
+        if invalid_cuda_pids:
+            # Collect detailed info about invalid processes
+            invalid_info = []
+            for pid in invalid_cuda_pids:
+                try:
+                    cmdline = read_cmdline(pid)
+                    comm = read_comm(pid)
+                    invalid_info.append(f"PID {pid} ({comm}): {cmdline}")
+                except Exception:
+                    invalid_info.append(f"PID {pid}")
+
+            raise RuntimeError(
+                f"Cannot checkpoint: found {len(invalid_cuda_pids)} non-leaf "
+                f"process(es) with CUDA contexts (mapped /dev/nvidia* FDs). "
+                f"Only leaf processes are allowed to have CUDA contexts.\n"
+                f"Invalid processes:\n" + "\n".join(invalid_info)
+            )
+
+        logger.info("Found %d leaf processes with CUDA contexts: %s",
+                    len(valid_cuda_pids), valid_cuda_pids)
+
+        # Capture ALL GPU UUIDs in the system BEFORE CUDA checkpoint
+        # cuda-checkpoint requires ALL GPUs to be specified in device map, not just used ones
+        gpu_uuids = get_gpu_uuids()  # Get all GPU UUIDs in the system
+        logger.info("Captured %d GPU UUIDs from system at checkpoint time", len(gpu_uuids))
 
         # Sleep the model (level 1) to free GPU memory before checkpointing
         logger.info("Putting model to sleep (level 1) before checkpoint...")
         await self.sleep(level=1)
         logger.info("Model sleep completed")
 
-        
+        # Attempt CUDA checkpoint on ALL processes with /dev/nvidia* FDs
+        if valid_cuda_pids:
+            logger.info("CUDA checkpoint: attempting cuda-checkpoint on PIDs with nvidia FDs: %s",
+                        valid_cuda_pids)
+            succeeded, failed = checkpoint_cuda_processes_from_pids(valid_cuda_pids)
+
+            # Format and log results
+            results_summary = format_cuda_checkpoint_results(succeeded, failed)
+            logger.info(results_summary)
+
+            if failed:
+                logger.warning("Some CUDA checkpoints failed. This may prevent successful checkpoint.")
+
+            # Verify that CUDA checkpoint actually worked
+            # After checkpoint, NO processes should have /dev/nvidia* FDs
+            remaining_nvidia_pids = get_processes_with_nvidia_fds(succeeded)
+            if remaining_nvidia_pids:
+                raise RuntimeError(
+                    f"CUDA checkpoint failed: {len(remaining_nvidia_pids)} process(es) "
+                    f"still have /dev/nvidia* FDs after checkpoint. PIDs: {remaining_nvidia_pids}. "
+                    f"This indicates the CUDA checkpoint did not work properly."
+                )
+
+        else:
+            logger.info("No processes with CUDA contexts found")
+
+        # Assert that all NVIDIA FDs are closed in the entire process tree
+        # This is critical - if any process still has NVIDIA FDs, CRIU will fail
+        assert_no_nvidia_fds_in_tree(root_pid)
+        logger.info("All /dev/nvidia* FDs closed; proceeding to CRIU dump")
 
         # Create checkpoint metadata
         metadata = CheckpointMetadata()
@@ -744,7 +803,36 @@ class CheckpointableAsyncLLM(AsyncLLM):
         # Save process tree info
         metadata.tree_pid = root_pid
         metadata.zmq_port = self.port
-        metadata.cuda_pids = cuda_pids
+        metadata.cuda_pids = valid_cuda_pids if valid_cuda_pids else []
+
+        # Save GPU UUIDs for potential cross-GPU restore
+        # (captured earlier before CUDA checkpoint)
+        metadata.gpu_uuids = gpu_uuids
+
+        # Save primary IP address
+        primary_ip = get_primary_ip_address()
+        if primary_ip:
+            metadata.primary_ip = primary_ip
+            logger.info("Captured primary IP address: %s", primary_ip)
+        else:
+            logger.warning("Could not capture primary IP address")
+        
+        # Save cache directory paths and backup the cache contents
+        vllm_cache, flashinfer_cache = get_cache_directories()
+        metadata.vllm_cache_path = vllm_cache
+        metadata.flashinfer_cache_path = flashinfer_cache
+        logger.info("Cache directories: vLLM=%s, FlashInfer=%s", vllm_cache, flashinfer_cache)
+        
+        # Copy cache directories to checkpoint
+        save_cache_directories(checkpoint_dir, vllm_cache, flashinfer_cache)
+
+        # Snapshot of open /dev/shm files across the process tree so we can
+        # pre-create them before CRIU restore. Some libraries (e.g., NCCL/Gloo
+        # or other IPC backends) use POSIX shm segments under /dev/shm, which
+        # CRIU expects to exist when restoring usual regular file descriptors.
+        # If these are absent at restore time, CRIU may fail with messages like
+        # "Can't open file dev/shm/<name>". We record their names/sizes here.
+        metadata.dev_shm_files = snapshot_dev_shm_files_for_tree(root_pid)
 
         # Take a snapshot of the process tree (for post-dump verification)
         pre_dump_tree = collect_process_tree_pids(root_pid)
@@ -760,10 +848,18 @@ class CheckpointableAsyncLLM(AsyncLLM):
             "--tcp-established",
             "--external", "mnt[/dev/shm]:shm",
             "--link-remap",
+            "--ghost-limit", "512M",
             "--manage-cgroups=ignore",
-            "--tree", str(root_pid),
-            "--ghost-limit", "512M"
+            "--allow-uprobes",
+            "--tree", str(root_pid)
         ]
+
+        # Force CRIU to skip CUDA plugin discovery by using an empty libdir
+        try:
+            dump_libdir = ensure_dummy_criu_libdir(checkpoint_dir)
+            cmd.extend(["--libdir", dump_libdir])
+        except Exception as e:
+            logger.warning("Failed to configure dummy --libdir for CRIU dump: %s", e)
 
         if metadata.tty_external:
             cmd.extend(["--external", metadata.tty_external])
@@ -791,7 +887,7 @@ class CheckpointableAsyncLLM(AsyncLLM):
 
         # Verify that all processes in the pre-dump tree are gone.
         # This helps catch stray children that might linger due to plugins.
-        verify_processes_exited(pre_dump_tree)
+        lingering_pids = verify_processes_exited(pre_dump_tree)
 
         # The process is now frozen, mark it as not running
         self._is_running = False
@@ -833,7 +929,6 @@ class CheckpointableAsyncLLM(AsyncLLM):
         # Ensure the original tree PID from dump is fully gone to avoid
         # PID collisions when restoring into the same PID namespace.
         if metadata.tree_pid:
-            logger.info("Checking if original PIDs are free for restore...")
             start = time.time()
             # Wait up to a short grace period since dump should have killed it
             while time.time() - start < 5.0:
@@ -842,109 +937,59 @@ class CheckpointableAsyncLLM(AsyncLLM):
                 await asyncio.sleep(0.05)
 
             # Verify root PID is not taken now (PID could be reused by others)
-            pid_path = f"/proc/{metadata.tree_pid}"
-            if os.path.exists(pid_path):
-                # Try to read the cmdline of the holder for diagnostics
-                holder = ""
-                try:
-                    cmd_path = os.path.join(pid_path, "cmdline")
-                    with open(cmd_path, "rb") as f:
-                        raw = f.read().replace(b"\x00", b" ")
-                        holder = raw.decode("utf-8", "ignore").strip()
-                except Exception:
-                    pass
-                
-                await asyncio.sleep(0.5)
-            
-            # Final check - if still taken, this is an error
-            if os.path.exists(f"/proc/{metadata.tree_pid}"):
-                holder = ""
-                try:
-                    with open(f"/proc/{metadata.tree_pid}/cmdline", "rb") as f:
-                        raw = f.read().replace(b"\x00", b" ")
-                        holder = raw.decode("utf-8", "ignore").strip()
-                except Exception:
-                    pass
-                
-                raise RuntimeError(
-                    f"CRIU restore failed: root PID {metadata.tree_pid} is still "
-                    f"in use after {max_wait}s. Holder: {holder or 'unknown'}. "
-                    "Cannot restore - PID collision would occur."
-                )
-                if holder:
-                    logger.error(
-                        "%s Holder cmdline: %s",
-                        msg,
-                        holder,
-                    )
-                else:
-                    logger.error("%s", msg)
+            # pid_path = f"/proc/{metadata.tree_pid}"
+            # if os.path.exists(pid_path):
+            #     # Try to read the cmdline of the holder for diagnostics
+            #     holder = ""
+            #     try:
+            #         cmd_path = os.path.join(pid_path, "cmdline")
+            #         with open(cmd_path, "rb") as f:
+            #             raw = f.read().replace(b"\x00", b" ")
+            #             holder = raw.decode("utf-8", "ignore").strip()
+            #     except Exception:
+            #         holder = ""
+            #     msg = (
+            #         "CRIU restore pre-check failed: root PID "
+            #         f"{metadata.tree_pid} is in use in current PID namespace. "
+            #         "Restore will fail with EEXIST. Consider restoring in a "
+            #         "new PID namespace or wait until the PID is free."
+            #     )
+            #     if holder:
+            #         logger.error(
+            #             "%s Holder cmdline: %s",
+            #             msg,
+            #             holder,
+            #         )
+            #     else:
+            #         logger.error("%s", msg)
+            #     raise RuntimeError(msg)
 
-        # Find temporary files in checkpoint that may not exist after pod restart
-        # and externalize them so CRIU doesn't fail
-        external_files = []
-        try:
-            files_img_path = os.path.join(self.checkpoint_dir, "files.img")
-            if os.path.exists(files_img_path):
-                logger.info("Parsing checkpoint to find temporary files...")
-                # Use crit to decode the files.img in JSON format
-                result = subprocess.run(
-                    ["crit", "show", files_img_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
-                if result.returncode == 0:
-                    try:
-                        # Parse JSON output from crit
-                        data = json.loads(result.stdout)
-                        if isinstance(data, dict) and 'entries' in data:
-                            for entry in data['entries']:
-                                if isinstance(entry, dict):
-                                    # Handle both 'reg' and 'remap' file types
-                                    file_info = entry.get('reg') or entry.get('remap')
-                                    if file_info and 'name' in file_info:
-                                        filepath = file_info['name']
-                                        # Externalize /tmp files that may not exist
-                                        # Handle both absolute paths and relative paths
-                                        if '/tmp/' in filepath or filepath.startswith('tmp/'):
-                                            fd_id = entry.get('id', '')
-                                            if fd_id:
-                                                # Handle both hex (0x1b1) and decimal formats
-                                                if isinstance(fd_id, str) and fd_id.startswith('0x'):
-                                                    # Already in hex format
-                                                    external_files.append(f"file[{fd_id}]")
-                                                elif isinstance(fd_id, int):
-                                                    # Convert to hex
-                                                    external_files.append(f"file[{hex(fd_id)}]")
-                                                else:
-                                                    # Use as-is
-                                                    external_files.append(f"file[{fd_id}]")
-                                                logger.info("Will externalize temp file: %s (id=%s)", 
-                                                          filepath, fd_id)
-                    except (json.JSONDecodeError, KeyError, TypeError) as e:
-                        logger.warning("Could not parse files.img JSON: %s", e)
-                        # Fallback: look for /tmp/ in text output and try to extract IDs
-                        for line in result.stdout.split('\n'):
-                            if '/tmp/' in line or 'tmp/' in line:
-                                # Try to extract file ID in hex format
-                                match = re.search(r'"id"\s*:\s*"(0x[0-9a-fA-F]+)"', line)
-                                if match:
-                                    fd_id = match.group(1)
-                                    external_files.append(f"file[{fd_id}]")
-                                    logger.info("Found temp file (fallback), will externalize: id=%s", fd_id)
-        except Exception as e:
-            logger.warning("Could not analyze checkpoint for temp files: %s", e)
+        # Configure network for restore
+        logger.info("Configuring network for restore...")
+        
+        # Enable ip_nonlocal_bind to allow binding to non-local IPs
+        if not set_ip_nonlocal_bind(True):
+            logger.warning("Failed to enable ip_nonlocal_bind, restore may fail")
+        
+        # Add the checkpointed IP address to loopback interface
+        if metadata.primary_ip:
+            logger.info("Adding checkpointed IP %s to loopback interface", metadata.primary_ip)
+            if not add_ip_to_loopback(metadata.primary_ip):
+                logger.warning("Failed to add IP %s to loopback, restore may fail", metadata.primary_ip)
+        else:
+            logger.warning("No primary IP found in checkpoint metadata")
+        
+        # Restore cache directories before process restore
+        logger.info("Restoring cache directories...")
+        vllm_cache = metadata.vllm_cache_path or get_cache_directories()[0]
+        flashinfer_cache = metadata.flashinfer_cache_path or get_cache_directories()[1]
+        restore_cache_directories(self.checkpoint_dir, vllm_cache, flashinfer_cache)
 
-        # Build CRIU restore command using criu_ns wrapper
-        # criu_ns handles namespace creation to avoid PID collisions
-        pidfile_path = os.path.join(self.checkpoint_dir, "restored.pid")
+        # Build CRIU restore command
         cmd = [
-            "criu-ns", "restore",
-            # Note: --shell-job removed because subprocess.run() doesn't provide a TTY stdin
-            # which causes criu-ns to fail with "The stdin is not a tty for a --shell-job"
+            "criu", "restore",
+            "--shell-job",
             "--restore-detached",
-            "--pidfile", pidfile_path,  # Track restored root PID
             "--images-dir", self.checkpoint_dir,
             "-o", "criu-restore.log",
             "-v4",
@@ -953,185 +998,122 @@ class CheckpointableAsyncLLM(AsyncLLM):
             "--external", "mnt[shm]:/dev/shm",
             "--link-remap",
             "--manage-cgroups=ignore",
-            "--ghost-limit", "50M",
+            "--allow-uprobes",
+            "--skip-file-rwx-check"
         ]
-        
-        # Add external file directives for temp files
-        for ext_file in external_files:
-            cmd.extend(["--external", ext_file])
-            logger.info("Added external directive: %s", ext_file)
 
-        # Note: When using criu-ns wrapper, we cannot pass file descriptors via --inherit-fd
-        # because the wrapper creates intermediate processes that don't forward fds properly.
-        # Instead, rely on CRIU's built-in TTY handling with --external for the tty device.
-        # The tty will be externalized and CRIU will handle it.
+        # Force CRIU to skip CUDA plugin discovery by using an empty libdir
+        try:
+            libdir = ensure_dummy_criu_libdir(self.checkpoint_dir)
+            cmd.extend(["--libdir", libdir])
+        except Exception as e:
+            logger.warning("Failed to configure dummy --libdir for CRIU: %s", e)
+
+        # Provide a valid TTY to CRIU using a Python-created pty, so we can
+        # mirror logs back to this terminal and support non-TTY parents.
+        # We pass the pty slave fd to CRIU and map it to the saved TTY id.
         pass_fds = ()
         pty_main_fd = None
         pty_worker_fd = None
-        
-        # Create PTY for log forwarding only (not passed to CRIU)
         if metadata.tty_external:
             try:
                 pty_main_fd, pty_worker_fd = pty.openpty()
-                # Don't pass the fd to CRIU when using criu-ns
-                # The --external tty directive is sufficient
+                os.set_inheritable(pty_worker_fd, True)
+                # Map the saved tty id to the pty worker fd in CRIU
+                cmd.extend([
+                    "--inherit-fd", f"fd[{pty_worker_fd}]:{metadata.tty_external}",
+                ])
+                pass_fds = (pty_worker_fd,)
             except Exception as e:
-                logger.warning("Failed to create PTY for log forwarding: %s", e)
+                logger.warning("Failed to create PTY for CRIU restore: %s", e)
 
-        logger.info("Running CRIU restore with criu-ns: %s", ' '.join(cmd))
+        logger.info("Running CRIU restore: %s", ' '.join(cmd))
 
-        # Run CRIU restore with detailed error checking
-        # Don't crash on failure - just log and return early
-        try:
-            # Note: No pass_fds needed when using criu-ns wrapper
-            # Add timeout to prevent hanging if criu-ns doesn't exit properly
-            restore_timeout = 60  # 60 seconds should be plenty for restore
-            logger.info("Running CRIU restore with %d second timeout...", restore_timeout)
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=restore_timeout)
+        # Run CRIU restore
+        # Pre-create any /dev/shm files that were open at checkpoint time, so
+        # CRIU can reopen them as regular files on the tmpfs mount.
+        precreate_dev_shm_files(getattr(metadata, "dev_shm_files", []) or [])
+
+        if pass_fds:
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    pass_fds=pass_fds)
+        else:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"CRIU restore failed: {result.stderr}")
+
+        logger.info("Successfully restored AsyncLLM from checkpoint")
+
+        # Restore and unlock CUDA contexts via CUDA API, since CRIU CUDA plugin is disabled
+        cuda_pids = getattr(metadata, "cuda_pids", []) or []
+        if cuda_pids:
+            # Check if we need GPU migration
+            old_gpu_uuids = getattr(metadata, "gpu_uuids", [])
+            new_gpu_uuids = list(reversed(get_gpu_uuids()))  # Get all GPUs in the current system
             
-            # ALWAYS log output for debugging (even on "success")
-            logger.info("CRIU restore exit code: %d", result.returncode)
-            if result.stdout:
-                logger.info("CRIU restore stdout:\n%s", result.stdout)
-            else:
-                logger.info("CRIU restore stdout: (empty)")
-            if result.stderr:
-                logger.info("CRIU restore stderr:\n%s", result.stderr)
-            else:
-                logger.info("CRIU restore stderr: (empty)")
-            
-            if result.returncode != 0:
-                logger.error(
-                    "CRIU restore failed with return code %d. Stderr: %s",
-                    result.returncode, result.stderr
+            # cuda-checkpoint requires ALL GPUs to be mapped, so both lists must have same length
+            device_map = None
+            if old_gpu_uuids and new_gpu_uuids:
+                if old_gpu_uuids != new_gpu_uuids:
+                    logger.info("GPU configuration changed - attempting migration")
+                    logger.info("Old GPUs: %s", old_gpu_uuids)
+                    logger.info("New GPUs: %s", new_gpu_uuids)
+                    device_map = create_gpu_device_map(old_gpu_uuids, new_gpu_uuids)
+                    if device_map is None:
+                        logger.error("Failed to create GPU device map")
+                else:
+                    logger.info("GPU configuration unchanged - standard restore")
+
+            logger.info(
+                "CUDA restore/unlock: attempting cuda-checkpoint restore/unlock on PIDs: %s",
+                cuda_pids,
+            )
+
+            succeeded, failed = restore_cuda_processes_from_pids(cuda_pids, device_map)
+
+            results_summary = format_cuda_restore_results(succeeded, failed)
+            logger.info(results_summary)
+            if failed:
+                logger.warning(
+                    "Some CUDA restore/unlock operations failed; subsequent GPU operations may fail."
                 )
-                return  # Exit early, don't try to reconnect
-                
-        except subprocess.TimeoutExpired:
-            logger.warning(
-                "CRIU restore command timed out after %d seconds, but this is OK! "
-                "criu-ns with --restore-detached may not exit properly even when restore succeeds. "
-                "Continuing with reconnection attempts...", restore_timeout
-            )
-            # Don't return early - the restore probably succeeded, just the wrapper didn't exit
-        except FileNotFoundError as e:
-            logger.error(
-                "CRIU binary not found. Make sure 'criu-ns' is installed and in PATH. "
-                "Error: %s", e
-            )
-            return  # Exit early
-        except Exception as e:
-            logger.error("Unexpected error running CRIU restore: %s", e)
-            return  # Exit early
-        
-        # Verify restore actually ran by checking for restore log (if we didn't timeout)
-        restore_log_path = os.path.join(self.checkpoint_dir, "criu-restore.log")
-        if not os.path.exists(restore_log_path):
-            logger.warning(
-                "CRIU restore log not found at %s. "
-                "This may be OK if restore timed out but succeeded. "
-                "Will attempt reconnection anyway.", restore_log_path
-            )
-            # Don't return early - try to reconnect anyway
-        
-        # Check restore log for errors (if it exists)
-        if os.path.exists(restore_log_path):
-            try:
-                with open(restore_log_path, 'r') as f:
-                    log_content = f.read()
-                    if 'Error' in log_content or 'Fail' in log_content:
-                        logger.warning("CRIU restore log contains errors:\n%s", 
-                                     log_content[-2000:])  # Last 2000 chars
-                        # Continue anyway - some warnings are non-fatal
-            except Exception as e:
-                logger.warning("Could not read restore log: %s", e)
-
-        logger.info("CRIU restore command completed, waiting for processes to initialize...")
-        
-        # Give restored processes time to fully initialize
-        # The processes need to set up signal handlers, ZMQ sockets, etc.
-        initial_wait = 5.0  # Increased from 3.0 to 5.0 seconds
-        logger.info("Waiting %s seconds for restored processes to initialize...", initial_wait)
-        await asyncio.sleep(initial_wait)
 
         # Re-establish connection to the restored process
         self._is_running = True
         # Mark subprocess as started after restore
         self._subprocess_started = True
 
-        # Create new socket and perform reconnection handshake with retries
+        # Create new socket and perform reconnection handshake
         # Re-establish client side of REQ-REP pattern
-        max_reconnect_attempts = 15  # Increased from 10
-        reconnect_delay = 3.0  # Increased from 2.0 seconds between attempts
-        
-        for attempt in range(max_reconnect_attempts):
-            try:
-                logger.info("Reconnection attempt %d/%d to %s", 
-                           attempt + 1, max_reconnect_attempts, self.socket_url)
-                
-                # Close old socket if it exists
-                if self.socket:
-                    self.socket.close()
-                
-                # Create fresh socket
-                self.socket = self.ctx.socket(zmq.REQ)
-                self.socket.setsockopt(zmq.LINGER, 0)  # Don't wait on close
-                self.socket.connect(self.socket_url)
-                
-                # Try to send reconnection signal
-                logger.info("Sending RECONNECT signal to %s...", self.socket_url)
-                await self.socket.send(b"RECONNECT")
-                logger.info("Sent RECONNECT signal, waiting for acknowledgment...")
+        self.socket = self.ctx.socket(zmq.REQ)
+        # REQ sockets automatically wait for connection establishment
+        self.socket.connect(self.socket_url)
 
-                # Wait for response with timeout
-                poll_timeout_ms = 10000  # 10 second timeout per attempt
-                if await self.socket.poll(timeout=poll_timeout_ms):
-                    ack = await self.socket.recv()
-                    if ack == b"RECONNECT_ACK":
-                        logger.info("Successfully reconnected to restored process!")
-                        break
-                    else:
-                        logger.warning("Unexpected reconnection response: %s", ack)
-                        if attempt < max_reconnect_attempts - 1:
-                            await asyncio.sleep(reconnect_delay)
-                            continue
-                        else:
-                            logger.error("Failed to reconnect after %d attempts", max_reconnect_attempts)
-                            self._is_running = False
-                            return
-                else:
-                    logger.warning("No response to RECONNECT signal (attempt %d/%d)", 
-                                 attempt + 1, max_reconnect_attempts)
-                    if attempt < max_reconnect_attempts - 1:
-                        await asyncio.sleep(reconnect_delay)
-                        continue
-                    else:
-                        logger.error("Failed to reconnect: no response after %d attempts", 
-                                   max_reconnect_attempts)
-                        self._is_running = False
-                        return
-                        
-            except Exception as e:
-                logger.warning("Reconnection attempt %d failed: %s", attempt + 1, e)
-                if attempt < max_reconnect_attempts - 1:
-                    await asyncio.sleep(reconnect_delay)
-                    continue
-                else:
-                    logger.error("Failed to reconnect after %d attempts", max_reconnect_attempts)
-                    self._is_running = False
-                    return
+        # Send reconnection signal and wait for acknowledgment
+        logger.info("Sending reconnection signal to restored process...")
+
+        # With REQ-REP pattern, the socket will block until connected
+        # This should succeed on the first attempt
+        await self.socket.send(b"RECONNECT")
+        logger.info("Waiting for reconnection acknowledgment...")
+
+        # REQ socket will wait for the response
+        # Use a generous timeout for post-restore initialization
+        if await self.socket.poll(timeout=5000):  # 5 second timeout
+            ack = await self.socket.recv()
+            if ack == b"RECONNECT_ACK":
+                logger.info("Reconnection acknowledged by server")
+            else:
+                raise ValueError(f"Unexpected reconnection response: {ack}")
+        else:
+            raise TimeoutError("No response to reconnection signal after 30 seconds")
 
         # Wake up the model to restore GPU memory
-        try:
-            logger.info("Waking up model after restore...")
-            await self.wake_up()
-            logger.info("Model wake up completed")
-        except Exception as e:
-            logger.error("Failed to wake up model after restore: %s", e)
-            logger.warning("Model may not be fully functional, but connection is established")
+        logger.info("Waking up model after restore...")
+        await self.wake_up()
+        logger.info("Model wake up completed")
 
-        # Start forwarding the restored process output to our stdout (if PTY was created)
-        # Note: With criu-ns, the PTY is for log forwarding only, not passed to CRIU
+        # Start forwarding the restored process output to our stdout
         if pty_main_fd is not None:
             try:
                 self._start_pty_forwarder(pty_main_fd)
