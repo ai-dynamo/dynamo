@@ -339,7 +339,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     ) = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
-        runtime, component, engine_client, default_sampling_params
+        runtime,
+        component,
+        engine_client,
+        default_sampling_params,
+        getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -450,6 +454,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         component,
         engine_client,
         default_sampling_params,
+        getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
     )
     handler.add_temp_dir(prometheus_temp_dir)
 

@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"testing"
 
-	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -703,18 +702,18 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								Resources: &dynamoCommon.Resources{
-									Requests: &dynamoCommon.ResourceItem{
+								Resources: &v1alpha1.Resources{
+									Requests: &v1alpha1.ResourceItem{
 										CPU:    "300m",
 										Memory: "500Mi",
 									},
-									Limits: &dynamoCommon.ResourceItem{
+									Limits: &v1alpha1.ResourceItem{
 										GPU:    "1",
 										Memory: "20Gi",
 										CPU:    "10",
 									},
 								},
-								ExtraPodMetadata: &dynamoCommon.ExtraPodMetadata{
+								ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 									Annotations: map[string]string{
 										"nvidia.com/annotation1": "annotation1",
 									},
@@ -722,7 +721,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										"nvidia.com/label1": "label1",
 									},
 								},
-								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+								ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 									PodSpec: &corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
 										Containers: []corev1.Container{
@@ -866,7 +865,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											Limits: corev1.ResourceList{
 												corev1.ResourceMemory: resource.MustParse("20Gi"),
 												corev1.ResourceCPU:    resource.MustParse("10"),
-												"nvidia.com/gpu":      resource.MustParse("1"),
+												corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
 											},
 										},
 										LivenessProbe: &corev1.Probe{
@@ -1024,12 +1023,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								Resources: &dynamoCommon.Resources{
-									Limits: &dynamoCommon.ResourceItem{
+								Resources: &v1alpha1.Resources{
+									Limits: &v1alpha1.ResourceItem{
 										GPU: "1",
 									},
 								},
-								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+								ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 									MainContainer: &corev1.Container{
 										Image: "test-image:latest",
 									},
@@ -1067,12 +1066,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								Resources: &dynamoCommon.Resources{
-									Limits: &dynamoCommon.ResourceItem{
+								Resources: &v1alpha1.Resources{
+									Limits: &v1alpha1.ResourceItem{
 										GPU: "1",
 									},
 								},
-								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+								ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 									MainContainer: &corev1.Container{
 										Image: "", // Image is missing, will cause error in generatePodTemplateSpec
 									},
