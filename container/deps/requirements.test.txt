@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# For Multimodal EPD (required for device_map="auto" in vision model loading)
-accelerate
 # For IFEval dataset loading in kvbm tests
 datasets
 # For NATS object store verification in router tests
