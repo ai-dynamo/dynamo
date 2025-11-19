@@ -40,6 +40,15 @@ impl OffsetBuffer {
         Ok(Self { base, offset, size })
     }
 
+    pub fn from_inner_address(base: Buffer, address: usize, size: usize) -> Result<Self> {
+        // address must be within the base region
+        if address < base.addr() || address + size > base.addr() + base.size() {
+            return Err(StorageError::Unsupported("address out of bounds".into()));
+        }
+        let offset = address - base.addr();
+        Self::new(base, offset, size)
+    }
+
     /// Get the offset relative to the base mapping.
     pub fn offset(&self) -> usize {
         self.offset

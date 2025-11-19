@@ -27,6 +27,7 @@ mod tests;
 pub use arena::{ArenaAllocator, ArenaBuffer, ArenaError};
 pub use device::DeviceStorage;
 pub use disk::DiskStorage;
+pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use system::SystemStorage;
 pub use torch::{TorchDevice, TorchTensor};
@@ -150,6 +151,13 @@ pub fn create_buffer<S: MemoryDescription + 'static>(memory: S) -> Buffer {
     Buffer(Arc::new(memory))
 }
 
+impl Buffer {
+    /// Create a Buffer from an existing Arc<dyn MemoryDescription>.
+    pub fn from_arc(arc: Arc<dyn MemoryDescription>) -> Self {
+        Buffer(arc)
+    }
+}
+
 /// An unowned contiguous chunk of memory, not storage specific.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryRegion {
@@ -173,5 +181,42 @@ impl MemoryRegion {
     #[inline]
     pub fn size(&self) -> usize {
         self.size
+    }
+
+    /// Get a slice view of this memory region.
+    ///
+    /// # Safety
+    /// This is unsafe because:
+    /// - The caller must ensure the memory region is valid and properly initialized
+    /// - The caller must ensure no mutable references exist to this memory
+    /// - The caller must ensure the memory remains valid for the lifetime of the slice
+    #[cfg(feature = "unsafe-slices")]
+    pub unsafe fn as_slice(&self) -> Result<&[u8]> {
+        if self.size == 0 {
+            return Ok(&[]);
+        }
+        // SAFETY: Caller guarantees memory is valid
+        unsafe { Ok(std::slice::from_raw_parts(self.addr as *const u8, self.size)) }
+    }
+
+    /// Get a mutable slice view of this memory region.
+    ///
+    /// # Safety
+    /// This is unsafe because:
+    /// - The caller must ensure the memory region is valid and properly initialized
+    /// - The caller must ensure no other references (mutable or immutable) exist to this memory
+    /// - The caller must ensure the memory remains valid for the lifetime of the slice
+    #[cfg(feature = "unsafe-slices")]
+    pub unsafe fn as_slice_mut(&mut self) -> Result<&mut [u8]> {
+        if self.size == 0 {
+            return Ok(&mut []);
+        }
+        // SAFETY: Caller guarantees memory is valid and exclusively accessible
+        unsafe {
+            Ok(std::slice::from_raw_parts_mut(
+                self.addr as *mut u8,
+                self.size,
+            ))
+        }
     }
 }

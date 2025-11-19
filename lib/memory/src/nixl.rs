@@ -13,7 +13,10 @@ use std::fmt;
 pub use agent::NixlAgent;
 pub use config::NixlBackendConfig;
 
-pub use nixl_sys::{MemType, OptArgs, RegistrationHandle};
+pub use nixl_sys::{
+    Agent, MemType, NotificationMap, OptArgs, RegistrationHandle, XferDescList, XferOp,
+    XferRequest,
+};
 pub use serde::{Deserialize, Serialize};
 
 /// Trait for storage types that can be registered with NIXL.
