@@ -256,12 +256,6 @@ impl Discovery for KVStoreDiscovery {
         // Delete the entry from the bucket
         bucket.delete(&key).await?;
 
-        tracing::debug!(
-            "KVStoreDiscovery::unregister: Successfully unregistered instance_id={}, key={}",
-            instance.instance_id(),
-            key_path
-        );
-
         Ok(())
     }
 

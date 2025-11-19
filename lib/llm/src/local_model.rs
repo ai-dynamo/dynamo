@@ -455,14 +455,6 @@ impl LocalModel {
 
         let endpoint_id = endpoint.id();
 
-        tracing::info!(
-            "Unregistering model from discovery: namespace={}, component={}, endpoint={}, instance_id={:x}",
-            endpoint_id.namespace,
-            endpoint_id.component,
-            endpoint_id.name,
-            instance_id
-        );
-
         let instance = DiscoveryInstance::Model {
             namespace: endpoint_id.namespace,
             component: endpoint_id.component,
