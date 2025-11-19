@@ -58,7 +58,7 @@ This will populate:
 - `/model-cache/deepseek-r1`
 - `/model-cache/deepseek-r1-fp4`
 
-### 4) Deploy vLLM (Disaggregated, 8x Hopper)
+### 4) Deploy vLLM (Disaggregated, DEP8)
 
 Apply the single-node disaggregated deployment:
 
@@ -67,6 +67,26 @@ kubectl apply -f ./deploy_hopper_8gpu.yaml -n ${NAMESPACE}
 ```
 
 The manifest runs separate prefill and decode workers, each mounting the shared model cache, with settings tuned for Hopper.
+
+Test the deployment locally by port-forwarding and sending a request:
+
+```bash
+# Port-forward the frontend Service to localhost:8000 (replace <frontend-svc> with the actual Service name)
+kubectl port-forward svc/<frontend-svc> 8000:8000 -n ${NAMESPACE}
+```
+
+```bash
+curl -sS http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer dummy' \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-R1",
+    "messages": [{"role":"user","content":"Say hello!"}],
+    "max_tokens": 64
+  }'
+```
+
+
 
 ### Notes
 - If your cluster/network requires specific interfaces, adjust environment variables (e.g., `NCCL_SOCKET_IFNAME`) in the manifest accordingly.
