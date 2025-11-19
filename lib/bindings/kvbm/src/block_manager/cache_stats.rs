@@ -47,6 +47,8 @@ pub struct CacheStatsTracker {
     /// Optional identifier for this tracker (e.g., worker_id, engine_index)
     /// Used in log messages to distinguish between multiple KVBM instances
     identifier: Option<String>,
+    /// Last logged values to avoid duplicate logs when values haven't changed
+    last_logged_values: Mutex<Option<(u64, u64, u64, u64)>>,
 }
 
 impl CacheStatsTracker {
@@ -79,6 +81,7 @@ impl CacheStatsTracker {
             last_log_time: Mutex::new(Instant::now()),
             log_interval: Duration::from_secs(log_interval_secs),
             identifier,
+            last_logged_values: Mutex::new(None),
         }
     }
 
@@ -120,7 +123,8 @@ impl CacheStatsTracker {
     }
 
     /// Check if we should log and do so if enough time has passed
-    pub fn maybe_log(&self) {
+    /// Returns true if logging occurred, false otherwise
+    pub fn maybe_log(&self) -> bool {
         let now = Instant::now();
         let should_log = {
             let mut last_log = self.last_log_time.lock().unwrap();
@@ -147,41 +151,61 @@ impl CacheStatsTracker {
 
             // Only log if there's activity
             if host_queries > 0 || disk_queries > 0 {
-                let host_rate = if host_queries == 0 {
-                    0.0
-                } else {
-                    (host_hits as f32 / host_queries as f32) * 100.0
+                // Check if values have changed since last log
+                let should_log_values = {
+                    let mut last_logged = self.last_logged_values.lock().unwrap();
+                    let current_values = (host_queries, host_hits, disk_queries, disk_hits);
+                    match *last_logged {
+                        Some(prev) if prev == current_values => {
+                            // Values haven't changed, skip logging
+                            false
+                        }
+                        _ => {
+                            // Values changed or first log, update and log
+                            *last_logged = Some(current_values);
+                            true
+                        }
+                    }
                 };
 
-                let disk_rate = if disk_queries == 0 {
-                    0.0
-                } else {
-                    (disk_hits as f32 / disk_queries as f32) * 100.0
-                };
+                if should_log_values {
+                    let host_rate = if host_queries == 0 {
+                        0.0
+                    } else {
+                        (host_hits as f32 / host_queries as f32) * 100.0
+                    };
 
-                // Include identifier in log message if available
-                let prefix = if let Some(ref id) = self.identifier {
-                    format!("KVBM [{}] Cache Hit Rates", id)
-                } else {
-                    "KVBM Cache Hit Rates".to_string()
-                };
+                    let disk_rate = if disk_queries == 0 {
+                        0.0
+                    } else {
+                        (disk_hits as f32 / disk_queries as f32) * 100.0
+                    };
 
-                tracing::info!(
-                    "{} - Host: {:.1}% ({}/{}), Disk: {:.1}% ({}/{})",
-                    prefix,
-                    host_rate,
-                    host_hits,
-                    host_queries,
-                    disk_rate,
-                    disk_hits,
-                    disk_queries,
-                );
+                    // Include identifier in log message if available
+                    let prefix = if let Some(ref id) = self.identifier {
+                        format!("KVBM [{}] Cache Hit Rates", id)
+                    } else {
+                        "KVBM Cache Hit Rates".to_string()
+                    };
+
+                    tracing::info!(
+                        "{} - Host: {:.1}% ({}/{}), Disk: {:.1}% ({}/{})",
+                        prefix,
+                        host_rate,
+                        host_hits,
+                        host_queries,
+                        disk_rate,
+                        disk_hits,
+                        disk_queries,
+                    );
+                    return true;
+                }
             }
         }
+        false
     }
 
     /// Get current host cache hit rate (0.0-1.0) from the sliding window
-    #[cfg(test)]
     pub fn host_hit_rate(&self) -> f32 {
         let aggregated = self.aggregated.lock().unwrap();
         if aggregated.host_queries == 0 {
@@ -192,7 +216,6 @@ impl CacheStatsTracker {
     }
 
     /// Get current disk cache hit rate (0.0-1.0) from the sliding window
-    #[cfg(test)]
     pub fn disk_hit_rate(&self) -> f32 {
         let aggregated = self.aggregated.lock().unwrap();
         if aggregated.disk_queries == 0 {
@@ -209,8 +232,10 @@ impl CacheStatsTracker {
     pub fn reset(&self) {
         let mut entries = self.entries.lock().unwrap();
         let mut aggregated = self.aggregated.lock().unwrap();
+        let mut last_logged = self.last_logged_values.lock().unwrap();
         entries.clear();
         *aggregated = AggregatedStats::default();
+        *last_logged = None;
     }
 }
 

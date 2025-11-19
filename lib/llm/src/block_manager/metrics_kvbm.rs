@@ -4,12 +4,12 @@
 use axum::Router;
 use dynamo_runtime::metrics::prometheus_names::{
     kvbm::{
-        MATCHED_TOKENS, OFFLOAD_BLOCKS_D2D, OFFLOAD_BLOCKS_D2H, OFFLOAD_BLOCKS_H2D,
-        ONBOARD_BLOCKS_D2D, ONBOARD_BLOCKS_H2D,
+        DISK_CACHE_HIT_RATE, HOST_CACHE_HIT_RATE, MATCHED_TOKENS, OFFLOAD_BLOCKS_D2D,
+        OFFLOAD_BLOCKS_D2H, OFFLOAD_BLOCKS_H2D, ONBOARD_BLOCKS_D2D, ONBOARD_BLOCKS_H2D,
     },
     sanitize_prometheus_name,
 };
-use prometheus::{IntCounter, Opts, Registry};
+use prometheus::{Gauge, IntCounter, Opts, Registry};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, thread};
 use tokio::{net::TcpListener, sync::Notify};
 
@@ -34,6 +34,12 @@ pub struct KvbmMetrics {
 
     // number of matched tokens from KVBM
     pub matched_tokens: IntCounter,
+
+    // host cache hit rate (0.0-1.0) from the sliding window
+    pub host_cache_hit_rate: Gauge,
+
+    // disk cache hit rate (0.0-1.0) from the sliding window
+    pub disk_cache_hit_rate: Gauge,
 
     shutdown_notify: Option<Arc<Notify>>,
 }
@@ -81,6 +87,20 @@ impl KvbmMetrics {
         let matched_tokens = mr
             .create_intcounter(MATCHED_TOKENS, "The number of matched tokens", &[])
             .unwrap();
+        let host_cache_hit_rate = mr
+            .create_gauge(
+                HOST_CACHE_HIT_RATE,
+                "Host cache hit rate (0.0-1.0) from the sliding window",
+                &[],
+            )
+            .unwrap();
+        let disk_cache_hit_rate = mr
+            .create_gauge(
+                DISK_CACHE_HIT_RATE,
+                "Disk cache hit rate (0.0-1.0) from the sliding window",
+                &[],
+            )
+            .unwrap();
 
         // early return if no endpoint is needed
         if !create_endpoint {
@@ -91,6 +111,8 @@ impl KvbmMetrics {
                 onboard_blocks_h2d,
                 onboard_blocks_d2d,
                 matched_tokens,
+                host_cache_hit_rate,
+                disk_cache_hit_rate,
                 shutdown_notify: None,
             };
         }
@@ -145,8 +167,16 @@ impl KvbmMetrics {
             onboard_blocks_h2d,
             onboard_blocks_d2d,
             matched_tokens,
+            host_cache_hit_rate,
+            disk_cache_hit_rate,
             shutdown_notify: Some(notify),
         }
+    }
+
+    /// Update cache hit rate metrics from a CacheStatsTracker
+    pub fn update_cache_hit_rates(&self, host_rate: f32, disk_rate: f32) {
+        self.host_cache_hit_rate.set(host_rate as f64);
+        self.disk_cache_hit_rate.set(disk_rate as f64);
     }
 }
 
@@ -192,6 +222,23 @@ impl KvbmMetricsRegistry {
         let c = IntCounter::with_opts(opts)?;
         self.registry.register(Box::new(c.clone()))?;
         Ok(c)
+    }
+
+    pub fn create_gauge(
+        &self,
+        name: &str,
+        description: &str,
+        labels: &[(&str, &str)],
+    ) -> anyhow::Result<Gauge> {
+        let metrics_name = sanitize_prometheus_name(&format!("{}_{}", self.prefix, name))?;
+        let const_labels: HashMap<String, String> = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let opts = Opts::new(metrics_name, description).const_labels(const_labels);
+        let g = Gauge::with_opts(opts)?;
+        self.registry.register(Box::new(g.clone()))?;
+        Ok(g)
     }
 
     pub fn inner(&self) -> Arc<Registry> {

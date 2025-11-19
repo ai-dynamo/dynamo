@@ -17,7 +17,7 @@ use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::cache_stats::CacheStatsTracker;
-use crate::get_current_cancel_token;
+use crate::{get_current_cancel_token, get_current_tokio_handle};
 
 use super::*;
 
@@ -184,6 +184,8 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     _transfer_engine_handle: Option<CriticalTaskExecutionHandle>,
     /// Cache statistics tracker
     cache_stats: Arc<CacheStatsTracker>,
+    /// KVBM metrics for exposing cache hit rates
+    kvbm_metrics: KvbmMetrics,
 }
 
 impl std::fmt::Debug for ConnectorSlotManager<String> {
@@ -199,6 +201,24 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         kvbm_metrics: KvbmMetrics,
         identifier: Option<String>,
     ) -> Self {
+        let cache_stats = Arc::new(CacheStatsTracker::new(identifier));
+        let kvbm_metrics_clone = kvbm_metrics.clone();
+        let cache_stats_clone = cache_stats.clone();
+
+        // Spawn a background task to periodically update metrics and log cache hit rates
+        let handle = get_current_tokio_handle();
+        handle.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                // Update Prometheus metrics
+                let host_rate = cache_stats_clone.host_hit_rate();
+                let disk_rate = cache_stats_clone.disk_hit_rate();
+                kvbm_metrics_clone.update_cache_hit_rates(host_rate, disk_rate);
+                // Also log cache hit rates periodically
+                cache_stats_clone.maybe_log();
+            }
+        });
         tracing::debug!(
             "creating slot manager with block size: {}",
             block_manager.block_size()
@@ -211,6 +231,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         let primary_token_clone = primary_token.clone();
         let runtime_primary = get_current_tokio_handle();
         let runtime_primary_clone = runtime_primary.clone();
+        let kvbm_metrics_for_xfer = kvbm_metrics.clone();
 
         let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token| async move {
@@ -219,7 +240,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
                         cancellation_token,
                         runtime_primary_clone,
                         primary_token_clone,
-                        kvbm_metrics,
+                        kvbm_metrics_for_xfer,
                     )
                     .await
             },
@@ -234,7 +255,8 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             block_manager,
             xfer_tx,
             _transfer_engine_handle: Some(xfer_engine_task),
-            cache_stats: Arc::new(CacheStatsTracker::new(identifier)),
+            cache_stats,
+            kvbm_metrics: kvbm_metrics.clone(),
         }
     }
 }
@@ -753,7 +775,6 @@ impl Slot for VllmConnectorSlot {
 
             self.cache_stats
                 .record(host_blocks, disk_blocks, self.total_blocks_queried);
-            self.cache_stats.maybe_log();
         }
 
         // Check if there are any pending operations
