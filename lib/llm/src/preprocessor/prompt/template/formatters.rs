@@ -18,6 +18,9 @@ use tracing;
 ///
 /// By removing these tags before validation, we allow templates with backend-specific
 /// extensions to work with minijinja while maintaining correct output semantics.
+///
+/// Note: This follows the same approach as Mistral.rs, which also strips these tags
+/// for compatibility: https://github.com/EricLBuehler/mistral.rs/blob/2bcf0e9/mistralrs-core/src/pipeline/chat_template.rs#L318-L322
 fn remove_known_non_jinja2_tags(template: &str) -> String {
     template
         .replace("{% generation %}", "")
