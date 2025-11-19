@@ -25,7 +25,7 @@ mod tests {
     #[test]
     fn test_lora_name_to_id() {
         let id = lora_name_to_id("test_lora");
-        assert!(1 <= id && id <= 0x7FFFFFFF as i32);
+        assert!(1 <= id);
 
         let id1 = lora_name_to_id("test_lora");
         let id2 = lora_name_to_id("test_lora");
