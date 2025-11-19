@@ -7,7 +7,7 @@
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 NUM_WORKERS=8
 MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-RECIPE_PATH="$DYNAMO_HOME/recipes/deepseek-r1-distill-llama-8b/trtllm"
+ENGINE_CONFIG_PATH="$DYNAMO_HOME/examples/backends/trtllm/engine_configs/deepseek-r1-distill-llama-8b"
 TENSOR_PARALLEL_SIZE=1
 DATA_PARALLEL_SIZE=1
 USE_MOCKERS=false
@@ -86,13 +86,13 @@ if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
         )
     elif [ "$USE_TRTLLM" = true ]; then
         # Default args for TensorRT-LLM engine using predefined YAML configs
-        # Config files located at: $RECIPE_PATH/{agg,decode,prefill}.yaml
+        # Config files located at: $ENGINE_CONFIG_PATH/{agg,decode,prefill}.yaml
         if [ "$MODE" = "prefill" ]; then
-            ENGINE_CONFIG="$RECIPE_PATH/prefill.yaml"
+            ENGINE_CONFIG="$ENGINE_CONFIG_PATH/prefill.yaml"
         elif [ "$MODE" = "decode" ]; then
-            ENGINE_CONFIG="$RECIPE_PATH/decode.yaml"
+            ENGINE_CONFIG="$ENGINE_CONFIG_PATH/decode.yaml"
         else
-            ENGINE_CONFIG="$RECIPE_PATH/agg.yaml"
+            ENGINE_CONFIG="$ENGINE_CONFIG_PATH/agg.yaml"
         fi
 
         EXTRA_ARGS=(
