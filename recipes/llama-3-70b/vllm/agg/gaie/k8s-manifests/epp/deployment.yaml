@@ -75,6 +75,8 @@ spec:
               value: "nats://dynamo-platform-nats.$(PLATFORM_NAMESPACE):4222" #  update dynamo-platform to appropriate namespace
             - name: DYNAMO_NAMESPACE
               value: "$(POD_NAMESPACE)-llama3-70b-agg"
+            - name: DYNAMO_MODEL
+              value: "llama3-70b-agg"
             - name: DYNAMO_KV_BLOCK_SIZE
               value: "128" # UPDATE to match the --block-size in your deploy.yaml engine command
             - name: USE_STREAMING
