@@ -241,24 +241,15 @@ def file_storage_backend():
     """Fixture that sets up and tears down file storage backend.
 
     Creates a temporary directory for file-based KV storage and sets
-    both DYN_STORE_KV and DYN_FILE_KV environment variables.
-    Cleans up after the test.
+    the DYN_FILE_KV environment variable. Cleans up after the test.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
-        old_store_kv = os.environ.get("DYN_STORE_KV")
-        old_file_kv = os.environ.get("DYN_FILE_KV")
-
-        os.environ["DYN_STORE_KV"] = "file"
+        old_env = os.environ.get("DYN_FILE_KV")
         os.environ["DYN_FILE_KV"] = tmpdir
+        logging.info(f"Set up file storage backend in: {tmpdir}")
         yield tmpdir
-
         # Cleanup
-        if old_store_kv is not None:
-            os.environ["DYN_STORE_KV"] = old_store_kv
-        else:
-            os.environ.pop("DYN_STORE_KV", None)
-
-        if old_file_kv is not None:
-            os.environ["DYN_FILE_KV"] = old_file_kv
+        if old_env is not None:
+            os.environ["DYN_FILE_KV"] = old_env
         else:
             os.environ.pop("DYN_FILE_KV", None)
