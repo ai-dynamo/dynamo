@@ -4,15 +4,12 @@
 import asyncio
 import json
 import logging
-import os
 import random
 import string
-import tempfile
 from typing import Any, Optional
 
 import aiohttp
 import nats
-import pytest
 
 from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
 from tests.utils.managed_process import ManagedProcess
@@ -21,30 +18,6 @@ logger = logging.getLogger(__name__)
 
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
-
-
-########################################################
-# Fixtures
-########################################################
-
-
-@pytest.fixture
-def file_storage_backend():
-    """Fixture that sets up and tears down file storage backend.
-
-    Creates a temporary directory for file-based KV storage and sets
-    the DYN_FILE_KV environment variable. Cleans up after the test.
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        old_env = os.environ.get("DYN_FILE_KV")
-        os.environ["DYN_FILE_KV"] = tmpdir
-        logger.info(f"Set up file storage backend in: {tmpdir}")
-        yield tmpdir
-        # Cleanup
-        if old_env is not None:
-            os.environ["DYN_FILE_KV"] = old_env
-        else:
-            os.environ.pop("DYN_FILE_KV", None)
 
 
 ########################################################
