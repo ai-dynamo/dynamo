@@ -125,6 +125,9 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+        // TODO: need to handle meta data change propagation to other pods
+        // Current implementation delete the entry from local metadata but
+        // it doesn't invalidate the cached service metadata on other pods
         let mut metadata = self.metadata.write().await;
         match &instance {
             DiscoveryInstance::Endpoint(_inst) => {
