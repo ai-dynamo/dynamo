@@ -33,6 +33,7 @@ pub use lock::*;
 pub use path::*;
 
 use super::utils::build_in_runtime;
+use crate::config::environment_names::etcd as env_etcd;
 
 /// ETCD Client
 #[derive(Clone)]
@@ -567,15 +568,15 @@ impl Default for ClientOptions {
         let mut connect_options = None;
 
         if let (Ok(username), Ok(password)) = (
-            std::env::var("ETCD_AUTH_USERNAME"),
-            std::env::var("ETCD_AUTH_PASSWORD"),
+            std::env::var(env_etcd::auth::ETCD_AUTH_USERNAME),
+            std::env::var(env_etcd::auth::ETCD_AUTH_PASSWORD),
         ) {
             // username and password are set
             connect_options = Some(ConnectOptions::new().with_user(username, password));
         } else if let (Ok(ca), Ok(cert), Ok(key)) = (
-            std::env::var("ETCD_AUTH_CA"),
-            std::env::var("ETCD_AUTH_CLIENT_CERT"),
-            std::env::var("ETCD_AUTH_CLIENT_KEY"),
+            std::env::var(env_etcd::auth::ETCD_AUTH_CA),
+            std::env::var(env_etcd::auth::ETCD_AUTH_CLIENT_CERT),
+            std::env::var(env_etcd::auth::ETCD_AUTH_CLIENT_KEY),
         ) {
             // TLS is set
             connect_options = Some(
@@ -596,7 +597,7 @@ impl Default for ClientOptions {
 }
 
 fn default_servers() -> Vec<String> {
-    match std::env::var("ETCD_ENDPOINTS") {
+    match std::env::var(env_etcd::ETCD_ENDPOINTS) {
         Ok(possible_list_of_urls) => possible_list_of_urls
             .split(',')
             .map(|s| s.to_string())
@@ -751,7 +752,7 @@ mod tests {
     fn test_ectd_client() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings(false);
+        let config = DistributedConfig::from_settings();
 
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();
@@ -794,7 +795,7 @@ mod tests {
     fn test_kv_cache() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings(false);
+        let config = DistributedConfig::from_settings();
 
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();

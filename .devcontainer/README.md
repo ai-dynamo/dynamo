@@ -79,16 +79,16 @@ graph TB
         HFCACHE["~/.cache/huggingface<br/>(host cache)"]
         GITCONFIG["~/.gitconfig<br/>(host git config)"]
 
-        subgraph CONTAINER["Docker Container<br/>vsc-dynamo-SHA-uid<br/>Running as: ubuntu user"]
-            MOUNT["/home/ubuntu/dynamo<br/>(mounted directory)"]
-            HFMOUNT["/home/ubuntu/.cache/huggingface<br/>(mounted cache)"]
-            GITCONFIGCOPY["/home/ubuntu/.gitconfig<br/>(via Dev Container setting)"]
+        subgraph CONTAINER["Docker Container<br/>vsc-dynamo-SHA-uid<br/>Running as: dynamo user"]
+            MOUNT["/home/dynamo/dynamo<br/>(mounted directory)"]
+            HFMOUNT["/home/dynamo/.cache/huggingface<br/>(mounted cache)"]
+            GITCONFIGCOPY["/home/dynamo/.gitconfig<br/>(via Dev Container setting)"]
             TOOLS["rust-analyzer<br/>cargo<br/>etc."]
         end
 
         IMAGE["Docker Image<br/>dynamo:latest-{framework}-local-dev<br/>(vllm/sglang/trtllm)"]
 
-        IMAGE -->|"docker run<br/>as ubuntu user"| CONTAINER
+        IMAGE -->|"docker run<br/>as dynamo user"| CONTAINER
     end
 
     TERM -->|"SSH Connection"| DIR
@@ -260,9 +260,9 @@ File Structure:
 - Local dynamo repo mounts to `/workspace`
 - Python venv in `/opt/dynamo/venv`
 - Build artifacts in `/workspace/target`
-- Hugging Face cache preserved between sessions (either mounting your host .cache to the container, or your `HF_HOME` to `/home/ubuntu/.cache/huggingface`)
-- Bash memory preserved between sessions at `/home/ubuntu/.commandhistory` using docker volume `dynamo-bashhistory`
-- Precommit preserved between sessions at `/home/ubuntu/.cache/precommit` using docker volume `dynamo-precommit-cache`
+- Hugging Face cache preserved between sessions (either mounting your host .cache to the container, or your `HF_HOME` to `/home/dynamo/.cache/huggingface`)
+- Bash memory preserved between sessions at `/home/dynamo/.commandhistory` using docker volume `dynamo-bashhistory`
+- Precommit preserved between sessions at `/home/dynamo/.cache/precommit` using docker volume `dynamo-precommit-cache`
 
 ## Documentation
 
@@ -397,8 +397,8 @@ docker volume prune -f
 **Note:** This resets bash history and pre-commit cache.
 
 **Volume Mounts in devcontainer.json:**
-- `dynamo-bashhistory` → `/home/ubuntu/.commandhistory` (bash history)
-- `dynamo-precommit-cache` → `/home/ubuntu/.cache/pre-commit` (pre-commit cache)
+- `dynamo-bashhistory` → `/home/dynamo/.commandhistory` (bash history)
+- `dynamo-precommit-cache` → `/home/dynamo/.cache/pre-commit` (pre-commit cache)
 
 ### Permission Issues
 

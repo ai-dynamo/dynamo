@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::component::Component;
+use crate::component::{Component, Instance};
 use crate::pipeline::PipelineError;
 use crate::storage::key_value_store::{
     EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, KeyValueStoreSelect,
@@ -9,7 +9,7 @@ use crate::storage::key_value_store::{
 };
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
-    component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
+    component::{self, ComponentBuilder, Endpoint, Namespace},
     discovery::Discovery,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
@@ -23,7 +23,9 @@ use crate::SystemHealth;
 use crate::runtime::Runtime;
 
 use async_once_cell::OnceCell;
+use std::fmt;
 use std::sync::{Arc, OnceLock, Weak};
+use tokio::sync::watch::Receiver;
 
 use anyhow::Result;
 use derive_getters::Dissolve;
@@ -32,6 +34,8 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+type InstanceMap = HashMap<Endpoint, Weak<Receiver<Vec<Instance>>>>;
+
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
 /// communication protocols and transports.
 #[derive(Clone)]
@@ -39,12 +43,14 @@ pub struct DistributedRuntime {
     // local runtime
     runtime: Runtime,
 
-    // we might consider a unifed transport manager here
+    // Unified transport manager
     etcd_client: Option<transports::etcd::Client>,
     nats_client: Option<transports::nats::Client>,
     store: KeyValueStoreManager,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    network_manager: Arc<OnceCell<Arc<crate::pipeline::network::manager::NetworkManager>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
+    request_plane: RequestPlaneMode,
 
     // Service discovery client
     discovery_client: Arc<dyn discovery::Discovery>,
@@ -60,11 +66,7 @@ pub struct DistributedRuntime {
     // paths in etcd to a minimum.
     component_registry: component::Registry,
 
-    // Will only have static components that are not discoverable via etcd, they must be know at
-    // startup. Will not start etcd.
-    is_static: bool,
-
-    instance_sources: Arc<tokio::sync::Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
+    instance_sources: Arc<tokio::sync::Mutex<InstanceMap>>,
 
     // Health Status
     system_health: Arc<parking_lot::Mutex<SystemHealth>>,
@@ -95,12 +97,12 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let (selected_kv_store, nats_config, is_static) = config.dissolve();
+        let (selected_kv_store, nats_config, request_plane) = config.dissolve();
 
         let runtime_clone = runtime.clone();
 
-        let (etcd_client, store) = match (is_static, selected_kv_store) {
-            (false, KeyValueStoreSelect::Etcd(etcd_config)) => {
+        let (etcd_client, store) = match selected_kv_store {
+            KeyValueStoreSelect::Etcd(etcd_config) => {
                 let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
                     // The returned error doesn't show because of a dropped runtime error, so
                     // log it first.
@@ -108,10 +110,8 @@ impl DistributedRuntime {
                 let store = KeyValueStoreManager::etcd(etcd_client.clone());
                 (Some(etcd_client), store)
             }
-            (false, KeyValueStoreSelect::File(root)) => (None, KeyValueStoreManager::file(root)),
-            (true, _) | (false, KeyValueStoreSelect::Memory) => {
-                (None, KeyValueStoreManager::memory())
-            }
+            KeyValueStoreSelect::File(root) => (None, KeyValueStoreManager::file(root)),
+            KeyValueStoreSelect::Memory => (None, KeyValueStoreManager::memory()),
         };
 
         let nats_client = Some(nats_config.clone().connect().await?);
@@ -177,14 +177,15 @@ impl DistributedRuntime {
             store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            network_manager: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             discovery_metadata,
             component_registry: component::Registry::new(),
-            is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
+            request_plane,
         };
 
         if let Some(nats_client_for_metrics) = nats_client_for_metrics {
@@ -283,13 +284,7 @@ impl DistributedRuntime {
     }
 
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings(false);
-        Self::new(runtime, config).await
-    }
-
-    // Call this if you are using static workers that do not need etcd-based discovery.
-    pub async fn from_settings_without_discovery(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings(true);
+        let config = DistributedConfig::from_settings();
         Self::new(runtime, config).await
     }
 
@@ -323,7 +318,7 @@ impl DistributedRuntime {
 
     /// Create a [`Namespace`]
     pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
-        Namespace::new(self.clone(), name.into(), self.is_static)
+        Namespace::new(self.clone(), name.into())
     }
 
     /// Returns the discovery interface for service registration and discovery
@@ -345,6 +340,73 @@ impl DistributedRuntime {
             })
             .await?
             .clone())
+    }
+
+    /// Get the network manager (lazy initialization)
+    ///
+    /// The network manager consolidates all network configuration and provides
+    /// unified access to request plane servers and clients.
+    pub async fn network_manager(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::manager::NetworkManager>> {
+        use crate::pipeline::network::manager::NetworkManager;
+
+        let manager = self
+            .network_manager
+            .get_or_try_init(async {
+                // Get NATS client if available
+                let nats_client = self.nats_client().map(|c| c.client().clone());
+
+                // NetworkManager handles all config reading and mode selection
+                anyhow::Ok(NetworkManager::new(
+                    self.child_token(),
+                    nats_client,
+                    self.component_registry.clone(),
+                    self.request_plane,
+                ))
+            })
+            .await?;
+
+        Ok(manager.clone())
+    }
+
+    /// Get the request plane server (convenience method)
+    ///
+    /// This is a shortcut for `network_manager().await?.server().await`.
+    pub async fn request_plane_server(
+        &self,
+    ) -> Result<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>>
+    {
+        let manager = self.network_manager().await?;
+        manager.server().await
+    }
+
+    /// DEPRECATED: Use network_manager().server() instead
+    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
+    pub async fn http_server(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>> {
+        // For backward compatibility, try to downcast
+        let _server = self.request_plane_server().await?;
+        // This will only work if we're actually in HTTP mode
+        // For now, just return an error suggesting the new API
+        anyhow::bail!(
+            "http_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
+        )
+    }
+
+    /// DEPRECATED: Use network_manager().server() instead
+    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
+    pub async fn shared_tcp_server(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer>> {
+        // For backward compatibility, try to downcast
+        let _server = self.request_plane_server().await?;
+        // This will only work if we're actually in TCP mode
+        // For now, just return an error suggesting the new API
+        anyhow::bail!(
+            "shared_tcp_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
+        )
     }
 
     pub fn nats_client(&self) -> Option<&nats::Client> {
@@ -372,6 +434,11 @@ impl DistributedRuntime {
         &self.store
     }
 
+    /// How the frontend should talk to the backend.
+    pub fn request_plane(&self) -> RequestPlaneMode {
+        self.request_plane
+    }
+
     pub fn child_token(&self) -> CancellationToken {
         self.runtime.child_token()
     }
@@ -380,7 +447,7 @@ impl DistributedRuntime {
         self.runtime.graceful_shutdown_tracker()
     }
 
-    pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
+    pub fn instance_sources(&self) -> Arc<Mutex<InstanceMap>> {
         self.instance_sources.clone()
     }
 }
@@ -389,15 +456,15 @@ impl DistributedRuntime {
 pub struct DistributedConfig {
     pub store_backend: KeyValueStoreSelect,
     pub nats_config: nats::ClientOptions,
-    pub is_static: bool,
+    pub request_plane: RequestPlaneMode,
 }
 
 impl DistributedConfig {
-    pub fn from_settings(is_static: bool) -> DistributedConfig {
+    pub fn from_settings() -> DistributedConfig {
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::default()),
             nats_config: nats::ClientOptions::default(),
-            is_static,
+            request_plane: RequestPlaneMode::from_env(),
         }
     }
 
@@ -409,35 +476,100 @@ impl DistributedConfig {
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::new(etcd_config)),
             nats_config: nats::ClientOptions::default(),
-            is_static: false,
+            request_plane: RequestPlaneMode::from_env(),
         }
+    }
+}
+
+/// Request plane transport mode configuration
+///
+/// This determines how requests are distributed from routers to workers:
+/// - `Nats`: Use NATS for request distribution (default, legacy)
+/// - `Http`: Use HTTP/2 for request distribution
+/// - `Tcp`: Use raw TCP for request distribution with msgpack support
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestPlaneMode {
+    /// Use NATS for request plane (default for backward compatibility)
+    Nats,
+    /// Use HTTP/2 for request plane
+    Http,
+    /// Use raw TCP for request plane with msgpack support
+    Tcp,
+}
+
+impl Default for RequestPlaneMode {
+    fn default() -> Self {
+        Self::Nats
+    }
+}
+
+impl fmt::Display for RequestPlaneMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Nats => write!(f, "nats"),
+            Self::Http => write!(f, "http"),
+            Self::Tcp => write!(f, "tcp"),
+        }
+    }
+}
+
+impl std::str::FromStr for RequestPlaneMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "nats" => Ok(Self::Nats),
+            "http" => Ok(Self::Http),
+            "tcp" => Ok(Self::Tcp),
+            _ => Err(anyhow::anyhow!(
+                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'http', 'tcp'",
+                s
+            )),
+        }
+    }
+}
+
+impl RequestPlaneMode {
+    /// Get the request plane mode from environment variable (uncached)
+    /// Reads from `DYN_REQUEST_PLANE` environment variable.
+    fn from_env() -> Self {
+        std::env::var("DYN_REQUEST_PLANE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default()
     }
 }
 
 pub mod distributed_test_utils {
     //! Common test helper functions for DistributedRuntime tests
-    // TODO: Use in-memory DistributedRuntime for tests instead of full runtime when available.
 
     /// Helper function to create a DRT instance for integration-only tests.
     /// Uses from_current to leverage existing tokio runtime
-    /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings_without_discovery
+    /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings
     #[cfg(feature = "integration")]
-    pub async fn create_test_drt_async() -> crate::DistributedRuntime {
+    pub async fn create_test_drt_async() -> super::DistributedRuntime {
+        use crate::{storage::key_value_store::KeyValueStoreSelect, transports::nats};
+
         let rt = crate::Runtime::from_current().unwrap();
-        crate::DistributedRuntime::from_settings_without_discovery(rt)
-            .await
-            .unwrap()
+        let config = super::DistributedConfig {
+            store_backend: KeyValueStoreSelect::Memory,
+            nats_config: nats::ClientOptions::default(),
+            request_plane: crate::distributed::RequestPlaneMode::default(),
+        };
+        super::DistributedRuntime::new(rt, config).await.unwrap()
     }
 }
 
 #[cfg(all(test, feature = "integration"))]
 mod tests {
+    use super::RequestPlaneMode;
     use super::distributed_test_utils::create_test_drt_async;
 
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_disabled() {
+        use crate::config::environment_names::runtime::system as env_system;
         // Test uptime with system status server disabled
-        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 
@@ -462,8 +594,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_enabled() {
+        use crate::config::environment_names::runtime::system as env_system;
         // Test uptime with system status server enabled
-        temp_env::async_with_vars([("DYN_SYSTEM_PORT", Some("8081"))], async {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, Some("8081"))], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 
@@ -484,5 +617,41 @@ mod tests {
             );
         })
         .await;
+    }
+
+    #[test]
+    fn test_request_plane_mode_from_str() {
+        assert_eq!(
+            "nats".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Nats
+        );
+        assert_eq!(
+            "http".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Http
+        );
+        assert_eq!(
+            "tcp".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Tcp
+        );
+        assert_eq!(
+            "NATS".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Nats
+        );
+        assert_eq!(
+            "HTTP".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Http
+        );
+        assert_eq!(
+            "TCP".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Tcp
+        );
+        assert!("invalid".parse::<RequestPlaneMode>().is_err());
+    }
+
+    #[test]
+    fn test_request_plane_mode_display() {
+        assert_eq!(RequestPlaneMode::Nats.to_string(), "nats");
+        assert_eq!(RequestPlaneMode::Http.to_string(), "http");
+        assert_eq!(RequestPlaneMode::Tcp.to_string(), "tcp");
     }
 }

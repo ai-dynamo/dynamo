@@ -16,8 +16,8 @@
 {{- $platformNs   := default .Release.Namespace .Values.platformNamespace -}}
 {{- $platformName := default "dynamo-platform" .Values.platformReleaseName -}}
 {{- $useDynamo    := default false .Values.epp.useDynamo -}}
-{{- $dynNsAll     := default .Values.dynamoNamespace .Values.epp.dynamo.namespace -}}
-{{- $ns           := ternary (required "set epp.dynamo.namespace (or top-level dynamoNamespace) when epp.useDynamo=true" $dynNsAll) "" $useDynamo -}}
+{{- $resolvedDynNs := (include "dynamo-gaie.dynamoNamespace" .) | trim -}}
+{{- $ns           := ternary (required "set dynamoGraphDeploymentName when epp.useDynamo=true" $resolvedDynNs) "" $useDynamo -}}
 {{- $kv           := default "16" .Values.epp.dynamo.kvBlockSize -}}
 {{- $std          := .Values.extension.standardImage -}}
 {{- $dyn          := .Values.extension.dynamoImage -}}
@@ -91,7 +91,7 @@ spec:
             value: "{{ $platformName }}-etcd.{{ $platformNs }}:2379"
           - name: NATS_SERVER
             value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
-          - name: DYN_NAMESPACE
+          - name: DYNAMO_NAMESPACE
             value: "{{ $ns }}"
           - name: DYNAMO_KV_BLOCK_SIZE
             value: "{{ $kv }}"
