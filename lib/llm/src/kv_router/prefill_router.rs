@@ -247,10 +247,13 @@ impl PrefillRouter {
                     .get("prefill_worker_id")
                     .and_then(|v| v.as_u64())
             });
-        Ok((PrefillResult {
-            disaggregated_params,
-            prompt_tokens_details,
-        }, prefill_worker_id))
+        Ok((
+            PrefillResult {
+                disaggregated_params,
+                prompt_tokens_details,
+            },
+            prefill_worker_id,
+        ))
     }
 }
 
