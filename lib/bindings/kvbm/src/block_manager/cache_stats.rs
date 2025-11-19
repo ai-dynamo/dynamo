@@ -17,18 +17,17 @@ const DEFAULT_LOG_INTERVAL_SECS: u64 = 5;
 /// Cache statistics entry for a single request
 #[derive(Clone, Copy, Debug)]
 struct CacheStatsEntry {
-    host_blocks: u64,
-    disk_blocks: u64,
-    total_blocks: u64,
+    host_blocks: u64,      // Blocks found in host cache
+    disk_blocks: u64,      // Blocks found in disk cache
+    total_blocks: u64,     // Total blocks queried from host/disk
 }
 
 /// Aggregated cache statistics for the current sliding window
 #[derive(Default)]
 struct AggregatedStats {
-    host_queries: u64,
-    host_hits: u64,
-    disk_queries: u64,
-    disk_hits: u64,
+    total_blocks_queried: u64,  // Total blocks queried from host/disk (same for both tiers)
+    host_blocks_hit: u64,        // Blocks found in host cache
+    disk_blocks_hit: u64,        // Blocks found in disk cache
 }
 
 /// Cache statistics tracker with sliding window
@@ -48,7 +47,8 @@ pub struct CacheStatsTracker {
     /// Used in log messages to distinguish between multiple KVBM instances
     identifier: Option<String>,
     /// Last logged values to avoid duplicate logs when values haven't changed
-    last_logged_values: Mutex<Option<(u64, u64, u64, u64)>>,
+    /// Format: (total_blocks_queried, host_blocks_hit, disk_blocks_hit)
+    last_logged_values: Mutex<Option<(u64, u64, u64)>>,
 }
 
 impl CacheStatsTracker {
@@ -105,19 +105,17 @@ impl CacheStatsTracker {
 
         // Add new entry and update aggregated stats
         entries.push_back(entry);
-        aggregated.host_queries += entry.total_blocks;
-        aggregated.host_hits += entry.host_blocks;
-        aggregated.disk_queries += entry.total_blocks;
-        aggregated.disk_hits += entry.disk_blocks;
+        aggregated.total_blocks_queried += entry.total_blocks;
+        aggregated.host_blocks_hit += entry.host_blocks;
+        aggregated.disk_blocks_hit += entry.disk_blocks;
 
         // Remove oldest entries if we exceed the limit
         // Keep at least one entry (the latest)
         while entries.len() > 1 && entries.len() > self.max_recent_requests {
             if let Some(old_entry) = entries.pop_front() {
-                aggregated.host_queries -= old_entry.total_blocks;
-                aggregated.host_hits -= old_entry.host_blocks;
-                aggregated.disk_queries -= old_entry.total_blocks;
-                aggregated.disk_hits -= old_entry.disk_blocks;
+                aggregated.total_blocks_queried -= old_entry.total_blocks;
+                aggregated.host_blocks_hit -= old_entry.host_blocks;
+                aggregated.disk_blocks_hit -= old_entry.disk_blocks;
             }
         }
     }
@@ -139,22 +137,21 @@ impl CacheStatsTracker {
 
         if should_log {
             // Read aggregated stats with minimal lock time
-            let (host_queries, host_hits, disk_queries, disk_hits) = {
+            let (total_blocks_queried, host_blocks_hit, disk_blocks_hit) = {
                 let aggregated = self.aggregated.lock().unwrap();
                 (
-                    aggregated.host_queries,
-                    aggregated.host_hits,
-                    aggregated.disk_queries,
-                    aggregated.disk_hits,
+                    aggregated.total_blocks_queried,
+                    aggregated.host_blocks_hit,
+                    aggregated.disk_blocks_hit,
                 )
             };
 
             // Only log if there's activity
-            if host_queries > 0 || disk_queries > 0 {
+            if total_blocks_queried > 0 {
                 // Check if values have changed since last log
                 let should_log_values = {
                     let mut last_logged = self.last_logged_values.lock().unwrap();
-                    let current_values = (host_queries, host_hits, disk_queries, disk_hits);
+                    let current_values = (total_blocks_queried, host_blocks_hit, disk_blocks_hit);
                     match *last_logged {
                         Some(prev) if prev == current_values => {
                             // Values haven't changed, skip logging
@@ -169,16 +166,16 @@ impl CacheStatsTracker {
                 };
 
                 if should_log_values {
-                    let host_rate = if host_queries == 0 {
+                    let host_rate = if total_blocks_queried == 0 {
                         0.0
                     } else {
-                        (host_hits as f32 / host_queries as f32) * 100.0
+                        (host_blocks_hit as f32 / total_blocks_queried as f32) * 100.0
                     };
 
-                    let disk_rate = if disk_queries == 0 {
+                    let disk_rate = if total_blocks_queried == 0 {
                         0.0
                     } else {
-                        (disk_hits as f32 / disk_queries as f32) * 100.0
+                        (disk_blocks_hit as f32 / total_blocks_queried as f32) * 100.0
                     };
 
                     // Include identifier in log message if available
@@ -192,11 +189,11 @@ impl CacheStatsTracker {
                         "{} - Host: {:.1}% ({}/{}), Disk: {:.1}% ({}/{})",
                         prefix,
                         host_rate,
-                        host_hits,
-                        host_queries,
+                        host_blocks_hit,
+                        total_blocks_queried,
                         disk_rate,
-                        disk_hits,
-                        disk_queries,
+                        disk_blocks_hit,
+                        total_blocks_queried,
                     );
                     return true;
                 }
@@ -208,20 +205,20 @@ impl CacheStatsTracker {
     /// Get current host cache hit rate (0.0-1.0) from the sliding window
     pub fn host_hit_rate(&self) -> f32 {
         let aggregated = self.aggregated.lock().unwrap();
-        if aggregated.host_queries == 0 {
+        if aggregated.total_blocks_queried == 0 {
             0.0
         } else {
-            aggregated.host_hits as f32 / aggregated.host_queries as f32
+            aggregated.host_blocks_hit as f32 / aggregated.total_blocks_queried as f32
         }
     }
 
     /// Get current disk cache hit rate (0.0-1.0) from the sliding window
     pub fn disk_hit_rate(&self) -> f32 {
         let aggregated = self.aggregated.lock().unwrap();
-        if aggregated.disk_queries == 0 {
+        if aggregated.total_blocks_queried == 0 {
             0.0
         } else {
-            aggregated.disk_hits as f32 / aggregated.disk_queries as f32
+            aggregated.disk_blocks_hit as f32 / aggregated.total_blocks_queried as f32
         }
     }
 

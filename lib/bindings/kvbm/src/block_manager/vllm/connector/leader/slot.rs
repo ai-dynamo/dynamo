@@ -231,7 +231,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         let primary_token_clone = primary_token.clone();
         let runtime_primary = get_current_tokio_handle();
         let runtime_primary_clone = runtime_primary.clone();
-        let kvbm_metrics_for_xfer = kvbm_metrics.clone();
+        let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token| async move {
@@ -240,7 +240,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
                         cancellation_token,
                         runtime_primary_clone,
                         primary_token_clone,
-                        kvbm_metrics_for_xfer,
+                        kvbm_metrics_clone,
                     )
                     .await
             },
