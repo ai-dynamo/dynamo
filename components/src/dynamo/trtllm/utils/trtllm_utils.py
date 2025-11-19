@@ -45,7 +45,7 @@ class Config:
         self.max_num_tokens: int = BuildConfig.model_fields['max_num_tokens'].default
         self.max_seq_len: int = BuildConfig.model_fields['max_seq_len'].default
         self.max_beam_width: int = BuildConfig.model_fields['max_beam_width'].default
-        self.free_gpu_memory_fraction: Optional[float] = None
+        self.free_gpu_memory_fraction: float = 0.9
         self.extra_engine_args: str = ""
         self.override_engine_args: str = ""
         self.publish_events_and_metrics: bool = False
