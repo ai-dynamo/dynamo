@@ -335,10 +335,7 @@ fn register_llm<'p>(
 /// Unregister a model from the endpoint.
 #[pyfunction]
 #[pyo3(signature = (endpoint))]
-fn unregister_llm<'p>(
-    py: Python<'p>,
-    endpoint: Endpoint,
-) -> PyResult<Bound<'p, PyAny>> {
+fn unregister_llm<'p>(py: Python<'p>, endpoint: Endpoint) -> PyResult<Bound<'p, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         LocalModel::detach_model_from_endpoint(&endpoint.inner)
             .await
