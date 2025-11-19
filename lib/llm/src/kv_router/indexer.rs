@@ -1189,7 +1189,7 @@ impl KvIndexerInterface for KvIndexer {
         };
 
         if let Err(e) = self.match_tx.send(req).await {
-            tracing::warn!(
+            tracing::error!(
                 error = ?e,
                 "Failed to send match request; the indexer maybe offline"
             );
@@ -1199,7 +1199,7 @@ impl KvIndexerInterface for KvIndexer {
         match resp_rx.await {
             Ok(scores) => Ok(scores),
             Err(e) => {
-                tracing::warn!(
+                tracing::error!(
                     error = ?e,
                     "Indexer match response dropped; the indexer maybe offline"
                 );
