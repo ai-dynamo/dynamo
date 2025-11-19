@@ -89,7 +89,9 @@ impl EndpointConfigBuilder {
         // Determine request plane mode
         let request_plane_mode = endpoint.drt().request_plane();
         if request_plane_mode.is_nats() {
-            // We only need the service if we want NATS metrics
+            // We only need the service if we want NATS metrics.
+            // TODO: This is called for every endpoint of a component. Ideally we only call it once
+            // on the component.
             endpoint.component.add_stats_service().await?;
         }
         tracing::info!(

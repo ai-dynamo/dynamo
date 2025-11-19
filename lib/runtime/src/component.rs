@@ -388,7 +388,10 @@ impl Component {
             .services
             .contains_key(&service_name)
         {
-            anyhow::bail!("Service {service_name} already exists");
+            // The NATS service is per component, but it is called from `serve_endpoint`, and there
+            // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
+            tracing::trace!("Service {service_name} already exists");
+            return Ok(());
         }
 
         let Some(nats_client) = self.drt.nats_client() else {
@@ -403,13 +406,16 @@ impl Component {
             // Normal case
             guard.services.insert(service_name.clone(), nats_service);
             guard.stats_handlers.insert(service_name.clone(), stats_reg);
+
+            tracing::info!("Added NATS / stats service {service_name}");
+
             drop(guard);
         } else {
             drop(guard);
             let _ = nats_service.stop().await;
-            return Err(anyhow::anyhow!(
-                "Service create race for {service_name}, now already exists"
-            ));
+            // The NATS service is per component, but it is called from `serve_endpoint`, and there
+            // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
+            return Ok(());
         }
 
         if let Err(err) = self.start_scraping_nats_service_component_metrics() {
