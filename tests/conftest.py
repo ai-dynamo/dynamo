@@ -250,7 +250,6 @@ def file_storage_backend():
 
         os.environ["DYN_STORE_KV"] = "file"
         os.environ["DYN_FILE_KV"] = tmpdir
-        logger.info(f"Set up file storage backend in: {tmpdir}")
         yield tmpdir
 
         # Cleanup
