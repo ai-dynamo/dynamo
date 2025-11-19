@@ -259,7 +259,8 @@ Verifies that the test scenario executed correctly by checking Kubernetes events
 **For Process Terminations (non-`*_pod` failures):**
 - Checks container restart counts (`restartCount` field)
 - Looks for container restart events (`Started`, `BackOff`, `CrashLoopBackOff`)
-- Distinguishes between subprocess termination (no container restart) and main process crashes
+- **Main process terminations** (e.g., `decode_worker`) → container restarts (verifiable via `restartCount`)
+- **Subprocess terminations** (e.g., `sglang_*_scheduler`, `sglang_*_detokenizer`) → no container restart (subprocess becomes zombie/defunct). These produce warnings but are documented known limitations (see Backend-Specific Validations below)
 
 **Example Stage 1 Output:**
 ```
@@ -328,19 +329,19 @@ The validation system uses a **factory pattern** for flexible, extensible valida
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │              test_deployment.py                              │
-│           (test_context fixture)                             │
+│           (validation_context fixture)                       │
 └──────────────────────┬───────────────────────────────────────┘
                        │
                        │ After test completes
                        │
           ┌────────────▼─────────────┐
-          │   validations.py         │
-          │   (Validation Factory)   │
+          │   checker_factory.py     │
+          │   (Checker Factory)      │
           └──────┬───────────┬───────┘
                  │           │
     ┌────────────▼───┐  ┌───▼────────────────┐
     │ Scenario       │  │ Results            │
-    │ Validation     │  │ Validation         │
+    │ Checkers       │  │ Checkers           │
     │ (Stage 1)      │  │ (Stage 2)          │
     └────────┬───────┘  └───┬────────────────┘
              │              │
@@ -353,27 +354,31 @@ The validation system uses a **factory pattern** for flexible, extensible valida
 
 ### Factory Functions
 
-#### `get_validation_for_scenario(scenario_name, scenario)`
+#### `get_checkers_for_scenario(test_name, scenario)`
 
-Selects scenario validation (Stage 1) based on:
+Determines which checkers to run based on:
 
-1. **Explicit validation** in `scenario.validation` (highest priority)
-2. **Pattern matching** on scenario name:
-   - `*-none` → No failure validation
-   - `*-frontend*` → Frontend failure validation
-   - `*-decode_worker_pod` → Decode worker pod deletion
-   - `*-prefill_worker_pod` → Prefill worker pod deletion
-   - `*-decode_worker` (non-pod) → Decode worker process termination
-   - `*-sglang_decode_scheduler` → SGLang scheduler subprocess
-   - `*-sglang_decode_detokenizer` → SGLang detokenizer subprocess
-3. **Default validation** (fallback)
+1. **Explicit checkers** in `scenario.checkers` (highest priority)
+   - Allows scenarios to specify custom checker lists
+2. **Pattern matching** on test name:
+   - Delegates to `get_scenario_checker()` for Stage 1
+   - Delegates to `get_results_checker()` for Stage 2
 
-#### `get_validation_for_results(test_name, scenario)`
+#### `get_scenario_checker(test_name, scenario)`
 
-Selects results validation (Stage 2) based on deployment redundancy:
+Selects scenario checker (Stage 1) based on test name pattern:
 
-- **DP > 1**: High availability validation (strict thresholds)
-- **DP = 1**: Single worker validation (lenient thresholds)
+- `*-none]` → `NoFailureChecker` (baseline)
+- `*_pod]` → `PodDeletionChecker` (pod deletions)
+- `*decode_worker]`, `*prefill_worker]`, `*frontend]`, `*scheduler]`, `*detokenizer]`, `*engine_core]` → `ProcessTerminationChecker` (process terminations)
+
+#### `get_results_checker(test_name, scenario)`
+
+Selects results checker (Stage 2) based on deployment redundancy:
+
+- `*-none]` → `BaselineResultsChecker` (100% success required)
+- **DP > 1** → `HighAvailabilityResultsChecker` (≥90% success, ≤60s recovery)
+- **DP = 1** → `SingleWorkerResultsChecker` (≥10% success, ≤180s recovery)
 
 ### Backend-Specific Validations
 

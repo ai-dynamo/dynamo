@@ -252,7 +252,7 @@ class NoFailureChecker(BaseChecker):
         super().__init__(name="NoFailureChecker")
 
     def check(self, context: ValidationContext) -> None:
-        """No specific verification needed for baseline."""
+        """Verify that no failures were injected (baseline scenario)."""
         self.logger.info("╔" + "═" * 78 + "╗")
         self.logger.info(
             "║" + " " * 20 + "STAGE 1: SCENARIO VERIFICATION" + " " * 28 + "║"
@@ -262,8 +262,28 @@ class NoFailureChecker(BaseChecker):
         )
         self.logger.info("╚" + "═" * 78 + "╝")
         self.logger.info("")
+        
+        # Verify no failures were injected
+        self.logger.info("─" * 80)
+        self.logger.info("1.1 Verifying No Failures Were Injected")
+        self.logger.info("─" * 80)
+        
+        if context.affected_pods:
+            # If affected_pods is not None/empty, failures were injected
+            affected_count = sum(len(pods) for pods in context.affected_pods.values())
+            self.logger.error(
+                f"✗ BASELINE SCENARIO VIOLATED: Found {affected_count} affected pod(s)"
+            )
+            for failure_key, pod_list in context.affected_pods.items():
+                self.logger.error(f"  - {failure_key}: {pod_list}")
+            raise AssertionError(
+                f"Baseline scenario failed: {affected_count} pod(s) were affected by failures. "
+                "Expected no failures for baseline test."
+            )
+        
+        self.logger.info("✓ Verified: No pods were affected by failures")
         self.logger.info(
-            "✓ STAGE 1 COMPLETE: No failures to verify (baseline scenario)\n"
+            "✓ STAGE 1 COMPLETE: Baseline scenario verified (no failures injected)\n"
         )
 
 
