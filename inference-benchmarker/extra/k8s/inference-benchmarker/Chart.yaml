@@ -1,0 +1,6 @@
+apiVersion: v2
+name: inference-benchmarker
+description: A Helm chart to run inference-benchmarker
+type: application
+version: 0.1.0
+appVersion: "2.3.0"

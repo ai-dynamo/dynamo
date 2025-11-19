@@ -1,0 +1,5 @@
+*.json
+*.txt
+.git
+.idea
+target

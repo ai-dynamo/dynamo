@@ -1,0 +1,3 @@
+{{- if and (.Values.tgi.enabled) (.Values.vllm.enabled) }}
+{{- fail "You cannot enable multiple inference engines at the same time. Please check you values" }}
+{{- end }}

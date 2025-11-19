@@ -1,0 +1,68 @@
+imagePullSecrets: [ ]
+nameOverride: ""
+fullnameOverride: ""
+
+hf_token: ""
+model_id: "meta-llama/Llama-3.1-8B-Instruct"
+server: tgi
+
+tgi:
+  enabled: true
+  extra_args:
+    - "--max-concurrent-requests"
+    - "512"
+  image:
+    repository: ghcr.io/huggingface/text-generation-inference
+    pullPolicy: IfNotPresent
+    tag: "latest"
+  replicaCount: 1
+  resources:
+    limits:
+      "nvidia.com/gpu": "1"
+  podAnnotations: { }
+  podLabels: { }
+  podSecurityContext: { }
+  securityContext: { }
+  nodeSelector: { }
+  tolerations: [ ]
+  affinity: { }
+
+vllm:
+  enabled: false
+  extra_args:
+  image:
+    repository: vllm/vllm-openai
+    pullPolicy: IfNotPresent
+    tag: "latest"
+  replicaCount: 1
+  resources:
+    limits:
+      "nvidia.com/gpu": "1"
+  podAnnotations: { }
+  podLabels: { }
+  podSecurityContext: { }
+  securityContext: { }
+  nodeSelector: { }
+  tolerations: [ ]
+  affinity: { }
+
+benchmark:
+  extra_args:
+    - "--profile"
+    - "chat"
+    - "800"
+  image:
+    repository: ghcr.io/huggingface/inference-benchmarker
+    pullPolicy: IfNotPresent
+    tag: "latest"
+  podAnnotations: { }
+  podLabels: { }
+  podSecurityContext: { }
+  securityContext: { }
+  resources: { }
+  nodeSelector: { }
+  tolerations: [ ]
+  affinity: { }
+
+
+

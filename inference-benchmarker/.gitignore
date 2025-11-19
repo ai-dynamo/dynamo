@@ -1,0 +1,12 @@
+debug/
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+__pycache__/
+
+*.json
+*.txt
+results
+*.parquet
+*.dev.*

@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "inference-benchmarker"
+version = "1.0.0"
+description = ""
+authors = ["Hugo Larcher <hugo.larcher@huggingface.co>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+matplotlib = "^3.10.1"
+scienceplots = "^2.1.1"
+pandas = "^2.2.2"
+opensearch-py = "^2.7.1"
+boto3 = "^1.35.21"
+gradio = "^5.23.1"
+pyarrow = "^19.0.1"
+pygithub = "^2.4.0"
+click = "^8.1.7"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

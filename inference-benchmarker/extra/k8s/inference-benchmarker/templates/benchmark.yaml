@@ -1,0 +1,97 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "inference-benchmarker.fullname" . }}-benchmark
+  labels:
+    app.kubernetes.io/component: benchmark
+    {{- include "inference-benchmarker.labels" . | nindent 4 }}
+spec:
+  template:
+    metadata:
+      {{- with .Values.benchmark.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/component: benchmark
+        {{- include "inference-benchmarker.labels" . | nindent 8 }}
+        {{- with .Values.benchmark.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.benchmark.podSecurityContext | nindent 8 }}
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-text-generation-inference
+          image: alpine/curl:latest
+          command:
+            - sh
+            - -c
+            - |
+              until curl -s http://{{ include "inference-benchmarker.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8080/health; do
+                echo "Waiting for  {{ include "inference-benchmarker.fullname" . }} service..."
+                sleep 1
+              done
+              exit 0
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.benchmark.securityContext | nindent 12 }}
+          image: "{{ .Values.benchmark.image.repository }}:{{ .Values.benchmark.image.tag | default "latest" }}"
+          imagePullPolicy: {{ .Values.benchmark.image.pullPolicy }}
+          args:
+            - "inference-benchmarker"
+            - "--url"
+            - "http://{{ include "inference-benchmarker.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8080"
+            - "--tokenizer-name"
+            - "{{ .Values.model_id }}"
+            {{- toYaml .Values.benchmark.extra_args | nindent 12 }}
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inference-benchmarker.fullname" . }}-hf-token
+                  key: HF_TOKEN
+            - name: RUST_LOG
+              value: "inference_benchmarker=info"
+          resources:
+            {{- toYaml .Values.benchmark.resources | nindent 12 }}
+          volumeMounts:
+            - name: results
+              mountPath: /opt/inference-benchmarker/results
+        - name: nginx
+          image: nginx
+          ports:
+            - containerPort: 80
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - name: results
+              mountPath: /usr/share/nginx/html
+            - name: default
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default
+      terminationGracePeriodSeconds: 5
+      volumes:
+        - name: results
+          emptyDir: { }
+        - name: default
+          configMap:
+              name: {{ include "inference-benchmarker.fullname" . }}-nginx-config
+      {{- with .Values.benchmark.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.benchmark.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.benchmark.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

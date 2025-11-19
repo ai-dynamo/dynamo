@@ -1,0 +1,87 @@
+{{- if .Values.vllm.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inference-benchmarker.fullname" . }}
+  labels:
+    app.kubernetes.io/component: text-generation-inference
+    {{- include "inference-benchmarker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.vllm.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: text-generation-inference
+      {{- include "inference-benchmarker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.vllm.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/component: text-generation-inference
+        {{- include "inference-benchmarker.labels" . | nindent 8 }}
+        {{- with .Values.vllm.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.vllm.podSecurityContext | nindent 8 }}
+      containers:
+        - name: vllm
+          securityContext:
+            {{- toYaml .Values.vllm.securityContext | nindent 12 }}
+          image: "{{ .Values.vllm.image.repository }}:{{ .Values.vllm.image.tag | default "latest" }}"
+          imagePullPolicy: {{ .Values.vllm.image.pullPolicy }}
+          env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inference-benchmarker.fullname" . }}-hf-token
+                  key: HF_TOKEN
+          args:
+            - "--model"
+            - "{{ .Values.model_id }}"
+            - "--port"
+            - "8080"
+            {{- with .Values.vllm.extra_args }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 3
+          resources:
+            {{- toYaml .Values.vllm.resources | nindent 12 }}
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+      terminationGracePeriodSeconds: 10
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+      {{- with .Values.vllm.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.vllm.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.vllm.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

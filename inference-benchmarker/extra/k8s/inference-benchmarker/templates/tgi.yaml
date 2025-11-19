@@ -1,0 +1,87 @@
+{{- if .Values.tgi.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inference-benchmarker.fullname" . }}
+  labels:
+    app.kubernetes.io/component: text-generation-inference
+    {{- include "inference-benchmarker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.tgi.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: text-generation-inference
+      {{- include "inference-benchmarker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.tgi.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/component: text-generation-inference
+        {{- include "inference-benchmarker.labels" . | nindent 8 }}
+        {{- with .Values.tgi.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.tgi.podSecurityContext | nindent 8 }}
+      containers:
+        - name: text-generation-inference
+          securityContext:
+            {{- toYaml .Values.tgi.securityContext | nindent 12 }}
+          image: "{{ .Values.tgi.image.repository }}:{{ .Values.tgi.image.tag | default "latest" }}"
+          imagePullPolicy: {{ .Values.tgi.image.pullPolicy }}
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inference-benchmarker.fullname" . }}-hf-token
+                  key: HF_TOKEN
+            - name: PORT
+              value: "8080"
+          args:
+            - "--model-id"
+            - "{{ .Values.model_id }}"
+            {{- with .Values.tgi.extra_args }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 3
+          resources:
+            {{- toYaml .Values.tgi.resources | nindent 12 }}
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+      terminationGracePeriodSeconds: 10
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+      {{- with .Values.tgi.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tgi.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tgi.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
