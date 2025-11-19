@@ -70,6 +70,8 @@ python -m dynamo.frontend --http-port=8000 &
 EXTRA_ARGS=""
 if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
     EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
+elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
+    EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
 fi
 
 # Start processor (Python-based preprocessing, handles prompt templating)
