@@ -73,6 +73,7 @@ class BaseWorkerHandler(ABC):
         self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
         self.image_loader = ImageLoader()
+        self.skip_abort = int(os.getenv("SKIP_ABORT", "0"))
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -81,12 +82,20 @@ class BaseWorkerHandler(ABC):
     async def _monitor_abort(self, context, request_id, is_prefill):
         """Background task that monitors for context cancellation and aborts the request."""
         try:
+            #    logger.debug("hello in abort")
+
             await context.async_killed_or_stopped()
-            # If we reach here, the context was stopped or killed
-            await self.engine_client.abort(request_id)
-            logger.debug(
-                f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
-            )
+            if self.skip_abort:
+                logger.debug(
+                    f"Skipped Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+                )
+
+            else:
+                # If we reach here, the context was stopped or killed
+                await self.engine_client.abort(request_id)
+                logger.debug(
+                    f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+                )
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
             pass
@@ -250,7 +259,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for tok in self.generate_tokens(
                     prompt, sampling_params, request_id, data_parallel_rank=dp_rank
                 ):
-                    yield tok
+                    if self.skip_abort:
+                        if not context.is_stopped() and not context.is_killed():
+                            yield tok
+                    else:
+                        yield tok
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")
@@ -316,7 +329,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         ),
                     }
 
-                    yield output
+                    if self.skip_abort:
+                        if not context.is_stopped() and not context.is_killed():
+                            yield output
+                    else:
+                        yield output
+
+                    # yield output
             except asyncio.CancelledError:
                 # raise the error because we cannot migrate prefill requests
                 raise GeneratorExit(
