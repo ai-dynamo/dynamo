@@ -54,13 +54,13 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl<=0.7.0",
+    "nixl[cu12]<=0.7.1",
     "vllm[flashinfer]==0.10.2",
 ]
 
 sglang = [
     "uvloop",
-    "nixl<=0.7.0",
+    "nixl[cu12]<=0.7.1",
     "sglang==0.5.4.post3",
 ]
 
