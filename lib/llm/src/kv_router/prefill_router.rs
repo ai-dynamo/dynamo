@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
-        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator,
-        PushRouter, RouterMode, ServerStreamingEngine, SingleIn, async_trait,
+        AsyncEngine, AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter,
+        RouterMode, ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -176,11 +176,11 @@ impl PrefillRouter {
         Ok(())
     }
 
-    /// Call the prefill router and extract structured prefill result
+    /// Call the prefill router and extract structured prefill result and worker ID
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<PrefillResult, PrefillError> {
+    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
         // Get the prefill router, error if not activated
         let Some(prefill_router) = self.prefill_router.get() else {
             return Err(PrefillError::NotActivated);
@@ -239,10 +239,21 @@ impl PrefillRouter {
             ));
         };
 
-        Ok(PrefillResult {
-            disaggregated_params,
-            prompt_tokens_details,
-        })
+        // Extract prefill worker ID from disaggregated_params
+        let prefill_worker_id = disaggregated_params
+            .get("worker_id")
+            .and_then(|worker_id_json| {
+                worker_id_json
+                    .get("prefill_worker_id")
+                    .and_then(|v| v.as_u64())
+            });
+        Ok((
+            PrefillResult {
+                disaggregated_params,
+                prompt_tokens_details,
+            },
+            prefill_worker_id,
+        ))
     }
 }
 
@@ -270,6 +281,7 @@ impl
         // Extract request data while preserving context
         let (req, context) = request.into_parts();
         let request_id = context.id().to_string();
+        let engine_ctx = context.context();
 
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
@@ -280,13 +292,25 @@ impl
         let prefill_context = Context::with_id(prefill_req, request_id.clone());
 
         // Link the prefill context as a child so that kill signals propagate
-        context.controller().link_child(prefill_context.context());
+        engine_ctx.link_child(prefill_context.context());
 
         let prefill_request = prefill_context;
 
-        // Attempt prefill and handle results
-        match self.call_prefill(prefill_request).await {
-            Ok(prefill_result) => {
+        // Attempt prefill
+        let prefill_result = self.call_prefill(prefill_request).await;
+
+        // Abort if cancelled during prefill
+        if engine_ctx.is_stopped() || engine_ctx.is_killed() {
+            tracing::debug!("Abort entering decode after context is stopped or killed");
+            return Err(anyhow::anyhow!(
+                "Context id {} is stopped or killed",
+                engine_ctx.id()
+            ));
+        }
+
+        // Handle prefill result
+        match prefill_result {
+            Ok((prefill_result, prefill_worker_id)) => {
                 tracing::debug!("Prefill succeeded, using disaggregated params for decode");
 
                 let mut decode_req = req;
@@ -302,8 +326,14 @@ impl
                     ..existing_override.unwrap_or_default()
                 });
 
+                // Store prefill worker ID in context if available
+                let mut decode_context = context;
+                if let Some(worker_id) = prefill_worker_id {
+                    decode_context.insert("prefill_worker_id", worker_id);
+                }
+
                 // Map the modified request through with preserved context
-                let decode_request = context.map(|_| decode_req);
+                let decode_request = decode_context.map(|_| decode_req);
                 next.generate(decode_request).await
             }
             Err(PrefillError::NotActivated) => {

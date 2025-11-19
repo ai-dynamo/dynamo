@@ -53,6 +53,10 @@ pub struct BackendOutput {
     // Token usage information
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_usage: Option<CompletionUsage>,
+
+    /// Disaggregated execution parameters (for prefill/decode separation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disaggregated_params: Option<serde_json::Value>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
