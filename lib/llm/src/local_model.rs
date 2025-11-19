@@ -5,11 +5,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::discovery::DiscoveryInstance;
 use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::discovery::DiscoveryInstance;
 
 use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::MockEngineArgs;
