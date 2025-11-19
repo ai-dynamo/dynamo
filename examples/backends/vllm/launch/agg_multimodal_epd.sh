@@ -19,6 +19,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
 PROVIDED_PROMPT_TEMPLATE=""
+REQUEST_PLANE="nats"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -31,11 +32,16 @@ while [[ $# -gt 0 ]]; do
             PROVIDED_PROMPT_TEMPLATE=$2
             shift 2
             ;;
+        --request-plane)
+            REQUEST_PLANE=$2
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --model <model_name> Specify the model to use (default: $MODEL_NAME)"
             echo "  --prompt-template <template> Specify the multi-modal prompt template to use. LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates."
+            echo "  --request-plane <plane> Specify the request plane to use. (default: nats, options: nats, http, tcp)"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;
@@ -61,6 +67,12 @@ else
     echo "Please provide a prompt template using --prompt-template option."
     echo "Example: --prompt-template 'USER: <image>\n<prompt> ASSISTANT:'"
     exit 1
+fi
+
+
+if [[ -n "$REQUEST_PLANE" ]]; then
+    export DYN_REQUEST_PLANE="$REQUEST_PLANE"
+    echo "Using request plane: $REQUEST_PLANE"
 fi
 
 # Start frontend (HTTP endpoint)

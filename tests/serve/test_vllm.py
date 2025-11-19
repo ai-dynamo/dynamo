@@ -177,6 +177,36 @@ vllm_configs = {
             )
         ],
     ),
+    "multimodal_agg_qwen_epd_30mb_img": VLLMConfig(
+        name="multimodal_agg_qwen_epd_30mb_img",
+        directory=vllm_dir,
+        script_name="agg_multimodal_epd.sh",
+        marks=[pytest.mark.gpu_2],
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        delayed_start=0,
+        script_args=[
+            "--model",
+            "Qwen/Qwen2.5-VL-7B-Instruct",
+            "--request-plane",
+            "tcp",
+        ],
+        timeout=360,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "https://floatingworld.com/wp-content/uploads/2023/02/Sample-jpg-image-30mb-16.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["bus"],
+            )
+        ],
+    ),
     "multimodal_agg_qwen": VLLMConfig(
         name="multimodal_agg_qwen",
         directory=vllm_dir,
