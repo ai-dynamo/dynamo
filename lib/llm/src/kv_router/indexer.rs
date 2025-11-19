@@ -68,6 +68,9 @@ pub enum KvRouterError {
 
     #[error("Indexer is dropped request")]
     IndexerDroppedRequest,
+
+    #[error("Prune operation failed: {0}")]
+    PruneFailed(String),
 }
 
 /// Errors that can occur during KV Cache Event processing.
@@ -78,6 +81,9 @@ pub enum KvCacheEventError {
 
     #[error("Failed to find block")]
     BlockNotFound,
+
+    #[error("Invalid block sequence")]
+    InvalidBlockSequence,
 }
 
 /// A shared reference to a [`RadixBlock`].
@@ -168,7 +174,7 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
 }
 
 /// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RouterEvent {
     /// The ID of the worker emitting the event.
     worker_id: WorkerId,
@@ -320,6 +326,16 @@ impl RadixTree {
 
         tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
 
+        // Populate tree sizes for all workers that have scores
+        for worker in scores.scores.keys() {
+            let tree_size = self
+                .lookup
+                .get(worker)
+                .expect("worker in scores must exist in lookup table")
+                .len();
+            scores.tree_sizes.insert(*worker, tree_size);
+        }
+
         scores
     }
 
@@ -345,60 +361,85 @@ impl RadixTree {
                 // we check the radix tree's root to find it.
                 // this is the single most expensive lookup
                 let current = match op.parent_hash {
-                    Some(parent) => worker_lookup.get(&parent),
-                    None => Some(&self.root),
+                    Some(parent) => match worker_lookup.get(&parent) {
+                        Some(current) => current.clone(),
+                        None => {
+                            tracing::warn!(
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
+                                id,
+                                parent_hash = ?op.parent_hash,
+                                num_blocks = op.blocks.len(),
+                                "Failed to find parent block; skipping store operation"
+                            );
+                            return Err(KvCacheEventError::ParentBlockNotFound);
+                        }
+                    },
+                    None => self.root.clone(),
                 };
 
-                let mut current = match current {
-                    Some(current) => current.clone(),
-                    None => {
-                        tracing::warn!(
-                            worker_id = worker.worker_id.to_string(),
-                            dp_rank = worker.dp_rank,
-                            id,
-                            parent_hash = ?op.parent_hash,
-                            num_blocks = op.blocks.len(),
-                            "Failed to find parent block; skipping store operation"
-                        );
-                        return Err(KvCacheEventError::ParentBlockNotFound);
+                fn process_blocks(
+                    parent: SharedRadixBlock,
+                    blocks: &[KvCacheStoredBlockData],
+                    worker: WorkerWithDpRank,
+                    worker_lookup: &mut HashMap<ExternalSequenceBlockHash, SharedRadixBlock>,
+                    id: u64,
+                ) -> Result<(), KvCacheEventError> {
+                    if blocks.is_empty() {
+                        return Ok(());
                     }
-                };
 
-                for block_id in op.blocks {
-                    let mut inner = current.borrow_mut();
-                    let block = match inner.children.get(&block_id.tokens_hash) {
+                    let mut parent_mut = parent.borrow_mut();
+                    let block_data = &blocks[0];
+
+                    let child = match parent_mut.children.get(&block_data.tokens_hash) {
                         Some(block) => block.clone(),
                         None => {
                             // create new block - automatically added to the lookup table
                             let new_block = worker_lookup
-                                .get(&block_id.block_hash)
+                                .get(&block_data.block_hash)
                                 .cloned()
                                 .unwrap_or_else(|| Rc::new(RefCell::new(RadixBlock::new())));
 
                             // insert into radix tree
-                            inner
+                            parent_mut
                                 .children
-                                .insert(block_id.tokens_hash, new_block.clone());
+                                .insert(block_data.tokens_hash, new_block.clone());
 
                             new_block
                         }
                     };
 
-                    // add our worker to the block with its external hash
-                    block
-                        .borrow_mut()
-                        .workers
-                        .insert(worker, block_id.block_hash);
+                    // Update child and check for cycles
+                    {
+                        // Try to borrow the child mutably - if it fails, it's already borrowed
+                        // in the ancestor chain (parent_mut is alive + all ancestors in recursive stack)
+                        let mut child_mut = match child.try_borrow_mut() {
+                            Ok(b) => b,
+                            Err(_) => {
+                                tracing::warn!(
+                                    worker_id = worker.worker_id.to_string(),
+                                    dp_rank = worker.dp_rank,
+                                    id,
+                                    block_hash = ?block_data.block_hash,
+                                    "Detected cycle in store event (block already in parent chain); rejecting sequence"
+                                );
+                                return Err(KvCacheEventError::InvalidBlockSequence);
+                            }
+                        };
+
+                        // add our worker to the block with its external hash
+                        child_mut.workers.insert(worker, block_data.block_hash);
+                    }
 
                     // add the block to the worker_id lookup table
-                    worker_lookup.insert(block_id.block_hash, block.clone());
+                    worker_lookup.insert(block_data.block_hash, child.clone());
 
-                    // drop inner so we can shift current to this block
-                    drop(inner);
-
-                    current = block;
+                    // Recurse with the child and remaining blocks
+                    process_blocks(child, &blocks[1..], worker, worker_lookup, id)
                 }
-                Ok(())
+
+                process_blocks(current, &op.blocks, worker, worker_lookup, id)
             }
             KvCacheEventData::Removed(remove) => {
                 // tracing::trace!(id, "KV Remove Operation: {:?}", op);
@@ -560,6 +601,10 @@ impl RadixTree {
 
         events
     }
+
+    pub fn current_size(&self) -> usize {
+        self.lookup.values().map(|m| m.len()).sum()
+    }
 }
 
 /// Metrics for the KV Indexer.
@@ -573,6 +618,7 @@ pub struct KvIndexerMetrics {
 pub const METRIC_STATUS_OK: &str = "ok";
 pub const METRIC_STATUS_PARENT_NOT_FOUND: &str = "parent_block_not_found";
 pub const METRIC_STATUS_BLOCK_NOT_FOUND: &str = "block_not_found";
+pub const METRIC_STATUS_INVALID_BLOCK: &str = "invalid_block";
 
 /// Metric event labels.
 pub const METRIC_EVENT_STORED: &str = "stored";
@@ -645,6 +691,7 @@ impl KvIndexerMetrics {
                 let error_label = match e {
                     KvCacheEventError::ParentBlockNotFound => METRIC_STATUS_PARENT_NOT_FOUND,
                     KvCacheEventError::BlockNotFound => METRIC_STATUS_BLOCK_NOT_FOUND,
+                    KvCacheEventError::InvalidBlockSequence => METRIC_STATUS_INVALID_BLOCK,
                 };
                 self.kv_cache_events_applied
                     .with_label_values(&[event_type, error_label])
@@ -661,6 +708,8 @@ pub struct OverlapScores {
     pub scores: HashMap<WorkerWithDpRank, u32>,
     // List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
     pub frequencies: Vec<usize>,
+    // Map of worker to their tree size (number of blocks in the tree for that worker)
+    pub tree_sizes: HashMap<WorkerWithDpRank, usize>,
 }
 
 impl Default for OverlapScores {
@@ -679,6 +728,7 @@ impl OverlapScores {
         Self {
             scores: HashMap::new(),
             frequencies: Vec::with_capacity(32),
+            tree_sizes: HashMap::new(),
         }
     }
 
@@ -1206,6 +1256,7 @@ impl KvIndexerInterface for KvIndexerSharded {
                 match match_rx.recv().await {
                     Some(response) => {
                         scores.scores.extend(response.scores);
+                        scores.tree_sizes.extend(response.tree_sizes);
 
                         if response_num == 0 {
                             scores.frequencies = response.frequencies;
@@ -1698,6 +1749,34 @@ mod tests {
         assert!(matches!(
             result.unwrap_err(),
             KvCacheEventError::BlockNotFound
+        ));
+
+        // Parent appears in blocks: parent=1, blocks=[1, 2, 3]
+        // This should be rejected as block 1 (hash 100) is the parent
+        trie.apply_event(create_store_event(worker_0, 4, vec![1], None))
+            .unwrap();
+        let result = trie.apply_event(create_store_event(
+            worker_0,
+            5,
+            vec![1, 2, 3],
+            Some(ExternalSequenceBlockHash(100)),
+        ));
+        assert!(matches!(
+            result.unwrap_err(),
+            KvCacheEventError::InvalidBlockSequence
+        ));
+
+        // Block appears twice in sequence: parent=1, blocks=[2, 3, 2]
+        // Block 2 appears at positions 0 and 2, creating a cycle
+        let result = trie.apply_event(create_store_event(
+            worker_0,
+            6,
+            vec![2, 3, 2],
+            Some(ExternalSequenceBlockHash(100)),
+        ));
+        assert!(matches!(
+            result.unwrap_err(),
+            KvCacheEventError::InvalidBlockSequence
         ));
     }
 

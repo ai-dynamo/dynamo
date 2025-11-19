@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::local_model::LocalModel;
+use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
+use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
@@ -9,13 +11,10 @@ use pyo3::exceptions::PyStopAsyncIteration;
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
-use rand::seq::IteratorRandom as _;
 use rs::pipeline::network::Ingress;
 use std::ffi::CString;
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
-use std::time::Duration;
 use std::{
     fmt::Display,
     sync::{Arc, Weak},
@@ -23,6 +22,7 @@ use std::{
 use tokio::sync::Mutex;
 use tracing::Instrument;
 
+use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
@@ -37,6 +37,7 @@ use dynamo_llm::{self as llm_rs};
 use dynamo_llm::{entrypoint::RouterConfig, kv_router::KvRouterConfig};
 
 use crate::llm::local_model::ModelRuntimeConfig;
+use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 
 #[pyclass(eq, eq_int)]
 #[derive(Clone, Debug, PartialEq)]
@@ -125,20 +126,22 @@ fn create_request_context(
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
-    if std::env::var("OTEL_EXPORT_ENABLED")
+    if std::env::var(env_otlp::OTEL_EXPORT_ENABLED)
         .map(|v| v == "1")
         .unwrap_or(false)
     {
         eprintln!(
-            "Warning: OTEL_EXPORT_ENABLED=1 detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
+            "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
         );
     } else {
         rs::logging::init();
     }
 
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
+    m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(unregister_llm, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
@@ -159,6 +162,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
+    m.add_class::<llm::preprocessor::MediaDecoder>()?;
+    m.add_class::<llm::preprocessor::MediaFetcher>()?;
     m.add_class::<llm::backend::Backend>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
     m.add_class::<llm::kv::KvIndexer>()?;
@@ -212,10 +217,17 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
     logging::log_message(level, message, module, file, line);
 }
 
+/// Generate a deterministic signed int32 ID from a LoRA name using blake3 hash.
+#[pyfunction]
+#[pyo3(text_signature = "(lora_name)")]
+fn lora_name_to_id(lora_name: &str) -> i32 {
+    llm_rs::utils::lora_name_to_id(lora_name)
+}
+
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
 /// This is the main way you create a Dynamo worker / backend.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -231,6 +243,8 @@ fn register_llm<'p>(
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
+    media_decoder: Option<MediaDecoder>,
+    media_fetcher: Option<MediaFetcher>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill {
@@ -303,15 +317,29 @@ fn register_llm<'p>(
             .migration_limit(Some(migration_limit))
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
-            .custom_template_path(custom_template_path_owned);
+            .custom_template_path(custom_template_path_owned)
+            .media_decoder(media_decoder.map(|m| m.inner))
+            .media_fetcher(media_fetcher.map(|m| m.inner));
         // Load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
-        // Advertise ourself on etcd so ingress can find us
+        // Advertise ourself so ingress can find us
         local_model
             .attach(&endpoint.inner, model_type_obj, model_input)
             .await
             .map_err(to_pyerr)?;
 
+        Ok(())
+    })
+}
+
+/// Unregister a model from the endpoint.
+#[pyfunction]
+#[pyo3(signature = (endpoint))]
+fn unregister_llm<'p>(py: Python<'p>, endpoint: Endpoint) -> PyResult<Bound<'p, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        LocalModel::detach_model_from_endpoint(&endpoint.inner)
+            .await
+            .map_err(to_pyerr)?;
         Ok(())
     })
 }
@@ -426,30 +454,33 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    fn new(event_loop: PyObject, is_static: bool) -> PyResult<Self> {
+    fn new(event_loop: PyObject, store_kv: String, request_plane: String) -> PyResult<Self> {
+        let selected_kv_store: KeyValueStoreSelect = store_kv.parse().map_err(to_pyerr)?;
+        let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
+
         // Try to get existing runtime first, create new Worker only if needed
         // This allows multiple DistributedRuntime instances to share the same tokio runtime
         let runtime = rs::Worker::runtime_from_existing()
-            .or_else(|_| {
+            .or_else(|_| -> anyhow::Result<rs::Runtime> {
                 // No existing Worker, create new one
                 let worker = rs::Worker::from_settings()?;
 
                 // Initialize pyo3 bridge (only happens once per process)
-                INIT.get_or_try_init(|| {
+                INIT.get_or_try_init(|| -> anyhow::Result<()> {
                     let primary = worker.tokio_runtime()?;
                     pyo3_async_runtimes::tokio::init_with_runtime(primary).map_err(|e| {
-                        rs::error!("failed to initialize pyo3 static runtime: {:?}", e)
+                        anyhow::anyhow!("failed to initialize pyo3 static runtime: {:?}", e)
                     })?;
-                    rs::OK(())
+                    Ok(())
                 })?;
 
-                rs::OK(worker.runtime().clone())
+                Ok(worker.runtime().clone())
             })
             .map_err(to_pyerr)?;
 
         // Initialize logging in context where tokio runtime is available
         // otel exporter requires it
-        if std::env::var("OTEL_EXPORT_ENABLED")
+        if std::env::var(env_otlp::OTEL_EXPORT_ENABLED)
             .map(|v| v == "1")
             .unwrap_or(false)
         {
@@ -458,17 +489,20 @@ impl DistributedRuntime {
             });
         }
 
-        let inner =
-            if is_static {
-                runtime.secondary().block_on(
-                    rs::DistributedRuntime::from_settings_without_discovery(runtime),
-                )
+        let runtime_config = DistributedConfig {
+            store_backend: selected_kv_store,
+            // We only need NATS here to monitor it's metrics, so only if it's our request plane.
+            nats_config: if request_plane.is_nats() {
+                Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {
-                runtime
-                    .secondary()
-                    .block_on(rs::DistributedRuntime::from_settings(runtime))
-            };
-        let inner = inner.map_err(to_pyerr)?;
+                None
+            },
+            request_plane,
+        };
+        let inner = runtime
+            .secondary()
+            .block_on(rs::DistributedRuntime::new(runtime, runtime_config))
+            .map_err(to_pyerr)?;
 
         Ok(DistributedRuntime { inner, event_loop })
     }
@@ -495,140 +529,8 @@ impl DistributedRuntime {
         })
     }
 
-    /// Allocate a contiguous block of ports from the specified range and atomically reserve them.
-    /// Returns a list of all allocated ports in order.
-    #[pyo3(signature = (namespace, port_min, port_max, block_size, context=None))]
-    fn allocate_port_block<'p>(
-        &self,
-        py: Python<'p>,
-        namespace: &str,
-        port_min: u16,
-        port_max: u16,
-        block_size: u16,
-        context: Option<String>, // Optional info to store alongside the reservation
-    ) -> PyResult<Bound<'p, PyAny>> {
-        const MAX_ALLOCATE_ATTEMPTS: usize = 100;
-        if block_size == 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Block size must be at least 1",
-            ));
-        }
-
-        let Some(etcd_client) = self.inner.etcd_client() else {
-            return Err(PyErr::new::<PyException, _>(
-                "Static workers should not need to reserve ports",
-            ));
-        };
-
-        let min = port_min;
-        let max = port_max;
-
-        // Compute maximum valid starting port (inclusive)
-        let max_start_port = max.saturating_sub(block_size.saturating_sub(1));
-        if max_start_port < min {
-            return Err(PyErr::new::<PyException, _>(format!(
-                "Port range {min}-{max} is too small for block size {block_size}",
-            )));
-        }
-
-        // Randomize candidate starting ports to reduce contention/races
-        let candidate_count =
-            (max_start_port - port_min + 1).min(MAX_ALLOCATE_ATTEMPTS as u16) as usize;
-        let mut rng = rand::rng();
-        let candidate_ports: Vec<u16> =
-            (port_min..=max_start_port).choose_multiple(&mut rng, candidate_count);
-
-        let local_ip = match local_ip() {
-            Ok(ip) => ip,
-            Err(err) => {
-                return Err(PyErr::new::<PyException, _>(format!(
-                    "Failed fetching local IP address: {err}"
-                )));
-            }
-        };
-
-        let context_bytes = context.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
-        let namespace = namespace.to_owned();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            for (attempt_idx, start_port) in candidate_ports.into_iter().enumerate() {
-                let end_port_exclusive = start_port + block_size;
-                let ports_to_reserve: Vec<u16> = (start_port..end_port_exclusive).collect();
-
-                // Hold/bind all ports in the block
-                let mut sockets = Vec::with_capacity(ports_to_reserve.len());
-                let mut bind_failed = false;
-
-                for &port in &ports_to_reserve {
-                    match bind_tcp_port(port) {
-                        Ok(sock) => sockets.push(sock),
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to bind to port block starting at {start_port} (attempt {}): {e}",
-                                attempt_idx + 1,
-                            );
-                            bind_failed = true;
-                            break;
-                        }
-                    }
-                }
-
-                if bind_failed {
-                    // Let previously bound sockets drop here
-                    if attempt_idx < candidate_count - 1 {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                    continue;
-                }
-
-                // With sockets held, reserve in ETCD
-                let mut reserved_keys = Vec::with_capacity(ports_to_reserve.len());
-                let mut reservation_failed = false;
-                for port in &ports_to_reserve {
-                    let key = make_port_key(&namespace, local_ip, *port).map_err(to_pyerr)?;
-
-                    if let Err(e) = etcd_client
-                        .kv_create(&key, context_bytes.clone(), None)
-                        .await
-                    {
-                        tracing::error!(
-                            "Failed to reserve port block starting at {start_port} (attempt {}): {e}",
-                            attempt_idx + 1,
-                        );
-                        reservation_failed = true;
-                        break;
-                    }
-                    reserved_keys.push(key);
-                }
-
-                if reservation_failed {
-                    // Cleanup partial reservations
-                    for key in reserved_keys {
-                        if let Err(e) = etcd_client.kv_delete(key.as_str(), None).await {
-                            tracing::warn!("Failed to cleanup reserved port {key}: {e}");
-                        }
-                    }
-
-                    // Sockets automatically released via RAII
-                    if attempt_idx < candidate_count - 1 {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                    continue;
-                }
-
-                // Success - sockets will be released automatically
-                tracing::debug!("Reserved port block {ports_to_reserve:?}");
-                return Ok(ports_to_reserve);
-            }
-
-            Err(PyErr::new::<PyException, _>(format!(
-                "Failed to allocate and reserve a port block of size {block_size} from range {min}-{max} after {candidate_count} attempts"
-            )))
-        })
-    }
-
     fn shutdown(&self) {
-        self.inner.runtime().shutdown();
+        self.inner.shutdown();
     }
 
     fn event_loop(&self) -> PyObject {
@@ -656,33 +558,6 @@ impl DistributedRuntime {
     }
 }
 
-// Bind a TCP port and return a socket held until dropped.
-fn bind_tcp_port(port: u16) -> std::io::Result<socket2::Socket> {
-    let sock = socket2::Socket::new(
-        socket2::Domain::IPV4,
-        socket2::Type::STREAM,
-        Some(socket2::Protocol::TCP),
-    )?;
-    sock.set_reuse_address(true)?;
-    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
-    sock.bind(&addr.into())?;
-    Ok(sock)
-}
-
-fn make_port_key(namespace: &str, node_ip: IpAddr, port: u16) -> anyhow::Result<String> {
-    Ok(format!("v1/{namespace}/ports/{node_ip}/{port}"))
-}
-
-fn local_ip() -> Result<IpAddr, local_ip_address::Error> {
-    local_ip_address::local_ip().or_else(|err| match err {
-        local_ip_address::Error::LocalIpAddressNotFound => {
-            // Fall back to IPv6 if no IPv4 addresses are found
-            local_ip_address::local_ipv6()
-        }
-        _ => Err(err),
-    })
-}
-
 #[pymethods]
 impl CancellationToken {
     fn cancel(&self) {
@@ -705,15 +580,6 @@ impl Component {
         Ok(Endpoint {
             inner,
             event_loop: self.event_loop.clone(),
-        })
-    }
-
-    /// NATS specific stats/metrics call
-    fn create_service<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let mut inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.add_stats_service().await.map_err(to_pyerr)?;
-            Ok(())
         })
     }
 
@@ -857,11 +723,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        if self.router.client.is_static() {
-            self.r#static(py, request, annotated, context)
-        } else {
-            self.random(py, request, annotated, context)
-        }
+        self.random(py, request, annotated, context)
     }
 
     /// Send a request to the next endpoint in a round-robin fashion.
@@ -971,45 +833,6 @@ impl Client {
                     .direct(request_ctx, instance_id)
                     .await
                     .map_err(to_pyerr)?,
-            };
-
-            tokio::spawn(process_stream(stream, tx));
-
-            Ok(AsyncResponseStream {
-                rx: Arc::new(Mutex::new(rx)),
-                annotated,
-            })
-        })
-    }
-
-    /// Directly send a request to a pre-defined static worker
-    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
-    fn r#static<'p>(
-        &self,
-        py: Python<'p>,
-        request: PyObject,
-        annotated: Option<bool>,
-        context: Option<context::Context>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
-        let request_ctx = create_request_context(request, &context);
-        let annotated = annotated.unwrap_or(false);
-
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let client = self.router.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = match context {
-                Some(context) => {
-                    // Always instrument with appropriate span (none if no trace context)
-                    let span = get_span_for_context(&context, "static");
-                    client
-                        .r#static(request_ctx)
-                        .instrument(span)
-                        .await
-                        .map_err(to_pyerr)?
-                }
-                _ => client.r#static(request_ctx).await.map_err(to_pyerr)?,
             };
 
             tokio::spawn(process_stream(stream, tx));

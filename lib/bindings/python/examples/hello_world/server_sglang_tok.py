@@ -93,7 +93,7 @@ class RequestHandler:
             count = next_count
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     await init(runtime, cmd_line_args())
 
@@ -103,7 +103,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     Instantiate and serve
     """
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
     await register_llm(

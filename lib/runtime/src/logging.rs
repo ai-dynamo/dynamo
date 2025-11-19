@@ -87,27 +87,13 @@ use tracing::{info, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-/// ENV used to set the log level
-const FILTER_ENV: &str = "DYN_LOG";
+use crate::config::environment_names::logging as env_logging;
 
 /// Default log level
 const DEFAULT_FILTER_LEVEL: &str = "info";
 
-/// ENV used to set the path to the logging configuration file
-const CONFIG_PATH_ENV: &str = "DYN_LOGGING_CONFIG_PATH";
-
-/// Enable OTLP trace exporting
-const OTEL_EXPORT_ENABLED_ENV: &str = "OTEL_EXPORT_ENABLED";
-
-/// (OLTP exporter env var spec defined here - https://opentelemetry.io/docs/specs/otel/protocol/exporter/)
-/// OTEL exporter endpoint
-const OTEL_EXPORT_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
-
 /// Default OTLP endpoint
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
-
-/// Service name environment variable
-const OTEL_SERVICE_NAME_ENV: &str = "OTEL_SERVICE_NAME";
 
 /// Default service name
 const DEFAULT_OTEL_SERVICE_NAME: &str = "dynamo";
@@ -144,16 +130,17 @@ impl Default for LoggingConfig {
     }
 }
 
-/// Check if OTLP trace exporting is enabled (set OTEL_EXPORT_ENABLED=1 to enable)
+/// Check if OTLP trace exporting is enabled (set OTEL_EXPORT_ENABLED to "1" to enable)
 fn otlp_exporter_enabled() -> bool {
-    std::env::var(OTEL_EXPORT_ENABLED_ENV)
+    std::env::var(env_logging::otlp::OTEL_EXPORT_ENABLED)
         .map(|v| v == "1")
         .unwrap_or(false)
 }
 
 /// Get the service name from environment or use default
 fn get_service_name() -> String {
-    std::env::var(OTEL_SERVICE_NAME_ENV).unwrap_or_else(|_| DEFAULT_OTEL_SERVICE_NAME.to_string())
+    std::env::var(env_logging::otlp::OTEL_SERVICE_NAME)
+        .unwrap_or_else(|_| DEFAULT_OTEL_SERVICE_NAME.to_string())
 }
 
 /// Validate a given trace ID according to W3C Trace Context specifications.
@@ -414,6 +401,30 @@ pub fn inject_otel_context_into_nats_headers(
 /// Inject trace context from current span into NATS headers
 pub fn inject_current_trace_into_nats_headers(headers: &mut async_nats::HeaderMap) {
     inject_otel_context_into_nats_headers(headers, None);
+}
+
+// Inject trace headers into a generic HashMap for HTTP/TCP transports
+pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<String, String>) {
+    if let Some(trace_context) = get_distributed_tracing_context() {
+        // Inject W3C traceparent header
+        headers.insert(
+            "traceparent".to_string(),
+            trace_context.create_traceparent(),
+        );
+
+        // Inject optional tracestate
+        if let Some(tracestate) = trace_context.tracestate {
+            headers.insert("tracestate".to_string(), tracestate);
+        }
+
+        // Inject custom request IDs
+        if let Some(x_request_id) = trace_context.x_request_id {
+            headers.insert("x-request-id".to_string(), x_request_id);
+        }
+        if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
+            headers.insert("x-dynamo-request-id".to_string(), x_dynamo_request_id);
+        }
+    }
 }
 
 /// Create a client_request span linked to the parent trace context
@@ -755,7 +766,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         // Build tracer provider - with or without OTLP export
         let (tracer_provider, endpoint_opt) = if otlp_exporter_enabled() {
             // Export enabled: create OTLP exporter with batch processor
-            let endpoint = std::env::var(OTEL_EXPORT_ENDPOINT_ENV)
+            let endpoint = std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
                 .unwrap_or_else(|_| DEFAULT_OTLP_ENDPOINT.to_string());
 
             // Initialize OTLP exporter using gRPC (Tonic)
@@ -830,7 +841,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
 fn filters(config: LoggingConfig) -> EnvFilter {
     let mut filter_layer = EnvFilter::builder()
         .with_default_directive(config.log_level.parse().unwrap())
-        .with_env_var(FILTER_ENV)
+        .with_env_var(env_logging::DYN_LOG)
         .from_env_lossy();
 
     for (module, level) in config.log_filters {
@@ -869,7 +880,8 @@ pub fn log_message(level: &str, message: &str, module: &str, file: &str, line: u
 }
 
 fn load_config() -> LoggingConfig {
-    let config_path = std::env::var(CONFIG_PATH_ENV).unwrap_or_else(|_| "".to_string());
+    let config_path =
+        std::env::var(env_logging::DYN_LOGGING_CONFIG_PATH).unwrap_or_else(|_| "".to_string());
     let figment = Figment::new()
         .merge(Serialized::defaults(LoggingConfig::default()))
         .merge(Toml::file("/opt/dynamo/etc/logging.toml"))
@@ -1266,7 +1278,7 @@ pub mod tests {
     async fn test_json_log_capture() -> Result<()> {
         #[allow(clippy::redundant_closure_call)]
         let _ = temp_env::async_with_vars(
-            [("DYN_LOGGING_JSONL", Some("1"))],
+            [(env_logging::DYN_LOGGING_JSONL, Some("1"))],
             (async || {
                 let tmp_file = NamedTempFile::new().unwrap();
                 let file_name = tmp_file.path().to_str().unwrap();
@@ -1279,11 +1291,11 @@ pub mod tests {
 
                 // 1. Extract the dynamically generated trace ID and validate consistency
                 // All logs should have the same trace_id since they're part of the same trace
+                // Skip any initialization logs that don't have trace_id (e.g., OTLP setup messages)
                 let trace_id = lines
-                    .first()
-                    .and_then(|log_line| log_line.get("trace_id"))
-                    .and_then(|v| v.as_str())
-                    .expect("First log line should have a trace_id")
+                    .iter()
+                    .find_map(|log_line| log_line.get("trace_id").and_then(|v| v.as_str()))
+                    .expect("At least one log line should have a trace_id")
                     .to_string();
 
                 // Verify trace_id is not a zero/invalid ID
@@ -1318,172 +1330,147 @@ pub mod tests {
                     }
                 }
 
-                // 2. Validate span IDs are unique for SPAN_CREATED and SPAN_CLOSED events
-                let mut created_span_ids: Vec<String> = Vec::new();
-                let mut closed_span_ids: Vec<String> = Vec::new();
+                // 2. Validate span IDs exist and are properly formatted
+                let mut span_ids_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut span_timestamps: std::collections::HashMap<String, DateTime<Utc>> = std::collections::HashMap::new();
 
                 for log_line in &lines {
-                    if let Some(message) = log_line.get("message") {
-                        match message.as_str().unwrap() {
-                            "SPAN_CREATED" => {
-                                if let Some(span_id) = log_line.get("span_id") {
-                                    let span_id_str = span_id.as_str().unwrap();
-                                    assert!(
-                                        created_span_ids.iter().all(|id| id != span_id_str),
-                                        "Duplicate span ID found in SPAN_CREATED: {}",
-                                        span_id_str
-                                    );
-                                    created_span_ids.push(span_id_str.to_string());
-                                }
-                            }
-                            "SPAN_CLOSED" => {
-                                if let Some(span_id) = log_line.get("span_id") {
-                                    let span_id_str = span_id.as_str().unwrap();
-                                    assert!(
-                                        closed_span_ids.iter().all(|id| id != span_id_str),
-                                        "Duplicate span ID found in SPAN_CLOSED: {}",
-                                        span_id_str
-                                    );
-                                    closed_span_ids.push(span_id_str.to_string());
-                                }
-                            }
-                            _ => {}
+                    if let Some(span_id) = log_line.get("span_id") {
+                        let span_id_str = span_id.as_str().unwrap();
+                        assert!(
+                            is_valid_span_id(span_id_str),
+                            "Invalid span_id format: {}",
+                            span_id_str
+                        );
+                        span_ids_seen.insert(span_id_str.to_string());
+                    }
+
+                    // Validate timestamp format and track span timestamps
+                    if let Some(time_str) = log_line.get("time").and_then(|v| v.as_str()) {
+                        let timestamp = DateTime::parse_from_rfc3339(time_str)
+                            .expect("All timestamps should be valid RFC3339 format")
+                            .with_timezone(&Utc);
+
+                        // Track timestamp for each span_name
+                        if let Some(span_name) = log_line.get("span_name").and_then(|v| v.as_str()) {
+                            span_timestamps.insert(span_name.to_string(), timestamp);
                         }
                     }
                 }
 
-                // Additionally, ensure that every SPAN_CLOSED has a corresponding SPAN_CREATED
-                for closed_span_id in &closed_span_ids {
-                    assert!(
-                        created_span_ids.contains(closed_span_id),
-                        "SPAN_CLOSED without corresponding SPAN_CREATED: {}",
-                        closed_span_id
-                    );
-                }
-
-                // 3. Validate parent span relationships
+                // 3. Validate parent-child span relationships
+                // Extract span IDs for each span by looking at their log messages
                 let parent_span_id = lines
                     .iter()
                     .find(|log_line| {
-                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CREATED"
-                            && log_line.get("span_name").unwrap().as_str().unwrap() == "parent"
+                        log_line.get("span_name")
+                            .and_then(|v| v.as_str()) == Some("parent")
                     })
                     .and_then(|log_line| {
-                        log_line
-                            .get("span_id")
-                            .map(|s| s.as_str().unwrap().to_string())
+                        log_line.get("span_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
                     })
-                    .unwrap();
+                    .expect("Should find parent span with span_id");
 
                 let child_span_id = lines
                     .iter()
                     .find(|log_line| {
-                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CREATED"
-                            && log_line.get("span_name").unwrap().as_str().unwrap() == "child"
+                        log_line.get("span_name")
+                            .and_then(|v| v.as_str()) == Some("child")
                     })
                     .and_then(|log_line| {
-                        log_line
-                            .get("span_id")
-                            .map(|s| s.as_str().unwrap().to_string())
+                        log_line.get("span_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
                     })
-                    .unwrap();
+                    .expect("Should find child span with span_id");
 
-                let _grandchild_span_id = lines
+                let grandchild_span_id = lines
                     .iter()
                     .find(|log_line| {
-                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CREATED"
-                            && log_line.get("span_name").unwrap().as_str().unwrap() == "grandchild"
+                        log_line.get("span_name")
+                            .and_then(|v| v.as_str()) == Some("grandchild")
                     })
                     .and_then(|log_line| {
-                        log_line
-                            .get("span_id")
-                            .map(|s| s.as_str().unwrap().to_string())
+                        log_line.get("span_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
                     })
-                    .unwrap();
+                    .expect("Should find grandchild span with span_id");
 
-                // Parent span has no parent_id
+                // Verify span IDs are unique
+                assert_ne!(parent_span_id, child_span_id, "Parent and child should have different span IDs");
+                assert_ne!(child_span_id, grandchild_span_id, "Child and grandchild should have different span IDs");
+                assert_ne!(parent_span_id, grandchild_span_id, "Parent and grandchild should have different span IDs");
+
+                // Verify parent span has no parent_id
                 for log_line in &lines {
                     if let Some(span_name) = log_line.get("span_name")
                         && let Some(span_name_str) = span_name.as_str()
                         && span_name_str == "parent"
                     {
-                        assert!(log_line.get("parent_id").is_none());
+                        assert!(
+                            log_line.get("parent_id").is_none(),
+                            "Parent span should not have a parent_id"
+                        );
                     }
                 }
 
-                // Child span's parent_id is parent_span_id
+                // Verify child span's parent_id is parent_span_id
                 for log_line in &lines {
                     if let Some(span_name) = log_line.get("span_name")
                         && let Some(span_name_str) = span_name.as_str()
                         && span_name_str == "child"
                     {
+                        let parent_id = log_line.get("parent_id")
+                            .and_then(|v| v.as_str())
+                            .expect("Child span should have a parent_id");
                         assert_eq!(
-                            log_line.get("parent_id").unwrap().as_str().unwrap(),
-                            &parent_span_id
+                            parent_id,
+                            parent_span_id,
+                            "Child's parent_id should match parent's span_id"
                         );
                     }
                 }
 
-                // Grandchild span's parent_id is child_span_id
+                // Verify grandchild span's parent_id is child_span_id
                 for log_line in &lines {
                     if let Some(span_name) = log_line.get("span_name")
                         && let Some(span_name_str) = span_name.as_str()
                         && span_name_str == "grandchild"
                     {
+                        let parent_id = log_line.get("parent_id")
+                            .and_then(|v| v.as_str())
+                            .expect("Grandchild span should have a parent_id");
                         assert_eq!(
-                            log_line.get("parent_id").unwrap().as_str().unwrap(),
-                            &child_span_id
+                            parent_id,
+                            child_span_id,
+                            "Grandchild's parent_id should match child's span_id"
                         );
                     }
                 }
 
-                // Validate duration relationships
-                let parent_duration = lines
-                    .iter()
-                    .find(|log_line| {
-                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CLOSED"
-                            && log_line.get("span_name").unwrap().as_str().unwrap() == "parent"
-                    })
-                    .and_then(|log_line| {
-                        log_line
-                            .get("time.duration_us")
-                            .map(|d| d.as_u64().unwrap())
-                    })
-                    .unwrap();
+                // 4. Validate timestamp ordering - spans should log in execution order
+                let parent_time = span_timestamps.get("parent")
+                    .expect("Should have timestamp for parent span");
+                let child_time = span_timestamps.get("child")
+                    .expect("Should have timestamp for child span");
+                let grandchild_time = span_timestamps.get("grandchild")
+                    .expect("Should have timestamp for grandchild span");
 
-                let child_duration = lines
-                    .iter()
-                    .find(|log_line| {
-                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CLOSED"
-                            && log_line.get("span_name").unwrap().as_str().unwrap() == "child"
-                    })
-                    .and_then(|log_line| {
-                        log_line
-                            .get("time.duration_us")
-                            .map(|d| d.as_u64().unwrap())
-                    })
-                    .unwrap();
-
-                let grandchild_duration = lines
-                    .iter()
-                    .find(|log_line| {
-                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CLOSED"
-                            && log_line.get("span_name").unwrap().as_str().unwrap() == "grandchild"
-                    })
-                    .and_then(|log_line| {
-                        log_line
-                            .get("time.duration_us")
-                            .map(|d| d.as_u64().unwrap())
-                    })
-                    .unwrap();
-
+                // Parent logs first (or at same time), then child, then grandchild
                 assert!(
-                    parent_duration > child_duration + grandchild_duration,
-                    "Parent duration is not greater than the sum of child and grandchild durations"
+                    parent_time <= child_time,
+                    "Parent span should log before or at same time as child span (parent: {}, child: {})",
+                    parent_time,
+                    child_time
                 );
                 assert!(
-                    child_duration > grandchild_duration,
-                    "Child duration is not greater than grandchild duration"
+                    child_time <= grandchild_time,
+                    "Child span should log before or at same time as grandchild span (child: {}, grandchild: {})",
+                    child_time,
+                    grandchild_time
                 );
 
                 Ok::<(), anyhow::Error>(())

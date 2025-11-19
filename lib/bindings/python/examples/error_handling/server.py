@@ -44,7 +44,6 @@ async def init(runtime: DistributedRuntime, ns: str):
     A `Component` can serve multiple endpoints
     """
     component = runtime.namespace(ns).component("backend")
-    await component.create_service()
 
     endpoint = component.endpoint("generate")
     print("Started server instance")

@@ -21,7 +21,7 @@ class RequestHandler:
             yield char
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     # Set up signal handler for graceful shutdown
     loop = asyncio.get_running_loop()
@@ -49,7 +49,6 @@ async def init(runtime: DistributedRuntime, ns: str):
     A `Component` can serve multiple endpoints
     """
     component = runtime.namespace(ns).component("backend")
-    await component.create_service()
 
     endpoint = component.endpoint("generate")
     print("Started server instance")

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::*;
+use crate::component::Component;
 use async_nats::service::Service as NatsService;
 use async_nats::service::ServiceExt as _;
 use derive_builder::Builder;
@@ -8,8 +10,6 @@ use derive_getters::Dissolve;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-use crate::component::Component;
 
 pub use super::endpoint::EndpointStats;
 

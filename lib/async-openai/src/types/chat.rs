@@ -1045,6 +1045,10 @@ pub struct CreateChatCompletionResponse {
     /// The object type, which is always `chat.completion`.
     pub object: String,
     pub usage: Option<CompletionUsage>,
+
+    /// NVIDIA extension field for response metadata (worker IDs, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
 }
 
 /// Parsed server side events stream until an \[DONE\] is received from server.
@@ -1136,6 +1140,10 @@ pub struct CreateChatCompletionStreamResponse {
     /// An optional field that will only be present when you set `stream_options: {"include_usage": true}` in your request.
     /// When present, it contains a null value except for the last chunk which contains the token usage statistics for the entire request.
     pub usage: Option<CompletionUsage>,
+
+    /// NVIDIA extension field for response metadata
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ This shows how Python code can:
 4. The metrics are automatically served via the /metrics endpoint
 
 Usage:
-    DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 ./server_with_callback.py
+    DYN_SYSTEM_PORT=8081 ./server_with_callback.py
 
     # In another terminal, query the metrics:
     curl http://localhost:8081/metrics
@@ -36,7 +36,6 @@ async def worker(runtime: DistributedRuntime) -> None:
 async def init(runtime: DistributedRuntime):
     # Create component and endpoint
     component: Component = runtime.namespace("ns556").component("cp556")
-    await component.create_service()
 
     endpoint: Endpoint = component.endpoint("ep556")
 

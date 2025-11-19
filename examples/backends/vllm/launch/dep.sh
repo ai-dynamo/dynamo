@@ -12,6 +12,8 @@ python -m dynamo.frontend --router-mode kv --http-port=8000 &
 # Chose Qwen3-30B because its a small MOE that can fit on smaller GPUs (L40S for example)
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 for i in {0..3}; do
+    DYN_VLLM_KV_EVENT_PORT=$((20080 + i)) \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) \
     CUDA_VISIBLE_DEVICES=$i python3 -m dynamo.vllm \
     --model Qwen/Qwen3-30B-A3B \
     --data-parallel-rank $i \

@@ -45,13 +45,6 @@ class DistributedRuntime:
         """
         ...
 
-    def allocate_port_block(self, namespace, port_min, port_max, block_size, context=None) -> List[int]:
-        """
-        Allocate a contiguous block of ports from the specified range and atomically reserve them.
-        Returns a list of all allocated ports in order.
-        """
-        ...
-
     def shutdown(self) -> None:
         """
         Shutdown the runtime by triggering the cancellation token
@@ -107,12 +100,6 @@ class Component:
     """
 
     ...
-
-    async def create_service(self) -> None:
-        """
-        Create a service
-        """
-        ...
 
     def endpoint(self, name: str) -> Endpoint:
         """
@@ -410,8 +397,7 @@ class WorkerMetricsPublisher:
 
     def create_endpoint(self, component: Component, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
         """
-        Similar to Component.create_service, but only service created through
-        this method will interact with KV router of the same component.
+        Only service created through this method will interact with KV router of the same component.
 
         Args:
             component: The component to create the endpoint for
@@ -894,6 +880,7 @@ class KserveGrpcService:
         model: str,
         checksum: str,
         engine: PythonAsyncEngine,
+        runtime_config: Optional[ModelRuntimeConfig],
     ) -> None:
         """
         Register a tensor-based model with the service.

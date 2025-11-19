@@ -1,0 +1,61 @@
+
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dynamo
+  annotations:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+spec:
+  envs:
+  - name: DYN_LOG
+    value: "debug"
+  services:
+    Frontend:
+      dynamoNamespace: dynamo
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: ${IMAGE}
+    VllmDecodeWorker:
+      dynamoNamespace: vllm-disagg
+      componentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        terminationGracePeriodSeconds: 120
+        mainContainer:
+          image: ${IMAGE}
+          workingDir: /workspace/components/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+    VllmPrefillWorker:
+      dynamoNamespace: vllm-disagg
+      componentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        terminationGracePeriodSeconds: 120
+        mainContainer:
+          image: ${IMAGE}
+          workingDir: /workspace/components/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --is-prefill-worker

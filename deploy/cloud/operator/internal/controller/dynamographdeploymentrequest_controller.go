@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"text/template"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -30,9 +31,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -40,7 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/yaml"
+	sigsyaml "sigs.k8s.io/yaml"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -100,6 +104,12 @@ const (
 
 	// ConfigMap naming
 	ConfigMapOutputPrefix = "dgdr-output-"
+
+	// Annotation keys
+	AnnotationAdditionalResources = "dgdr.nvidia.com/additional-resources"
+
+	// Size limits
+	MaxAnnotationSize = 250000 // ~250KB, below K8s 256KB limit
 
 	// Sidecar image
 	SidecarImage = "bitnami/kubectl:latest"
@@ -193,17 +203,8 @@ data:
 EOF
 sed 's/^/    /' {{.OutputPath}}/{{.OutputFile}} >> /tmp/cm.yaml
 
-# Add profiling data directories to ConfigMap for long-term storage
-# Find all interpolation directories and add their raw_data.npz files
-for dir in {{.OutputPath}}/*/interpolation; do
-  if [ -d "$dir" ]; then
-    dirname=$(basename $(dirname "$dir"))
-    if [ -f "$dir/raw_data.npz" ]; then
-      echo "  ${dirname}_raw_data.npz: |" >> /tmp/cm.yaml
-      base64 "$dir/raw_data.npz" | sed 's/^/    /' >> /tmp/cm.yaml
-    fi
-  fi
-done
+# Note: Profiling data (raw_data.npz converted to JSON) is included in the
+# generated DGD YAML as a separate ConfigMap by the profiler, no need to add it here
 
 kubectl apply -f /tmp/cm.yaml
 echo "Saved profiling output to ConfigMap {{.ConfigMapName}}"
@@ -395,6 +396,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingState(ctx contex
 
 	// Record spec generation event
 	r.Recorder.Event(dgdr, corev1.EventTypeNormal, EventReasonSpecGenerated, MessageSpecGenerated)
+
+	// Create additional resources (ConfigMaps) immediately after profiling
+	// This ensures that the `planner-profile-data` ConfigMap is available for both auto and manual deployment
+	targetNamespace := dgdr.Namespace
+	if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.Namespace != "" {
+		targetNamespace = dgdr.Spec.DeploymentOverrides.Namespace
+	}
+	if err := r.createAdditionalResources(ctx, dgdr, targetNamespace); err != nil {
+		logger.Error(err, "Failed to create additional resources after profiling")
+		// Don't fail the DGDR, just log the error - ConfigMaps can be created manually
+		r.Recorder.Event(dgdr, corev1.EventTypeWarning, "ConfigMapCreationFailed",
+			fmt.Sprintf("Failed to create ConfigMaps from profiling output: %v", err))
+	}
 
 	// If autoApply is enabled, transition to Deploying state
 	if dgdr.Spec.AutoApply {
@@ -667,6 +681,80 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 }
 
+// createAdditionalResources creates ConfigMaps from the profiling output that should be deployed alongside the DGD
+func (r *DynamoGraphDeploymentRequestReconciler) createAdditionalResources(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, targetNamespace string) error {
+	logger := log.FromContext(ctx)
+
+	// Check if there are additional resources stored in annotations
+	if dgdr.Annotations == nil {
+		return nil
+	}
+
+	resourcesYAML, exists := dgdr.Annotations[AnnotationAdditionalResources]
+	if !exists || resourcesYAML == "" {
+		return nil
+	}
+
+	// Parse using standard Kubernetes YAML decoder
+	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader([]byte(resourcesYAML)), 4096)
+	resourceCount := 0
+
+	for {
+		obj := &unstructured.Unstructured{}
+		if err := decoder.Decode(obj); err != nil {
+			if err == io.EOF {
+				break
+			}
+			logger.Error(err, "Failed to decode resource, skipping")
+			continue
+		}
+
+		if obj.GetKind() == "" {
+			continue
+		}
+
+		resourceCount++
+
+		// Only support ConfigMap for now (what profiler actually generates)
+		if obj.GetKind() != "ConfigMap" {
+			logger.Info("Skipping non-ConfigMap resource from profiling output", "kind", obj.GetKind(), "name", obj.GetName())
+			continue
+		}
+
+		cm := &corev1.ConfigMap{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, cm); err != nil {
+			logger.Error(err, "Failed to convert to ConfigMap", "name", obj.GetName())
+			continue
+		}
+
+		// Override namespace and add tracking labels
+		cm.Namespace = targetNamespace
+		if cm.Labels == nil {
+			cm.Labels = make(map[string]string)
+		}
+		cm.Labels[LabelDGDRName] = dgdr.Name
+		cm.Labels[LabelDGDRNamespace] = dgdr.Namespace
+		cm.Labels[LabelManagedBy] = LabelValueDynamoOperator
+
+		// Create the ConfigMap
+		if err := r.Create(ctx, cm); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				logger.Info("ConfigMap already exists, skipping", "name", cm.Name)
+			} else {
+				return fmt.Errorf("failed to create ConfigMap %s: %w", cm.Name, err)
+			}
+		} else {
+			logger.Info("Created ConfigMap from profiling output", "name", cm.Name, "namespace", targetNamespace)
+		}
+	}
+
+	if resourceCount > 0 {
+		logger.Info("Deploying additional resources from profiling output", "count", resourceCount)
+	}
+
+	return nil
+}
+
 // handleFailedState handles DGDR in Failed state
 func (r *DynamoGraphDeploymentRequestReconciler) handleFailedState(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -879,7 +967,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 
 		// Serialize config to YAML for passing to profiler
-		configYAML, err := yaml.Marshal(config)
+		configYAML, err := sigsyaml.Marshal(config)
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to marshal profiling config to YAML: %w", err)
 		}
@@ -997,13 +1085,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			}},
 		}
 
-		// Build volumes - use dynamo-pvc for profiling output so data persists for the Planner
+		// Build volumes - use emptyDir for profiling output
+		// The sidecar saves all needed data to ConfigMaps, so persistence is not needed
 		volumes := []corev1.Volume{{
 			Name: VolumeNameProfilingOutput,
 			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: "dynamo-pvc",
-				},
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		}}
 
@@ -1054,9 +1141,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				Template: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						ServiceAccountName: ServiceAccountProfilingJob,
-						RestartPolicy:      corev1.RestartPolicyNever,
-						Containers:         []corev1.Container{profilerContainer, sidecarContainer},
-						Volumes:            volumes,
+						RestartPolicy:      corev1.RestartPolicyNever, SecurityContext: &corev1.PodSecurityContext{
+							RunAsNonRoot: ptr.To(true),        // Enforces that container cannot run as root
+							RunAsUser:    ptr.To[int64](1000), // Run as UID 1000 (non-privileged user)
+							RunAsGroup:   ptr.To[int64](1000), // Run with GID 1000 (non-privileged group)
+							FSGroup:      ptr.To[int64](1000), // Volume files owned by GID 1000
+						},
+						Containers: []corev1.Container{profilerContainer, sidecarContainer},
+						Volumes:    volumes,
 						ImagePullSecrets: []corev1.LocalObjectReference{
 							{Name: "nvcr-imagepullsecret"},
 						},
@@ -1186,26 +1278,115 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 
 	logger.Info("Found profiling output in ConfigMap", "configMap", outputConfigMapName, "size", len(yamlContent))
 
-	// Parse YAML into full DynamoGraphDeployment object first to validate and get name
-	dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{}
-	if err := yaml.Unmarshal([]byte(yamlContent), dgd); err != nil {
-		return fmt.Errorf("failed to parse %s: %w", ProfilingOutputFile, err)
+	// Extract DGD and any supporting resources from potentially multi-document YAML (ConfigMap + DGD)
+	dgd, additionalResources, err := r.extractResourcesFromYAML([]byte(yamlContent))
+	if err != nil {
+		return fmt.Errorf("failed to extract DGD from %s: %w", ProfilingOutputFile, err)
 	}
 
-	logger.Info("Parsed DGD from ConfigMap", "dgdName", dgd.Name)
+	logger.Info("Parsed profiling output", "dgdName", dgd.Name, "additionalResources", len(additionalResources))
 
-	// Store as RawExtension (need to marshal to JSON as RawExtension expects JSON)
-	// This preserves all fields including metadata
+	// Store additional resources (ConfigMaps) in annotations first
+	if len(additionalResources) > 0 {
+		if err := r.storeAdditionalResources(ctx, dgdr, additionalResources); err != nil {
+			logger.Error(err, "Failed to store additional resources")
+			return err
+		}
+		// Refetch the DGDR after updating annotations to get the latest resourceVersion
+		if err := r.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, dgdr); err != nil {
+			return fmt.Errorf("failed to refetch DGDR after storing annotations: %w", err)
+		}
+	}
+
+	// Store the generated DGD in status
 	dgdr.Status.GeneratedDeployment = &runtime.RawExtension{
 		Object: dgd,
 	}
-
-	// Set profiling results reference
 	dgdr.Status.ProfilingResults = fmt.Sprintf("configmap/%s", outputConfigMapName)
 
-	logger.Info("Successfully generated DGD from profiling output", "dgdName", dgd.Name)
-
 	return r.Status().Update(ctx, dgdr)
+}
+
+// storeAdditionalResources marshals additional resources to YAML and stores them in DGDR annotations.
+// Validates annotation size and fails gracefully if too large.
+func (r *DynamoGraphDeploymentRequestReconciler) storeAdditionalResources(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest, resources []*unstructured.Unstructured) error {
+	if len(resources) == 0 {
+		return nil
+	}
+
+	var resourcesYAML []byte
+
+	for i, res := range resources {
+		resYAML, err := sigsyaml.Marshal(res.Object)
+		if err != nil {
+			return fmt.Errorf("failed to marshal resource %s/%s: %w", res.GetKind(), res.GetName(), err)
+		}
+		if i > 0 {
+			resourcesYAML = append(resourcesYAML, []byte("\n---\n")...)
+		}
+		resourcesYAML = append(resourcesYAML, resYAML...)
+	}
+
+	// Validate size before storing
+	if len(resourcesYAML) > MaxAnnotationSize {
+		return fmt.Errorf("additional resources YAML size (%d bytes) exceeds maximum annotation size (%d bytes); "+
+			"consider reducing the number of resources or storing them separately",
+			len(resourcesYAML), MaxAnnotationSize)
+	}
+
+	if dgdr.Annotations == nil {
+		dgdr.Annotations = make(map[string]string)
+	}
+	dgdr.Annotations[AnnotationAdditionalResources] = string(resourcesYAML)
+
+	return r.Update(ctx, dgdr)
+}
+
+// extractResourcesFromYAML parses multi-document YAML from profiling output,
+// extracting the DynamoGraphDeployment and any ConfigMaps that should be deployed with it.
+func (r *DynamoGraphDeploymentRequestReconciler) extractResourcesFromYAML(yamlContent []byte) (*nvidiacomv1alpha1.DynamoGraphDeployment, []*unstructured.Unstructured, error) {
+	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(yamlContent), 4096)
+
+	var dgd *nvidiacomv1alpha1.DynamoGraphDeployment
+	var additionalResources []*unstructured.Unstructured
+
+	for {
+		obj := &unstructured.Unstructured{}
+		if err := decoder.Decode(obj); err != nil {
+			if err == io.EOF {
+				break
+			}
+			// Skip invalid documents and continue
+			continue
+		}
+
+		// Skip empty objects
+		if obj.GetKind() == "" {
+			continue
+		}
+
+		if obj.GetKind() == "DynamoGraphDeployment" {
+			dgd = &nvidiacomv1alpha1.DynamoGraphDeployment{}
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, dgd); err != nil {
+				return nil, nil, fmt.Errorf("failed to convert to DynamoGraphDeployment: %w", err)
+			}
+		} else {
+			// Store ConfigMaps or other resources for deployment
+			additionalResources = append(additionalResources, obj)
+		}
+	}
+
+	if dgd == nil {
+		return nil, nil, fmt.Errorf("no DynamoGraphDeployment found in YAML content")
+	}
+
+	return dgd, additionalResources, nil
+}
+
+// extractDGDFromYAML is a convenience wrapper that extracts only the DGD (used by tests)
+func (r *DynamoGraphDeploymentRequestReconciler) extractDGDFromYAML(yamlContent []byte) (*nvidiacomv1alpha1.DynamoGraphDeployment, error) {
+	dgd, _, err := r.extractResourcesFromYAML(yamlContent)
+	return dgd, err
 }
 
 // updateStateAndRequeue updates the DGDR state and requeues

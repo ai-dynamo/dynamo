@@ -66,6 +66,9 @@ pub const MAX_N: u8 = 128;
 /// Allowed range of values for `n` (number of choices)
 pub const N_RANGE: (u8, u8) = (MIN_N, MAX_N);
 
+/// Maximum allowed total number of choices (batch_size × n)
+pub const MAX_TOTAL_CHOICES: usize = 128;
+
 /// Minimum allowed value for OpenAI's `logit_bias` values
 pub const MIN_LOGIT_BIAS: f32 = -100.0;
 /// Maximum allowed value for OpenAI's `logit_bias` values
@@ -85,8 +88,6 @@ pub const MAX_TOOLS: usize = 128;
 // Metadata validation constants removed - we are no longer restricting the metadata field char limits
 /// Maximum allowed length for function names
 pub const MAX_FUNCTION_NAME_LENGTH: usize = 64;
-/// Maximum allowed value for Prompt IntegerArray elements
-pub const MAX_PROMPT_TOKEN_ID: u32 = 50256;
 /// Minimum allowed value for `repetition_penalty`
 pub const MIN_REPETITION_PENALTY: f32 = 0.0;
 /// Maximum allowed value for `repetition_penalty`
@@ -95,6 +96,20 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 //
 // Shared Fields
 //
+
+/// Validates that no unsupported fields are present in the request
+pub fn validate_no_unsupported_fields(
+    unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), anyhow::Error> {
+    if !unsupported_fields.is_empty() {
+        let fields: Vec<_> = unsupported_fields
+            .keys()
+            .map(|s| format!("`{}`", s))
+            .collect();
+        anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
+    }
+    Ok(())
+}
 
 /// Validates the temperature parameter
 pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Error> {
@@ -245,6 +260,21 @@ pub fn validate_n(n: Option<u8>) -> Result<(), anyhow::Error> {
         && !(MIN_N..=MAX_N).contains(&value)
     {
         anyhow::bail!("n must be between {} and {}, got {}", MIN_N, MAX_N, value);
+    }
+    Ok(())
+}
+
+/// Validates total choices (batch_size × n) doesn't exceed maximum
+pub fn validate_total_choices(batch_size: usize, n: u8) -> Result<(), anyhow::Error> {
+    let total_choices = batch_size * (n as usize);
+    if total_choices > MAX_TOTAL_CHOICES {
+        anyhow::bail!(
+            "Total choices (batch_size × n = {} × {} = {}) exceeds maximum of {}",
+            batch_size,
+            n,
+            total_choices,
+            MAX_TOTAL_CHOICES
+        );
     }
     Ok(())
 }
@@ -426,16 +456,6 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
             if arr.is_empty() {
                 anyhow::bail!("Prompt integer array cannot be empty");
             }
-            for (i, &token_id) in arr.iter().enumerate() {
-                if token_id > MAX_PROMPT_TOKEN_ID {
-                    anyhow::bail!(
-                        "Token ID at index {} must be between 0 and {}, got {}",
-                        i,
-                        MAX_PROMPT_TOKEN_ID,
-                        token_id
-                    );
-                }
-            }
         }
         dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
             if arr.is_empty() {
@@ -444,17 +464,6 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
             for (i, inner_arr) in arr.iter().enumerate() {
                 if inner_arr.is_empty() {
                     anyhow::bail!("Prompt integer array at index {} cannot be empty", i);
-                }
-                for (j, &token_id) in inner_arr.iter().enumerate() {
-                    if token_id > MAX_PROMPT_TOKEN_ID {
-                        anyhow::bail!(
-                            "Token ID at index [{}][{}] must be between 0 and {}, got {}",
-                            i,
-                            j,
-                            MAX_PROMPT_TOKEN_ID,
-                            token_id
-                        );
-                    }
                 }
             }
         }

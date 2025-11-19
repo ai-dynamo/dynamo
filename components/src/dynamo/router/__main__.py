@@ -120,6 +120,7 @@ class StandaloneRouterHandler:
                 "index": worker_output.get("index"),
                 "disaggregated_params": worker_output.get("disaggregated_params"),
                 "extra_args": worker_output.get("extra_args"),
+                "completion_usage": worker_output.get("completion_usage"),
             }
             yield llm_engine_output
 
@@ -220,7 +221,7 @@ def parse_args():
     return parser.parse_args()
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     """Main worker function for the standalone router service."""
 
@@ -259,7 +260,6 @@ async def worker(runtime: DistributedRuntime):
 
     # Create service component - use "router" as component name
     component = runtime.namespace(namespace).component("router")
-    await component.create_service()
 
     # Create handler
     handler = StandaloneRouterHandler(
