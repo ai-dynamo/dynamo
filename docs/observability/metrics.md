@@ -17,7 +17,8 @@ Dynamo provides built-in metrics capabilities through the Dynamo metrics API, wh
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_SYSTEM_PORT` | System metrics/health port | `-1` (disabled) | `8081` |
+| `DYN_SYSTEM_PORT` | Backend component metrics/health port | `-1` (disabled) | `8081` |
+| `DYN_HTTP_PORT` | Frontend HTTP port (also configurable via `--http-port` flag) | `8000` | `8000` |
 
 ## Getting Started Quickly
 
@@ -36,7 +37,7 @@ Launch a frontend and vLLM backend to test metrics:
 # Start frontend (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
 $ python -m dynamo.frontend
 
-# Enable system metrics server on port 8081
+# Enable backend worker's system metrics on port 8081
 $ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
    --enforce-eager --no-enable-prefix-caching --max-num-seqs 3
 ```
@@ -53,7 +54,7 @@ curl -H 'Content-Type: application/json' \
 }' \
 http://localhost:8000/v1/chat/completions
 
-# Check metrics from the worker
+# Check metrics from the backend worker
 curl -s localhost:8081/metrics | grep dynamo_component
 ```
 
@@ -101,18 +102,30 @@ This hierarchical structure allows you to create metrics at the appropriate leve
 
 ### Backend Component Metrics
 
-The core Dynamo backend system automatically exposes metrics with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework:
+**Backend workers** (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.) expose `dynamo_component_*` metrics on port 8081 by default (configurable via `DYN_SYSTEM_PORT`).
+
+The core Dynamo backend system automatically exposes metrics on the system status port (default: 8081, configurable via `DYN_SYSTEM_PORT`) at the `/metrics` endpoint with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework:
 
 - `dynamo_component_inflight_requests`: Requests currently being processed (gauge)
 - `dynamo_component_request_bytes_total`: Total bytes received in requests (counter)
 - `dynamo_component_request_duration_seconds`: Request processing time (histogram)
 - `dynamo_component_requests_total`: Total requests processed (counter)
 - `dynamo_component_response_bytes_total`: Total bytes sent in responses (counter)
-- `dynamo_component_system_uptime_seconds`: DistributedRuntime uptime (gauge)
+- `dynamo_component_uptime_seconds`: DistributedRuntime uptime (gauge)
+
+**Access backend component metrics:**
+```bash
+# Default port 8081
+curl http://localhost:8081/metrics
+
+# Or with custom port
+DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model <model>
+curl http://localhost:8081/metrics
+```
 
 ### KV Router Statistics (kvstats)
 
-KV router statistics are automatically exposed by LLM workers and KV router components with the `dynamo_component_kvstats_*` prefix. These metrics provide insights into GPU memory usage and cache efficiency:
+KV router statistics are automatically exposed by LLM workers and KV router components on the backend system status port (port 8081) with the `dynamo_component_kvstats_*` prefix. These metrics provide insights into GPU memory usage and cache efficiency:
 
 - `dynamo_component_kvstats_active_blocks`: Number of active KV cache blocks currently in use (gauge)
 - `dynamo_component_kvstats_total_blocks`: Total number of KV cache blocks available (gauge)
@@ -131,22 +144,31 @@ Some components expose additional metrics specific to their functionality:
 
 ### Frontend Metrics
 
-When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TRTLLM`), these metrics are automatically exposed with the `dynamo_frontend_*` prefix and include `model` labels containing the model name:
+**Important:** The frontend and backend workers are separate components that expose metrics on different ports. See [Backend Component Metrics](#backend-component-metrics) for backend metrics.
+
+The Dynamo HTTP Frontend (`python -m dynamo.frontend`) exposes `dynamo_frontend_*` metrics on port 8000 by default (configurable via `--http-port` or `DYN_HTTP_PORT`) at the `/metrics` endpoint. Most metrics include `model` labels containing the model name:
 
 - `dynamo_frontend_inflight_requests`: Inflight requests (gauge)
 - `dynamo_frontend_queued_requests`: Number of requests in HTTP processing queue (gauge)
+- `dynamo_frontend_disconnected_clients`: Number of disconnected clients (gauge)
 - `dynamo_frontend_input_sequence_tokens`: Input sequence length (histogram)
 - `dynamo_frontend_inter_token_latency_seconds`: Inter-token latency (histogram)
 - `dynamo_frontend_output_sequence_tokens`: Output sequence length (histogram)
+- `dynamo_frontend_output_tokens_total`: Total number of output tokens generated (counter)
 - `dynamo_frontend_request_duration_seconds`: LLM request duration (histogram)
 - `dynamo_frontend_requests_total`: Total LLM requests (counter)
 - `dynamo_frontend_time_to_first_token_seconds`: Time to first token (histogram)
+
+**Access frontend metrics:**
+```bash
+curl http://localhost:8000/metrics
+```
 
 **Note**: The `dynamo_frontend_inflight_requests` metric tracks requests from HTTP handler start until the complete response is finished, while `dynamo_frontend_queued_requests` tracks requests from HTTP handler start until first token generation begins (including prefill time). HTTP queue time is a subset of inflight time.
 
 #### Model Configuration Metrics
 
-The frontend also exposes model configuration metrics with the `dynamo_frontend_model_*` prefix. These metrics are populated from the worker backend registration service when workers register with the system:
+The frontend also exposes model configuration metrics (on port 8000 `/metrics` endpoint) with the `dynamo_frontend_model_*` prefix. These metrics are populated from the worker backend registration service when workers register with the system. All model configuration metrics include a `model` label.
 
 **Runtime Config Metrics (from ModelRuntimeConfig):**
 These metrics come from the runtime configuration provided by worker backends during registration.
@@ -156,14 +178,11 @@ These metrics come from the runtime configuration provided by worker backends du
 - `dynamo_frontend_model_max_num_batched_tokens`: Maximum number of batched tokens for a worker serving the model (gauge)
 
 **MDC Metrics (from ModelDeploymentCard):**
-These metrics come from the Model Deployment Card information provided by worker backends during registration. Note that when multiple worker instances register with the same model name, only the first instance's configuration metrics (runtime config and MDC metrics) will be populated. Subsequent instances with duplicate model names will be skipped for configuration metric updates, though the worker count metric will reflect all instances.
+These metrics come from the Model Deployment Card information provided by worker backends during registration. Note that when multiple worker instances register with the same model name, only the first instance's configuration metrics (runtime config and MDC metrics) will be populated. Subsequent instances with duplicate model names will be skipped for configuration metric updates.
 
 - `dynamo_frontend_model_context_length`: Maximum context length for a worker serving the model (gauge)
 - `dynamo_frontend_model_kv_cache_block_size`: KV cache block size for a worker serving the model (gauge)
 - `dynamo_frontend_model_migration_limit`: Request migration limit for a worker serving the model (gauge)
-
-**Worker Management Metrics:**
-- `dynamo_frontend_model_workers`: Number of worker instances currently serving the model (gauge)
 
 ### Request Processing Flow
 

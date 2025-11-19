@@ -78,7 +78,10 @@ def parse_args():
         "-i", "--interactive", action="store_true", help="Interactive text chat"
     )
     parser.add_argument(
-        "--kv-cache-block-size", type=int, help="KV cache block size (u32)."
+        "--kv-cache-block-size",
+        type=int,
+        default=os.environ.get("DYN_KV_CACHE_BLOCK_SIZE"),
+        help="KV cache block size (u32). Can be set via DYN_KV_CACHE_BLOCK_SIZE env var.",
     )
     parser.add_argument(
         "--http-host",
@@ -114,20 +117,20 @@ def parse_args():
     parser.add_argument(
         "--kv-overlap-score-weight",
         type=float,
-        default=1.0,
+        default=float(os.environ.get("DYN_KV_OVERLAP_SCORE_WEIGHT", "1.0")),
         help="KV Router: Weight for overlap score in worker selection. Higher values prioritize KV cache reuse.",
     )
     parser.add_argument(
         "--router-temperature",
         type=float,
-        default=0.0,
+        default=float(os.environ.get("DYN_ROUTER_TEMPERATURE", "0.0")),
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
         "--no-kv-events",
         action="store_false",
         dest="use_kv_events",
-        default=True,
+        default=os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
         help="KV Router: Disable KV events. When set, uses ApproxKvRouter for predicting block creation/deletion based only on incoming requests at a timer. By default, KV events are enabled.",
     )
     parser.add_argument(
@@ -161,6 +164,12 @@ def parse_args():
         dest="router_track_active_blocks",
         default=True,
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing.",
+    )
+    parser.add_argument(
+        "--enforce-disagg",
+        action="store_true",
+        default=False,
+        help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
     )
     parser.add_argument(
         "--busy-threshold",
@@ -210,8 +219,16 @@ def parse_args():
     parser.add_argument(
         "--store-kv",
         type=str,
+        choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
         help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
+    parser.add_argument(
+        "--request-plane",
+        type=str,
+        choices=["nats", "http", "tcp"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
 
     flags = parser.parse_args()
@@ -247,7 +264,7 @@ async def async_main():
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.store_kv)
+    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -278,7 +295,7 @@ async def async_main():
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
         "router_config": RouterConfig(
-            router_mode, kv_router_config, flags.busy_threshold
+            router_mode, kv_router_config, flags.busy_threshold, flags.enforce_disagg
         ),
     }
 

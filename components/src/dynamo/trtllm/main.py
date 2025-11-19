@@ -106,7 +106,7 @@ async def worker():
     config = cmd_line_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv)
+    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
@@ -242,6 +242,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     default_sampling_params = SamplingParams()
     default_sampling_params._setup(tokenizer)
     default_sampling_params.stop = None
+    # Enable perf metrics so prompt_tokens_details can be returned
+    if hasattr(default_sampling_params, "return_perf_metrics"):
+        default_sampling_params.return_perf_metrics = True
+
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode for unified frontend support
@@ -261,7 +265,6 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if modality == "multimodal":
         engine_args["skip_tokenizer_init"] = False
-        model_input = ModelInput.Text
         model_config = AutoConfig.from_pretrained(
             config.model_path, trust_remote_code=True
         )
@@ -357,6 +360,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             connector=connector,
             runtime=runtime,  # Pass runtime for graceful shutdown
             metrics_collector=metrics_collector,
+            kv_block_size=config.kv_block_size,
         )
 
         # Register the model with runtime config

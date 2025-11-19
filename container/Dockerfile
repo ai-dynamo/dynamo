@@ -248,20 +248,21 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
      git clone https://github.com/openucx/ucx.git && \
      cd ucx && 			     \
      git checkout $NIXL_UCX_REF &&	 \
-     ./autogen.sh && ./configure     \
-         --prefix=/usr/local/ucx     \
-         --enable-shared             \
-         --disable-static            \
-         --disable-doxygen-doc       \
-         --enable-optimizations      \
-         --enable-cma                \
-         --enable-devel-headers      \
-         --with-cuda=/usr/local/cuda \
-         --with-verbs                \
-         --with-dm                   \
-         --with-gdrcopy=/usr/local   \
-         --with-efa                  \
-         --enable-mt &&              \
+     ./autogen.sh &&      \
+     ./contrib/configure-release    \
+        --prefix=/usr/local/ucx     \
+        --enable-shared             \
+        --disable-static            \
+        --disable-doxygen-doc       \
+        --enable-optimizations      \
+        --enable-cma                \
+        --enable-devel-headers      \
+        --with-cuda=/usr/local/cuda \
+        --with-verbs                \
+        --with-dm                   \
+        --with-gdrcopy=/usr/local   \
+        --with-efa                  \
+        --enable-mt &&              \
      make -j &&                      \
      make -j install-strip &&        \
      /tmp/use-sccache.sh show-stats "UCX" && \
@@ -317,7 +318,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo/lib/bindings/python && \
     maturin build --release --out /opt/dynamo/dist && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
-        cd /opt/dynamo/lib/kvbm && \
+        cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
@@ -334,6 +335,9 @@ ARG ARCH_ALT
 # Application environment variables
 ENV DYNAMO_HOME=/opt/dynamo \
     CARGO_TARGET_DIR=/opt/dynamo/target
+
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \

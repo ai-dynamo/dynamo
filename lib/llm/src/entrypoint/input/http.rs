@@ -7,9 +7,8 @@ use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{EngineConfig, input::common},
+    entrypoint::{EngineConfig, RouterConfig, input::common},
     http::service::service_v2::{self, HttpService},
-    kv_router::KvRouterConfig,
     namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -17,7 +16,6 @@ use crate::{
     },
 };
 use dynamo_runtime::DistributedRuntime;
-use dynamo_runtime::pipeline::RouterMode;
 
 /// Build and run an HTTP service
 pub async fn run(
@@ -81,9 +79,7 @@ pub async fn run(
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
-                router_config.router_mode,
-                Some(router_config.kv_router_config),
-                router_config.busy_threshold,
+                router_config.clone(),
                 target_namespace,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
@@ -191,24 +187,15 @@ pub async fn run(
 
 /// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
-#[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
-    router_mode: RouterMode,
-    kv_router_config: Option<KvRouterConfig>,
-    busy_threshold: Option<f64>,
+    router_config: RouterConfig,
     target_namespace: Option<String>,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
 ) -> anyhow::Result<()> {
-    let mut watch_obj = ModelWatcher::new(
-        runtime.clone(),
-        model_manager,
-        router_mode,
-        kv_router_config,
-        busy_threshold,
-    );
+    let mut watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

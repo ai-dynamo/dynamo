@@ -18,7 +18,7 @@ use std::{collections::HashMap, pin::Pin};
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures::StreamExt;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event};
 use parking_lot::Mutex;
 
 use crate::storage::key_value_store::KeyValue;
@@ -370,13 +370,8 @@ impl KeyValueBucket for Directory {
                     }
 
                     // Canonicalize paths to handle symlinks (e.g., /var -> /private/var on macOS)
-                    let canonical_item_path = match item_path.canonicalize() {
-                        Ok(p) => p,
-                        Err(err) => {
-                            tracing::warn!(error = %err, item = %item_path.display(), "Failed to canonicalize path. Using original path.");
-                            item_path.clone()
-                        }
-                    };
+                    // The unwrap_or_else path is for Remove case.
+                    let canonical_item_path = item_path.canonicalize().unwrap_or_else(|_| item_path.clone());
 
                     let key = match canonical_item_path.strip_prefix(&root) {
                         Ok(stripped) => stripped.display().to_string().replace("_", "/"),
@@ -393,7 +388,7 @@ impl KeyValueBucket for Directory {
                     };
 
                     match event.kind {
-                        EventKind::Create(_) | EventKind::Modify(_) => {
+                        EventKind::Create(event::CreateKind::File) | EventKind::Modify(event::ModifyKind::Data(event::DataChange::Content)) => {
                             let data: bytes::Bytes = match fs::read(&item_path) {
                                 Ok(data) => data.into(),
                                 Err(err) => {
@@ -404,11 +399,11 @@ impl KeyValueBucket for Directory {
                             let item = KeyValue::new(key, data);
                             yield WatchEvent::Put(item);
                         }
-                        EventKind::Remove(_) => {
+                        EventKind::Remove(event::RemoveKind::File) => {
                             yield WatchEvent::Delete(Key::from_raw(key));
                         }
-                        event_type => {
-                            tracing::debug!(?event_type, dir = %dir.display(), "Ignoring event type");
+                        _ => {
+                            // These happen every time the keep-alive updates last modified time
                             continue;
                         }
                     }
@@ -470,4 +465,34 @@ fn a_to_fs_err(err: anyhow::Error) -> StoreError {
 
 fn to_fs_err<E: std::error::Error>(err: E) -> StoreError {
     StoreError::FilesystemError(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use crate::storage::key_value_store::{
+        FileStore, Key, KeyValueBucket as _, KeyValueStore as _,
+    };
+
+    #[tokio::test]
+    async fn test_entries_full_path() {
+        let t = tempfile::tempdir().unwrap();
+
+        let m = FileStore::new(t.path());
+        let bucket = m.get_or_create_bucket("v1/tests", None).await.unwrap();
+        let _ = bucket
+            .insert(&Key::new("key1/multi/part"), "value1".into(), 0)
+            .await
+            .unwrap();
+        let _ = bucket
+            .insert(&Key::new("key2"), "value2".into(), 0)
+            .await
+            .unwrap();
+        let entries = bucket.entries().await.unwrap();
+        let keys: HashSet<String> = entries.into_keys().collect();
+
+        assert!(keys.contains("v1/tests/key1/multi/part"));
+        assert!(keys.contains("v1/tests/key2"));
+    }
 }
