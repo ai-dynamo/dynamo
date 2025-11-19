@@ -408,7 +408,11 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1) && \
-        if [ -n "$KVBM_WHEEL" ]; then uv pip install "$KVBM_WHEEL"; fi; \
+        if [ -n "$KVBM_WHEEL" ]; then \
+            uv pip install "$KVBM_WHEEL"; \
+        else \
+            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
+        fi; \
     fi \
     && cd /workspace/benchmarks \
     && UV_GIT_LFS=1 uv pip install --no-cache .
