@@ -196,7 +196,12 @@ impl MemoryRegion {
             return Ok(&[]);
         }
         // SAFETY: Caller guarantees memory is valid
-        unsafe { Ok(std::slice::from_raw_parts(self.addr as *const u8, self.size)) }
+        unsafe {
+            Ok(std::slice::from_raw_parts(
+                self.addr as *const u8,
+                self.size,
+            ))
+        }
     }
 
     /// Get a mutable slice view of this memory region.

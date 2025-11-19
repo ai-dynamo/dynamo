@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use tokio_util::task::TaskTracker;
+
 use super::*;
 
 /// Local event handle with ability to trigger exactly once.
@@ -113,24 +115,23 @@ impl LocalEventSystem {
         self.new_event()
     }
 
-    /// Waits for the event to complete (triggered or poisoned).
+    /// Returns a future that waits for the event to complete (triggered or poisoned).
     ///
     /// # Cancellation Safety
     ///
-    /// This method is **cancellation safe** and can be used in `tokio::select!` statements.
-    /// If the future is dropped before completion, the internal waiter count is properly
-    /// decremented via the `Drop` implementation of `LocalWaiter`.
+    /// The returned `LocalEventWaiter` is **cancellation safe** and can be used in
+    /// `tokio::select!` statements. If the future is dropped before completion, the internal
+    /// waiter count is properly decremented via the `Drop` implementation.
     ///
     /// # Performance Considerations
     ///
-    /// Each call to `wait` performs a `DashMap` lookup and acquires a mutex lock to register
-    /// a waiter. When using `wait` in a loop with `tokio::select!`, consider pinning the
-    /// future to avoid repeated lookups:
+    /// This method performs a `DashMap` lookup and acquires a mutex lock to register a waiter.
+    /// The returned future is efficient for use in `tokio::select!` loops - it can be polled
+    /// multiple times without overhead:
     ///
     /// ```rust,ignore
-    /// // Efficient: Lookup happens once
-    /// let wait_fut = system.wait(handle);
-    /// tokio::pin!(wait_fut);
+    /// // Efficient: Lookup happens once, future can be polled repeatedly
+    /// let mut wait_fut = system.awaiter(handle)?;
     ///
     /// loop {
     ///     tokio::select! {
@@ -145,10 +146,11 @@ impl LocalEventSystem {
     /// Returns an error if:
     /// - The handle does not belong to this worker
     /// - The event is unknown (invalid handle)
-    /// - The event was poisoned (returns `EventPoison` error)
-    pub async fn wait(self: &Arc<Self>, handle: EventHandle) -> Result<()> {
+    ///
+    /// When awaited, the future returns an error if the event was poisoned.
+    pub fn awaiter(self: &Arc<Self>, handle: EventHandle) -> Result<LocalEventWaiter> {
         self.ensure_local_handle(handle)?;
-        self.wait_local(handle).await
+        self.wait_local(handle)
     }
 
     pub fn poll(self: &Arc<Self>, handle: EventHandle) -> Result<EventStatus> {
@@ -208,7 +210,12 @@ impl LocalEventSystem {
             let mut failure_reasons: Option<Vec<Arc<str>>> = None;
 
             for dependency in inputs {
-                match system.wait(dependency).await {
+                let wait_result = match system.awaiter(dependency) {
+                    Ok(waiter) => waiter.await,
+                    Err(err) => Err(err),
+                };
+
+                match wait_result {
                     Ok(()) => {}
                     Err(err) => {
                         let reason = match err.downcast::<EventPoison>() {
@@ -267,7 +274,7 @@ impl LocalEventSystem {
         Ok(())
     }
 
-    async fn wait_local(&self, handle: EventHandle) -> Result<()> {
+    fn wait_local(&self, handle: EventHandle) -> Result<LocalEventWaiter> {
         let entry = self
             .events
             .get(&handle.key())
@@ -275,12 +282,13 @@ impl LocalEventSystem {
             .ok_or_else(|| anyhow!("Unknown local event {}", handle))?;
 
         match entry.register_local_waiter(handle.generation())? {
-            WaitRegistration::Ready => Ok(()),
-            WaitRegistration::Poisoned(poison) => Err(anyhow!((*poison).clone())),
-            WaitRegistration::Pending(waiter) => {
-                let signal = waiter.wait().await;
-                signal.as_ref().as_result().map_err(anyhow::Error::new)
-            }
+            WaitRegistration::Ready => Ok(LocalEventWaiter::immediate(Arc::new(
+                CompletionKind::Triggered,
+            ))),
+            WaitRegistration::Poisoned(poison) => Ok(LocalEventWaiter::immediate(Arc::new(
+                CompletionKind::Poisoned(poison),
+            ))),
+            WaitRegistration::Pending(waiter) => Ok(waiter),
         }
     }
 

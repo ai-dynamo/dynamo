@@ -11,11 +11,12 @@ use dashmap::DashMap;
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use tokio::sync::Notify;
-use tokio_util::task::TaskTracker;
+use std::task::{Context, Poll, Waker};
 use tracing::{error, trace};
 
 /// Alias for event generation counters.
@@ -172,7 +173,7 @@ impl std::error::Error for EventPoison {}
 type PoisonArc = Arc<EventPoison>;
 
 #[derive(Clone, Debug)]
-enum CompletionKind {
+pub(crate) enum CompletionKind {
     Triggered,
     Poisoned(PoisonArc),
 }
@@ -185,26 +186,32 @@ impl CompletionKind {
         }
     }
 }
-
 #[derive(Clone)]
 struct ActiveSlot {
     state: Arc<ActiveSlotState>,
 }
 
-struct ActiveSlotState {
-    notify: Notify,
-    completion: ParkingMutex<Option<Arc<CompletionKind>>>,
+pub(crate) struct ActiveSlotState {
+    // Combine completion and wakers under a single lock to prevent lost wakeups
+    inner: ParkingMutex<SlotStateInner>,
     completed: AtomicBool,
     generation: AtomicU64,
     waiter_count: AtomicU32,
+}
+
+struct SlotStateInner {
+    completion: Option<Arc<CompletionKind>>,
+    wakers: Vec<Waker>,
 }
 
 impl ActiveSlot {
     fn new() -> Self {
         Self {
             state: Arc::new(ActiveSlotState {
-                notify: Notify::new(),
-                completion: ParkingMutex::new(None),
+                inner: ParkingMutex::new(SlotStateInner {
+                    completion: None,
+                    wakers: Vec::with_capacity(2), // Optimize for common case of 1-2 waiters
+                }),
                 completed: AtomicBool::new(false),
                 generation: AtomicU64::new(0),
                 waiter_count: AtomicU32::new(0),
@@ -212,14 +219,9 @@ impl ActiveSlot {
         }
     }
 
-    fn waiter(&self) -> LocalWaiter {
-        // Increment waiter count to prevent completion from being cleared
-        self.state.waiter_count.fetch_add(1, Ordering::AcqRel);
-        LocalWaiter {
-            state: Arc::clone(&self.state),
-            observed_generation: self.state.generation.load(Ordering::Acquire),
-            decremented: Arc::new(AtomicBool::new(false)),
-        }
+    fn waiter(&self) -> LocalEventWaiter {
+        let observed_generation = self.state.generation.load(Ordering::Acquire);
+        LocalEventWaiter::pending(Arc::clone(&self.state), observed_generation)
     }
 
     fn begin_generation(&self) -> u64 {
@@ -241,20 +243,16 @@ impl ActiveSlot {
 }
 
 impl ActiveSlotState {
-    fn clone_completion(&self) -> Option<Arc<CompletionKind>> {
-        let guard = self.completion.lock();
-        guard.as_ref().cloned()
-    }
-
     fn begin_generation(&self) -> u64 {
         let next = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.completed.store(false, Ordering::Release);
 
         // Only clear completion if no waiters are using it
-        // This prevents race where stale waiters try to observe completion after it's cleared
         if self.waiter_count.load(Ordering::Acquire) == 0 {
-            let mut guard = self.completion.lock();
-            guard.take();
+            let mut guard = self.inner.lock();
+            guard.completion = None;
+            // Retain capacity for next generation, but clear items
+            guard.wakers.clear();
         }
 
         next
@@ -268,77 +266,117 @@ impl ActiveSlotState {
         if self.completed.swap(true, Ordering::AcqRel) {
             return;
         }
-        {
-            let mut guard = self.completion.lock();
-            *guard = Some(value);
+
+        let wakers = {
+            let mut guard = self.inner.lock();
+            guard.completion = Some(value);
+            // Drain wakers to notify them outside the lock
+            std::mem::take(&mut guard.wakers)
+        };
+
+        for waker in wakers {
+            waker.wake();
         }
-        self.notify.notify_waiters();
     }
 }
 
-#[derive(Clone)]
-struct LocalWaiter {
-    state: Arc<ActiveSlotState>,
+/// Future that waits for an event to complete.
+///
+/// This can be used in `tokio::select!` and polled multiple times efficiently.
+/// The waiter creates a fresh notification registration on each poll to ensure
+/// proper wakeup semantics.
+pub struct LocalEventWaiter {
+    state: Option<Arc<ActiveSlotState>>,
     observed_generation: u64,
-    decremented: Arc<AtomicBool>,
+    immediate_result: Option<Arc<CompletionKind>>,
 }
 
-impl LocalWaiter {
-    async fn wait(self) -> Arc<CompletionKind> {
-        let result = self.wait_inner().await;
-
-        // Decrement waiter count after consuming completion (RAII-style)
-        if !self.decremented.swap(true, Ordering::AcqRel) {
-            self.state.waiter_count.fetch_sub(1, Ordering::AcqRel);
+impl LocalEventWaiter {
+    /// Creates a waiter that immediately resolves with the given result.
+    #[allow(private_interfaces)]
+    pub(crate) fn immediate(result: Arc<CompletionKind>) -> Self {
+        Self {
+            state: None,
+            observed_generation: 0,
+            immediate_result: Some(result),
         }
-
-        result
     }
 
-    async fn wait_inner(&self) -> Arc<CompletionKind> {
-        loop {
-            let current = self.state.generation.load(Ordering::Acquire);
-            if current != self.observed_generation {
-                // Stale waiter - generation advanced without us observing completion
-                if let Some(value) = self.state.clone_completion() {
-                    return value;
-                }
-                // If no completion exists for our generation, return error rather than
-                // waiting forever. This can occur if generation advanced without completing,
-                // which indicates a logic error in the caller.
-                return Arc::new(CompletionKind::Poisoned(Arc::new(EventPoison::new(
-                    EventHandle::from_raw(0), // Dummy handle - we don't have the real one
-                    format!(
-                        "generation expired: observed {}, current {}",
-                        self.observed_generation, current
-                    ),
-                ))));
-            } else if let Some(value) = self.state.clone_completion() {
-                return value;
+    /// Creates a waiter that will wait for completion from the active slot.
+    #[allow(private_interfaces)]
+    pub(crate) fn pending(state: Arc<ActiveSlotState>, observed_generation: u64) -> Self {
+        // Increment waiter count to prevent completion from being cleared
+        state.waiter_count.fetch_add(1, Ordering::AcqRel);
+        Self {
+            state: Some(state),
+            observed_generation,
+            immediate_result: None,
+        }
+    }
+}
+
+impl Future for LocalEventWaiter {
+    type Output = Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Check for immediate result first
+        if let Some(result) = &self.immediate_result {
+            return Poll::Ready(result.as_ref().as_result().map_err(anyhow::Error::new));
+        }
+
+        let state = self
+            .state
+            .as_ref()
+            .expect("LocalEventWaiter with no state or immediate_result");
+
+        // Acquire lock to check completion and register waker atomically
+        let mut inner = state.inner.lock();
+        let current = state.generation.load(Ordering::Acquire);
+
+        // 1. Check generation freshness
+        if current != self.observed_generation {
+            if let Some(value) = &inner.completion {
+                return Poll::Ready(value.as_ref().as_result().map_err(anyhow::Error::new));
             }
-            // Lost-wakeup prevention: tokio::Notify guarantees that if we check
-            // completion, then call notified(), we won't miss a notification that
-            // happens between the check and the await. This is safe because:
-            // 1. We check completion state before awaiting
-            // 2. notified() is created before the await point
-            // 3. Any notify_waiters() after notified() creation will wake us
-            self.state.notify.notified().await;
+            return Poll::Ready(Err(anyhow!(EventPoison::new(
+                EventHandle::from_raw(0),
+                format!(
+                    "generation expired: observed {}, current {}",
+                    self.observed_generation, current
+                ),
+            ))));
         }
+
+        // 2. Check for completion
+        if let Some(value) = &inner.completion {
+            return Poll::Ready(value.as_ref().as_result().map_err(anyhow::Error::new));
+        }
+
+        // 3. Register waker with deduplication
+        // This is critical for performance in select! loops
+        let waker = cx.waker();
+        if let Some(existing) = inner.wakers.iter_mut().find(|w| w.will_wake(waker)) {
+            // Update existing waker in case the task moved to a different thread
+            existing.clone_from(waker);
+        } else {
+            inner.wakers.push(waker.clone());
+        }
+
+        Poll::Pending
     }
 }
 
-impl Drop for LocalWaiter {
+impl Drop for LocalEventWaiter {
     fn drop(&mut self) {
-        // Ensure we decrement exactly once, even if wait() was never called or panicked
-        if !self.decremented.swap(true, Ordering::AcqRel) {
-            self.state.waiter_count.fetch_sub(1, Ordering::AcqRel);
+        if let Some(state) = &self.state {
+            state.waiter_count.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
 
 enum WaitRegistration {
     Ready,
-    Pending(LocalWaiter),
+    Pending(LocalEventWaiter),
     Poisoned(PoisonArc),
 }
 
@@ -599,7 +637,7 @@ mod tests {
 
         let waiter = {
             let system = Arc::clone(&system);
-            tokio::spawn(async move { system.wait(handle).await })
+            tokio::spawn(async move { system.awaiter(handle)?.await })
         };
 
         yield_now().await;
@@ -615,7 +653,7 @@ mod tests {
         let handle = event.handle();
 
         event.trigger()?;
-        system.wait(handle).await?;
+        system.awaiter(handle)?.await?;
         Ok(())
     }
 
@@ -626,7 +664,7 @@ mod tests {
         let handle = event.handle();
 
         system.poison(handle, "boom")?;
-        let err = system.wait(handle).await.unwrap_err();
+        let err = system.awaiter(handle)?.await.unwrap_err();
         let poison = err.downcast::<EventPoison>().unwrap();
         assert_eq!(poison.reason(), "boom");
         Ok(())
@@ -641,7 +679,7 @@ mod tests {
         let generation = handle.generation();
 
         event.trigger()?;
-        system.wait(handle).await?;
+        system.awaiter(handle)?.await?;
 
         let next = system.new_event()?;
         let next_handle = next.handle();
@@ -659,7 +697,9 @@ mod tests {
         let mut waiters = Vec::new();
         for _ in 0..8 {
             let system_clone = Arc::clone(&system);
-            waiters.push(tokio::spawn(async move { system_clone.wait(handle).await }));
+            waiters.push(tokio::spawn(
+                async move { system_clone.awaiter(handle)?.await },
+            ));
         }
 
         yield_now().await;
@@ -681,7 +721,7 @@ mod tests {
         first.trigger()?;
         second.trigger()?;
 
-        system.wait(merged).await?;
+        system.awaiter(merged)?.await?;
         Ok(())
     }
 
@@ -696,7 +736,7 @@ mod tests {
         system.poison(first.handle(), "first failed")?;
         system.poison(second.handle(), "second failed")?;
 
-        let err = system.wait(merged).await.unwrap_err();
+        let err = system.awaiter(merged)?.await.unwrap_err();
         let poison = err.downcast::<EventPoison>().unwrap();
         assert!(poison.reason().contains("first failed"));
         assert!(poison.reason().contains("second failed"));
@@ -711,7 +751,7 @@ mod tests {
 
         let waiter = {
             let system = system.clone();
-            tokio::spawn(async move { system.wait(handle).await })
+            tokio::spawn(async move { system.awaiter(handle)?.await })
         };
 
         yield_now().await;
@@ -735,7 +775,7 @@ mod tests {
         };
         assert!(err.to_string().contains("shutdown"));
 
-        let err = system.wait(event.handle()).await.unwrap_err();
+        let err = system.awaiter(event.handle())?.await.unwrap_err();
         assert!(err.downcast::<EventPoison>().is_ok());
         Ok(())
     }

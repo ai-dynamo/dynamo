@@ -14,8 +14,7 @@ pub use agent::NixlAgent;
 pub use config::NixlBackendConfig;
 
 pub use nixl_sys::{
-    Agent, MemType, NotificationMap, OptArgs, RegistrationHandle, XferDescList, XferOp,
-    XferRequest,
+    Agent, MemType, NotificationMap, OptArgs, RegistrationHandle, XferDescList, XferOp, XferRequest,
 };
 pub use serde::{Deserialize, Serialize};
 
