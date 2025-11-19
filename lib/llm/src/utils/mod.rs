@@ -4,4 +4,5 @@
 pub mod lora;
 pub mod prefix_matcher;
 
+pub use lora::lora_name_to_id;
 pub use prefix_matcher::{MarkerMatcher, MatchResult};

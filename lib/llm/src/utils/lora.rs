@@ -24,11 +24,9 @@ mod tests {
 
     #[test]
     fn test_lora_name_to_id() {
-        // Test that function returns a valid ID
         let id = lora_name_to_id("test_lora");
-        assert!(id > 0);
+        assert!(1 <= id && id <= 0x7FFFFFFF as i32);
 
-        // Test determinism
         let id1 = lora_name_to_id("test_lora");
         let id2 = lora_name_to_id("test_lora");
         assert_eq!(id1, id2);
