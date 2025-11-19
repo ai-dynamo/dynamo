@@ -212,11 +212,11 @@ RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.3 setuptool
         python3 -m pip install https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sgl_kernel-${SGL_KERNEL_VERSION}+cu130-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps \
     ; \
     else \
-        python3 -m pip install --no-cache-dir sgl-kernel==${SGL_KERNEL_VERSION} \
+        python3 -m pip install --no-cache-dir sgl-kernel==${SGL_KERNEL_VERSION} ; \
     fi\
     && python3 -m pip install --no-cache-dir -e "python[${BUILD_TYPE}]" --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} \
     && python3 -m pip install --no-cache-dir nvidia-nccl-cu${CUDA_VERSION_MAJOR}==${NVIDIA_NCCL_VERVSION} --force-reinstall --no-deps \
-    && if [ "$CUDA_VERSION" = "13.0.1" ]; then \
+    && if [ "$CUDA_VERSION" = "13.0.1" ] ; then \
         python3 -m pip uninstall -y torch torchaudio torchvision ; \
         python3 -m pip install torch==2.9.0 torchaudio==2.9.0 torchvision --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} ; \
     fi \
@@ -224,10 +224,10 @@ RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.3 setuptool
 
 # Download and extract NVSHMEM source, clone DeepEP (use Tom's fork for GB200)
 RUN --mount=type=cache,target=/var/cache/curl,uid=1000,gid=0 \
-    curl --retry 3 --retry-delay 2 -fsSL -o /var/cache/curl/nvshmem_src_cuda13-all-all-${NVSHMEM_VERSION}.tar.gz https://developer.download.nvidia.com/compute/redist/nvshmem/${NVSHMEM_VERSION}/source/nvshmem_src_cuda13-all-all-${NVSHMEM_VERSION}.tar.gz \
-    && tar -xf /var/cache/curl/nvshmem_src_cuda13-all-all-${NVSHMEM_VERSION}.tar.gz \
+    curl --retry 3 --retry-delay 2 -fsSL -o /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz https://developer.download.nvidia.com/compute/redist/nvshmem/${NVSHMEM_VERSION}/source/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
+    && tar -xf /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
     && mv nvshmem_src nvshmem \
-    && rm -f /var/cache/curl/nvshmem_src_cuda13-all-all-${NVSHMEM_VERSION}.tar.gz \
+    && rm -f /var/cache/curl/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
     && if [ "$GRACE_BLACKWELL" = true ]; then \
         git clone --depth 1 https://github.com/fzyzcjy/DeepEP.git \
         && cd DeepEP \
@@ -283,6 +283,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     cd /sgl-workspace/DeepEP && \
+    if [ "${CUDA_VERSION%%.*}" = "13" ] ; then \
+      sed -i "/^    include_dirs = \['csrc\/'\]/a\    include_dirs.append('${CUDA_HOME}/include/cccl')" setup.py ; \
+    fi && \
     NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install --no-build-isolation .
 
 # Copy rust installation from dynamo_base to avoid duplication efforts
