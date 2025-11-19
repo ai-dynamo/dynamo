@@ -407,7 +407,8 @@ RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
-        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
+        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1) && \
+        if [ -n "$KVBM_WHEEL" ]; then uv pip install "$KVBM_WHEEL"; fi; \
     fi \
     && cd /workspace/benchmarks \
     && UV_GIT_LFS=1 uv pip install --no-cache .

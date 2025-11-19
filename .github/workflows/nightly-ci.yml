@@ -44,6 +44,7 @@ jobs:
           target: dev
           platform: linux/amd64
           base_image_tag: ${{ env.BASE_IMAGE_TAG }}
+          enable_kvbm: 'true'
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -89,6 +90,7 @@ jobs:
           target: dev
           platform: linux/arm64
           base_image_tag: ${{ env.BASE_IMAGE_TAG }}
+          enable_kvbm: 'true'
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -121,7 +123,7 @@ jobs:
   build-vllm-amd64:
     name: Build vLLM (amd64)
     needs: build-base-amd64
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: cpu-amd-m5-4xlarge
     timeout-minutes: 90
     env:
       FRAMEWORK: vllm
@@ -243,7 +245,7 @@ jobs:
   build-trtllm-amd64:
     name: Build TRTLLM (amd64)
     needs: build-base-amd64
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: cpu-amd-m5-4xlarge
     timeout-minutes: 90
     env:
       FRAMEWORK: trtllm
@@ -355,7 +357,7 @@ jobs:
   build-sglang-amd64:
     name: Build SGLang (amd64)
     needs: build-base-amd64
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: cpu-amd-m5-4xlarge
     timeout-minutes: 90
     env:
       FRAMEWORK: sglang
