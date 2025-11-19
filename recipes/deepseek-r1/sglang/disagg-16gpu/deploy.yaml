@@ -6,8 +6,11 @@ kind: DynamoGraphDeployment
 metadata:
   name: sgl-dsr1-16gpu
 spec:
+  envs:
+    - name: HF_HOME
+      value: /opt/model
   pvcs:
-    - name: model-cache-pvc
+    - name: model-cache
       create: false
   services:
     Frontend:
@@ -16,13 +19,6 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            periodSeconds: 10
-            timeoutSeconds: 1800
-            failureThreshold: 60
           image: my-registry/sglang-runtime:my-tag
     decode:
       dynamoNamespace: sgl-dsr1-16gpu
@@ -34,19 +30,12 @@ spec:
         limits:
           gpu: "8"
       volumeMounts:
-        - name: model-cache-pvc
-          mountPoint: /model-cache
+        - name: model-cache
+          mountPoint: /opt/model
       sharedMemory:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            timeoutSeconds: 10
-            failureThreshold: 600
           image: my-registry/sglang-runtime:my-tag
           workingDir: /sgl-workspace/dynamo
           command:
@@ -55,7 +44,7 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - /model-cache/deepseek-r1
+            - deepseek-ai/DeepSeek-R1
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --tp
@@ -86,19 +75,12 @@ spec:
         limits:
           gpu: "8"
       volumeMounts:
-        - name: model-cache-pvc
-          mountPoint: /model-cache
+        - name: model-cache
+          mountPoint: /opt/model
       sharedMemory:
         size: 80Gi
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            timeoutSeconds: 10
-            failureThreshold: 600
           image: my-registry/sglang-runtime:my-tag
           workingDir: /sgl-workspace/dynamo
           command:
@@ -107,7 +89,7 @@ spec:
             - dynamo.sglang
           args:
             - --model-path
-            - /model-cache/deepseek-r1
+            - deepseek-ai/DeepSeek-R1
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --tp
