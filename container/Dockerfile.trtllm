@@ -335,7 +335,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
+        --requirement /tmp/requirements.test.txt \
+        cupy-cuda13x
 
 # Copy tests, benchmarks, deploy and components for CI with correct ownership
 COPY --chown=dynamo: tests /workspace/tests
