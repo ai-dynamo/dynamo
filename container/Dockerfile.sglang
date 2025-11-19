@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG CUDA_VERSION=13.0.1
+ARG CUDA_VERSION=12.9.1
 
 # Runtime image and build-time configuration (aligned with other backends)
 # TODO: OPS-<number>: Use the same runtime image as the other backends
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="${CUDA_VERSION}-cudnn-runtime-ubuntu24.04"
+ARG RUNTIME_IMAGE_TAG="12.9.1-cudnn-runtime-ubuntu24.04"
 
 ARG PYTHON_VERSION=3.10
 ARG ARCH=amd64
@@ -48,9 +48,8 @@ ARG DEEPEP_GB_COMMIT=1b14ad661c7640137fcfe93cccb2694ede1220b0
 ARG CMAKE_BUILD_PARALLEL_LEVEL=2
 ARG SGL_KERNEL_VERSION=0.3.16.post5
 ARG SGLANG_COMMIT=0.5.4.post3
-ARG GDRCOPY_COMMIT=v2.5.1
-ARG NVSHMEM_VERSION=3.4.5
-ARG NVIDIA_NCCL_VERVSION=2.28.3
+ARG GDRCOPY_COMMIT=v2.4.4
+ARG NVSHMEM_VERSION=3.3.9
 ARG GRACE_BLACKWELL=false
 ARG ARCH
 ARG ARCH_ALT
@@ -203,23 +202,13 @@ RUN python3 -m pip install --no-cache-dir --ignore-installed pip==25.3 setuptool
     && git clone --depth 1 --branch v${SGLANG_COMMIT} https://github.com/sgl-project/sglang.git \
     && cd sglang \
     && case "$CUDA_VERSION" in \
-        12.8.1) CUINDEX=128 CUDA_VERSION_MAJOR=12;; \
-        12.9.1) CUINDEX=129 CUDA_VERSION_MAJOR=12;; \
-        13.0.1) CUINDEX=130 CUDA_VERSION_MAJOR=13;; \
-        *) echo "Error: Unsupported CUDA version for sglang: $CUDA_VERSION (requires 12.8.1 or 12.9.1 or 13.0.1)" && exit 1 ;; \
+        12.8.1) CUINDEX=128 ;; \
+        12.9.1) CUINDEX=129 ;; \
+        *) echo "Error: Unsupported CUDA version for sglang: $CUDA_VERSION (requires 12.8.1 or 12.9.1)" && exit 1 ;; \
     esac \
-    && if [ "$CUDA_VERSION" = "13.0.1" ]; then \
-        python3 -m pip install https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sgl_kernel-${SGL_KERNEL_VERSION}+cu130-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps \
-    ; \
-    else \
-        python3 -m pip install --no-cache-dir sgl-kernel==${SGL_KERNEL_VERSION} ; \
-    fi\
+    && python3 -m pip install --no-cache-dir sgl-kernel==${SGL_KERNEL_VERSION} \
     && python3 -m pip install --no-cache-dir -e "python[${BUILD_TYPE}]" --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} \
-    && python3 -m pip install --no-cache-dir nvidia-nccl-cu${CUDA_VERSION_MAJOR}==${NVIDIA_NCCL_VERVSION} --force-reinstall --no-deps \
-    && if [ "$CUDA_VERSION" = "13.0.1" ] ; then \
-        python3 -m pip uninstall -y torch torchaudio torchvision ; \
-        python3 -m pip install torch==2.9.0 torchaudio==2.9.0 torchvision --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} ; \
-    fi \
+    && python3 -m pip install --no-cache-dir nvidia-nccl-cu12==2.27.6 --force-reinstall --no-deps \
     && FLASHINFER_LOGGING_LEVEL=warning python3 -m flashinfer --download-cubin
 
 # Download and extract NVSHMEM source, clone DeepEP (use Tom's fork for GB200)
@@ -275,7 +264,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
     NVSHMEM_USE_GDRCOPY=1 \
     cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} -DNVSHMEM_BUILD_PYTHON_LIB=ON && \
-    cmake --build build --target build_nvshmem4py_wheel_cu13_${PYTHON_VERSION} -j${CMAKE_BUILD_PARALLEL_LEVEL} && \
+    cmake --build build --target build_nvshmem4py_wheel_cu12_${PYTHON_VERSION} -j${CMAKE_BUILD_PARALLEL_LEVEL} && \
     /tmp/use-sccache.sh show-stats "NVSHMEM4PY"
 
 # Install DeepEP
@@ -283,9 +272,6 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
     cd /sgl-workspace/DeepEP && \
-    if [ "${CUDA_VERSION%%.*}" = "13" ] ; then \
-      sed -i "/^    include_dirs = \['csrc\/'\]/a\    include_dirs.append('${CUDA_HOME}/include/cccl')" setup.py ; \
-    fi && \
     NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install --no-build-isolation .
 
 # Copy rust installation from dynamo_base to avoid duplication efforts
@@ -360,7 +346,7 @@ COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/whee
 RUN python3 -m pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    nixl[cu13]==0.7.1 \
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
     && cd /opt/dynamo/benchmarks \
     && python3 -m pip install --no-cache . \
     && cd - \
