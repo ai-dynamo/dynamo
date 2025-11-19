@@ -326,7 +326,6 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     Instantiate and serve
     """
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
@@ -339,7 +338,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     ) = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
-        runtime, component, engine_client, default_sampling_params
+        runtime,
+        component,
+        engine_client,
+        default_sampling_params,
+        getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -423,7 +426,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     """
 
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
@@ -450,6 +452,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         component,
         engine_client,
         default_sampling_params,
+        getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -553,7 +556,6 @@ def get_engine_cache_info(engine: AsyncLLM):
 async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
     """Initialize multimodal processor component"""
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
 
@@ -605,7 +607,6 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
 async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Config):
     """Initialize multimodal encode worker component"""
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
 
@@ -652,7 +653,6 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     Both can operate in aggregated (P+D) or disaggregated (P→D) mode.
     """
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")

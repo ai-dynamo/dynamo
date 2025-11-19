@@ -198,6 +198,9 @@ pub trait Discovery: Send + Sync {
     /// Registers an object in the discovery plane with the instance id
     async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance>;
 
+    /// Unregisters an instance from the discovery plane
+    async fn unregister(&self, instance: DiscoveryInstance) -> Result<()>;
+
     /// Returns a list of currently registered instances for the given discovery query
     /// This is a one-time snapshot without watching for changes
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>>;

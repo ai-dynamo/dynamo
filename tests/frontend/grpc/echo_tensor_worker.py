@@ -16,7 +16,6 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 @dynamo_worker()
 async def echo_tensor_worker(runtime: DistributedRuntime):
     component = runtime.namespace("tensor").component("echo")
-    await component.create_service()
 
     endpoint = component.endpoint("generate")
 

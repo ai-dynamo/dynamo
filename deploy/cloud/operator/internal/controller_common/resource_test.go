@@ -21,8 +21,11 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/bsm/gomega"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -473,4 +476,59 @@ func TestCopySpec(t *testing.T) {
 
 	g := gomega.NewGomegaWithT(t)
 	g.Expect(dst).To(gomega.Equal(expected))
+}
+
+func TestGetResourcesConfig(t *testing.T) {
+	tests := []struct {
+		name             string
+		resources        *v1alpha1.Resources
+		expectedGPULimit corev1.ResourceName
+		expectedGPUValue string
+		expectError      bool
+	}{
+		{
+			name: "limits.gpu defined with no gpuType",
+			resources: &v1alpha1.Resources{
+				Limits: &v1alpha1.ResourceItem{
+					GPU: "4",
+				},
+			},
+			expectedGPULimit: corev1.ResourceName(consts.KubeResourceGPUNvidia),
+			expectedGPUValue: "4",
+			expectError:      false,
+		},
+		{
+			name: "limits.gpu defined with custom gpuType",
+			resources: &v1alpha1.Resources{
+				Limits: &v1alpha1.ResourceItem{
+					GPU:     "8",
+					GPUType: "gpu.custom-type.com/test",
+				},
+			},
+			expectedGPULimit: corev1.ResourceName("gpu.custom-type.com/test"),
+			expectedGPUValue: "8",
+			expectError:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			result, err := GetResourcesConfig(tt.resources)
+
+			if tt.expectError {
+				g.Expect(err).To(gomega.HaveOccurred())
+				return
+			}
+
+			g.Expect(err).To(gomega.BeNil())
+			g.Expect(result).ToNot(gomega.BeNil())
+			g.Expect(result.Limits).ToNot(gomega.BeNil())
+
+			gpuQuantity, exists := result.Limits[tt.expectedGPULimit]
+			g.Expect(exists).To(gomega.BeTrue(), "GPU resource %s should exist in limits", tt.expectedGPULimit)
+			g.Expect(gpuQuantity.String()).To(gomega.Equal(tt.expectedGPUValue))
+		})
+	}
 }

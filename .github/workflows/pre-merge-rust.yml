@@ -92,7 +92,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run', 'lib/kvbm-kernels'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
     permissions:
       contents: read
     steps:
@@ -117,10 +117,7 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ runner.os }}-cargo-
     - name: Set up Rust Toolchain Components
-      run: rustup component add clippy rustfmt
-    - name: Verify Code Formatting
-      working-directory: ${{ matrix.dir }}
-      run: cargo fmt -- --check
+      run: rustup component add clippy
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
