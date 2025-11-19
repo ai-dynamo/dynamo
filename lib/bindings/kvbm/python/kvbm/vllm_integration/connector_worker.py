@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
+import functools
 # Keeping this import is important because it runs the code in nixl’s __init__.py
 # to set up the Nixl plugin path when there is no pre-defined NIXL_PLUGIN_DIR
 import nixl  # noqa: F401
@@ -44,6 +45,15 @@ class DynamoConnectorMetadata(KVConnectorMetadata):
         assert isinstance(metadata, bytes)
         self.metadata = metadata
 
+def requires_metadata(return_value=lambda: None):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if not self.bound:
+                return return_value()
+            return func(self, *args, **kwargs)
+        return wrapper
+    return decorator
 
 class KvConnectorWorker:
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
@@ -58,6 +68,7 @@ class KvConnectorWorker:
 
         self.vllm_config = vllm_config
         self._connector = RustKvConnectorWorker(self.drt, engine_id)
+        self.bound = False
 
     # Worker
 
@@ -138,8 +149,13 @@ class KvConnectorWorker:
         Args:
             connector_metadata (dict): the connector metadata.
         """
+        self.bound = True
+        if len(data) == 0:
+            self.bound = False
+            return
         self._connector.bind_connector_metadata(data)
 
+    @requires_metadata()
     def clear_connector_metadata(self) -> None:
         """Clear the connector metadata.
 
@@ -148,6 +164,7 @@ class KvConnectorWorker:
         """
         self._connector.clear_connector_metadata()
 
+    @requires_metadata()
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
@@ -164,7 +181,8 @@ class KvConnectorWorker:
 
         """
         pass
-
+    
+    @requires_metadata()
     def save_kv_layer(
         self,
         layer_name: str,
@@ -187,6 +205,7 @@ class KvConnectorWorker:
         self.events[layer_name].record(torch.cuda.current_stream())
         self._connector.save_kv_layer(layer_name, kv_layer)
 
+    @requires_metadata(return_value=lambda: (set(), set()))
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:

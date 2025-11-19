@@ -7,6 +7,9 @@ Implementation of vLLM KV cache manager protocol.
 
 from __future__ import annotations
 
+import os
+import functools
+from threading import Thread
 from typing import TYPE_CHECKING, Any, Optional
 
 from vllm.config import VllmConfig
@@ -39,6 +42,17 @@ if is_dyn_runtime_enabled():
     from dynamo.runtime import DistributedRuntime
 
 
+def requires_connector_init_complete(return_value=lambda: None):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if not hasattr(self, "_connector"):
+                return return_value()
+            print("FUNCTION CALL", func.__name__, flush=True)
+            return func(self, *args, **kwargs)
+        return wrapper
+    return decorator
+
 class DynamoConnectorMetadata(KVConnectorMetadata):
     def __init__(self, metadata: bytes):
         assert isinstance(metadata, bytes)
@@ -64,55 +78,17 @@ class KvConnectorLeader:
 
         self.drt = drt
         self.vllm_config = vllm_config
-        world_size = vllm_config.parallel_config.world_size
-
-        leader = KvbmLeader(world_size, drt=self.drt)
 
         print(f"KvConnectorLeader initialized with engine_id: {engine_id}")
-        # Get kv event consolidator endpoints from vllm_config (pre-computed in main.py)
-        consolidator_vllm_endpoint = None
-        consolidator_output_endpoint = None
-        self._consolidator_output_port = None
-
-        if (
-            hasattr(vllm_config, "consolidator_endpoints")
-            and vllm_config.consolidator_endpoints
-        ):
-            # Unpack all three endpoints
-            # [0]: vllm_endpoint (for consolidator to subscribe to vLLM)
-            # [1]: output_bind_endpoint (for consolidator to bind/publish)
-            # [2]: output_connect_endpoint (for clients to connect)
-            (
-                consolidator_vllm_endpoint,
-                consolidator_output_endpoint,
-                _consolidator_output_connect_endpoint,  # Not needed here
-            ) = vllm_config.consolidator_endpoints
-            self._consolidator_output_port = int(
-                consolidator_output_endpoint.split(":")[-1]
-            )
-
-            # Pass endpoints to Rust
-            self._connector = RustKvConnectorLeader(
-                engine_id,
-                self.drt,
-                vllm_config.cache_config.block_size,
-                leader,
-                consolidator_vllm_endpoint=consolidator_vllm_endpoint,
-                consolidator_output_endpoint=consolidator_output_endpoint,
-            )
+        if os.environ.get("DYN_KVBM_INIT_ASYNC", "0") == "1":
+            print("Creating KVBM connector asynchronously...")
+            Thread(target=lambda vllm_config, engine_id: self._create_connector(vllm_config, engine_id), args=(vllm_config, engine_id)).start()
         else:
-            # No kv event consolidator - pass None to Rust
-            self._connector = RustKvConnectorLeader(
-                engine_id,
-                self.drt,
-                vllm_config.cache_config.block_size,
-                leader,
-                consolidator_vllm_endpoint=None,
-                consolidator_output_endpoint=None,
-            )
+            self._create_connector(vllm_config, engine_id)
+        print("Done creating rust leader...")
 
     # KV Connector
-
+    @requires_connector_init_complete(return_value=lambda: (0, False))
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -141,6 +117,7 @@ class KvConnectorLeader:
             num_computed_tokens,
         )
 
+    @requires_connector_init_complete()
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
@@ -149,6 +126,7 @@ class KvConnectorLeader:
             request.request_id, block_ids, num_external_tokens
         )
 
+    @requires_connector_init_complete(return_value=lambda: bytes())
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
         """
         Build the connector metadata for this step.
@@ -208,6 +186,7 @@ class KvConnectorLeader:
 
         return self._connector.build_connector_metadata(output)
 
+    @requires_connector_init_complete(return_value=lambda: (False, dict()))
     def request_finished(
         self,
         request: "Request",
@@ -230,6 +209,7 @@ class KvConnectorLeader:
 
     # Utility functions
 
+    @requires_connector_init_complete()
     def _create_slot(self, request: Request) -> None:
         """Create a slot for the request"""
 
@@ -253,3 +233,51 @@ class KvConnectorLeader:
         )
 
         self._connector.create_slot(request, all_token_ids)
+    
+    def _create_connector(self, vllm_config: "VllmConfig", engine_id: str):
+        world_size = vllm_config.parallel_config.world_size
+        leader = KvbmLeader(world_size, drt=self.drt)
+        print("created leader!")
+
+        # Get kv event consolidator endpoints from vllm_config (pre-computed in main.py)
+        consolidator_vllm_endpoint = None
+        consolidator_output_endpoint = None
+        self._consolidator_output_port = None
+
+        if (
+            hasattr(vllm_config, "consolidator_endpoints")
+            and vllm_config.consolidator_endpoints
+        ):
+            # Unpack all three endpoints
+            # [0]: vllm_endpoint (for consolidator to subscribe to vLLM)
+            # [1]: output_bind_endpoint (for consolidator to bind/publish)
+            # [2]: output_connect_endpoint (for clients to connect)
+            (
+                consolidator_vllm_endpoint,
+                consolidator_output_endpoint,
+                _consolidator_output_connect_endpoint,  # Not needed here
+            ) = vllm_config.consolidator_endpoints
+            self._consolidator_output_port = int(
+                consolidator_output_endpoint.split(":")[-1]
+            )
+
+            # Pass endpoints to Rust
+            self._connector = RustKvConnectorLeader(
+                engine_id,
+                self.drt,
+                vllm_config.cache_config.block_size,
+                leader,
+                consolidator_vllm_endpoint=consolidator_vllm_endpoint,
+                consolidator_output_endpoint=consolidator_output_endpoint,
+            )
+        else:
+            # No kv event consolidator - pass None to Rust
+            self._connector = RustKvConnectorLeader(
+                engine_id,
+                self.drt,
+                vllm_config.cache_config.block_size,
+                leader,
+                consolidator_vllm_endpoint=None,
+                consolidator_output_endpoint=None,
+            )
+

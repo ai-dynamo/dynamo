@@ -183,7 +183,7 @@ impl PinnedStorage {
         unsafe {
             ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
-            let async_alloc = std::env::var("DYN_KVBM_PINNED_ALLOC_ASYNC")
+            let async_alloc = std::env::var("DYN_KVBM_INIT_ASYNC")
                 .map(|v| v == "1")
                 .unwrap_or(false);
 
@@ -217,41 +217,46 @@ impl PinnedStorage {
                         ));
                     }
                     let ptr_addr = ptr as usize;
-                    std::thread::spawn(move || {
-                        const CHUNK_SIZE: usize = 1024 * 1024 * 64; // 64MB chunks
-                        tracing::info!("Beginning asynchronous pinned memory registration. Performance instability may be observed.");
-                        let ptr = ptr_addr as *mut u8;
-                        for chunk_num in 0..size / CHUNK_SIZE {
-                            let offset = chunk_num * CHUNK_SIZE;
+                    const CHUNK_SIZE: usize = 1024 * 1024 * 64; // 64MB chunks
+                    tracing::info!(
+                        "Beginning chunked pinned memory registration. Performance instability may be observed."
+                    );
+                    let ptr = ptr_addr as *mut u8;
+                    for chunk_num in 0..size / CHUNK_SIZE {
+                        let offset = chunk_num * CHUNK_SIZE;
 
-                            if mlock(ptr.byte_add(offset) as *mut c_void, std::cmp::min(size - offset, CHUNK_SIZE)) != 0 {
-                                tracing::error!("Failed to lock pinned memory. KVBM will fallback to synchronous transfer.");
-                                return;
-                            }
-
-                            let start_time = std::time::Instant::now();
-                            if cudaHostRegister(
-                                ptr.byte_add(offset) as *mut c_void,
-                                std::cmp::min(size - offset, CHUNK_SIZE),
-                                0,
-                            ) != cudaError::cudaSuccess
-                            {
-                                tracing::error!(
-                                    "Pinned memory registration failed. KVBM will fallback to synchronous transfer."
-                                );
-                                return;
-                            } else {
-                                let duration = start_time.elapsed();
-                                tracing::debug!(
-                                    "Finished pinning chunk {} of {} in {:?}",
-                                    chunk_num,
-                                    size / CHUNK_SIZE,
-                                    duration
-                                );
-                            }
+                        if mlock(
+                            ptr.byte_add(offset) as *mut c_void,
+                            std::cmp::min(size - offset, CHUNK_SIZE),
+                        ) != 0
+                        {
+                            return Err(StorageError::OperationFailed(
+                                "Failed to lock pinned memory. KVBM will fallback to synchronous transfer.".into(),
+                            ));
                         }
-                        tracing::info!("Finished pinning all chunks");
-                    });
+
+                        let start_time = std::time::Instant::now();
+                        if cudaHostRegister(
+                            ptr.byte_add(offset) as *mut c_void,
+                            std::cmp::min(size - offset, CHUNK_SIZE),
+                            0,
+                        ) != cudaError::cudaSuccess
+                        {
+                            return Err(StorageError::OperationFailed(
+                                "Failed to register pinned memory.".into(),
+                            ));
+                        } else {
+                            let duration = start_time.elapsed();
+                            tracing::debug!(
+                                "Finished pinning chunk {} of {} in {:?}",
+                                chunk_num,
+                                size / CHUNK_SIZE,
+                                duration
+                            );
+                        }
+                    }
+                    tracing::info!("Finished pinning all chunks");
+
                     ptr as *mut u8
                 } else {
                     cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)

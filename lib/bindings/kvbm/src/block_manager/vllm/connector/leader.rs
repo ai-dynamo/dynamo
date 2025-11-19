@@ -564,6 +564,7 @@ impl PyKvConnectorLeader {
     #[new]
     #[pyo3(signature = (worker_id, drt, page_size, leader, consolidator_vllm_endpoint=None, consolidator_output_endpoint=None))]
     pub fn new(
+        py: Python,
         worker_id: String,
         drt: Option<PyObject>,
         page_size: usize,
@@ -580,23 +581,25 @@ impl PyKvConnectorLeader {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-        let connector_leader: Box<dyn Leader> = if enable_kvbm_record {
-            Box::new(recorder::KvConnectorLeaderRecorder::new(
-                worker_id,
-                page_size,
-                leader,
-                consolidator_vllm_endpoint,
-                consolidator_output_endpoint,
-            ))
-        } else {
-            Box::new(KvConnectorLeader::new(
-                worker_id,
-                page_size,
-                leader,
-                consolidator_vllm_endpoint,
-                consolidator_output_endpoint,
-            ))
-        };
+        let connector_leader = py.allow_threads(|| -> Box<dyn Leader> {
+            if enable_kvbm_record {
+                Box::new(recorder::KvConnectorLeaderRecorder::new(
+                    worker_id,
+                    page_size,
+                    leader,
+                    consolidator_vllm_endpoint,
+                    consolidator_output_endpoint,
+                ))
+            } else {
+                Box::new(KvConnectorLeader::new(
+                    worker_id,
+                    page_size,
+                    leader,
+                    consolidator_vllm_endpoint,
+                    consolidator_output_endpoint,
+                ))
+            }
+        });
         Ok(Self { connector_leader })
     }
 
