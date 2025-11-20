@@ -174,7 +174,7 @@ runs:
 
         # Create job-specific metrics file
         mkdir -p build-metrics
-        METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${{ github.run_id }}.json"
+        METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${{ github.run_id }}-${{ job.check_run_id }}.json"
 
         # Create the job metrics file directly
         cat > "$METRICS_FILE" << EOF
