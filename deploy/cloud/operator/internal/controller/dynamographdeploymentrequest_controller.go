@@ -20,7 +20,6 @@ package controller
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"text/template"
@@ -48,6 +47,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
+	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook/validation"
 )
 
 const (
@@ -798,22 +798,26 @@ func isOnlineProfiling(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) boo
 
 // validateSpec validates the DGDR spec
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
-	// Validate profiler image is specified in the new location
-	if dgdr.Spec.ProfilingConfig.ProfilerImage == "" {
-		return errors.New("profilingConfig.profilerImage is required")
-	}
+	// Use the validator for simple validation (defense in depth - only when webhooks are disabled)
+	if !r.Config.WebhooksEnabled {
+		isClusterWide := r.Config.RestrictedNamespace == ""
+		validator := webhookvalidation.NewDynamoGraphDeploymentRequestValidator(dgdr, isClusterWide)
+		warnings, err := validator.Validate()
+		if err != nil {
+			return err
+		}
 
-	// Basic validation - check that profilingConfig.config is provided
-	if dgdr.Spec.ProfilingConfig.Config == nil || len(dgdr.Spec.ProfilingConfig.Config.Raw) == 0 {
-		return errors.New("profilingConfig.config is required and must not be empty")
-	}
-
-	// Validate enableGpuDiscovery is only true for cluster-wide operators
-	if dgdr.Spec.EnableGpuDiscovery && r.Config.RestrictedNamespace != "" {
-		return errors.New("enableGpuDiscovery can only be set to true for cluster-wide operators. Namespace-restricted operators cannot access cluster nodes for GPU discovery. Please set enableGpuDiscovery to false and provide hardware configuration (hardware.min_num_gpus_per_engine, hardware.max_num_gpus_per_engine, hardware.num_gpus_per_node) in profilingConfig.config")
+		// Log warnings if any
+		if len(warnings) > 0 {
+			logger := log.FromContext(ctx)
+			for _, warning := range warnings {
+				logger.Info("Validation warning", "warning", warning)
+			}
+		}
 	}
 
 	// Validate ConfigMap if provided (for the DGD base config)
+	// This requires cluster access and cannot be done in the stateless validator
 	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
 		cm := &corev1.ConfigMap{}
 		err := r.Get(ctx, types.NamespacedName{
@@ -837,28 +841,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 
 		if _, exists := cm.Data[key]; !exists {
 			return fmt.Errorf(MessageConfigMapKeyNotFound, key, cm.Name)
-		}
-	}
-
-	// Parse config to validate structure
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
-		return fmt.Errorf("failed to parse profilingConfig.config: %w", err)
-	}
-
-	// Warn if deployment.model or engine.backend are specified in config (they will be overwritten by spec fields)
-	if engineConfig, ok := config["engine"].(map[string]interface{}); ok {
-		if backend, ok := engineConfig["backend"].(string); ok && backend != "" && backend != dgdr.Spec.Backend {
-			logger := log.FromContext(ctx)
-			logger.Info("Warning: profilingConfig.config.engine.backend will be overwritten by spec.backend",
-				"configBackend", backend, "specBackend", dgdr.Spec.Backend)
-		}
-	}
-	if deployment, ok := config["deployment"].(map[string]interface{}); ok {
-		if model, ok := deployment["model"].(string); ok && model != "" && model != dgdr.Spec.Model {
-			logger := log.FromContext(ctx)
-			logger.Info("Warning: profilingConfig.config.deployment.model will be overwritten by spec.model",
-				"configModel", model, "specModel", dgdr.Spec.Model)
 		}
 	}
 

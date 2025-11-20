@@ -126,12 +126,7 @@ impl EndpointConfigBuilder {
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
             // Build transport based on request plane mode
-            let transport = build_transport_type(
-                request_plane_mode,
-                &endpoint_name,
-                &subject,
-                TransportContext::HealthCheck,
-            );
+            let transport = build_transport_type(request_plane_mode, &endpoint_name, &subject);
 
             let instance = Instance {
                 component: component_name.clone(),
@@ -237,12 +232,7 @@ impl EndpointConfigBuilder {
         let discovery = endpoint.drt().discovery();
 
         // Build transport for discovery service based on request plane mode
-        let transport = build_transport_type(
-            request_plane_mode,
-            &endpoint_name,
-            &subject,
-            TransportContext::Discovery,
-        );
+        let transport = build_transport_type(request_plane_mode, &endpoint_name, &subject);
 
         let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
             namespace: namespace_name.clone(),
@@ -270,31 +260,21 @@ impl EndpointConfigBuilder {
     }
 }
 
-/// Context for building transport type - determines port and formatting differences
-enum TransportContext {
-    /// For health check targets
-    HealthCheck,
-    /// For discovery service registration
-    Discovery,
-}
-
-/// Build transport type based on request plane mode and context
+/// Build transport type based on request plane mode
 ///
-/// This unified function handles both health check and discovery transport building,
-/// with context-specific differences:
-/// - HTTP: Both use the same port (default 8888, configurable via DYN_HTTP_RPC_PORT)
-/// - TCP: Health check omits endpoint suffix, discovery includes it for routing
-/// - NATS: Identical for both contexts
+/// This function handles both health check and discovery transport building.
+/// All transport modes use consistent addressing:
+/// - HTTP: Uses full URL path including endpoint name (e.g., http://host:port/v1/rpc/endpoint_name)
+/// - TCP: Includes endpoint name for routing (e.g., host:port/endpoint_name)
+/// - NATS: Uses subject-based addressing (unique per endpoint)
 fn build_transport_type(
     mode: RequestPlaneMode,
     endpoint_name: &str,
     subject: &str,
-    context: TransportContext,
 ) -> TransportType {
     match mode {
         RequestPlaneMode::Http => {
             let http_host = crate::utils::get_http_rpc_host_from_env();
-            // Both health check and discovery use the same port (8888) where the HTTP server binds
             let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
@@ -316,16 +296,9 @@ fn build_transport_type(
                 .and_then(|p| p.parse::<u16>().ok())
                 .unwrap_or(9999);
 
-            let tcp_endpoint = match context {
-                TransportContext::HealthCheck => {
-                    // Health check uses simple host:port format
-                    format!("{}:{}", tcp_host, tcp_port)
-                }
-                TransportContext::Discovery => {
-                    // Discovery includes endpoint name for routing
-                    format!("{}:{}/{}", tcp_host, tcp_port, endpoint_name)
-                }
-            };
+            // Include endpoint name for proper TCP routing
+            // TCP client parses this format and adds x-endpoint-path header for server-side routing
+            let tcp_endpoint = format!("{}:{}/{}", tcp_host, tcp_port, endpoint_name);
 
             TransportType::Tcp(tcp_endpoint)
         }
