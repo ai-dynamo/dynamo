@@ -7,17 +7,17 @@ ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
-ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+ARG BASE_IMAGE_TAG="25.01-cuda12.9-devel-ubuntu24.04"
 ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
-ARG CUDA_VERSION="12.8"
+ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
+ARG CUDA_VERSION="12.9"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
 ARG VLLM_REF="v0.11.1"
 # FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
 ARG FLASHINF_REF="v0.5.2"
-ARG TORCH_BACKEND="cu128"
+ARG TORCH_BACKEND="cu129"
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
@@ -206,7 +206,7 @@ RUN apt-get update && \
         # prometheus dependencies
         ca-certificates \
         # DeepGemm uses 'cuobjdump' which does not come with CUDA image
-        cuda-command-line-tools-12-8 && \
+        cuda-command-line-tools-12-9 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image

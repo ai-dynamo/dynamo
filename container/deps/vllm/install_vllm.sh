@@ -21,10 +21,10 @@ MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 
 # VLLM and Dependency Configurations
-TORCH_BACKEND="cu128"
+TORCH_BACKEND="cu129"
 TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels
 DEEPGEMM_REF=""
-CUDA_VERSION="12.8" # For DEEPGEMM
+CUDA_VERSION="12.9" # For DEEPGEMM
 
 # These flags are applicable when installing vLLM from source code
 EDITABLE=true
