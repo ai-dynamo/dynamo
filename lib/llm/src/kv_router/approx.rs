@@ -491,15 +491,22 @@ impl KvIndexerInterface for ApproxKvIndexer {
 
         if let Err(e) = self.match_tx.send(request).await {
             tracing::error!(
-                "Failed to send match request: {:?}; the indexer maybe offline",
-                e
+                error = ?e,
+                "Failed to send match request; approximate indexer maybe offline"
             );
-            return Err(KvRouterError::IndexerOffline);
+            return Ok(OverlapScores::new());
         }
 
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+        match resp_rx.await {
+            Ok(scores) => Ok(scores),
+            Err(e) => {
+                tracing::error!(
+                    error = ?e,
+                    "Approximate indexer match response dropped; the indexer maybe offline"
+                );
+                Ok(OverlapScores::new())
+            }
+        }
     }
 
     async fn find_matches_for_request(
@@ -681,6 +688,39 @@ mod tests {
         time::sleep(TTL + Duration::from_millis(50)).await;
         let post_scores = indexer.find_matches_for_request(&tokens).await.unwrap();
         assert!(post_scores.scores.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_approx_indexer_find_matches_returns_empty_when_offline() {
+        let cancel = CancellationToken::new();
+        let mut indexer =
+            ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, Duration::from_secs(1), None);
+
+        indexer.shutdown();
+
+        let scores = indexer
+            .find_matches(vec![LocalBlockHash(1)])
+            .await
+            .expect("fallback should succeed");
+        assert!(scores.scores.is_empty());
+        assert!(scores.frequencies.is_empty());
+        assert!(scores.tree_sizes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_approx_indexer_find_matches_for_request_returns_empty_when_offline() {
+        let cancel = CancellationToken::new();
+        let mut indexer =
+            ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, Duration::from_secs(1), None);
+
+        indexer.shutdown();
+
+        let tokens = vec![1, 2, 3, 4];
+        let scores = indexer
+            .find_matches_for_request(&tokens)
+            .await
+            .expect("fallback should succeed");
+        assert!(scores.scores.is_empty());
     }
 
     /// Verify that `remove_worker` clears all entries for the specified worker.
