@@ -15,61 +15,9 @@ on:
         type: string
 
 jobs:
-  validate-access:
-    runs-on: ubuntu-latest
-    outputs:
-      authorized: ${{ steps.check.outputs.authorized }}
-    steps:
-      - name: Check User Authorization
-        id: check
-        run: |
-          # Allow NVIDIA employees and approved bots
-          allowed_actors=(
-            "nvidia-employee1"
-            "nvidia-employee2"
-            "copy-pr-bot"  # Allow the copy PR bot
-            "nvidia-bot"   # Allow other NVIDIA bots
-          )
-
-          # Block external contributors
-          blocked_patterns=(
-            "external-"
-            "contributor-"
-            "guest-"
-          )
-
-          actor="${{ github.actor }}"
-
-          # Check if actor is explicitly allowed
-          for allowed in "${allowed_actors[@]}"; do
-            if [[ "$actor" == "$allowed" ]]; then
-              echo "authorized=true" >> $GITHUB_OUTPUT
-              echo "✅ Authorized user: $actor"
-              exit 0
-            fi
-          done
-
-          # Check if actor matches blocked patterns
-          for pattern in "${blocked_patterns[@]}"; do
-            if [[ "$actor" == *"$pattern"* ]]; then
-              echo "❌ Blocked user pattern: $actor"
-              echo "authorized=false" >> $GITHUB_OUTPUT
-              exit 1
-            fi
-          done
-
-          # Default: block unknown users
-          echo "❌ Unauthorized user: $actor"
-          echo "authorized=false" >> $GITHUB_OUTPUT
-          exit 1
-
-  trigger-deploy-tests:
-    runs-on: ubuntu-latest
-    needs: validate-access
-    if: needs.validate-access.outputs.authorized == 'true'
-    environment: protected-deploy  # manual approval before triggering
-    steps:
-      - name: Call Secure Deploy Workflow
-        uses: ./.github/workflows/container-validation-backends.yml
-        with:
-          run_deploy_operator: ${{ github.event.inputs.run_deploy_operator }}
+  call-container-validation:
+    uses: ./.github/workflows/container-validation-backends.yml
+    with:
+      run_deploy_operator: ${{ github.event.inputs.run_deploy_operator }}
+      target_branch: ${{ github.event.inputs.target_branch }}
+    environment: protected-deploy # manual approval before triggering
