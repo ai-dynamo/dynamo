@@ -423,7 +423,7 @@ By default, profiling jobs save essential data to ConfigMaps for planner integra
 - Profiling data for Planner (`.npz` files, `.json`)
 
 **What's available in PVC if attached to DGDR (optional):**
-- Performance plots (PNG images)
+- Performance plots (PNGs)
 - Detailed logs
 - AIPerf profiling artifacts
 - Raw profiling data (`.npz` files)
@@ -437,7 +437,7 @@ export NAMESPACE=your-namespace
 deploy/utils/setup_benchmarking_resources.sh
 ```
 
-1. Add `outputPVC` to your DGDR's `profilingConfig`:
+2. Add `outputPVC` to your DGDR's `profilingConfig`:
 ```yaml
 spec:
   profilingConfig:
@@ -446,7 +446,7 @@ spec:
       # ... rest of config
 ```
 
-1. After profiling completes, access results:
+3. After profiling completes, access results:
 ```bash
 kubectl apply -f deploy/utils/manifests/pvc-access-pod.yaml -n $NAMESPACE
 kubectl wait --for=condition=Ready pod/pvc-access-pod -n $NAMESPACE --timeout=60s
