@@ -223,9 +223,10 @@ vllm_configs = {
         script_name="agg_multimodal.sh",
         marks=[
             pytest.mark.gpu_2,
+            # https://github.com/ai-dynamo/dynamo/issues/4501
             pytest.mark.xfail(
                 strict=False
-            ),  # See issue #4501 - Multimodal Requests in Dynamo + Llava Chat Templates are not compliant
+            ),
         ],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
