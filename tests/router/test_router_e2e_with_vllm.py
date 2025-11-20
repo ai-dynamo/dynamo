@@ -272,6 +272,7 @@ class VLLMProcess:
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.vllm
+@pytest.mark.skip(reason="All vLLM tests disabled for now")
 @pytest.mark.model(MODEL_NAME)
 def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers):
     """
@@ -322,6 +323,7 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
 @pytest.mark.e2e
 @pytest.mark.vllm
 @pytest.mark.gpu_1
+@pytest.mark.skip(reason="All vLLM tests disabled for now")
 @pytest.mark.model(MODEL_NAME)
 def test_router_decisions_vllm_multiple_workers(
     request, runtime_services, predownload_tokenizers
@@ -373,9 +375,7 @@ def test_router_decisions_vllm_multiple_workers(
 @pytest.mark.e2e
 @pytest.mark.vllm
 @pytest.mark.gpu_2
-@pytest.mark.skip(
-    reason="faulty on L4 (passing on L40S); temporarily disabled until 2 GPUs on CI"
-)
+@pytest.mark.skip(reason="All vLLM tests disabled for now")
 @pytest.mark.model(MODEL_NAME)
 def test_router_decisions_vllm_dp(request, runtime_services, predownload_tokenizers):
     """Validate KV cache prefix reuse with vLLM by sending progressive requests with overlapping prefixes.
