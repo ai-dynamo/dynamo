@@ -1,0 +1,238 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- if and .Values.webhook.enabled (not .Values.webhook.certManager.enabled) (not .Values.webhook.certificateSecret.external) }}
+---
+# ServiceAccount for CA bundle injection job
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+---
+# Role to read the certificate secret
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["{{ .Values.webhook.certificateSecret.name }}"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject
+subjects:
+- kind: ServiceAccount
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject
+  namespace: {{ .Release.Namespace }}
+---
+# ClusterRole to patch ValidatingWebhookConfiguration
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["validatingwebhookconfigurations"]
+  {{- if .Values.namespaceRestriction.enabled }}
+  resourceNames: ["{{ include "dynamo-operator.fullname" . }}-validating-{{ .Release.Namespace }}"]
+  {{- else }}
+  resourceNames: ["{{ include "dynamo-operator.fullname" . }}-validating"]
+  {{- end }}
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject
+subjects:
+- kind: ServiceAccount
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject
+  namespace: {{ .Release.Namespace }}
+---
+# Job to inject CA bundle into ValidatingWebhookConfiguration
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "2"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 5
+  template:
+    metadata:
+      name: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject
+      labels:
+        app.kubernetes.io/component: webhook
+        app.kubernetes.io/created-by: dynamo-operator
+        app.kubernetes.io/part-of: dynamo-operator
+      {{- include "dynamo-operator.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "dynamo-operator.fullname" . }}-webhook-ca-inject
+      restartPolicy: OnFailure
+      containers:
+      - name: ca-injector
+        image: {{ .Values.webhook.certGenerator.image.repository }}:{{ .Values.webhook.certGenerator.image.tag }}
+        imagePullPolicy: {{ .Values.webhook.certGenerator.image.pullPolicy }}
+        env:
+        - name: OPENSSL_CONF
+          value: /tmp/openssl.cnf
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+
+          echo "🔐 Injecting CA bundle into webhook configuration..."
+
+          # Configuration
+          SECRET_NAME="{{ .Values.webhook.certificateSecret.name }}"
+          NAMESPACE="{{ .Release.Namespace }}"
+          {{- if .Values.namespaceRestriction.enabled }}
+          WEBHOOK_NAME="{{ include "dynamo-operator.fullname" . }}-validating-{{ .Release.Namespace }}"
+          {{- else }}
+          WEBHOOK_NAME="{{ include "dynamo-operator.fullname" . }}-validating"
+          {{- end }}
+
+          echo "⏳ Waiting for certificate secret to be available..."
+          # Wait for secret (up to 5 minutes)
+          for i in $(seq 1 60); do
+            if kubectl get secret ${SECRET_NAME} -n ${NAMESPACE} >/dev/null 2>&1; then
+              echo "✅ Secret found!"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "❌ ERROR: Secret ${SECRET_NAME} not found after 5 minutes"
+              exit 1
+            fi
+            echo "   Waiting for secret... ($i/60)"
+            sleep 5
+          done
+
+          echo "📝 Extracting CA bundle from secret..."
+          CA_BUNDLE=$(kubectl get secret ${SECRET_NAME} \
+            -n ${NAMESPACE} \
+            -o jsonpath='{.data.ca\.crt}')
+
+          if [ -z "$CA_BUNDLE" ]; then
+            echo "❌ ERROR: ca.crt not found in secret ${SECRET_NAME}"
+            exit 1
+          fi
+
+          echo "📝 Patching ValidatingWebhookConfiguration..."
+          # Patch all webhooks (DynamoComponentDeployment, DynamoGraphDeployment, DynamoModel, DynamoGraphDeploymentRequest)
+          kubectl patch validatingwebhookconfiguration ${WEBHOOK_NAME} \
+            --type='json' -p="[
+              {
+                \"op\": \"add\",
+                \"path\": \"/webhooks/0/clientConfig/caBundle\",
+                \"value\": \"${CA_BUNDLE}\"
+              },
+              {
+                \"op\": \"add\",
+                \"path\": \"/webhooks/1/clientConfig/caBundle\",
+                \"value\": \"${CA_BUNDLE}\"
+              },
+              {
+                \"op\": \"add\",
+                \"path\": \"/webhooks/2/clientConfig/caBundle\",
+                \"value\": \"${CA_BUNDLE}\"
+              },
+              {
+                \"op\": \"add\",
+                \"path\": \"/webhooks/3/clientConfig/caBundle\",
+                \"value\": \"${CA_BUNDLE}\"
+              }
+            ]"
+
+          echo "✅ CA bundle injected successfully!"
+          echo "🎉 Webhook configuration complete!"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1001
+{{- end }}
+

@@ -110,7 +110,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -197,7 +196,6 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -257,7 +255,6 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -315,7 +312,6 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -364,7 +360,6 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -405,7 +400,6 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -447,7 +441,6 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 

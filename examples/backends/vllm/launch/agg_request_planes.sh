@@ -44,4 +44,5 @@ echo "Using request plane mode: $REQUEST_PLANE"
 python -m dynamo.frontend --http-port=8000 &
 
 DYN_SYSTEM_PORT=8081 \
+DYN_HEALTH_CHECK_ENABLED=true \
     python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --connector none

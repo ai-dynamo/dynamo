@@ -20,16 +20,43 @@ This document describes how LMCache is integrated into Dynamo's vLLM backend to 
 
 ### Configuration
 
-LMCache is enabled by setting the `ENABLE_LMCACHE` environment variable:
+LMCache is enabled using the `--connector lmcache` flag:
 
 ```bash
-export ENABLE_LMCACHE=1
+python -m dynamo.vllm --model <model_name> --connector lmcache
 ```
 
-Additional LMCache configuration can be customized via environment variables:
-- `LMCACHE_CHUNK_SIZE=256` - Token chunk size for cache granularity (default: 256)
+**The `--connector lmcache` flag is required** to enable LMCache in vLLM. Optionally set `ENABLE_LMCACHE=1` to use Dynamo's default LMCache configuration values, or set individual `LMCACHE_*` environment variables for custom configuration.
+
+### Environment Variables
+
+LMCache configuration can be customized via environment variables:
+
+**Option 1: Use Dynamo Defaults (Recommended)**
+```bash
+export ENABLE_LMCACHE=1  # Sets Dynamo's recommended defaults
+python -m dynamo.vllm --model <model_name> --connector lmcache
+```
+
+Dynamo sets these defaults when `ENABLE_LMCACHE=1`:
+- `LMCACHE_CHUNK_SIZE=256` - Token chunk size for cache granularity
 - `LMCACHE_LOCAL_CPU=True` - Enable CPU memory backend for offloading
-- `LMCACHE_MAX_LOCAL_CPU_SIZE=20` - CPU memory limit in GB (user can adjust based on available RAM to a fixed value)
+- `LMCACHE_MAX_LOCAL_CPU_SIZE=20` - CPU memory limit in GB
+
+**Option 2: Set Individual Variables**
+```bash
+export LMCACHE_CHUNK_SIZE=256
+export LMCACHE_LOCAL_CPU=True
+export LMCACHE_MAX_LOCAL_CPU_SIZE=20
+python -m dynamo.vllm --model <model_name> --connector lmcache
+```
+
+**Option 3: Use LMCache Defaults**
+```bash
+# Just use --connector lmcache without env vars
+python -m dynamo.vllm --model <model_name> --connector lmcache
+# LMCache will use its own defaults (chunk_size=256, local_cpu=True, max_local_cpu_size=5GB)
+```
 
 For advanced configurations, LMCache supports multiple [storage backends](https://docs.lmcache.ai/index.html):
 - **CPU RAM**: Fast local memory offloading
@@ -167,8 +194,19 @@ lmcache_config = {
    - Shared context across sessions
    - Long-running services with warm caches
 
+## Metrics and Monitoring
+
+When LMCache is enabled with `--connector lmcache` and `DYN_SYSTEM_PORT` is set, LMCache metrics are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
+
+**Requirements to access LMCache metrics:**
+- `--connector lmcache` - Enables LMCache
+- `DYN_SYSTEM_PORT=8081` - Enables metrics HTTP endpoint
+
+For detailed information on LMCache metrics, including the complete list of available metrics and how to access them, see the **[LMCache Metrics section](prometheus.md#lmcache-metrics)** in the vLLM Prometheus Metrics Guide.
+
 ## References and Additional Resources
 
 - [LMCache Documentation](https://docs.lmcache.ai/index.html) - Comprehensive guide and API reference
 - [Configuration Reference](https://docs.lmcache.ai/api_reference/configurations.html) - Detailed configuration options
+- [LMCache Observability Guide](https://docs.lmcache.ai/production/observability/vllm_endpoint.html) - Metrics and monitoring details
 
