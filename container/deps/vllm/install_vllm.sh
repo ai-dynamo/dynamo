@@ -226,10 +226,14 @@ if [ "$ARCH" = "amd64" ]; then
 else
     echo "⚠ Skipping LMCache on ARM64 (compatibility issues)"
 fi
-
-echo "\n=== Installing DeepGEMM ==="
 cd $INSTALLATION_DIR/vllm/tools
 
+echo "\n=== Installing GDRCopy ==="
+bash install_gdrcopy.sh
+echo "✓ GDRCopy installation completed"
+
+
+echo "\n=== Installing DeepGEMM ==="
 if [ -n "$DEEPGEMM_REF" ]; then
     bash install_deepgemm.sh --cuda-version "${CUDA_VERSION}" --ref "$DEEPGEMM_REF"
 else
@@ -240,5 +244,6 @@ echo "✓ DeepGEMM installation completed"
 echo "\n=== Installing EP Kernels (PPLX and DeepEP) ==="
 cd ep_kernels/
 TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" bash install_python_libraries.sh
+echo "✓ EP Kernels installation completed"
 
 echo "\n✅ All installations completed successfully!"
