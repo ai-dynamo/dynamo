@@ -199,3 +199,13 @@ EOF
 # Run trtllm-serve for the baseline for comparison
 trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/llm_api_config.yaml &
 ```
+
+## Developing Locally
+
+Inside the Dynamo container, after changing KVBM related code (Rust and/or Python), to test or use it:
+```bash
+cd /workspace/lib/bindings/kvbm
+uv pip install maturin[patchelf]
+maturin build --release --out /workspace/dist
+uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
+```
