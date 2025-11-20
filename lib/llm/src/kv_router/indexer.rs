@@ -944,12 +944,9 @@ impl KvIndexer {
 
                 loop {
                     // Create a future that sleeps until the next expiration time
-                    let expiry_fut = if let Some(ref pm) = prune_manager {
-                        if let Some(next_expiry) = pm.peek_next_expiry() {
-                            tokio::time::sleep_until(next_expiry)
-                        } else {
-                            tokio::time::sleep(Duration::MAX)
-                        }
+                    let expiry_fut = if let Some(ref pm) = prune_manager
+                        && let Some(next_expiry) = pm.peek_next_expiry() {
+                        tokio::time::sleep_until(next_expiry)
                     } else {
                         tokio::time::sleep(Duration::MAX)
                     };
@@ -973,22 +970,22 @@ impl KvIndexer {
 
                         Some(_) = prune_rx.recv() => {
                             // Tree size-based pruning triggered
-                            if let Some(ref mut pm) = prune_manager
-                                && let Ok(pruned) = pm.prune(trie.current_size()) {
-                                for p in pruned {
-                                    event_id_counter += 1;
-                                    let event = RouterEvent::new(
-                                        p.worker.worker_id,
-                                        KvCacheEvent {
-                                            event_id: event_id_counter,
-                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                                block_hashes: vec![p.key],
-                                            }),
-                                            dp_rank: p.worker.dp_rank,
-                                        }
-                                    );
-                                    let _ = trie.apply_event(event);
-                                }
+                            let Some(ref mut pm) = prune_manager else { continue };
+                            let Ok(pruned) = pm.prune(trie.current_size()) else { continue };
+
+                            for p in pruned {
+                                event_id_counter += 1;
+                                let event = RouterEvent::new(
+                                    p.worker.worker_id,
+                                    KvCacheEvent {
+                                        event_id: event_id_counter,
+                                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                            block_hashes: vec![p.key],
+                                        }),
+                                        dp_rank: p.worker.dp_rank,
+                                    }
+                                );
+                                let _ = trie.apply_event(event);
                             }
                         }
 
@@ -1088,22 +1085,22 @@ impl KvIndexer {
 
                         _ = expiry_fut => {
                             // TTL-based expiry triggered
-                            if let Some(ref mut pm) = prune_manager {
-                                let expired = pm.pop_expired();
-                                for e in expired {
-                                    event_id_counter += 1;
-                                    let event = RouterEvent::new(
-                                        e.worker.worker_id,
-                                        KvCacheEvent {
-                                            event_id: event_id_counter,
-                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                                block_hashes: vec![e.key],
-                                            }),
-                                            dp_rank: e.worker.dp_rank,
-                                        }
-                                    );
-                                    let _ = trie.apply_event(event);
-                                }
+                            let Some(ref mut pm) = prune_manager else { continue };
+
+                            let expired = pm.pop_expired();
+                            for e in expired {
+                                event_id_counter += 1;
+                                let event = RouterEvent::new(
+                                    e.worker.worker_id,
+                                    KvCacheEvent {
+                                        event_id: event_id_counter,
+                                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                            block_hashes: vec![e.key],
+                                        }),
+                                        dp_rank: e.worker.dp_rank,
+                                    }
+                                );
+                                let _ = trie.apply_event(event);
                             }
                         }
                     }
@@ -1397,12 +1394,9 @@ impl KvIndexerSharded {
 
                     loop {
                         // Create a future that sleeps until the next expiration time
-                        let expiry_fut = if let Some(ref pm) = prune_manager {
-                            if let Some(next_expiry) = pm.peek_next_expiry() {
-                                tokio::time::sleep_until(next_expiry)
-                            } else {
-                                tokio::time::sleep(Duration::MAX)
-                            }
+                        let expiry_fut = if let Some(ref pm) = prune_manager
+                            && let Some(next_expiry) = pm.peek_next_expiry() {
+                            tokio::time::sleep_until(next_expiry)
                         } else {
                             tokio::time::sleep(Duration::MAX)
                         };
@@ -1426,22 +1420,22 @@ impl KvIndexerSharded {
 
                             Some(_) = shard_prune_rx.recv() => {
                                 // Tree size-based pruning triggered
-                                if let Some(ref mut pm) = prune_manager
-                                    && let Ok(pruned) = pm.prune(trie.current_size()) {
-                                    for p in pruned {
-                                        event_id_counter += 1;
-                                        let event = RouterEvent::new(
-                                            p.worker.worker_id,
-                                            KvCacheEvent {
-                                                event_id: event_id_counter,
-                                                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                                    block_hashes: vec![p.key],
-                                                }),
-                                                dp_rank: p.worker.dp_rank,
-                                            }
-                                        );
-                                        let _ = trie.apply_event(event);
-                                    }
+                                let Some(ref mut pm) = prune_manager else { continue };
+                                let Ok(pruned) = pm.prune(trie.current_size()) else { continue };
+
+                                for p in pruned {
+                                    event_id_counter += 1;
+                                    let event = RouterEvent::new(
+                                        p.worker.worker_id,
+                                        KvCacheEvent {
+                                            event_id: event_id_counter,
+                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                                block_hashes: vec![p.key],
+                                            }),
+                                            dp_rank: p.worker.dp_rank,
+                                        }
+                                    );
+                                    let _ = trie.apply_event(event);
                                 }
                             }
 
@@ -1543,22 +1537,22 @@ impl KvIndexerSharded {
 
                             _ = expiry_fut => {
                                 // TTL-based expiry triggered
-                                if let Some(ref mut pm) = prune_manager {
-                                    let expired = pm.pop_expired();
-                                    for e in expired {
-                                        event_id_counter += 1;
-                                        let event = RouterEvent::new(
-                                            e.worker.worker_id,
-                                            KvCacheEvent {
-                                                event_id: event_id_counter,
-                                                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                                    block_hashes: vec![e.key],
-                                                }),
-                                                dp_rank: e.worker.dp_rank,
-                                            }
-                                        );
-                                        let _ = trie.apply_event(event);
-                                    }
+                                let Some(ref mut pm) = prune_manager else { continue };
+
+                                let expired = pm.pop_expired();
+                                for e in expired {
+                                    event_id_counter += 1;
+                                    let event = RouterEvent::new(
+                                        e.worker.worker_id,
+                                        KvCacheEvent {
+                                            event_id: event_id_counter,
+                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                                block_hashes: vec![e.key],
+                                            }),
+                                            dp_rank: e.worker.dp_rank,
+                                        }
+                                    );
+                                    let _ = trie.apply_event(event);
                                 }
                             }
                         }
