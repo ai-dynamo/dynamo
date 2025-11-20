@@ -104,11 +104,11 @@ TENSORRTLLM_PIP_WHEEL=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # Note: CUDA 12.9 requires NGC 25.04+ (25.01 only has CUDA 12.8)
-# FIXME: NCCL hang issue with 25.03 - verify if resolved in 25.04
+# FIXME: NCCL hang issue with 25.03 - verify if resolved in 25.6
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
-VLLM_BASE_IMAGE_TAG="25.04-cuda12.9-devel-ubuntu24.04"
+VLLM_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
 
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
