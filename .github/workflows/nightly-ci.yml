@@ -95,7 +95,7 @@ jobs:
           framework: ${{ env.FRAMEWORK }}
           target: framework
           platform: linux/${{ matrix.platform.arch }}
-          # Ternary operations that are specific to vllm/arm64 
+          # Ternary operations that are specific to vllm/arm64, empty str for all other combinations
           base_image_tag: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
           runtime_image_tag: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && '12.9.0-runtime-ubuntu24.04' || '' }}
           cuda_version: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && '129' || '' }}
