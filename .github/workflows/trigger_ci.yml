@@ -19,4 +19,4 @@ jobs:
     uses: ./.github/workflows/container-validation-backends.yml
     with:
       run_deploy_operator: ${{ github.event.inputs.run_deploy_operator }}
-      target_branch: ${{ github.event.inputs.target_branch }}
+      #target_branch: ${{ github.event.inputs.target_branch }}
