@@ -378,38 +378,20 @@ def runtime_services_session(request, tmp_path_factory):
             yield nats, etcd
 
 
-@pytest.fixture(scope="session")
-def file_storage_backend_root():
-    """Session-scoped fixture that creates a persistent root directory for file storage.
-
-    This directory persists across all tests to avoid race conditions with background
-    threads trying to access deleted directories.
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield tmpdir
-
-
 @pytest.fixture
-def file_storage_backend(request, file_storage_backend_root):
+def file_storage_backend():
     """Fixture that sets up and tears down file storage backend.
 
-    Creates a subdirectory within the session-scoped root for this specific test.
-    This prevents background threads from erroring when test cleanup happens.
+    Creates a temporary directory for file-based KV storage and sets
+    the DYN_FILE_KV environment variable. Cleans up after the test.
     """
-    # Create a unique subdirectory for this test
-    import uuid
-
-    test_subdir = Path(file_storage_backend_root) / f"test_{uuid.uuid4().hex[:8]}"
-    test_subdir.mkdir(parents=True, exist_ok=True)
-
-    old_env = os.environ.get("DYN_FILE_KV")
-    os.environ["DYN_FILE_KV"] = str(test_subdir)
-    logging.info(f"Set up file storage backend in: {test_subdir}")
-
-    yield str(test_subdir)
-
-    # Cleanup - just restore env, leave directory for background threads
-    if old_env is not None:
-        os.environ["DYN_FILE_KV"] = old_env
-    else:
-        os.environ.pop("DYN_FILE_KV", None)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        old_env = os.environ.get("DYN_FILE_KV")
+        os.environ["DYN_FILE_KV"] = tmpdir
+        logging.info(f"Set up file storage backend in: {tmpdir}")
+        yield tmpdir
+        # Cleanup
+        if old_env is not None:
+            os.environ["DYN_FILE_KV"] = old_env
+        else:
+            os.environ.pop("DYN_FILE_KV", None)
