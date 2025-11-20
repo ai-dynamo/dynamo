@@ -126,11 +126,7 @@ impl EndpointConfigBuilder {
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
             // Build transport based on request plane mode
-            let transport = build_transport_type(
-                request_plane_mode,
-                &endpoint_name,
-                &subject,
-            );
+            let transport = build_transport_type(request_plane_mode, &endpoint_name, &subject);
 
             let instance = Instance {
                 component: component_name.clone(),
@@ -236,11 +232,7 @@ impl EndpointConfigBuilder {
         let discovery = endpoint.drt().discovery();
 
         // Build transport for discovery service based on request plane mode
-        let transport = build_transport_type(
-            request_plane_mode,
-            &endpoint_name,
-            &subject,
-        );
+        let transport = build_transport_type(request_plane_mode, &endpoint_name, &subject);
 
         let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
             namespace: namespace_name.clone(),
