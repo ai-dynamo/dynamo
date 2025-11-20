@@ -15,11 +15,7 @@ on:
         type: string
 
 jobs:
-  trigger-deploy-tests:
-    runs-on: ubuntu-latest
-    environment: protected-deploy  # manual approval before triggering
-    steps:
-      - name: Call Main Deploy Workflow
-        uses: ./.github/workflows/container-validation-backends.yml
-        with:
-          run_deploy_operator: ${{ github.event.inputs.run_deploy_operator }}
+  call-container-validation:
+    uses: ./.github/workflows/container-validation-backends.yml
+    with:
+      run_deploy_operator: ${{ github.event.inputs.run_deploy_operator }}
