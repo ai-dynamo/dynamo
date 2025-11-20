@@ -131,7 +131,7 @@ def parse_args():
         action="store_false",
         dest="use_kv_events",
         default=os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
-        help="KV Router: Disable KV events. When set, uses ApproxKvRouter for predicting block creation/deletion based only on incoming requests at a timer. By default, KV events are enabled.",
+        help="KV Router: Disable KV events. When set, the router predicts cache state based on routing decisions with TTL-based expiration and pruning, rather than receiving events from workers. By default, KV events are enabled.",
     )
     parser.add_argument(
         "--router-ttl",
