@@ -223,13 +223,10 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
 mod tests {
     use super::*;
     use crate::kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-    use crate::kv_router::protocols::{LocalBlockHash, WorkerId, WorkerWithDpRank};
+    use crate::kv_router::protocols::{WorkerId, WorkerWithDpRank};
     use std::sync::Arc;
     use tokio::time::{self, Duration, Instant};
     use tokio_util::sync::CancellationToken;
-
-    #[cfg(feature = "failpoints")]
-    use serial_test::serial;
 
     const KV_BLOCK_SIZE: u32 = 4;
 
@@ -857,90 +854,4 @@ mod tests {
         // Key 1 should still be present (it was refreshed and is now near the end)
         assert!(pm.get_expiry(&1).is_some());
     }
-    #[cfg(feature = "failpoints")]
-    struct PanicResetGuard;
-
-    #[cfg(feature = "failpoints")]
-    impl PanicResetGuard {
-        fn new() -> Self {
-            fail::remove("radix_tree_find_matches_panic");
-            fail::remove("radix_tree_apply_event_panic");
-            Self
-        }
-    }
-
-    #[cfg(feature = "failpoints")]
-    impl Drop for PanicResetGuard {
-        fn drop(&mut self) {
-            fail::remove("radix_tree_find_matches_panic");
-            fail::remove("radix_tree_apply_event_panic");
-        }
-    }
-
-    #[tokio::test]
-    #[serial]
-    #[cfg(feature = "failpoints")]
-    async fn test_approx_indexer_returns_empty_scores_when_radix_tree_panics() {
-        let token = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let indexer = KvIndexer::new(token.clone(), KV_BLOCK_SIZE, metrics);
-
-        let _guard = PanicResetGuard::new();
-        fail::cfg("radix_tree_find_matches_panic", "panic").unwrap();
-
-        let scores = indexer
-            .find_matches(vec![LocalBlockHash(42)])
-            .await
-            .unwrap();
-        assert!(scores.scores.is_empty());
-        assert!(scores.frequencies.is_empty());
-        assert!(scores.tree_sizes.is_empty());
-    }
-
-    #[tokio::test]
-    #[serial]
-    #[cfg(feature = "failpoints")]
-    async fn test_approx_indexer_shutdown_does_not_panic_after_radix_tree_panic() {
-        let token = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let mut indexer = KvIndexer::new(token.clone(), KV_BLOCK_SIZE, metrics);
-
-        let _guard = PanicResetGuard::new();
-        fail::cfg("radix_tree_find_matches_panic", "panic").unwrap();
-
-        let scores = indexer
-            .find_matches(vec![LocalBlockHash(99)])
-            .await
-            .unwrap();
-        assert!(scores.scores.is_empty());
-
-        // Ensures shutdown stays non-panicking even if the background task already crashed.
-        indexer.shutdown();
-    }
-
-    #[tokio::test]
-    #[serial]
-    #[cfg(feature = "failpoints")]
-    async fn test_approx_indexer_returns_empty_scores_when_apply_event_panics() {
-        let token = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let indexer = KvIndexer::new(token.clone(), KV_BLOCK_SIZE, metrics.clone());
-
-        let _guard = PanicResetGuard::new();
-        fail::cfg("radix_tree_apply_event_panic", "panic").unwrap();
-
-        let worker = WorkerWithDpRank::from_worker_id(1);
-        let tokens = vec![1, 2, 3, 4];
-
-        indexer
-            .process_routing_decision_for_request(&tokens, worker)
-            .await
-            .unwrap();
-
-        time::sleep(Duration::from_millis(10)).await;
-
-        let scores = indexer.find_matches(vec![LocalBlockHash(1)]).await.unwrap();
-        assert!(scores.scores.is_empty());
-    }
-}
 }

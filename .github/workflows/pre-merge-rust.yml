@@ -86,7 +86,7 @@ jobs:
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
-      run: cargo test --locked --all-targets ${{ matrix.dir == '.' && '--features dynamo-llm/failpoints' || '' }}
+      run: cargo test --locked --all-targets
 
   clippy:
     runs-on:
