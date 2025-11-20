@@ -7,7 +7,7 @@ import os
 import pytest
 from pytest_httpserver import HTTPServer
 
-from tests.serve.common import WORKSPACE_DIR
+from dynamo.common.utils.paths import WORKSPACE_DIR
 
 # Shared constants for multimodal testing
 IMAGE_SERVER_PORT = 8765
