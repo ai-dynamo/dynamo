@@ -43,8 +43,6 @@ pub struct DistributedRuntime {
     // local runtime
     runtime: Runtime,
 
-    // Unified transport manager
-    etcd_client: Option<transports::etcd::Client>,
     nats_client: Option<transports::nats::Client>,
     store: KeyValueStoreManager,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
@@ -101,17 +99,16 @@ impl DistributedRuntime {
 
         let runtime_clone = runtime.clone();
 
-        let (etcd_client, store) = match selected_kv_store {
+        let store = match selected_kv_store {
             KeyValueStoreSelect::Etcd(etcd_config) => {
                 let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
                     // The returned error doesn't show because of a dropped runtime error, so
                     // log it first.
                     tracing::error!(%err, "Could not connect to etcd. Pass `--store-kv ..` to use a different backend or start etcd."))?;
-                let store = KeyValueStoreManager::etcd(etcd_client.clone());
-                (Some(etcd_client), store)
+                KeyValueStoreManager::etcd(etcd_client)
             }
-            KeyValueStoreSelect::File(root) => (None, KeyValueStoreManager::file(root)),
-            KeyValueStoreSelect::Memory => (None, KeyValueStoreManager::memory()),
+            KeyValueStoreSelect::File(root) => KeyValueStoreManager::file(root),
+            KeyValueStoreSelect::Memory => KeyValueStoreManager::memory(),
         };
 
         let nats_client = match nats_config {
@@ -176,7 +173,6 @@ impl DistributedRuntime {
 
         let distributed_runtime = Self {
             runtime,
-            etcd_client,
             store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
@@ -423,15 +419,7 @@ impl DistributedRuntime {
         self.system_status_server.get().cloned()
     }
 
-    // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
-    //
-    // Try to use `store()` instead of this. Only use this if you have not been able to migrate
-    // yet, or if you require etcd-specific features like distributed locking (rare).
-    pub fn etcd_client(&self) -> Option<etcd::Client> {
-        self.etcd_client.clone()
-    }
-
-    /// An interface to store things. Will eventually replace `etcd_client`.
+    /// An interface to store things outside of the process. Usually backed by something like etcd.
     /// Currently does key-value, but will grow to include whatever we need to store.
     pub fn store(&self) -> &KeyValueStoreManager {
         &self.store
