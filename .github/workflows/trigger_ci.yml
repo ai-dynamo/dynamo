@@ -1,16 +1,141 @@
-name: Trigger Secure Deploy
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: NVIDIA Test Lab Validation
 
 on:
-  workflow_dispatch:
-    inputs:
-      run_deploy_operator:
-        description: 'Run deploy operator and deployment tests'
-        required: false
-        default: false
-        type: boolean
+  push:
+    branches:
+      - main
+      - release/*.*.*
+      - "pull-request/[0-9]+"
+    # Skip docs only changes
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
 
 jobs:
-  call-container-validation:
-    uses: ./.github/workflows/container-validation-backends.yml
-    with:
-      run_deploy_operator: ${{ github.event.inputs.run_deploy_operator }}
+  mirror_repo:
+    name: Mirror Repository to GitLab
+    environment: GITLAB
+    runs-on:
+      group: gitlab_ci_runners
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Sync Mirror Repository
+      run: ./.github/workflows/mirror_repo.sh ${{ secrets.TOKEN }} ${{ secrets.MIRROR_URL }}
+
+  trigger-ci:
+    name: Trigger CI Pipeline
+    environment: GITLAB
+    needs: mirror_repo
+    runs-on:
+      group: gitlab_ci_runners
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Detect source code changes
+      id: src_changes
+      uses: dorny/paths-filter@v3
+      with:
+        filters: .github/filters.yaml
+    - name: Check if Validation Workflow has run
+      id: check_workflow
+      uses: actions/github-script@v6
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const eventName = context.eventName;
+          let commit_sha = context.sha;
+          const workflow_id = 'build-and-test.yml';
+          if (eventName === 'pull_request') {
+            commit_sha = context.payload.pull_request.head.sha;
+          }
+          const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: workflow_id,
+              head_sha: commit_sha,
+              event: eventName
+            });
+          const inProgressCount = runs.data.workflow_runs.filter(run => run.status === 'in_progress').length;
+          const queuedCount = runs.data.workflow_runs.filter(run => run.status === 'queued').length;
+          const skip_ci = inProgressCount > 0 || queuedCount > 0;
+          console.log(`Validation Workflow is running: ${skip_ci}`);
+          core.setOutput('skip_ci', skip_ci.toString());
+    - name: Trigger Pipeline
+      run: |
+        #!/bin/bash -e
+        declare -A ci_variables
+
+        ci_variables["ENABLE_BUILD"]="true"
+        ci_variables["ENABLE_PREMERGE"]="true"
+        ci_variables["ENABLE_E2E_TEST"]="true"
+
+        # Override to false if validation workflow is running
+        if [[ "${{ vars.ALLOW_GITLAB_TEST_SKIP }}" == "1" && "${{ steps.check_workflow.outputs.skip_ci }}" == "true" ]]; then
+          echo "Github Workflow has run and ENABLE_PREMERGE variable value is False"
+          ci_variables["ENABLE_PREMERGE"]="false"
+        fi
+
+        # Build space-separated FRAMEWORKS variable
+        frameworks=""
+        if [ "${{ steps.src_changes.outputs.vllm }}" == "true" ]; then
+          frameworks+="vllm "
+        fi
+
+        if [ "${{ steps.src_changes.outputs.trtllm }}" == "true" ]; then
+          frameworks+="trtllm "
+        fi
+
+        if [ "${{ steps.src_changes.outputs.sglang }}" == "true" ]; then
+          frameworks+="sglang "
+        fi
+
+        # Trim trailing space and set FRAMEWORKS variable if any frameworks detected
+        frameworks=$(echo "$frameworks" | xargs)
+        if [ -n "$frameworks" ]; then
+          ci_variables["FRAMEWORKS"]="$frameworks"
+        fi
+
+        # Set BUILD_ARCHS to empty string to build both amd64 and arm64
+        ci_variables["BUILD_ARCHS"]=""
+
+        # Set additional pipeline variables
+        ci_variables["ENABLE_PUBLISH_WHEELS"]="false"
+        ci_variables["ENABLE_JET_BENCHMARKS"]="false"
+        ci_variables["ENABLE_SECURITY_SCAN"]="false"
+        ci_variables["RELEASE_BUILD"]="false"
+
+        ci_args=()
+        for key in "${!ci_variables[@]}"; do
+          value="${ci_variables[$key]}"
+          ci_args+=(--form "variables[$key]=${value}")
+        done
+
+        echo "Running Pipeline with Variables: ${ci_args[*]}"
+
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          REF="${{ github.event.pull_request.head.ref }}"
+        else
+          REF="${{ github.ref }}"
+        fi
+        curl --fail-with-body \
+          --request POST \
+          --form token=${{ secrets.PIPELINE_TOKEN }} \
+          --form ref=${REF} \
+          "${ci_args[@]}" \
+          "${{ secrets.PIPELINE_URL }}"
