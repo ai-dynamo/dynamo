@@ -1024,6 +1024,151 @@ impl Drop for KvIndexer {
     }
 }
 
+// -------------------------------------------------
+// Decentralized router: LocalKvIndexer for workers
+// -------------------------------------------------
+
+/// A thin wrapper around KvIndexer that buffers recent events
+/// (e.g. which may be queued by router upon startup)
+///
+pub struct LocalKvIndexer {
+    /// The underlying indexer
+    indexer: Arc<KvIndexer>,
+    /// Circular buffer of recent events
+    /// Stores (worker_id, event) tuples
+    event_buffer: Arc<std::sync::Mutex<std::collections::VecDeque<(WorkerId, KvCacheEvent)>>>,
+    /// Maximum number of events to keep in buffer
+    max_buffer_size: usize,
+}
+
+impl LocalKvIndexer {
+    /// create a new LocalKvIndexer pointing to a KvIndexer.
+    pub fn new(
+        token: CancellationToken,
+        kv_block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+        max_buffer_size: usize,
+    ) -> Self {
+        Self {
+            indexer: Arc::new(KvIndexer::new(token, kv_block_size, metrics)),
+            event_buffer: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::with_capacity(
+                max_buffer_size,
+            ))),  // circular buffer for O(1) pop
+            max_buffer_size,
+        }
+    }
+
+    /// get the underlying indexer reference.
+    pub fn indexer(&self) -> &Arc<KvIndexer> {
+        &self.indexer
+    }
+
+    /// get the N most recent events (returned in oldest->newest order)
+    pub fn get_recent_events(&self, n: usize) -> Vec<(WorkerId, KvCacheEvent)> {
+        // TODO what if n > buffer size
+        let buffer = self.event_buffer.lock().unwrap();
+        buffer.iter().rev().take(n).cloned().rev().collect()
+    }
+
+    /// get all buffered events (oldest first)
+    pub fn get_all_events(&self) -> Vec<(WorkerId, KvCacheEvent)> {
+        let buffer = self.event_buffer.lock().unwrap();
+        buffer.iter().cloned().collect()
+    }
+
+    /// TODO implement method which returns all events
+    /// starting and/or ending in a given event id
+
+    /// Record an event in the buffer
+    fn record_event(&self, worker_id: WorkerId, event: KvCacheEvent) {
+        let mut buffer = self.event_buffer.lock().unwrap();
+
+        // Add to back
+        buffer.push_back((worker_id, event));
+
+        // Remove from front if over capacity (circular buffer behavior)
+        while buffer.len() > self.max_buffer_size {
+            buffer.pop_front();
+        }
+    }
+
+    /// Apply event with buffering.
+    ///
+    /// This records the event in the buffer and forwards it to the underlying indexer.
+    pub async fn apply_event_with_buffer(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        let worker_id = event.worker_id;
+        let kv_event = event.event.clone();
+
+        // Record in buffer
+        self.record_event(worker_id, kv_event);
+
+        // Forward to underlying indexer
+        self.indexer
+            .event_sender()
+            .send(event)
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)
+    }
+
+    /// Clear the event buffer.
+    pub fn clear_buffer(&self) {
+        let mut buffer = self.event_buffer.lock().unwrap();
+        buffer.clear();
+    }
+
+    /// Get the current buffer size.
+    pub fn buffer_len(&self) -> usize {
+        let buffer = self.event_buffer.lock().unwrap();
+        buffer.len()
+    }
+}
+
+// Implement Deref to allow transparent access to KvIndexer methods
+impl std::ops::Deref for LocalKvIndexer {
+    type Target = Arc<KvIndexer>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.indexer
+    }
+}
+
+// Implement KvIndexerInterface by delegating to the underlying indexer
+#[async_trait]
+impl KvIndexerInterface for LocalKvIndexer {
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<OverlapScores, KvRouterError> {
+        self.indexer.find_matches(sequence).await
+    }
+
+    async fn find_matches_for_request(
+        &self,
+        tokens: &[u32],
+    ) -> Result<OverlapScores, KvRouterError> {
+        self.indexer.find_matches_for_request(tokens).await
+    }
+
+    async fn apply_event(&mut self, event: RouterEvent) {
+        // Use the buffering version
+        let _ = self.apply_event_with_buffer(event).await;
+    }
+
+    async fn remove_worker(&mut self, worker: WorkerId) {
+        let _ = self.indexer.remove_worker_sender().send(worker).await;
+    }
+
+    fn shutdown(&mut self) {
+        // Note: Since indexer is Arc<KvIndexer>, we can't call mutable methods directly.
+        // The indexer will be shut down when the CancellationToken is cancelled
+        // or when the last Arc reference is dropped.
+    }
+
+    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        self.indexer.dump_events().await
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ShardedMatchRequest {
     sequence: Vec<LocalBlockHash>,

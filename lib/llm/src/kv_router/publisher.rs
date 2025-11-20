@@ -3,7 +3,7 @@
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT,
-    indexer::{KvIndexer, KvIndexerMetrics, RouterEvent, compute_block_hash_for_seq},
+    indexer::{KvIndexer, KvIndexerMetrics, LocalKvIndexer, RouterEvent, compute_block_hash_for_seq},
     protocols::*,
     scoring::LoadEvent,
 };
@@ -94,7 +94,7 @@ pub struct KvEventPublisher {
     tx: mpsc::UnboundedSender<KvCacheEvent>,
     /// Optional worker-local indexer for tracking this worker's own KV cache.
     /// When present, events are applied to this indexer before being published to NATS.
-    local_indexer: Option<Arc<KvIndexer>>,
+    local_indexer: Option<Arc<LocalKvIndexer>>,
 }
 
 impl KvEventPublisher {
@@ -134,10 +134,11 @@ impl KvEventPublisher {
         // Create local indexer if requested
         let local_indexer = if enable_local_indexer {
             let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-            Some(Arc::new(KvIndexer::new(
+            Some(Arc::new(LocalKvIndexer::new(
                 cancellation_token.clone(),
                 kv_block_size,
                 metrics,
+                100, // TODO make this a parameter available for user change?
             )))
         } else {
             None
@@ -191,7 +192,7 @@ impl KvEventPublisher {
     }
 
     /// Get reference to local indexer if enabled.
-    pub fn local_indexer(&self) -> Option<&Arc<KvIndexer>> {
+    pub fn local_indexer(&self) -> Option<&Arc<LocalKvIndexer>> {
         self.local_indexer.as_ref()
     }
 
@@ -217,7 +218,7 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
     worker_id: u64,
     cancellation_token: CancellationToken,
     mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
-    local_indexer: Option<Arc<KvIndexer>>,
+    local_indexer: Option<Arc<LocalKvIndexer>>,
 ) {
     loop {
         tokio::select! {
@@ -237,8 +238,8 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
 
                 // Apply to local indexer first (if present)
                 if let Some(indexer) = &local_indexer {
-                    let event_sender = indexer.event_sender();
-                    if let Err(e) = event_sender.send(router_event.clone()).await {
+                    // Adds event into local indexer, and logs it into internal buffer
+                    if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
                         tracing::warn!(
                             "Failed to send event to local indexer for worker {}: {}",
                             worker_id,
@@ -1148,7 +1149,7 @@ mod tests_startup_helpers {
         // Create a local indexer
         let token = CancellationToken::new();
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let local_indexer = Arc::new(KvIndexer::new(token.clone(), 4, metrics));
+        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
 
         // Create BlockStored event
         let event = KvCacheEvent {
@@ -1220,7 +1221,7 @@ mod tests_startup_helpers {
 
         let token = CancellationToken::new();
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let local_indexer = Arc::new(KvIndexer::new(token.clone(), 4, metrics));
+        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
 
         // First, store a block
         let store_event = KvCacheEvent {
@@ -1286,7 +1287,7 @@ mod tests_startup_helpers {
 
         let token = CancellationToken::new();
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let local_indexer = Arc::new(KvIndexer::new(token.clone(), 4, metrics));
+        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
 
         // Store a block
         let store_event = KvCacheEvent {
@@ -1350,7 +1351,7 @@ mod tests_startup_helpers {
 
         let token = CancellationToken::new();
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let local_indexer = Arc::new(KvIndexer::new(token.clone(), 4, metrics));
+        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
 
         // cancel indexer immediately to simulate failure
         token.cancel();
