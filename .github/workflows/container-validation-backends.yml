@@ -14,7 +14,7 @@ on:
       run_deploy_operator:
         description: 'Run deploy operator and deployment tests'
         required: false
-        default: 'false'
+        default: false
         type: boolean
 
 concurrency:
@@ -50,7 +50,8 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    #if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: inputs.run_deploy_operator
     strategy:
       fail-fast: false
       matrix:
@@ -130,7 +131,7 @@ jobs:
 
   vllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: inputs.run_deploy_operator == true
     strategy:
       fail-fast: false
       matrix:
@@ -199,7 +200,7 @@ jobs:
 
   sglang:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: inputs.run_deploy_operator == false
     strategy:
       fail-fast: false
       matrix:
@@ -762,7 +763,7 @@ jobs:
     runs-on: cpu-amd-m5-2xlarge
     # TODO: Uncomment this when we have a way to test the deploy-test-sglang job in CI.
     #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: inputs.run_deploy_operator == 'true'
+    if: inputs.run_deploy_operator
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
@@ -785,7 +786,7 @@ jobs:
     runs-on: cpu-amd-m5-2xlarge
     # TODO: Uncomment this when we have a way to test the deploy-test-trtllm job in CI.
     #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: inputs.run_deploy_operator == 'true'
+    if: inputs.run_deploy_operator
     needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
@@ -810,7 +811,7 @@ jobs:
     runs-on: cpu-amd-m5-2xlarge
     # TODO: Uncomment the below if statement when we have a way to test the cleanup job in CI.
     # if: always()
-    if: inputs.run_deploy_operator == 'true'
+    if: inputs.run_deploy_operator
     needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
     steps:
     - name: Output Node Name
