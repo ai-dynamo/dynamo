@@ -13,7 +13,7 @@ ARG RUNTIME_IMAGE_TAG="13.0.2-runtime-ubuntu24.04"
 # TensorRT-LLM specific configuration
 ARG HAS_TRTLLM_CONTEXT=0
 ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
-ARG TENSORRTLLM_INDEX_URL="https://download.pytorch.org/whl/cu130"
+ARG TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 ARG GITHUB_TRTLLM_COMMIT
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -187,7 +187,6 @@ ARG PYTHON_VERSION
 
 WORKDIR /workspace
 
-ARG ENV=/etc/shinit_v2
 ENV ENV=${ENV:-/etc/shinit_v2}
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
