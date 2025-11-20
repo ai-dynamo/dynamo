@@ -26,9 +26,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
 
-# Global LMCache configuration - initialize once on module import
-ENABLE_LMCACHE = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
-
 
 class Config:
     """Command line parameters or defaults"""
