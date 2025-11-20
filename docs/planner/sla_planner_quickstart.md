@@ -420,14 +420,14 @@ By default, profiling jobs save essential data to ConfigMaps for planner integra
 
 **What's available in ConfigMaps (always created):**
 - Generated DGD configuration
-- Profiling data for Planner (`.npz` files, `.json`)
+- Profiling data for Planner (`.json` files)
 
 **What's available in PVC if attached to DGDR (optional):**
 - Performance plots (PNGs)
-- Detailed logs
-- AIPerf profiling artifacts
+- DGD configuration and logs of all services for each profiled deployment
+- AIPerf profiling artifacts for each AIPerf run 
 - Raw profiling data (`.npz` files)
-- Per-configuration YAML files
+- Profiler log
 
 **Setup:**
 
