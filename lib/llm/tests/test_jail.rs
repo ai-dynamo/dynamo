@@ -1661,11 +1661,21 @@ mod tests {
         assert_eq!(results.len(), 2, "Should have exactly 2 chunks");
 
         // First chunk should be content chunk
-        let content = results[0].data.as_ref().unwrap().choices[0].delta.content.as_ref().unwrap();
-        assert_eq!(content, "Hello, world!", "Content chunk should have 'Hello, world!'");
+        let content = results[0].data.as_ref().unwrap().choices[0]
+            .delta
+            .content
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            content, "Hello, world!",
+            "Content chunk should have 'Hello, world!'"
+        );
 
         // Second chunk should be usage-only chunk
-        assert!(results[1].data.as_ref().unwrap().choices.is_empty(), "Usage chunk should have no choices");
+        assert!(
+            results[1].data.as_ref().unwrap().choices.is_empty(),
+            "Usage chunk should have no choices"
+        );
         let usage = results[1].data.as_ref().unwrap().usage.as_ref().unwrap();
         assert_eq!(usage.prompt_tokens, 11);
         assert_eq!(usage.completion_tokens, 3);
