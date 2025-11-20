@@ -114,19 +114,18 @@ pub struct KvRouterConfig {
     /// Whether to reset the router state on startup (default: false)
     pub router_reset_states: bool,
 
-    /// TTL for blocks in seconds (only used when use_kv_events is false)
-    pub router_ttl_secs: Option<f64>,
+    /// TTL for blocks in seconds (only used when use_kv_events is false, default: 120.0)
+    pub router_ttl_secs: f64,
 
-    /// Maximum tree size before pruning (only used when use_kv_events is false)
-    pub router_max_tree_size: Option<usize>,
+    /// Maximum tree size before pruning (only used when use_kv_events is false, default: 1024)
+    pub router_max_tree_size: usize,
 
-    /// Target size ratio after pruning (only used when use_kv_events is false)
-    pub router_prune_target_ratio: Option<f64>,
+    /// Target size ratio after pruning (only used when use_kv_events is false, default: 0.8)
+    pub router_prune_target_ratio: f64,
 }
 
 impl Default for KvRouterConfig {
     fn default() -> Self {
-        let prune_defaults = PruneConfig::default();
         Self {
             overlap_score_weight: 1.0,
             router_temperature: 0.0,
@@ -135,9 +134,9 @@ impl Default for KvRouterConfig {
             router_track_active_blocks: true,
             router_snapshot_threshold: Some(1000000),
             router_reset_states: false,
-            router_ttl_secs: Some(prune_defaults.ttl.as_secs_f64()),
-            router_max_tree_size: Some(prune_defaults.max_tree_size),
-            router_prune_target_ratio: Some(prune_defaults.prune_target_ratio),
+            router_ttl_secs: 120.0,
+            router_max_tree_size: 1024,
+            router_prune_target_ratio: 0.8,
         }
     }
 }
@@ -154,9 +153,9 @@ impl KvRouterConfig {
         track_active_blocks: Option<bool>,
         router_snapshot_threshold: Option<Option<u32>>,
         router_reset_states: Option<bool>,
-        router_ttl_secs: Option<Option<f64>>,
-        router_max_tree_size: Option<Option<usize>>,
-        router_prune_target_ratio: Option<Option<f64>>,
+        router_ttl_secs: Option<f64>,
+        router_max_tree_size: Option<usize>,
+        router_prune_target_ratio: Option<f64>,
     ) -> Self {
         let default = Self::default();
         Self {
@@ -287,19 +286,10 @@ impl KvRouter {
 
             // If use_kv_events is false, enable TTL and pruning for approximate behavior
             let prune_config = if !kv_router_config.use_kv_events {
-                let default = PruneConfig::default();
-
                 Some(PruneConfig {
-                    ttl: kv_router_config
-                        .router_ttl_secs
-                        .map(Duration::from_secs_f64)
-                        .unwrap_or(default.ttl),
-                    max_tree_size: kv_router_config
-                        .router_max_tree_size
-                        .unwrap_or(default.max_tree_size),
-                    prune_target_ratio: kv_router_config
-                        .router_prune_target_ratio
-                        .unwrap_or(default.prune_target_ratio),
+                    ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
+                    max_tree_size: kv_router_config.router_max_tree_size,
+                    prune_target_ratio: kv_router_config.router_prune_target_ratio,
                 })
             } else {
                 None

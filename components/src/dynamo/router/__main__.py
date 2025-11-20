@@ -221,22 +221,22 @@ def parse_args():
     parser.add_argument(
         "--router-ttl-secs",
         type=float,
-        default=None,
-        help="KV Router: TTL for blocks in seconds. Only used when --no-kv-events is set. Controls how long cached blocks are considered valid without explicit events (default: None)",
+        default=120.0,
+        help="KV Router: TTL for blocks in seconds. Only used when --no-kv-events is set. Controls how long cached blocks are considered valid without explicit events (default: 120.0)",
     )
 
     parser.add_argument(
         "--router-max-tree-size",
         type=int,
-        default=None,
-        help="KV Router: Maximum tree size before pruning. Only used when --no-kv-events is set. When the indexer tree exceeds this size, pruning is triggered (default: None)",
+        default=2**10,
+        help="KV Router: Maximum tree size before pruning. Only used when --no-kv-events is set. When the indexer tree exceeds this size, pruning is triggered (default: 1024)",
     )
 
     parser.add_argument(
         "--router-prune-target-ratio",
         type=float,
-        default=None,
-        help="KV Router: Target size ratio after pruning (0.0-1.0). Only used when --no-kv-events is set. Determines how aggressively to prune the tree (default: None)",
+        default=0.8,
+        help="KV Router: Target size ratio after pruning (0.0-1.0). Only used when --no-kv-events is set. Determines how aggressively to prune the tree (default: 0.8)",
     )
 
     return parser.parse_args()

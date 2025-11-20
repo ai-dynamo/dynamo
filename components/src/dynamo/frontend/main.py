@@ -136,20 +136,20 @@ def parse_args():
     parser.add_argument(
         "--router-ttl",
         type=float,
-        default=None,
-        help="KV Router: Time-to-live in seconds for blocks when KV events are disabled (default: 120.0). Only used when --no-kv-events is set.",
+        default=float(os.environ.get("DYN_ROUTER_TTL", "120.0")),
+        help="KV Router: Time-to-live in seconds for blocks when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_TTL env var (default: 120.0).",
     )
     parser.add_argument(
         "--router-max-tree-size",
         type=int,
-        default=None,
-        help="KV Router: Maximum tree size before pruning when KV events are disabled (default: 1048576). Only used when --no-kv-events is set.",
+        default=int(os.environ.get("DYN_ROUTER_MAX_TREE_SIZE", str(2**10))),
+        help="KV Router: Maximum tree size before pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1024).",
     )
     parser.add_argument(
         "--router-prune-target-ratio",
         type=float,
-        default=None,
-        help="KV Router: Target size ratio after pruning when KV events are disabled (default: 0.8). Only used when --no-kv-events is set.",
+        default=float(os.environ.get("DYN_ROUTER_PRUNE_TARGET_RATIO", "0.8")),
+        help="KV Router: Target size ratio after pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_PRUNE_TARGET_RATIO env var (default: 0.8).",
     )
     parser.add_argument(
         "--namespace",

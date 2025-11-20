@@ -950,7 +950,36 @@ class RouterConfig:
 
 class KvRouterConfig:
     """Values for KV router"""
-    ...
+
+    def __init__(
+        self,
+        overlap_score_weight: float = 1.0,
+        router_temperature: float = 0.0,
+        use_kv_events: bool = True,
+        router_replica_sync: bool = False,
+        router_track_active_blocks: bool = True,
+        router_snapshot_threshold: Optional[int] = 1000000,
+        router_reset_states: bool = False,
+        router_ttl_secs: float = 120.0,
+        router_max_tree_size: int = 1024,
+        router_prune_target_ratio: float = 0.8,
+    ) -> None:
+        """
+        Create a KV router configuration.
+
+        Args:
+            overlap_score_weight: Weight for overlap score in worker selection (default: 1.0)
+            router_temperature: Temperature for worker sampling via softmax (default: 0.0)
+            use_kv_events: Whether to use KV events from workers (default: True)
+            router_replica_sync: Enable replica synchronization (default: False)
+            router_track_active_blocks: Track active blocks for load balancing (default: True)
+            router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
+            router_reset_states: Reset router state on startup (default: False)
+            router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
+            router_max_tree_size: Maximum tree size before pruning (default: 1024)
+            router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
+        """
+        ...
 
 async def register_llm(
     model_input: ModelInput,
