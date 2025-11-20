@@ -37,6 +37,17 @@ The request plane is the transport layer that handles communication between Dyna
 | **TCP** | Low-latency direct communication | Direct connections, minimal overhead |
 | **HTTP** | Standard deployments, debugging | HTTP/2 protocol, easier observability with standard tools, widely compatible |
 
+## KV Routing and NATS
+
+Dynamo's Key-Value (KV) cache based routing optimizes large language model inference by intelligently directing requests to workers with the most relevant KV cache data. KV-aware routing improves both Time To First Token (TTFT) through better cache locality and Inter-Token Latency (ITL) through intelligent load balancing.
+
+Please refer to the [KV Cache Routing documentation](../router/kv_cache_routing.md) for more details.
+
+There are two modes of KV based routing:
+- Exact KV routing (needs NATS):  KV routing is based KV events indexing in a radix tree scoring the best match for the request. *This requires NATS* to persist and distribute KV events across routers.
+
+- Approximate KV routing (does not need NATS): KV routing is based on approximate load heuristics. *This does not require NATS*.
+
 ## Configuration
 
 ### Environment Variable
