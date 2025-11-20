@@ -157,7 +157,6 @@ pub struct Component {
     #[educe(Debug(ignore))]
     drt: Arc<DistributedRuntime>,
 
-    // todo - restrict the namespace to a-z0-9-_A-Z
     /// Name of the component
     #[builder(setter(into))]
     #[validate(custom(function = "validate_allowed_chars"))]
@@ -435,8 +434,10 @@ impl ComponentBuilder {
         if component.drt().request_plane().is_nats() {
             let mut c = component.clone();
             // Start in the background to isolate the async, and because we don't need it yet
-            tokio::spawn(async move {
-                let _ = c.add_stats_service().await;
+            component.drt().runtime().secondary().spawn(async move {
+                if let Err(err) = c.add_stats_service().await {
+                    tracing::error!(error = %err, component = c.service_name(), "Failed starting stats service");
+                }
             });
         }
         Ok(component)
