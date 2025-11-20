@@ -177,7 +177,7 @@ jobs:
         # if: ${{ github.ref_name == 'main' }}
         with:
           local_image: ${{ env.DYNAMO_BASE_IMAGE }}
-          push_tag: ai-dynamo/dynamo:${{ github.ref_name }}-dynamo-${{ matrix.platform.arch }}
+          push_tag: ai-dynamo/dynamo:test-dynamo-${{ matrix.platform.arch }}
           aws_push: 'true'
           azure_push: 'false'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
