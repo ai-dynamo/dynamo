@@ -115,6 +115,9 @@ runs:
         if [ -n "${{ inputs.dynamo_base_image }}" ]; then
           EXTRA_ARGS+=" --dynamo-base-image ${{ inputs.dynamo_base_image }}"
         fi
+        if [ -n "${{ inputs.enable_kvbm }}" ]; then
+          EXTRA_ARGS+=" --build-arg ENABLE_KVBM=${{ inputs.enable_kvbm }}"
+        fi
 
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \

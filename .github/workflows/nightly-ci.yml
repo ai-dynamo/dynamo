@@ -147,6 +147,7 @@ jobs:
           target: runtime
           platform: linux/${{ env.ARCH }}
           dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64
+          enable_kvbm: ${{ env.ENABLE_KVBM }}
           base_image_tag: ${{ env.BASE_IMAGE_TAG }}
           runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
           cuda_version: ${{ env.CUDA_VERSION }}
@@ -208,6 +209,7 @@ jobs:
           target: runtime
           platform: linux/${{ env.ARCH }}
           dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64
+          enable_kvbm: ${{ env.ENABLE_KVBM }}
           base_image_tag: ${{ env.BASE_IMAGE_TAG }}
           runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
           cuda_version: ${{ env.CUDA_VERSION }}
@@ -269,6 +271,7 @@ jobs:
           target: runtime
           platform: linux/${{ env.ARCH }}
           dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64
+          enable_kvbm: ${{ env.ENABLE_KVBM }}
           base_image_tag: ${{ env.BASE_IMAGE_TAG }}
           runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
           cuda_version: ${{ env.CUDA_VERSION }}
@@ -325,6 +328,7 @@ jobs:
           target: runtime
           platform: linux/${{ env.ARCH }}
           dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64
+          enable_kvbm: ${{ env.ENABLE_KVBM }}
           base_image_tag: ${{ env.BASE_IMAGE_TAG }}
           runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
           cuda_version: ${{ env.CUDA_VERSION }}
@@ -381,6 +385,7 @@ jobs:
           target: runtime
           platform: linux/${{ env.ARCH }}
           dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64
+          enable_kvbm: ${{ env.ENABLE_KVBM }}
           base_image_tag: ${{ env.BASE_IMAGE_TAG }}
           runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
           cuda_version: ${{ env.CUDA_VERSION }}
@@ -437,6 +442,7 @@ jobs:
           target: runtime
           platform: linux/${{ env.ARCH }}
           dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64
+          enable_kvbm: ${{ env.ENABLE_KVBM }}
           base_image_tag: ${{ env.BASE_IMAGE_TAG }}
           runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
           cuda_version: ${{ env.CUDA_VERSION }}
@@ -494,6 +500,7 @@ jobs:
           framework: vllm
           test_type: unit
           platform_arch: amd64
+          cpu_limit: '8'
 
   unit-vllm-arm64:
     name: Unit vLLM (arm64)
@@ -523,6 +530,7 @@ jobs:
           framework: vllm
           test_type: unit
           platform_arch: arm64
+          cpu_limit: '8'
 
   unit-trtllm-amd64:
     name: Unit TRTLLM (amd64)
@@ -552,6 +560,7 @@ jobs:
           framework: trtllm
           test_type: unit
           platform_arch: amd64
+          cpu_limit: '8'
 
   unit-trtllm-arm64:
     name: Unit TRTLLM (arm64)
@@ -581,6 +590,7 @@ jobs:
           framework: trtllm
           test_type: unit
           platform_arch: arm64
+          cpu_limit: '8'
 
   unit-sglang-amd64:
     name: Unit SGLang (amd64)
@@ -610,6 +620,7 @@ jobs:
           framework: sglang
           test_type: unit
           platform_arch: amd64
+          cpu_limit: '8'
 
   unit-sglang-arm64:
     name: Unit SGLang (arm64)
@@ -639,6 +650,7 @@ jobs:
           framework: sglang
           test_type: unit
           platform_arch: arm64
+          cpu_limit: '8'
 
   integration-vllm-amd64:
     name: Integration vLLM (amd64)
