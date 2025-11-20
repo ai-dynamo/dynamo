@@ -62,24 +62,18 @@ jobs:
         working-directory: ./deploy
         run: |
           docker compose down
-      - name: Run pytest
-        env:
-          PYTEST_MARKS: "(pre_merge and parallel) or mypy"
+      - name: Run pytest (parallel tests with xdist)
         run: |
-          # Only use parallel execution (-n 4) for tests marked with 'parallel'
-          # Other tests run sequentially to avoid pytest-xdist overhead
-          PYTEST_XDIST_FLAG=""
-          if echo "${{ env.PYTEST_MARKS }}" | grep -q "parallel"; then
-            PYTEST_XDIST_FLAG="-n 4"
-            echo "🔀 Using parallel execution (4 workers) for parallel-marked tests"
-          else
-            echo "▶️  Running tests sequentially"
-          fi
-
+          docker run -w /workspace \
+            --name ${{ env.CONTAINER_ID }}_pytest_parallel \
+            ${{ steps.define_image_tag.outputs.image_tag }} \
+            bash -c "pytest --basetemp=/tmp -n 4 -m 'pre_merge and parallel' || true"
+      - name: Run pytest (sequential tests)
+        run: |
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} ${PYTEST_XDIST_FLAG} -m \"${{ env.PYTEST_MARKS }}\" "
+            bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m '(pre_merge and not parallel) or mypy' "
       - name: Copy test report from test Container
         if: always()
         run: |
