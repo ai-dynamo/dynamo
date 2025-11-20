@@ -25,7 +25,7 @@ Dynamo supports multiple transport mechanisms for its request plane (the communi
 - **TCP**: Direct TCP connection for optimal performance
 - **HTTP**: HTTP/2-based request plane
 
-This guide explains how to configure and use alternative request planes in your Dynamo deployment.
+This guide explains how to configure and use request plane in your Dynamo deployment.
 
 ## What is a Request Plane?
 
