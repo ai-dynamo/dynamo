@@ -239,7 +239,12 @@ pub(crate) struct KvEventPublisher {
 impl KvEventPublisher {
     #[new]
     #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0))]
-    fn new(component: Component, worker_id: WorkerId, kv_block_size: usize, dp_rank: DpRank) -> PyResult<Self> {
+    fn new(
+        component: Component,
+        worker_id: WorkerId,
+        kv_block_size: usize,
+        dp_rank: DpRank,
+    ) -> PyResult<Self> {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
