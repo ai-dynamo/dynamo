@@ -49,6 +49,9 @@ inputs:
   torch_backend:
     description: 'Optional override for TORCH_BACKEND build-arg (e.g., cu129)'
     required: false
+  dynamo_base_image:
+    description: 'Pre-built Dynamo base image to use instead of building from scratch'
+    required: false
 
 outputs:
   image_tag:
@@ -62,12 +65,6 @@ runs:
       uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
       with:
         driver: docker
-    - name: Login to ECR
-      shell: bash
-      env:
-        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
-      run: |
-        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
     - name: Login to NGC
       if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
       shell: bash
@@ -114,6 +111,12 @@ runs:
         fi
         if [ -n "${{ inputs.torch_backend }}" ]; then
           EXTRA_ARGS+=" --build-arg TORCH_BACKEND=${{ inputs.torch_backend }}"
+        fi
+        if [ -n "${{ inputs.dynamo_base_image }}" ]; then
+          EXTRA_ARGS+=" --dynamo-base-image ${{ inputs.dynamo_base_image }}"
+        fi
+        if [ -n "${{ inputs.enable_kvbm }}" ]; then
+          EXTRA_ARGS+=" --build-arg ENABLE_KVBM=${{ inputs.enable_kvbm }}"
         fi
 
         ./container/build.sh --tag "$IMAGE_TAG" \
