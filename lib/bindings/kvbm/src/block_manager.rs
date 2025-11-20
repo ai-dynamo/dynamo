@@ -15,6 +15,7 @@ use pyo3::PyResult;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+pub mod cache_stats;
 mod controller;
 mod distributed;
 

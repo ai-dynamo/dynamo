@@ -81,7 +81,12 @@ pub async fn run(
     let request_plane: RequestPlaneMode = flags.request_plane.parse()?;
     let dst_config = DistributedConfig {
         store_backend: selected_store,
-        nats_config: nats::ClientOptions::default(),
+        // We only need NATS here to monitor it's metrics, so only if it's our request plane.
+        nats_config: if request_plane.is_nats() {
+            Some(nats::ClientOptions::default())
+        } else {
+            None
+        },
         request_plane,
     };
     let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;

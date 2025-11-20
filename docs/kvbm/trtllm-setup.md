@@ -141,6 +141,8 @@ KVBM currently provides following types of metrics out of the box:
 - `kvbm_offload_blocks_d2d`: The number of offload blocks from device to disk (bypassing host memory)
 - `kvbm_onboard_blocks_d2d`: The number of onboard blocks from disk to device
 - `kvbm_onboard_blocks_h2d`: The number of onboard blocks from host to device
+- `kvbm_host_cache_hit_rate`: Host cache hit rate (0.0-1.0) from sliding window
+- `kvbm_disk_cache_hit_rate`: Disk cache hit rate (0.0-1.0) from sliding window
 
 ## Troubleshooting
 
@@ -198,4 +200,14 @@ EOF
 
 # Run trtllm-serve for the baseline for comparison
 trtllm-serve Qwen/Qwen3-0.6B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/llm_api_config.yaml &
+```
+
+## Developing Locally
+
+Inside the Dynamo container, after changing KVBM related code (Rust and/or Python), to test or use it:
+```bash
+cd /workspace/lib/bindings/kvbm
+uv pip install maturin[patchelf]
+maturin build --release --out /workspace/dist
+uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
 ```
