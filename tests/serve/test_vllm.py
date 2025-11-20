@@ -51,6 +51,19 @@ vllm_configs = {
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
     ),
+    "aggregated_lmcache": VLLMConfig(
+        name="aggregated_lmcache",
+        directory=vllm_dir,
+        script_name="agg_lmcache.sh",
+        marks=[pytest.mark.gpu_1],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+            metric_payload_default(min_num_requests=6, backend="lmcache"),
+        ],
+    ),
     "agg-request-plane-tcp": VLLMConfig(
         name="agg-request-plane-tcp",
         directory=vllm_dir,
@@ -208,6 +221,42 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=["purple"],
                 max_tokens=100,
+            ),
+        ],
+    ),
+    "multimodal_agg_llava": VLLMConfig(
+        name="multimodal_agg_llava",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_2,
+            # https://github.com/ai-dynamo/dynamo/issues/4501
+            pytest.mark.xfail(strict=False),
+        ],
+        model="llava-hf/llava-1.5-7b-hf",
+        script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
+        delayed_start=0,
+        timeout=360,
+        request_payloads=[
+            # HTTP URL test
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["bus"],
+                temperature=0.0,
+            ),
+            # String content test - verifies string → array conversion for multimodal templates
+            chat_payload_default(
+                repeat_count=1,
+                expected_response=[],  # Just validate no error
             ),
         ],
     ),

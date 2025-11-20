@@ -238,11 +238,20 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, kv_block_size, dp_rank=0))]
-    fn new(component: Component, kv_block_size: usize, dp_rank: DpRank) -> PyResult<Self> {
+    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0))]
+    fn new(
+        component: Component,
+        worker_id: WorkerId,
+        kv_block_size: usize,
+        dp_rank: DpRank,
+    ) -> PyResult<Self> {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
+
+        // Note: worker_id parameter matches the Python stub (_core.pyi) signature but is not used.
+        // The actual worker_id is inferred from component's connection_id in the Rust implementation.
+        let _ = worker_id;
 
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
