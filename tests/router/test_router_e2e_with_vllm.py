@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 import pytest
 
 from tests.router.common import (  # utilities
+    BLOCK_SIZE,
     KVRouterProcess,
     _test_router_basic,
     _test_router_decisions,
@@ -22,7 +23,6 @@ MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 SPEEDUP_RATIO = 10.0
 PORT = 8090
 NUM_REQUESTS = 10
-BLOCK_SIZE = 16
 
 # Shared test payload for all tests
 TEST_PAYLOAD: Dict[str, Any] = {
@@ -281,7 +281,7 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
         frontend_port = PORT
         logger.info(f"Starting KV router frontend on port {frontend_port}")
 
-        kv_router = KVRouterProcess(request, BLOCK_SIZE, frontend_port)
+        kv_router = KVRouterProcess(request, frontend_port, store_backend="etcd")
         kv_router.__enter__()
 
         # Start vLLM workers
@@ -303,6 +303,7 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
             num_requests=NUM_REQUESTS,
             wait_for_frontend=True,  # vLLM workers need time to load models
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
+            store_backend="etcd",
         )
 
     finally:

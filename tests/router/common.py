@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
-
 ########################################################
 # Helper Classes
 ########################################################
@@ -28,17 +27,19 @@ BLOCK_SIZE = 16
 class KVRouterProcess(ManagedProcess):
     """Manages the KV router process using dynamo.frontend"""
 
-    def __init__(self, request, block_size: int, frontend_port: int):
+    def __init__(self, request, frontend_port: int, store_backend: str = "etcd"):
         command = [
-            "python3",
+            "python",
             "-m",
             "dynamo.frontend",
             "--kv-cache-block-size",
-            str(block_size),
+            str(BLOCK_SIZE),
             "--router-mode",
             "kv",
             "--http-port",
             str(frontend_port),
+            "--store-kv",
+            store_backend,
         ]
 
         super().__init__(
@@ -70,6 +71,49 @@ def generate_random_suffix() -> str:
 ########################################################
 # Utility functions
 ########################################################
+
+
+async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):
+    """Check NATS consumers for the KV events stream.
+
+    Args:
+        namespace: The namespace to check consumers for
+        expected_count: Optional expected number of consumers. If provided, logs an error if count doesn't match.
+
+    Returns:
+        List of consumer names
+    """
+    component_subject = f"namespace.{namespace}.component.mocker"
+    slugified = component_subject.lower().replace(".", "-").replace("_", "-")
+    stream_name = f"{slugified}-kv-events"
+    logger.info(f"Checking consumers for stream: {stream_name}")
+
+    nc = await nats.connect("nats://localhost:4222")
+    try:
+        js = nc.jetstream()
+        consumer_infos = await js.consumers_info(stream_name)
+        consumer_names = [info.name for info in consumer_infos]
+        logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
+
+        # Log detailed consumer info
+        for info in consumer_infos:
+            logger.info(
+                f"Consumer {info.name}: "
+                f"num_pending={info.num_pending}, "
+                f"num_ack_pending={info.num_ack_pending}, "
+                f"ack_floor={info.ack_floor}, "
+                f"delivered={info.delivered}"
+            )
+
+        if expected_count is not None:
+            assert (
+                len(consumer_names) == expected_count
+            ), f"Expected {expected_count} durable consumers, found {len(consumer_names)}: {consumer_names}"
+            logger.info(f"✓ Verified {expected_count} durable consumers exist")
+
+        return consumer_names
+    finally:
+        await nc.close()
 
 
 async def wait_for_frontend_ready(
@@ -271,29 +315,20 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8)
     return False
 
 
-def get_runtime():
-    """Get or create a DistributedRuntime instance.
+def get_runtime(store_backend="etcd"):
+    """Create a DistributedRuntime instance for testing.
 
-    This handles the case where a worker is already initialized (common in CI)
-    by using the detached() method to reuse the existing runtime.
+    Args:
+        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
     """
     try:
-        # Try to use existing runtime (common in CI where tests run in same process)
-        _runtime_instance = DistributedRuntime.detached()
-        logger.info("Using detached runtime (worker already initialized)")
-    except Exception as e:
-        # If no existing runtime, create a new one
-        logger.info(f"Creating new runtime (detached failed: {e})")
-        try:
-            # Try to get running loop (works in async context)
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop, create a new one (sync context)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        _runtime_instance = DistributedRuntime(loop, False)
-
-    return _runtime_instance
+        # Try to get running loop (works in async context)
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop, create a new one (sync context)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return DistributedRuntime(loop, store_backend)
 
 
 async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
@@ -459,6 +494,7 @@ def _test_router_basic(
     num_requests: int,
     wait_for_frontend: bool = False,
     frontend_timeout: int = 180,
+    store_backend: str = "etcd",
 ):
     """Basic router test: wait for workers (optional) and send concurrent requests via HTTP frontend.
 
@@ -506,6 +542,7 @@ def _test_router_basic(
 
 def _test_router_two_routers(
     engine_workers,
+    kv_routers,
     block_size: int,
     request,
     router_ports: list[int],
@@ -533,24 +570,14 @@ def _test_router_two_routers(
     Raises:
         AssertionError: If consumer lifecycle verification fails
     """
-    import nats
-
-    kv_routers = []
 
     try:
-        # Start two KV routers on different ports
-        for port in router_ports:
-            logger.info(f"Starting KV router frontend on port {port}")
-            kv_router = KVRouterProcess(request, block_size, port)
-            kv_router.__enter__()
-            kv_routers.append(kv_router)
-
         # Build URLs for both routers
         router_urls = [
             f"http://localhost:{port}/v1/chat/completions" for port in router_ports
         ]
 
-        # Send requests concurrently, alternating between routers
+        # Use async to send requests concurrently, alternating between routers
         asyncio.run(
             send_inflight_requests(
                 router_urls,
@@ -567,77 +594,34 @@ def _test_router_two_routers(
         async def verify_consumer_lifecycle():
             logger.info("Verifying durable consumers lifecycle")
 
-            # Construct the stream name from the workers namespace
-            component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
-            slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-            stream_name = f"{slugified}-kv-events"
+            # Check initial consumer count - should have 2 (one for each router process)
+            await check_nats_consumers(engine_workers.namespace, expected_count=2)
 
-            logger.info(f"Checking consumers for stream: {stream_name}")
+            # Kill the first router process
+            logger.info(f"Killing first router on port {router_ports[0]}")
+            kv_routers[0].__exit__(None, None, None)
 
-            # Connect to NATS and list consumers
-            nc = await nats.connect("nats://localhost:4222")
-            try:
-                js = nc.jetstream()
+            # Wait for cleanup to happen (consumer deletion is triggered by etcd watch)
+            await asyncio.sleep(1)
 
-                # List consumers - should have 2 (one for each router process)
-                consumer_infos = await js.consumers_info(stream_name)
-                consumer_names = [info.name for info in consumer_infos]
-                logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
+            # Verify only 1 consumer remains
+            await check_nats_consumers(engine_workers.namespace, expected_count=1)
+            logger.info(
+                "✓ Verified 1 durable consumer remains after killing first router"
+            )
 
-                assert (
-                    len(consumer_names) == 2
-                ), f"Expected 2 durable consumers (one per router), found {len(consumer_names)}: {consumer_names}"
-                logger.info("✓ Verified 2 durable consumers exist (one per router)")
+            # Kill the second router process
+            logger.info(f"Killing second router on port {router_ports[1]}")
+            kv_routers[1].__exit__(None, None, None)
 
-                # Kill the first router process
-                logger.info(f"Killing first router on port {router_ports[0]}")
-                kv_routers[0].__exit__(None, None, None)
+            # Wait for cleanup to happen
+            await asyncio.sleep(1)
 
-                # Poll until one consumer remains (up to 5s)
-                for _ in range(25):
-                    consumer_infos = await js.consumers_info(stream_name)
-                    if len(list(consumer_infos)) == 1:
-                        break
-                    await asyncio.sleep(0.2)
-
-                # Verify only 1 consumer remains
-                consumer_names = [info.name for info in consumer_infos]
-                logger.info(
-                    f"After killing router1, found {len(consumer_names)} consumers: {consumer_names}"
-                )
-
-                assert (
-                    len(consumer_names) == 1
-                ), f"Expected 1 durable consumer after killing router1, found {len(consumer_names)}: {consumer_names}"
-                logger.info(
-                    "✓ Verified 1 durable consumer remains after killing first router"
-                )
-
-                # Kill the second router process
-                logger.info(f"Killing second router on port {router_ports[1]}")
-                kv_routers[1].__exit__(None, None, None)
-
-                # Poll until no consumers remain (up to 5s)
-                for _ in range(25):
-                    consumer_infos = await js.consumers_info(stream_name)
-                    if len(list(consumer_infos)) == 0:
-                        break
-                    await asyncio.sleep(0.2)
-
-                consumer_names = [info.name for info in consumer_infos]
-                logger.info(
-                    f"After killing router2, found {len(consumer_names)} consumers: {consumer_names}"
-                )
-
-                assert (
-                    len(consumer_names) == 0
-                ), f"Expected 0 durable consumers after killing both routers, found {len(consumer_names)}: {consumer_names}"
-                logger.info(
-                    "✓ Verified 0 durable consumers remain after killing both routers"
-                )
-
-            finally:
-                await nc.close()
+            # Verify no consumers remain
+            await check_nats_consumers(engine_workers.namespace, expected_count=0)
+            logger.info(
+                "✓ Verified 0 durable consumers remain after killing both routers"
+            )
 
         # Run consumer lifecycle verification
         asyncio.run(verify_consumer_lifecycle())
@@ -779,6 +763,7 @@ def _test_python_router_bindings(
 
 def _test_router_query_instance_id(
     engine_workers,
+    kv_router,
     block_size: int,
     request,
     frontend_port: int,
@@ -808,14 +793,8 @@ def _test_router_query_instance_id(
     Raises:
         AssertionError: If annotation response structure is incorrect or contains generation content
     """
-    import aiohttp
 
     try:
-        # Start KV router (frontend)
-        logger.info(f"Starting KV router frontend on port {frontend_port}")
-        kv_router = KVRouterProcess(request, block_size, frontend_port)
-        kv_router.__enter__()
-
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
         # Send a warming request first to ensure system is ready
@@ -1121,243 +1100,6 @@ def _test_router_overload_503(
     finally:
         if "kv_router" in locals():
             kv_router.__exit__(None, None, None)
-
-
-def _test_router_indexers_sync(
-    engine_workers,
-    endpoint,
-    block_size: int,
-    model_name: str,
-    num_workers: int,
-):
-    """Test that two KV routers have synchronized indexer states after processing requests.
-
-    Assumes engine_workers are already initialized. This test:
-    1. Creates first KvPushRouter and sends 25 requests (triggers snapshot at threshold=20)
-    2. Creates second KvPushRouter (should sync from NATS snapshot)
-    3. Sends 25 requests to second router
-    4. Verifies NATS object store contains the snapshot
-    5. Dumps states from both routers and compares them (should be identical)
-
-    This validates that the snapshot mechanism works and routers can sync state from NATS.
-
-    Args:
-        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
-        endpoint: Dynamo endpoint for the workers
-        block_size: Block size for KV cache
-        model_name: Model name to use for requests
-        num_workers: Expected number of workers
-
-    Raises:
-        AssertionError: If router states don't synchronize correctly or snapshot is missing
-    """
-    import nats
-
-    # Use async to manage the test flow
-    async def test_sync():
-        # Create KvRouterConfig with lower snapshot threshold for testing
-        kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
-
-        async def send_requests_to_router(router, num_requests, router_name):
-            # Now send the actual requests
-            tasks = []
-            for i in range(num_requests):
-                # Generate random token IDs for each request
-                logger.debug(f"Sending request {i + 1}/{num_requests} to {router_name}")
-
-                # Generate 30 random tokens
-                request_tokens = [random.randint(1, 10000) for _ in range(30)]
-
-                # Send request to mocker via the router
-                tasks.append(
-                    asyncio.create_task(
-                        send_request_via_python_kv_router(
-                            kv_python_router=router,
-                            model_name=model_name,
-                            token_ids=request_tokens,
-                            initial_wait=1.0,
-                            max_retries=8,
-                            stop_conditions={
-                                "ignore_eos": True,  # Don't stop on EOS token
-                                "max_tokens": 10,  # Generate exactly 10 tokens
-                            },
-                        )
-                    )
-                )
-
-            # Wait for all requests to complete
-            results = await asyncio.gather(*tasks)
-            successful = sum(1 for r in results if r)
-            logger.info(
-                f"Completed {successful}/{num_requests} requests for {router_name}"
-            )
-            return successful
-
-        # Launch first router
-        logger.info("Creating first KV router")
-        kv_push_router1 = KvPushRouter(
-            endpoint=endpoint,
-            block_size=block_size,
-            kv_router_config=kv_router_config,
-        )
-
-        # Wait for workers to be ready
-        await wait_for_workers_ready(endpoint, kv_push_router1, num_workers, model_name)
-
-        # Send 25 requests to first router
-        logger.info("Sending 25 requests to first router")
-
-        # Send requests to first router
-        successful1 = await send_requests_to_router(kv_push_router1, 25, "Router 1")
-        assert (
-            successful1 == 25
-        ), f"Expected 25 successful requests to router 1, got {successful1}"
-
-        # Wait for a second before creating the second router
-        logger.info("Waiting for 1 second before creating second router")
-        await asyncio.sleep(1)
-
-        # Launch second router - will automatically sync with the first router's state
-        logger.info("Creating second KV router")
-        kv_push_router2 = KvPushRouter(
-            endpoint=endpoint,
-            block_size=block_size,
-            kv_router_config=kv_router_config,
-        )
-
-        # Send 25 requests to second router with initial retry loop
-        logger.info("Sending 25 requests to second router")
-        successful2 = await send_requests_to_router(kv_push_router2, 25, "Router 2")
-        assert (
-            successful2 == 25
-        ), f"Expected 25 successful requests to router 2, got {successful2}"
-
-        # Wait for all requests to complete (they should already be complete from gather)
-        # Wait another 1 second for internal synchronization
-        logger.info("Waiting for final synchronization")
-        await asyncio.sleep(1)
-
-        # Verify NATS object store bucket was created with snapshot
-        # Mirror the Rust bucket naming logic from subscriber.rs:
-        # component.subject() -> "namespace.{ns}.component.{comp}"
-        # then slugify (convert dots to dashes, lowercase, etc) and append "-radix-bucket"
-        component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
-        slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-        expected_bucket = f"{slugified}-radix-bucket"
-        expected_file = "radix-state"
-
-        logger.info(f"Verifying NATS object store bucket exists: {expected_bucket}")
-        snapshot_verified = False
-        try:
-            # Connect to NATS and check object store
-            nc = await nats.connect("nats://localhost:4222")
-            try:
-                js = nc.jetstream()
-                obj_store = await js.object_store(expected_bucket)
-
-                # Try to get the expected file
-                try:
-                    result = await obj_store.get(expected_file)
-                    logger.info(
-                        f"✓ Snapshot file '{expected_file}' found in bucket '{expected_bucket}' "
-                        f"(size: {len(result.data) if result.data else 0} bytes)"
-                    )
-                    snapshot_verified = True
-                except Exception as e:
-                    logger.error(
-                        f"Snapshot file '{expected_file}' not found in bucket '{expected_bucket}': {e}"
-                    )
-            finally:
-                await nc.close()
-        except Exception as e:
-            logger.error(f"Error checking NATS object store: {e}")
-
-        # Assert that snapshot was created (threshold=20, sent 25 requests)
-        if not snapshot_verified:
-            assert False, (
-                f"Expected snapshot to be created in bucket '{expected_bucket}' with file '{expected_file}'. "
-                f"Router sent 25 requests with snapshot_threshold=20, so snapshot should have been triggered."
-            )
-
-        # Dump states from both routers
-        logger.info("Dumping states from both routers")
-        state1_json = await kv_push_router1.dump_events()
-        state2_json = await kv_push_router2.dump_events()
-
-        # Parse JSON strings for comparison
-        state1 = json.loads(state1_json)
-        state2 = json.loads(state2_json)
-
-        # Sort both states for comparison (order might differ due to HashMap iteration and sharding)
-        def sort_key(event):
-            data = event["event"]["data"]["stored"]
-            blocks = data["blocks"]
-            first_block = blocks[0]
-            return (
-                event["worker_id"],
-                first_block["tokens_hash"],
-                data["parent_hash"],
-            )
-
-        sorted_state1 = sorted(state1, key=sort_key)
-        sorted_state2 = sorted(state2, key=sort_key)
-
-        # Verify they are equal
-        logger.info(f"Router 1 has {len(sorted_state1)} events")
-        logger.info(f"Router 2 has {len(sorted_state2)} events")
-
-        # Compare states one by one and only show differences
-        if len(sorted_state1) != len(sorted_state2):
-            logger.error(
-                f"Router 1 has {len(sorted_state1)} events, Router 2 has {len(sorted_state2)} events"
-            )
-            assert False, "Router states have different numbers of events"
-
-        differences = []
-        for i, (state1_item, state2_item) in enumerate(
-            zip(sorted_state1, sorted_state2)
-        ):
-            # Create copies without event_id for comparison
-            item1_compare = state1_item.copy()
-            item2_compare = state2_item.copy()
-
-            # Remove event_id from the nested event structure
-            if "event" in item1_compare and "event_id" in item1_compare["event"]:
-                del item1_compare["event"]["event_id"]
-            if "event" in item2_compare and "event_id" in item2_compare["event"]:
-                del item2_compare["event"]["event_id"]
-
-            if item1_compare != item2_compare:
-                differences.append(
-                    {
-                        "index": i,
-                        "router1_state": state1_item,
-                        "router2_state": state2_item,
-                    }
-                )
-        # If there are differences, format them for easier debugging
-        if differences:
-            error_msg = (
-                f"Router states are not equal. Found {len(differences)} differences:\n"
-            )
-            for diff in differences:
-                error_msg += f"\nDifference at index {diff['index']}:\n"
-                error_msg += (
-                    f"Router 1: {json.dumps(diff['router1_state'], indent=2)}\n"
-                )
-                error_msg += (
-                    f"Router 2: {json.dumps(diff['router2_state'], indent=2)}\n"
-                )
-                error_msg += "-" * 80 + "\n"
-
-            assert False, error_msg
-
-        logger.info("Successfully verified that both router states are equal")
-
-    # Run the async test
-    asyncio.run(test_sync())
-
-    logger.info("Indexers sync test completed successfully")
 
 
 def _test_router_decisions(

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import json
 import logging
 import os
 import random
@@ -11,16 +12,17 @@ import aiohttp
 import nats
 import pytest
 
-from dynamo._core import DistributedRuntime, KvPushRouter
+from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
 from tests.router.common import (  # utilities
+    BLOCK_SIZE,
     KVRouterProcess,
     _test_python_router_bindings,
     _test_router_basic,
     _test_router_decisions,
-    _test_router_indexers_sync,
     _test_router_overload_503,
     _test_router_query_instance_id,
     _test_router_two_routers,
+    check_nats_consumers,
     generate_random_suffix,
     send_request_via_python_kv_router,
     send_request_with_retry,
@@ -58,11 +60,8 @@ NUM_MOCKERS = 2
 SPEEDUP_RATIO = 10.0
 PORT = 8090  # Starting port for mocker instances
 NUM_REQUESTS = 100
-BLOCK_SIZE = 16
 
-
-# Shared test payload for all tests
-TEST_PAYLOAD: Dict[str, Any] = {
+TEST_PAYLOAD = {
     "model": MODEL_NAME,
     "messages": [
         {
@@ -186,49 +185,6 @@ def get_runtime(store_backend="etcd", request_plane="nats"):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
     return DistributedRuntime(loop, store_backend, request_plane)
-
-
-async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):
-    """Check NATS consumers for the KV events stream.
-
-    Args:
-        namespace: The namespace to check consumers for
-        expected_count: Optional expected number of consumers. If provided, logs an error if count doesn't match.
-
-    Returns:
-        List of consumer names
-    """
-    component_subject = f"namespace.{namespace}.component.mocker"
-    slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-    stream_name = f"{slugified}-kv-events"
-    logger.info(f"Checking consumers for stream: {stream_name}")
-
-    nc = await nats.connect("nats://localhost:4222")
-    try:
-        js = nc.jetstream()
-        consumer_infos = await js.consumers_info(stream_name)
-        consumer_names = [info.name for info in consumer_infos]
-        logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
-
-        # Log detailed consumer info
-        for info in consumer_infos:
-            logger.info(
-                f"Consumer {info.name}: "
-                f"num_pending={info.num_pending}, "
-                f"num_ack_pending={info.num_ack_pending}, "
-                f"ack_floor={info.ack_floor}, "
-                f"delivered={info.delivered}"
-            )
-
-        if expected_count is not None:
-            assert (
-                len(consumer_names) == expected_count
-            ), f"Expected {expected_count} durable consumers, found {len(consumer_names)}: {consumer_names}"
-            logger.info(f"✓ Verified {expected_count} durable consumers exist")
-
-        return consumer_names
-    finally:
-        await nc.close()
 
 
 async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
@@ -374,7 +330,7 @@ def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
         frontend_port = PORT
         logger.info(f"Starting KV router frontend on port {frontend_port}")
 
-        kv_router = KVRouterProcess(request, BLOCK_SIZE, frontend_port)
+        kv_router = KVRouterProcess(request, frontend_port, store_backend="etcd")
         kv_router.__enter__()
 
         # Start mocker instances with the new CLI interface
@@ -427,14 +383,15 @@ def test_mocker_two_kv_router(
     # Create mocker args dictionary: FixtureRequest: tuple[NatsServer, EtcdServer]: NoneType
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
+    kv_routers = []
+
     try:
         # Start two KV routers (frontend) on ports 8091 and 8092
         router_ports = [PORT + 1, PORT + 2]  # 8091 and 8092
-        kv_routers = []
 
         for port in router_ports:
             logger.info(f"Starting KV router frontend on port {port}")
-            kv_router = KVRouterProcess(request, port, store_backend)
+            kv_router = KVRouterProcess(request, port, store_backend=store_backend)
             kv_router.__enter__()
             kv_routers.append(kv_router)
 
@@ -449,10 +406,10 @@ def test_mocker_two_kv_router(
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        # Run two-router test with consumer lifecycle verification
-        router_ports = [PORT + 1, PORT + 2]  # 8091 and 8092
+        # Run two router test with consumer lifecycle verification
         _test_router_two_routers(
             engine_workers=mockers,
+            kv_routers=kv_routers,
             block_size=BLOCK_SIZE,
             request=request,
             router_ports=router_ports,
@@ -460,7 +417,11 @@ def test_mocker_two_kv_router(
             num_requests=NUM_REQUESTS,
         )
 
+        # Clear the kv_routers list since _test_router_two_routers already cleaned them up
+        kv_routers = []
+
     finally:
+        # Clean up mockers
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
@@ -562,7 +523,7 @@ def test_indexers_sync(
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     try:
-        # Start mocker instances
+        # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
             request,
@@ -571,24 +532,235 @@ def test_indexers_sync(
             store_backend=store_backend,
         )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        # Initialize mockers
         mockers.__enter__()
 
-        # Get runtime and create endpoint
-        runtime = get_runtime()
-        namespace = runtime.namespace(mockers.namespace)
-        component = namespace.component(mockers.component_name)
-        endpoint = component.endpoint("generate")
+        # Use async to manage the test flow
+        async def test_sync():
+            # Create SEPARATE runtimes for each router to ensure independence
+            # This is especially important for file storage backend where connection_id
+            # would otherwise be shared between routers
+            runtime1 = get_runtime(store_backend)
+            runtime2 = get_runtime(store_backend)
 
-        # Run indexers sync test
-        _test_router_indexers_sync(
-            engine_workers=mockers,
-            endpoint=endpoint,
-            block_size=BLOCK_SIZE,
-            model_name=MODEL_NAME,
-            num_workers=NUM_MOCKERS,
-        )
+            # Use the namespace from the mockers for both runtimes
+            namespace1 = runtime1.namespace(mockers.namespace)
+            component1 = namespace1.component("mocker")
+            endpoint1 = component1.endpoint("generate")
+
+            namespace2 = runtime2.namespace(mockers.namespace)
+            component2 = namespace2.component("mocker")
+            endpoint2 = component2.endpoint("generate")
+
+            # Create KvRouterConfig with lower snapshot threshold for testing
+            kv_router_config = KvRouterConfig(router_snapshot_threshold=20)
+
+            async def send_requests_to_router(router, num_requests, router_name):
+                # Now send the actual requests
+                tasks = []
+                for i in range(num_requests):
+                    # Generate random token IDs for each request
+                    logger.debug(
+                        f"Sending request {i + 1}/{num_requests} to {router_name}"
+                    )
+
+                    # Generate 30 random tokens
+                    request_tokens = [random.randint(1, 10000) for _ in range(30)]
+
+                    # Send request to mocker via the router
+                    tasks.append(
+                        asyncio.create_task(
+                            send_request_via_python_kv_router(
+                                kv_python_router=router,
+                                model_name=MODEL_NAME,
+                                token_ids=request_tokens,
+                                initial_wait=1.0,
+                                max_retries=8,
+                                stop_conditions={
+                                    "ignore_eos": True,  # Don't stop on EOS token
+                                    "max_tokens": 10,  # Generate exactly 10 tokens
+                                },
+                            )
+                        )
+                    )
+
+                # Wait for all requests to complete
+                results = await asyncio.gather(*tasks)
+                successful = sum(1 for r in results if r)
+                logger.info(
+                    f"Completed {successful}/{num_requests} requests for {router_name}"
+                )
+                return successful
+
+            # Launch first router
+            logger.info("Creating first KV router")
+            kv_push_router1 = KvPushRouter(
+                endpoint=endpoint1,
+                block_size=BLOCK_SIZE,
+                kv_router_config=kv_router_config,
+            )
+
+            # Wait for mockers to be ready
+            await wait_for_mockers_ready(endpoint1, kv_push_router1)
+
+            # Send 25 requests to first router
+            logger.info("Sending 25 requests to first router")
+
+            # Send requests to first router
+            successful1 = await send_requests_to_router(kv_push_router1, 25, "Router 1")
+            assert (
+                successful1 == 25
+            ), f"Expected 25 successful requests to router 1, got {successful1}"
+
+            # Wait for a second before creating the second router
+            logger.info("Waiting for 1 second before creating second router")
+            await asyncio.sleep(2)
+
+            # Launch second router - will automatically sync with the first router's state
+            logger.info("Creating second KV router")
+            kv_push_router2 = KvPushRouter(
+                endpoint=endpoint2,
+                block_size=BLOCK_SIZE,
+                kv_router_config=kv_router_config,
+            )
+
+            # Send 25 requests to second router with initial retry loop
+            logger.info("Sending 25 requests to second router")
+            successful2 = await send_requests_to_router(kv_push_router2, 25, "Router 2")
+            assert (
+                successful2 == 25
+            ), f"Expected 25 successful requests to router 2, got {successful2}"
+
+            # Wait for all requests to complete (they should already be complete from gather)
+            # Wait another 1 second for internal synchronization
+            logger.info("Waiting for final synchronization")
+            await asyncio.sleep(1)
+
+            # Check NATS consumers to verify both routers have separate consumers
+            await check_nats_consumers(mockers.namespace, expected_count=2)
+
+            # Verify NATS object store bucket was created with snapshot
+            # Mirror the Rust bucket naming logic from subscriber.rs:
+            # component.subject() -> "namespace.{ns}.component.{comp}"
+            # then slugify (convert dots to dashes, lowercase, etc) and append "-radix-bucket"
+            component_subject = f"namespace.{mockers.namespace}.component.mocker"
+            slugified = component_subject.lower().replace(".", "-").replace("_", "-")
+            expected_bucket = f"{slugified}-radix-bucket"
+            expected_file = "radix-state"
+
+            logger.info(f"Verifying NATS object store bucket exists: {expected_bucket}")
+            snapshot_verified = False
+            try:
+                # Connect to NATS and check object store
+                nc = await nats.connect("nats://localhost:4222")
+                try:
+                    js = nc.jetstream()
+                    obj_store = await js.object_store(expected_bucket)
+
+                    # Try to get the expected file
+                    try:
+                        result = await obj_store.get(expected_file)
+                        logger.info(
+                            f"✓ Snapshot file '{expected_file}' found in bucket '{expected_bucket}' "
+                            f"(size: {len(result.data) if result.data else 0} bytes)"
+                        )
+                        snapshot_verified = True
+                    except Exception as e:
+                        logger.error(
+                            f"Snapshot file '{expected_file}' not found in bucket '{expected_bucket}': {e}"
+                        )
+                finally:
+                    await nc.close()
+            except Exception as e:
+                logger.error(f"Error checking NATS object store: {e}")
+
+            # Assert that snapshot was created (threshold=20, sent 25 requests)
+            if not snapshot_verified:
+                assert False, (
+                    f"Expected snapshot to be created in bucket '{expected_bucket}' with file '{expected_file}'. "
+                    f"Router sent 25 requests with snapshot_threshold=20, so snapshot should have been triggered."
+                )
+
+            # Dump states from both routers
+            logger.info("Dumping states from both routers")
+            state1_json = await kv_push_router1.dump_events()
+            state2_json = await kv_push_router2.dump_events()
+
+            # Parse JSON strings for comparison
+            state1 = json.loads(state1_json)
+            state2 = json.loads(state2_json)
+
+            # Sort both states for comparison (order might differ due to HashMap iteration and sharding)
+            def sort_key(event):
+                data = event["event"]["data"]["stored"]
+                blocks = data["blocks"]
+                first_block = blocks[0]
+                return (
+                    event["worker_id"],
+                    first_block["tokens_hash"],
+                    data["parent_hash"],
+                )
+
+            sorted_state1 = sorted(state1, key=sort_key)
+            sorted_state2 = sorted(state2, key=sort_key)
+
+            # Verify they are equal
+            logger.info(f"Router 1 has {len(sorted_state1)} events")
+            logger.info(f"Router 2 has {len(sorted_state2)} events")
+
+            # Compare states one by one and only show differences
+            if len(sorted_state1) != len(sorted_state2):
+                logger.error(
+                    f"Router 1 has {len(sorted_state1)} events, Router 2 has {len(sorted_state2)} events"
+                )
+                assert False, "Router states have different numbers of events"
+
+            differences = []
+            for i, (state1_item, state2_item) in enumerate(
+                zip(sorted_state1, sorted_state2)
+            ):
+                # Create copies without event_id for comparison
+                item1_compare = state1_item.copy()
+                item2_compare = state2_item.copy()
+
+                # Remove event_id from the nested event structure
+                if "event" in item1_compare and "event_id" in item1_compare["event"]:
+                    del item1_compare["event"]["event_id"]
+                if "event" in item2_compare and "event_id" in item2_compare["event"]:
+                    del item2_compare["event"]["event_id"]
+
+                if item1_compare != item2_compare:
+                    differences.append(
+                        {
+                            "index": i,
+                            "router1_state": state1_item,
+                            "router2_state": state2_item,
+                        }
+                    )
+            # If there are differences, format them for easier debugging
+            if differences:
+                error_msg = f"Router states are not equal. Found {len(differences)} differences:\n"
+                for diff in differences:
+                    error_msg += f"\nDifference at index {diff['index']}:\n"
+                    error_msg += (
+                        f"Router 1: {json.dumps(diff['router1_state'], indent=2)}\n"
+                    )
+                    error_msg += (
+                        f"Router 2: {json.dumps(diff['router2_state'], indent=2)}\n"
+                    )
+                    error_msg += "-" * 80 + "\n"
+
+                assert False, error_msg
+
+            logger.info("Successfully verified that both router states are equal")
+
+        # Run the async test
+        asyncio.run(test_sync())
+
+        logger.info("Indexers sync test completed successfully")
 
     finally:
+        # Clean up mockers
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
@@ -598,13 +770,38 @@ def test_indexers_sync(
 def test_query_instance_id_returns_worker_and_tokens(
     request, runtime_services, predownload_tokenizers
 ):
-    """Test query_instance_id annotation with mocker engines."""
+    """
+    Test that the KV router correctly handles query_instance_id annotation.
+
+    When a request includes 'nvext.annotations': ['query_instance_id'], the router should:
+    1. NOT route the request to a worker immediately
+    2. Return worker_instance_id as an SSE event
+    3. Return token_data as an SSE event containing the request tokens
+    4. Term: FixtureRequestinate the stream w: tuple[NatsServer, EtcdServer]ith [DONE]: NoneType
+
+    This tests the specific code block:
+        if query_instance_id {
+            let instance_id_str = instance_id.to_string();
+            let response = Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
+            let response_tokens = Annotated::from_annotation("token_data", &request.token_ids)?;
+            let stream = stream::iter(vec![response, response_tokens]);
+            return Ok(ResponseStream::new(Box::pin(stream), stream_context));
+        }
+    """
+
     logger.info("Starting KV router query_instance_id annotation test")
+
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
     os.makedirs(request.node.name, exist_ok=True)
 
     try:
-        # Start mocker instances
+        # Start KV router (frontend)
+        frontend_port = PORT + 30  # Use unique port to avoid conflicts
+        logger.info(f"Starting KV router frontend on port {frontend_port}")
+        kv_router = KVRouterProcess(request, frontend_port, store_backend="etcd")
+        kv_router.__enter__()
+
+        # Start multiple mocker engines to ensure worker selection logic
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         mockers = MockerProcess(
             request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
@@ -612,10 +809,9 @@ def test_query_instance_id_returns_worker_and_tokens(
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        # Run query_instance_id annotation test
-        frontend_port = PORT + 30  # Use unique port to avoid conflicts
         _test_router_query_instance_id(
             engine_workers=mockers,
+            kv_router=kv_router,
             block_size=BLOCK_SIZE,
             request=request,
             frontend_port=frontend_port,
@@ -623,6 +819,8 @@ def test_query_instance_id_returns_worker_and_tokens(
         )
 
     finally:
+        if "kv_router" in locals():
+            kv_router.__exit__(None, None, None)
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
