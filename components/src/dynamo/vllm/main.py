@@ -33,7 +33,7 @@ from dynamo.vllm.multimodal_handlers import (
     ProcessorHandler,
 )
 
-from .args import ENABLE_LMCACHE, Config, overwrite_args, parse_args
+from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
 from .publisher import StatLoggerFactory
@@ -214,13 +214,6 @@ def setup_vllm_engine(config, stat_logger=None):
 
     engine_args = config.engine_args
 
-    # KV transfer config is now handled by args.py based on ENABLE_LMCACHE env var
-    if ENABLE_LMCACHE:
-        setup_lmcache_environment()
-        logger.info("LMCache enabled for VllmWorker")
-    else:
-        logger.debug("LMCache is disabled")
-
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
         engine_args.create_model_config().get_diff_sampling_param()
@@ -258,12 +251,6 @@ def setup_vllm_engine(config, stat_logger=None):
         disable_log_requests=engine_args.disable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
-    if ENABLE_LMCACHE:
-        logger.info(
-            f"VllmWorker for {config.served_model_name} has been initialized with LMCache"
-        )
-    else:
-        logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 
     return engine_client, vllm_config, default_sampling_params, prometheus_temp_dir
 
