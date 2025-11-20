@@ -64,14 +64,13 @@ jobs:
         run: |
           docker compose down
       - name: Run pytest (parallel tests with xdist)
-        continue-on-error: true
         env:
           PYTEST_MARKS: "pre_merge and parallel"
         run: |
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest_parallel \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_PARALLEL_XML_FILE }} -n 4 -m \"${{ env.PYTEST_MARKS }}\""
+            bash -c "pytest --basetemp=/tmp/pytest-parallel --junitxml=${{ env.PYTEST_PARALLEL_XML_FILE }} -n 4 -m \"${{ env.PYTEST_MARKS }}\""
       - name: Copy parallel test report from Container
         if: always()
         run: |
