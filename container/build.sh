@@ -842,8 +842,8 @@ fi
 if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
     # Follow 2-step build process for all frameworks
     if [[ $FRAMEWORK != "NONE" ]]; then
-        # Define base image tag before using it
-        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+        # Define base image tag before using it, or use predefined image name
+        DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE:-dynamo-base:$VERSION}
         # Start base image build
         echo "======================================"
         echo "Starting Build 1: Base Image"

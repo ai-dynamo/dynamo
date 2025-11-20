@@ -132,6 +132,8 @@ jobs:
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
     name: vllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
+    env:
+      DYNAMO_BASE_IMAGE: dynamo-base:latest
     steps:
       - name: Output Node Name
         shell: bash
@@ -157,7 +159,7 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      - name: Docker Tag and Push
+      - name: Push framework runtime image
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
@@ -165,6 +167,19 @@ jobs:
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Push dynamo base image
+        uses: ./.github/actions/docker-tag-push
+        # if: ${{ github.ref_name == 'main' }}
+        with:
+          local_image: ${{ env.DYNAMO_BASE_IMAGE }}
+          push_tag: ai-dynamo/dynamo:${{ github.ref_name }}-dynamo-${{ matrix.platform.arch }}
+          aws_push: 'true'
+          azure_push: 'false'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -224,7 +239,7 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      - name: Docker Tag and Push
+      - name: Push framework runtime image
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
@@ -291,7 +306,7 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      - name: Docker Tag and Push
+      - name: Push framework runtime image
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
