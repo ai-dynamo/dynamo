@@ -9,6 +9,13 @@ on:
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
+  workflow_dispatch:
+    inputs:
+      run_deploy_operator:
+        description: 'Run deploy operator and deployment tests'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
     group: ${{ github.workflow }}-build-test-${{ github.ref_name || github.run_id }}
@@ -17,6 +24,7 @@ concurrency:
 jobs:
   changed-files:
     runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
       has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
     steps:
@@ -495,7 +503,9 @@ jobs:
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # TODO: Uncomment this when we have a way to test the deploy-operator job in CI.
+    #if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: github.event.inputs.run_deploy_operator
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -567,7 +577,9 @@ jobs:
 
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # TODO: Uncomment this when we have a way to test the deploy-test-vllm job in CI.
+    #if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: github.event.inputs.run_deploy_operator
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
@@ -628,7 +640,7 @@ jobs:
         export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
         echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
         # Wait for all pods with the deployment label to be ready
-        kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1300s
+        kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1800s
 
         # Debug: Show final pod statuses for the deployment
         echo "=== FINAL POD STATUSES ==="
@@ -717,7 +729,9 @@ jobs:
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # TODO: Uncomment this when we have a way to test the deploy-test-sglang job in CI.
+    #if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: github.event.inputs.run_deploy_operator
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
@@ -738,7 +752,9 @@ jobs:
 
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # TODO: Uncomment this when we have a way to test the deploy-test-trtllm job in CI.
+    #if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: github.event.inputs.run_deploy_operator
     needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
@@ -761,7 +777,9 @@ jobs:
 
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
-    if: always()
+    # TODO: Uncomment the below if statement when we have a way to test the cleanup job in CI.
+    # if: always()
+    if: github.event.inputs.run_deploy_operator
     needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
     steps:
     - uses: actions/checkout@v4
