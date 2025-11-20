@@ -85,7 +85,7 @@ RUN mkdir -p /opt/dynamo/venv && \
 # Copy pytorch installation from NGC PyTorch
 ARG TORCH_VER=2.9.0a0+145a3a7bda.nv25.10
 ARG TORCHVISION_VER=0.24.0a0+094e7af5
-ARG PYTORCH_TRITON_VER=3.4.0+gitc817b9b6
+# ARG PYTORCH_TRITON_VER=3.4.0+gitc817b9b6
 ARG JINJA2_VER=3.1.6
 ARG SYMPY_VER=1.14.0
 ARG FLASH_ATTN_VER=2.7.4.post1+25.10
@@ -104,8 +104,8 @@ COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/sy
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn_2_cuda.cpython-*-*-linux-gnu.so ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/triton ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/triton
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
+# COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/triton ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/triton
+# COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
 
 # Install TensorRT-LLM and related dependencies
 ARG HAS_TRTLLM_CONTEXT
@@ -153,11 +153,7 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
         # TRTLLM 1.2.0rc2 has issues installing from pypi with uv, installing from direct wheel link works best
         TENSORRTLLM_PIP_WHEEL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc2-cp312-cp312-linux_${ARCH_ALT}.whl"; \
-        # Dry run first to save dependencies
-        uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" --dry-run > dry_run.txt 2>&1 ; \
-        # convirt dry run output to requirements.txt format and remove triton
-        grep '^ +' dry_run.txt | grep -vE '^ \+ triton==' | sed 's/^ + //' > requirements.txt ; \
-        uv pip install --no-deps --no-cache -r requirements.txt ; \
+        uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" ; \
     fi
 
 ##################################################
@@ -273,8 +269,6 @@ COPY --from=pytorch_base /opt/hpcx /opt/hpcx
 # This is needed to make libucc.so visible so pytorch can use it.
 ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
 # Might not need to copy cusparseLt in the future once it's included in DLFW cuda container
-# networkx, packaging, setuptools get overridden by trtllm installation, so not copying them
-# pytorch-triton is copied after trtllm installation.
 COPY --from=pytorch_base /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
 
 # Copy uv to system /bin
