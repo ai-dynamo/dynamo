@@ -178,7 +178,7 @@ RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
 
 ARG NIXL_UCX_REF
 ARG NIXL_REF
-ARG NIXL_GDRCOPY_REF    
+ARG NIXL_GDRCOPY_REF
 
 # Build and install gdrcopy
 RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
@@ -201,7 +201,7 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
-    
+
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
