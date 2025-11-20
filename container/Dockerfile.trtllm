@@ -153,7 +153,11 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
         # TRTLLM 1.2.0rc2 has issues installing from pypi with uv, installing from direct wheel link works best
         TENSORRTLLM_PIP_WHEEL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc2-cp312-cp312-linux_${ARCH_ALT}.whl"; \
-        uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}"; \
+        # Dry run first to save dependencies
+        uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" --dry-run > dry_run.txt 2>&1 ; \
+        # convirt dry run output to requirements.txt format and remove triton
+        grep '^ +' dry_run.txt | grep -vE '^ \+ triton==' | sed 's/^ + //' > requirements.txt ; \
+        uv pip install --no-deps --no-cache -r requirements.txt ; \
     fi
 
 ##################################################
@@ -243,6 +247,15 @@ COPY --from=pytorch_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 COPY --from=pytorch_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
 COPY --from=pytorch_base /usr/local/cuda/lib64/libcupti* /usr/local/cuda/lib64/
 COPY --from=pytorch_base /usr/local/lib/lib* /usr/local/lib/
+COPY --from=pytorch_base /usr/local/cuda/bin/cuobjdump /usr/local/cuda/bin/cuobjdump
+COPY --from=pytorch_base /usr/local/cuda/bin/nvdisasm /usr/local/cuda/bin/nvdisasm
+
+ENV TRITON_CUPTI_PATH=/usr/local/cuda/include \
+    TRITON_CUDACRT_PATH=/usr/local/cuda/include \
+    TRITON_CUOBJDUMP_PATH=/usr/local/cuda/bin/cuobjdump \
+    TRITON_NVDISASM_PATH=/usr/local/cuda/bin/nvdisasm \
+    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+    TRITON_CUDART_PATH=/usr/local/cuda/include
 
 # Copy nats and etcd from dynamo_base image
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
