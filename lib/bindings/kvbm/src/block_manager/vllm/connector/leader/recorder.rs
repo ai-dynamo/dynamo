@@ -3,6 +3,7 @@
 
 use super::*;
 use anyhow;
+use dynamo_llm::block_manager::kv_consolidator::tracker::EventSource;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Action {
@@ -152,7 +153,7 @@ impl KvConnectorLeaderRecorder {
                     (consolidator_vllm_ep, consolidator_output_ep)
                 {
                     block_manager_builder =
-                        block_manager_builder.consolidator_config(vllm_ep, output_ep);
+                        block_manager_builder.consolidator_config(vllm_ep, output_ep, EventSource::Vllm);
                 }
 
                 let block_manager = match block_manager_builder.build().await {
