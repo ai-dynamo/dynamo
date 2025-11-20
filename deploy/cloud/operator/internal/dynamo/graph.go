@@ -896,7 +896,9 @@ func GenerateBasePodSpec(
 	}
 
 	if controllerConfig.IsK8sDiscoveryEnabled(component.Annotations) {
-		podSpec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(parentGraphDeploymentName)
+		if podSpec.ServiceAccountName == "" {
+			podSpec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(parentGraphDeploymentName)
+		}
 	}
 
 	podSpec.Containers = append(podSpec.Containers, container)
