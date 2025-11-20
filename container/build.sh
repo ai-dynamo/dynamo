@@ -110,7 +110,6 @@ VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
-# NONE_BASE_IMAGE_TAG="25.10-cuda13.0-devel-ubuntu24.04"
 
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
