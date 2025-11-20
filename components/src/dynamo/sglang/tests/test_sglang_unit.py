@@ -19,12 +19,13 @@ TEST_DIR = REPO_ROOT / "tests"
 JINJA_TEMPLATE_PATH = str(
     REPO_ROOT / "tests" / "serve" / "fixtures" / "custom_template.jinja"
 )
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
     pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
 ]
-
 
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv

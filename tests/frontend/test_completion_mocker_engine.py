@@ -146,6 +146,8 @@ def start_services(request, runtime_services):
 
 @pytest.mark.usefixtures("start_services")
 @pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.post_merge
 @pytest.mark.model(TEST_MODEL)
 def test_completion_string_prompt() -> None:
     payload: Dict[str, Any] = {
@@ -164,6 +166,8 @@ def test_completion_string_prompt() -> None:
 
 @pytest.mark.usefixtures("start_services")
 @pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.post_merge
 @pytest.mark.model(TEST_MODEL)
 def test_completion_empty_array_prompt() -> None:
     payload: Dict[str, Any] = {
@@ -182,6 +186,8 @@ def test_completion_empty_array_prompt() -> None:
 
 @pytest.mark.usefixtures("start_services")
 @pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.post_merge
 @pytest.mark.model(TEST_MODEL)
 def test_completion_single_element_array_prompt() -> None:
     payload: Dict[str, Any] = {
@@ -200,6 +206,8 @@ def test_completion_single_element_array_prompt() -> None:
 
 @pytest.mark.usefixtures("start_services")
 @pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.post_merge
 @pytest.mark.model(TEST_MODEL)
 def test_completion_multi_element_array_prompt() -> None:
     payload: Dict[str, Any] = {

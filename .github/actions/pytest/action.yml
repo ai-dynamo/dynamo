@@ -54,7 +54,16 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
-        docker run --runtime=nvidia --gpus all -w /workspace \
+        # Detect GPU availability and conditionally add GPU flags
+        GPU_FLAGS=""
+        if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+          echo "GPU detected, enabling GPU runtime"
+          GPU_FLAGS="--runtime=nvidia --gpus all"
+        else
+          echo "No GPU detected, running in CPU-only mode"
+        fi
+
+        docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
