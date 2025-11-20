@@ -72,7 +72,7 @@ type ProfilingConfigSpec struct {
 	// If specified, all profiling artifacts (logs, plots, configs, raw data) will be written
 	// to this PVC instead of an ephemeral emptyDir volume. This allows users to access
 	// complete profiling results after the job completes by mounting the PVC.
-	// The PVC must exist in the same namespace as the DGDR and have ReadWriteOnce access mode.
+	// The PVC must exist in the same namespace as the DGDR.
 	// If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.
 	// Note: ConfigMaps are still created regardless of this setting for planner integration.
 	// +kubebuilder:validation:Optional
