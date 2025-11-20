@@ -180,3 +180,13 @@ More details about how to use LMBenchmark could be found [here](https://github.c
 `NOTE`: if metrics are enabled as mentioned in the above section, you can observe KV offloading, and KV onboarding in the grafana dashboard.
 
 To compare, you can run `vllm serve Qwen/Qwen3-0.6B` to turn KVBM off as the baseline.
+
+## Developing Locally
+
+Inside the Dynamo container, after changing KVBM related code (Rust and/or Python), to test or use it:
+```bash
+cd /workspace/lib/bindings/kvbm
+uv pip install maturin[patchelf]
+maturin build --release --out /workspace/dist
+uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
+```
