@@ -176,12 +176,13 @@ For Llama-3-70B with vLLM (Aggregated), an example of integration with the Infer
 
 Follow to Follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE. Then apply manifests.
 Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml
+This should be the same image you have used for your deployment.
 
 ```bash
 export DEPLOY_PATH=llama-3-70b/vllm/agg/
 #DEPLOY_PATH=<model>/<framework>/<mode>/
 kubectl apply -R -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
-
+```
 
 ### DeepSeek-R1 on GB200 (Multi-node)
 

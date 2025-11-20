@@ -169,6 +169,7 @@ impl KvConnectorLeaderRecorder {
                     block_manager.get_block_manager().clone(),
                     leader.clone(),
                     kvbm_metrics_clone.clone(),
+                    None, // Recorder doesn't need identifier
                 );
 
                 let _ = slot_manager_cell.set(sm);

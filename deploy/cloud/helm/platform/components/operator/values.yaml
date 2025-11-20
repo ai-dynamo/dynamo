@@ -138,3 +138,80 @@ natsAddr: ""
 etcdAddr: ""
 modelExpressURL: ""
 
+# Webhook configuration
+webhook:
+  # Enable admission webhooks for validation
+  # Enabled by default for production-ready validation and better error reporting
+  enabled: true
+
+  # Certificate configuration
+  certificateSecret:
+    # Name of the secret containing webhook TLS certificates
+    # The secret must contain: tls.crt, tls.key, and ca.crt
+    name: webhook-server-cert
+
+    # Set to true if you're managing the certificate secret externally
+    # When false (default), certificates are auto-generated via Helm hooks
+    external: false
+
+  # Certificate validity duration (in days) for auto-generated certificates
+  # Only used when certManager.enabled=false and certificateSecret.external=false
+  certificateValidity: 365
+
+  # Container image for certificate generation and CA injection jobs
+  # Only used when certManager.enabled=false and certificateSecret.external=false
+  certGenerator:
+    image:
+      repository: bitnami/kubectl
+      tag: latest
+      pullPolicy: IfNotPresent
+
+  # CA bundle for webhook (base64 encoded)
+  # Only used when certificateSecret.external=true
+  # For automatic mode or cert-manager, leave empty
+  caBundle: ""
+
+  # Webhook failure policy
+  # Fail: Reject requests if webhook is unavailable (recommended for production)
+  # Ignore: Allow requests if webhook is unavailable
+  failurePolicy: Fail
+
+  # Timeout for webhook calls (in seconds)
+  timeoutSeconds: 10
+
+  # Namespace selector for webhooks
+  # Use this to exclude certain namespaces from validation
+  #
+  # For CLUSTER-WIDE operators: Exclude namespaces with namespace-restricted operators
+  # namespaceSelector:
+  #   matchExpressions:
+  #   - key: dynamo-operator
+  #     operator: NotIn
+  #     values: ["namespace-restricted"]
+  #
+  # For NAMESPACE-RESTRICTED operators: Leave empty (auto-configured)
+  namespaceSelector: {}
+
+  # cert-manager integration (optional)
+  certManager:
+    # Enable cert-manager for automatic certificate management
+    # Requires cert-manager to be installed in the cluster
+    # When enabled, disables automatic certificate generation
+    enabled: false
+
+    # Certificate configuration for cert-manager
+    certificate:
+      # Certificate duration (e.g., "8760h" for 1 year)
+      duration: "8760h"
+
+      # Time before expiration to renew certificate (e.g., "360h" for 15 days)
+      renewBefore: "360h"
+
+      # Root CA configuration
+      rootCA:
+        # Duration for root CA certificate (e.g., "87600h" for 10 years)
+        duration: "87600h"
+
+        # Time before expiration to renew root CA (e.g., "720h" for 30 days)
+        renewBefore: "720h"
+

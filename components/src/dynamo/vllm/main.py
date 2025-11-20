@@ -9,14 +9,12 @@ import tempfile
 from typing import Optional
 
 import uvloop
-from prometheus_client import REGISTRY
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
-from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -193,8 +191,11 @@ def setup_kv_event_publisher(
 
 
 def setup_vllm_engine(config, stat_logger=None):
-    # Set PROMETHEUS_MULTIPROC_DIR before setup to avoid vLLM v0.11.0 bug
-    # vllm/v1/metrics/prometheus.py:79 passes TemporaryDirectory object instead of .name
+    # Existing vLLM v0.11.0 bug: vllm/v1/metrics/prometheus.py:79 passes TemporaryDirectory object instead of
+    # the .name string, causing a false error message when vLLM exits. Therefore, always set
+    # PROMETHEUS_MULTIPROC_DIR first, and we'll do the path cleanup.
+
+    # This vLLM bug causes a false error message when vLLM exits.
     prometheus_temp_dir = None
     if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
         prometheus_temp_dir = tempfile.TemporaryDirectory(prefix="vllm_prometheus_")
@@ -203,7 +204,7 @@ def setup_vllm_engine(config, stat_logger=None):
             f"Created PROMETHEUS_MULTIPROC_DIR at: {os.environ['PROMETHEUS_MULTIPROC_DIR']}"
         )
 
-    setup_multiprocess_prometheus()
+    setup_multiprocess_prometheus()  # call vLLM's library's function to setup multiprocess prometheus
     logger.debug(
         f"Prometheus multiproc dir set to: {os.environ.get('PROMETHEUS_MULTIPROC_DIR')}"
     )
@@ -374,8 +375,29 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         handler.kv_publishers = kv_publishers
 
     if config.engine_args.disable_log_stats is False:
+        # vLLM v1 registers its metrics with 'vllm:' prefix
+        from prometheus_client import REGISTRY, multiprocess
+
+        from dynamo.common.utils.prometheus import register_engine_metrics_callback
+
+        # Option 1: Try adding MultiProcessCollector to the global REGISTRY
+        # This would make REGISTRY collect from both its registered metrics AND multiprocess files
+        if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+            try:
+                # Add MultiProcessCollector to global REGISTRY
+                # This makes REGISTRY collect from .db files in addition to its own metrics
+                multiprocess.MultiProcessCollector(REGISTRY)
+                logger.info("Added MultiProcessCollector to global REGISTRY")
+            except ValueError as e:
+                # Might already be registered or directory issues
+                logger.warning(f"Could not add MultiProcessCollector to REGISTRY: {e}")
+
+        # Register callback with the global REGISTRY
+        # Now it should collect both its own metrics AND multiprocess metrics
         register_engine_metrics_callback(
-            endpoint=generate_endpoint, registry=REGISTRY, metric_prefix_filter="vllm:"
+            endpoint=generate_endpoint,
+            registry=REGISTRY,
+            metric_prefix_filters=["vllm:", "lmcache:"],
         )
 
     # Register prefill model with ModelType.Prefill
@@ -484,8 +506,29 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.kv_publishers = kv_publishers
 
     if config.engine_args.disable_log_stats is False:
+        # vLLM v1 registers its metrics with 'vllm:' prefix
+        from prometheus_client import REGISTRY, multiprocess
+
+        from dynamo.common.utils.prometheus import register_engine_metrics_callback
+
+        # Option 1: Try adding MultiProcessCollector to the global REGISTRY
+        # This would make REGISTRY collect from both its registered metrics AND multiprocess files
+        if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+            try:
+                # Add MultiProcessCollector to global REGISTRY
+                # This makes REGISTRY collect from .db files in addition to its own metrics
+                multiprocess.MultiProcessCollector(REGISTRY)
+                logger.info("Added MultiProcessCollector to global REGISTRY")
+            except ValueError as e:
+                # Might already be registered or directory issues
+                logger.warning(f"Could not add MultiProcessCollector to REGISTRY: {e}")
+
+        # Register callback with the global REGISTRY
+        # Now it should collect both its own metrics AND multiprocess metrics
         register_engine_metrics_callback(
-            endpoint=generate_endpoint, registry=REGISTRY, metric_prefix_filter="vllm:"
+            endpoint=generate_endpoint,
+            registry=REGISTRY,
+            metric_prefix_filters=["vllm:", "lmcache:"],
         )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
