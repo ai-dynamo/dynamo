@@ -17,6 +17,7 @@ use std::path::Path;
 const DISK_CACHE_KEY: &str = "DYN_KVBM_DISK_CACHE_DIR";
 const DEFAULT_DISK_CACHE_DIR: &str = "/tmp/";
 const DISK_ZEROFILL_FALLBACK_KEY: &str = "DYN_KVBM_DISK_ZEROFILL_FALLBACK";
+const DISK_DISABLE_O_DIRECT_KEY: &str = "DYN_KVBM_DISK_DISABLE_O_DIRECT";
 
 #[derive(Debug)]
 pub struct DiskStorage {
@@ -31,32 +32,188 @@ impl Local for DiskStorage {}
 impl SystemAccessible for DiskStorage {}
 
 const ZERO_BUF_SIZE: usize = 16 * 1024 * 1024; // 16MB
+const PAGE_SIZE: usize = 4096; // Standard page size for O_DIRECT alignment
+
+/// A page-aligned buffer for O_DIRECT I/O operations.
+/// On filesystems like Lustre, O_DIRECT requires both buffer address and I/O size
+/// to be aligned to the filesystem block size (typically page size).
+struct AlignedBuffer {
+    ptr: *mut u8,
+    layout: std::alloc::Layout,
+    len: usize,
+}
+
+impl AlignedBuffer {
+    /// Create a new page-aligned zero-filled buffer.
+    /// Size will be rounded up to the nearest page boundary.
+    fn new(size: usize) -> anyhow::Result<Self> {
+        // Round up to nearest page size to ensure alignment requirements
+        let aligned_size = (size + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+
+        let layout = std::alloc::Layout::from_size_align(aligned_size, PAGE_SIZE)
+            .context("Failed to create aligned layout")?;
+
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+
+        if ptr.is_null() {
+            anyhow::bail!("Failed to allocate aligned buffer of {} bytes", aligned_size);
+        }
+
+        tracing::trace!(
+            "Allocated aligned buffer: size={}, aligned_size={}, align={}",
+            size,
+            aligned_size,
+            PAGE_SIZE
+        );
+
+        Ok(Self {
+            ptr,
+            layout,
+            len: aligned_size,
+        })
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl Drop for AlignedBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            std::alloc::dealloc(self.ptr, self.layout);
+        }
+    }
+}
+
+// Safety: AlignedBuffer owns its memory and is safe to send between threads
+unsafe impl Send for AlignedBuffer {}
+unsafe impl Sync for AlignedBuffer {}
 
 fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
     match fallocate(fd, FallocateFlags::empty(), 0, size as i64) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            tracing::debug!("Successfully allocated {} bytes using fallocate()", size);
+            Ok(())
+        }
         Err(err) => match err {
             nix::errno::Errno::EOPNOTSUPP => {
                 let do_zero_fill = std::env::var(DISK_ZEROFILL_FALLBACK_KEY).is_ok();
                 if do_zero_fill {
                     tracing::warn!(
                         "fallocate() not supported on this filesystem, using zero-fill fallback. \
-                         This may be slower but provides actual disk space allocation."
+                         This may be slower but provides actual disk space allocation. \
+                         Using page-aligned buffers (alignment={}) for O_DIRECT compatibility.",
+                        PAGE_SIZE
                     );
-                    // optional fallback: append zeros until reaching size
-                    let mut written = 0;
-                    let zeros = vec![0u8; ZERO_BUF_SIZE];
+
+                    // Use page-aligned buffer for O_DIRECT compatibility (required on Lustre)
+                    let buf = AlignedBuffer::new(ZERO_BUF_SIZE)
+                        .context("Failed to allocate aligned zero buffer")?;
+                    let buf_slice = buf.as_slice();
 
                     let mut file =
                         unsafe { File::from_raw_fd(nix::unistd::dup(fd).context("dup error")?) };
 
+                    let mut written: u64 = 0;
                     while written < size {
-                        let to_write = std::cmp::min(ZERO_BUF_SIZE as u64, size - written) as usize;
-                        file.write_all(&zeros[..to_write])
-                            .context("write all error")?;
-                        written += to_write as u64;
+                        // Calculate how much to write in this iteration.
+                        // For O_DIRECT, we must write in multiples of page size, except possibly
+                        // the last write.
+                        let remaining = size - written;
+                        let to_write = if remaining >= buf.len() as u64 {
+                            // Full buffer write - always aligned
+                            buf.len()
+                        } else {
+                            // Last partial write - round up to page size for O_DIRECT
+                            let aligned = ((remaining as usize + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+                            std::cmp::min(aligned, buf.len())
+                        };
+
+                        match file.write(&buf_slice[..to_write]) {
+                            Ok(n) => {
+                                if n != to_write {
+                                    tracing::error!(
+                                        "Partial write detected: requested={}, written={}, \
+                                         total_written={}/{}, fd={}, errno={:?}",
+                                        to_write,
+                                        n,
+                                        written,
+                                        size,
+                                        fd,
+                                        std::io::Error::last_os_error()
+                                    );
+                                    anyhow::bail!(
+                                        "Partial write: expected {} bytes, wrote {} bytes (total {}/{})",
+                                        to_write,
+                                        n,
+                                        written + n as u64,
+                                        size
+                                    );
+                                }
+                                written += n as u64;
+                                tracing::trace!(
+                                    "Zero-fill progress: {}/{} bytes ({:.1}%)",
+                                    written,
+                                    size,
+                                    (written as f64 / size as f64) * 100.0
+                                );
+                            }
+                            Err(e) => {
+                                let errno = e.raw_os_error();
+                                tracing::error!(
+                                    "Zero-fill write failed: error={}, errno={:?}, \
+                                     fd={}, to_write={}, written={}/{}, buf_addr={:p}, buf_align={}",
+                                    e,
+                                    errno,
+                                    fd,
+                                    to_write,
+                                    written,
+                                    size,
+                                    buf_slice.as_ptr(),
+                                    PAGE_SIZE
+                                );
+
+                                // Provide specific guidance for common errors
+                                if errno == Some(22) {
+                                    // EINVAL - typically alignment issues
+                                    anyhow::bail!(
+                                        "Zero-fill write failed with EINVAL (errno 22). \
+                                         This usually indicates O_DIRECT alignment issues. \
+                                         Buffer is page-aligned ({}), but filesystem may require \
+                                         different alignment. Try setting {}=true to disable O_DIRECT. \
+                                         Original error: {}",
+                                        PAGE_SIZE,
+                                        DISK_DISABLE_O_DIRECT_KEY,
+                                        e
+                                    );
+                                } else {
+                                    anyhow::bail!("Zero-fill write failed: {}", e);
+                                }
+                            }
+                        }
                     }
-                    file.flush().context("flush error")?;
+
+                    file.flush().context("Failed to flush zero-filled file")?;
+
+                    // Truncate to exact size if we over-allocated due to alignment
+                    if written > size {
+                        tracing::debug!(
+                            "Truncating file from {} to {} bytes (alignment padding)",
+                            written,
+                            size
+                        );
+                        ftruncate(fd, size as i64).context("Failed to truncate to exact size")?;
+                    }
+
+                    tracing::info!(
+                        "Successfully zero-filled {} bytes using aligned buffers",
+                        size
+                    );
                     Ok(())
                 } else {
                     tracing::warn!(
@@ -93,13 +250,27 @@ impl DiskStorage {
         let template = CString::new(file_path.to_str().unwrap()).unwrap();
         let mut template_bytes = template.into_bytes_with_nul();
 
+        // Determine whether to use O_DIRECT based on environment variable.
+        // O_DIRECT is required for GPU DirectStorage but has strict alignment requirements.
+        // For debugging or when filesystems don't support O_DIRECT alignment, it can be disabled.
+        let disable_o_direct = std::env::var(DISK_DISABLE_O_DIRECT_KEY).is_ok();
+        let flags = if disable_o_direct {
+            tracing::warn!(
+                "O_DIRECT disabled via {}. GPU DirectStorage performance may be reduced.",
+                DISK_DISABLE_O_DIRECT_KEY
+            );
+            nix::libc::O_RDWR
+        } else {
+            // For maximum performance, GPU DirectStorage requires O_DIRECT.
+            // This allows transfers to bypass the kernel page cache.
+            // It also introduces the restriction that all accesses must be page-aligned.
+            nix::libc::O_RDWR | nix::libc::O_DIRECT
+        };
+
         let raw_fd = unsafe {
             nix::libc::mkostemp(
                 template_bytes.as_mut_ptr() as *mut c_char,
-                // For maximum performance, GPU DirectStorage requires O_DIRECT.
-                // This allows transfers to bypass the kernel page cache.
-                // It also introduces the restriction that all accesses must be page-aligned.
-                nix::libc::O_RDWR | nix::libc::O_DIRECT,
+                flags,
             )
         };
 
@@ -203,5 +374,237 @@ pub struct DiskAllocator;
 impl StorageAllocator<DiskStorage> for DiskAllocator {
     fn allocate(&self, size: usize) -> Result<DiskStorage, StorageError> {
         DiskStorage::new(size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::FileExt;
+
+    /// Mock writer that enforces strict O_DIRECT alignment rules like Lustre.
+    /// This allows us to test the alignment logic without needing an actual Lustre filesystem.
+    struct StrictODirectWriter {
+        bytes_written: usize,
+        writes: Vec<(usize, usize)>, // (address, size) of each write
+    }
+
+    impl StrictODirectWriter {
+        fn new() -> Self {
+            Self {
+                bytes_written: 0,
+                writes: Vec::new(),
+            }
+        }
+    }
+
+    impl std::io::Write for StrictODirectWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let addr = buf.as_ptr() as usize;
+            let size = buf.len();
+
+            // Enforce Lustre-like O_DIRECT requirements
+            if addr % PAGE_SIZE != 0 {
+                eprintln!(
+                    "❌ EINVAL: Buffer address {:#x} not aligned to {} bytes",
+                    addr, PAGE_SIZE
+                );
+                return Err(std::io::Error::from_raw_os_error(22)); // EINVAL
+            }
+
+            if size % PAGE_SIZE != 0 {
+                eprintln!(
+                    "❌ EINVAL: Write size {} not aligned to {} bytes",
+                    size, PAGE_SIZE
+                );
+                return Err(std::io::Error::from_raw_os_error(22)); // EINVAL
+            }
+
+            self.writes.push((addr, size));
+            self.bytes_written += size;
+            Ok(size)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Test that AlignedBuffer satisfies strict O_DIRECT requirements.
+    #[test]
+    fn test_aligned_buffer_with_strict_writer() {
+        let test_sizes = vec![
+            1234,
+            PAGE_SIZE,
+            PAGE_SIZE + 1,
+            16 * 1024 * 1024, // 16 MB
+            1_000_000,
+        ];
+
+        for requested_size in test_sizes {
+            let buf = AlignedBuffer::new(requested_size)
+                .expect("Failed to create aligned buffer");
+
+            let mut writer = StrictODirectWriter::new();
+
+            // This should succeed - AlignedBuffer meets strict requirements
+            let result = writer.write(buf.as_slice());
+
+            assert!(
+                result.is_ok(),
+                "AlignedBuffer write failed for size {}: {:?}",
+                requested_size,
+                result.err()
+            );
+
+            assert_eq!(
+                writer.bytes_written,
+                buf.len(),
+                "Bytes written mismatch for size {}",
+                requested_size
+            );
+        }
+    }
+
+    /// Test that regular Vec<u8> FAILS with strict O_DIRECT writer.
+    /// This demonstrates the bug that existed before the fix.
+    #[test]
+    fn test_unaligned_vec_fails_strict_writer() {
+        let vec_buf = vec![0u8; 8192]; // 8KB, but not guaranteed aligned address
+
+        let mut writer = StrictODirectWriter::new();
+        let result = writer.write(&vec_buf);
+
+        // This may fail with EINVAL if vec! didn't happen to allocate aligned memory
+        // (which is common but not guaranteed)
+        if result.is_err() {
+            let err = result.unwrap_err();
+            assert_eq!(
+                err.raw_os_error(),
+                Some(22),
+                "Expected EINVAL (22), got {:?}",
+                err
+            );
+            eprintln!("✓ Confirmed: vec! buffer failed strict alignment check (as expected)");
+        } else {
+            eprintln!(
+                "⚠ vec! happened to be aligned this time (lucky!), but not guaranteed"
+            );
+        }
+    }
+
+    /// Test that the zero-fill write loop produces properly aligned write operations.
+    #[test]
+    fn test_zerofill_write_loop_alignment() {
+        let test_sizes = vec![
+            1_000_000,        // 1 MB non-aligned
+            10_000_000,       // 10 MB non-aligned
+            100_000_000,      // 100 MB non-aligned
+        ];
+
+        for total_size in test_sizes {
+            let buf = AlignedBuffer::new(ZERO_BUF_SIZE)
+                .expect("Failed to create buffer");
+
+            let mut writer = StrictODirectWriter::new();
+            let mut written: u64 = 0;
+
+            // Simulate the zero-fill loop from allocate_file()
+            while written < total_size {
+                let remaining = total_size - written;
+                let to_write = if remaining >= buf.len() as u64 {
+                    buf.len()
+                } else {
+                    let aligned = ((remaining as usize + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+                    std::cmp::min(aligned, buf.len())
+                };
+
+                // This should always succeed with our aligned buffer
+                writer.write(&buf.as_slice()[..to_write])
+                    .unwrap_or_else(|e| panic!(
+                        "Write failed at offset {} for total size {}: {:?}",
+                        written, total_size, e
+                    ));
+
+                written += to_write as u64;
+            }
+
+            assert!(
+                written >= total_size,
+                "Didn't write enough bytes for size {}",
+                total_size
+            );
+
+            eprintln!(
+                "✓ Size {} passed: {} writes, {} total bytes",
+                total_size,
+                writer.writes.len(),
+                writer.bytes_written
+            );
+        }
+    }
+
+    /// Integration test: Verify disk allocation with zero-fill fallback on filesystems
+    /// that don't support fallocate (like Lustre). This exercises the O_DIRECT + aligned
+    /// buffer code path that was failing before the fix.
+    ///
+    /// Run with: cargo test -- --ignored --nocapture test_zerofill_with_o_direct
+    #[test]
+    #[ignore]
+    fn test_zerofill_with_o_direct() {
+        std::env::set_var(DISK_ZEROFILL_FALLBACK_KEY, "1");
+
+        // Test various sizes including non-page-aligned sizes that would fail with
+        // unaligned buffers on Lustre
+        let test_cases = vec![
+            ("Small non-aligned", 1234),
+            ("One page", PAGE_SIZE),
+            ("Just over one page", PAGE_SIZE + 1),
+            ("Multi-page non-aligned", 3 * PAGE_SIZE + 567),
+            ("Large 10MB", 10 * 1024 * 1024),
+        ];
+
+        for (name, size) in test_cases {
+            eprintln!("Testing: {} ({} bytes)", name, size);
+
+            let storage = DiskStorage::new(size)
+                .unwrap_or_else(|e| panic!("Failed to allocate {} bytes ({}): {:?}", size, name, e));
+
+            // Verify the file is actually the correct size
+            assert_eq!(storage.size(), size, "Size mismatch for {}", name);
+
+            // Verify we can read from the file (tests that data was actually written)
+            let fd = storage.fd() as RawFd;
+            let mut buf = vec![0u8; std::cmp::min(size, 4096)];
+
+            let bytes_read = unsafe {
+                nix::sys::uio::pread(fd, &mut buf, 0)
+                    .unwrap_or_else(|e| panic!("Failed to read back data for {}: {:?}", name, e))
+            };
+
+            assert!(bytes_read > 0, "No data read back for {}", name);
+            assert!(buf.iter().all(|&b| b == 0), "File should be zero-filled for {}", name);
+
+            eprintln!("✓ {} passed", name);
+        }
+
+        std::env::remove_var(DISK_ZEROFILL_FALLBACK_KEY);
+    }
+
+    /// Test that O_DIRECT can be disabled and allocation still works.
+    #[test]
+    #[ignore]
+    fn test_disable_o_direct() {
+        std::env::set_var(DISK_DISABLE_O_DIRECT_KEY, "1");
+        std::env::set_var(DISK_ZEROFILL_FALLBACK_KEY, "1");
+
+        let size = 1024 * 1024;
+        let storage = DiskStorage::new(size)
+            .expect("Failed to allocate with O_DIRECT disabled");
+
+        assert_eq!(storage.size(), size);
+
+        std::env::remove_var(DISK_DISABLE_O_DIRECT_KEY);
+        std::env::remove_var(DISK_ZEROFILL_FALLBACK_KEY);
     }
 }
