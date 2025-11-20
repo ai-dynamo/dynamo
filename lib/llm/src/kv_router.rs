@@ -45,6 +45,7 @@ use crate::{
             LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult, WorkerWithDpRank,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
+        sequence::SequenceError,
         subscriber::start_kv_router_background,
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -438,22 +439,26 @@ impl KvRouter {
             compute_seq_hash_for_block(&block_hashes)
         });
 
-        self.scheduler
+        if let Err(e) = self
+            .scheduler
             .add_request(
-                request_id,
+                request_id.clone(),
                 maybe_seq_hashes,
                 isl_tokens,
                 overlap_blocks,
                 worker,
             )
-            .await;
+            .await
+        {
+            tracing::warn!("Failed to add request {request_id}: {e}");
+        }
     }
 
-    pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<()> {
+    pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
-    pub async fn free(&self, request_id: &str) -> Result<()> {
+    pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
     }
 
@@ -672,7 +677,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
                         if !prefill_marked {
                             if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
-                                tracing::warn!("Failed to mark prefill completed for request {context_id}: {e:?}");
+                                tracing::warn!("Failed to mark prefill completed for request {context_id}: {e}");
                             }
                             prefill_marked = true;
                         }
@@ -703,7 +708,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
 
             if let Err(e) = chooser.free(&context_id).await {
-                tracing::warn!("Failed to free request {context_id}: {e:?}");
+                tracing::warn!("Failed to free request {context_id}: {e}");
             }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
