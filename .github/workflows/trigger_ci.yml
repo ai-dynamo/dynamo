@@ -20,4 +20,3 @@ jobs:
     with:
       run_deploy_operator: ${{ github.event.inputs.run_deploy_operator }}
       target_branch: ${{ github.event.inputs.target_branch }}
-    environment: protected-deploy # manual approval before triggering
