@@ -140,25 +140,8 @@ class BaseWorkerHandler(ABC):
             await context.async_killed_or_stopped()
 
             logging.info(
-                f"Cancellation signal received for SGLang Request ID {sglang_request_id}, Context: {context.id()}"
+                f"Cancellation detected, skipping abort for SGLang Request ID {sglang_request_id}, Context: {context.id()}"
             )
-
-            # Call abort_request on the tokenizer_manager through the engine
-            if (
-                hasattr(self.engine, "tokenizer_manager")
-                and self.engine.tokenizer_manager
-            ):
-                logging.info(
-                    f"Calling SGLang abort_request for Request ID {sglang_request_id}"
-                )
-                self.engine.tokenizer_manager.abort_request(
-                    rid=sglang_request_id, abort_all=False
-                )
-                logging.info(f"Aborted Request ID: {context.id()}")
-            else:
-                logging.error(
-                    f"SGLang tokenizer_manager not found for abort request: {context.id()}"
-                )
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes
             request_id = "unknown"
