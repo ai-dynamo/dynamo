@@ -34,8 +34,8 @@ The request plane is the transport layer that handles communication between Dyna
 | Request Plane | Suitable For | Characteristics | KV Routing Support |
 |--------------|----------|-----------------|-------------------|
 | **NATS** | Production deployments with KV routing | Requires NATS infrastructure, provides pub/sub patterns, highest flexibility | ✓ Yes |
-| **TCP** | Low-latency direct communication | Direct connections, minimal overhead | ✗ Need NATs for KV routing |
-| **HTTP** | Standard deployments, debugging | HTTP/2 protocol, easier observability with standard tools, widely compatible | ✗ Need NATs for KV routing |
+| **TCP** | Low-latency direct communication | Direct connections, minimal overhead | ✗ Need NATS for KV routing |
+| **HTTP** | Standard deployments, debugging | HTTP/2 protocol, easier observability with standard tools, widely compatible | ✗ Need NATS for KV routing |
 
 ## Configuration
 
@@ -52,7 +52,7 @@ Where `<mode>` is one of:
 - `tcp`
 - `http`
 
-The value is case-insensitive
+The value is case-insensitive.
 
 ### Default Behavior
 
@@ -78,12 +78,12 @@ DYN_REQUEST_PLANE=nats python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 
 **When to use NATS:**
 - Production deployments with service discovery
-- Complex routing patterns with pub/sub
+- Currently (HA) highly available routers require durable messages persisted in NATS message broker. If you want to completely disable NATS, KV based routing won't be available
 - Multiple frontends and backends
 - Need for message replay and persistence features
 
 Limitations:
-- NATs does not support payloads beyond 16MB (use TCP for larger payloads)
+- NATS does not support payloads beyond 16MB (use TCP for larger payloads)
 
 ### Using TCP
 
