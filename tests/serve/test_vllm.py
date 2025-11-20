@@ -224,9 +224,7 @@ vllm_configs = {
         marks=[
             pytest.mark.gpu_2,
             # https://github.com/ai-dynamo/dynamo/issues/4501
-            pytest.mark.xfail(
-                strict=False
-            ),
+            pytest.mark.xfail(strict=False),
         ],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
