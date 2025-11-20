@@ -24,6 +24,7 @@ a high-level, SLA-driven interface for deploying machine learning models on Dyna
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -76,6 +77,16 @@ type ProfilingConfigSpec struct {
 	// Note: ConfigMaps are still created regardless of this setting for planner integration.
 	// +kubebuilder:validation:Optional
 	OutputPVC string `json:"outputPVC,omitempty"`
+
+	// Resources specifies the compute resource requirements for the profiling job container.
+	// If not specified, no resource requests or limits are set.
+	// +kubebuilder:validation:Optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Tolerations allows the profiling job to be scheduled on nodes with matching taints.
+	// For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint.
+	// +kubebuilder:validation:Optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 }
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.

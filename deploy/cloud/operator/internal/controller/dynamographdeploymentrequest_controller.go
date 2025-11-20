@@ -29,7 +29,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -1041,18 +1040,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		logger.Info("Using profiler image", "image", imageName)
 
 		profilerContainer := corev1.Container{
-			Name:    ContainerNameProfiler,
-			Image:   imageName,
-			Command: []string{"python", "-m", "benchmarks.profiler.profile_sla"},
-			Args:    profilerArgs,
-			Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("16"),
-					corev1.ResourceMemory: resource.MustParse("10Gi"),
-				},
-			},
+			Name:         ContainerNameProfiler,
+			Image:        imageName,
+			Command:      []string{"python", "-m", "benchmarks.profiler.profile_sla"},
+			Args:         profilerArgs,
 			Env:          profilerEnv,
 			VolumeMounts: volumeMounts,
+		}
+
+		// Apply resource requirements if specified in the DGDR
+		if dgdr.Spec.ProfilingConfig.Resources != nil {
+			profilerContainer.Resources = *dgdr.Spec.ProfilingConfig.Resources
 		}
 
 		// Generate sidecar script from template
@@ -1139,6 +1137,27 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			labelValue = LabelValueAICProfiler
 		}
 
+		podSpec := corev1.PodSpec{
+			ServiceAccountName: ServiceAccountProfilingJob,
+			RestartPolicy:      corev1.RestartPolicyNever,
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: ptr.To(true),        // Enforces that container cannot run as root
+				RunAsUser:    ptr.To[int64](1000), // Run as UID 1000 (non-privileged user)
+				RunAsGroup:   ptr.To[int64](1000), // Run with GID 1000 (non-privileged group)
+				FSGroup:      ptr.To[int64](1000), // Volume files owned by GID 1000
+			},
+			Containers: []corev1.Container{profilerContainer, sidecarContainer},
+			Volumes:    volumes,
+			ImagePullSecrets: []corev1.LocalObjectReference{
+				{Name: "nvcr-imagepullsecret"},
+			},
+		}
+
+		// Apply tolerations if specified in the DGDR
+		if len(dgdr.Spec.ProfilingConfig.Tolerations) > 0 {
+			podSpec.Tolerations = dgdr.Spec.ProfilingConfig.Tolerations
+		}
+
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      jobName,
@@ -1152,20 +1171,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			Spec: batchv1.JobSpec{
 				BackoffLimit: &backoffLimit,
 				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						ServiceAccountName: ServiceAccountProfilingJob,
-						RestartPolicy:      corev1.RestartPolicyNever, SecurityContext: &corev1.PodSecurityContext{
-							RunAsNonRoot: ptr.To(true),        // Enforces that container cannot run as root
-							RunAsUser:    ptr.To[int64](1000), // Run as UID 1000 (non-privileged user)
-							RunAsGroup:   ptr.To[int64](1000), // Run with GID 1000 (non-privileged group)
-							FSGroup:      ptr.To[int64](1000), // Volume files owned by GID 1000
-						},
-						Containers: []corev1.Container{profilerContainer, sidecarContainer},
-						Volumes:    volumes,
-						ImagePullSecrets: []corev1.LocalObjectReference{
-							{Name: "nvcr-imagepullsecret"},
-						},
-					},
+					Spec: podSpec,
 				},
 			},
 		}
