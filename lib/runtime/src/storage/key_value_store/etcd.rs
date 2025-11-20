@@ -273,8 +273,7 @@ mod concurrent_create_tests {
     }
 
     async fn test_concurrent_create(drt: DistributedRuntime) -> Result<(), StoreError> {
-        let etcd_client = drt.etcd_client().expect("etcd client should be available");
-        let storage = EtcdStore::new(etcd_client);
+        let storage = drt.store();
 
         // Create a bucket for testing
         let bucket = Arc::new(tokio::sync::Mutex::new(
