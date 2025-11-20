@@ -18,6 +18,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import pytest
 from filelock import FileLock
@@ -246,19 +247,24 @@ class SharedManagedProcess:
         self.port = port
         self.timeout = timeout
         self.resource_name = resource_name
-        self._server = None
+        self._server: Optional[ManagedProcess] = None
         self._owns_process = False
 
         # Use a fixed shared directory across all pytest-xdist workers
-        # Try to use pytest's basetemp parent, but fall back to /tmp if not available
+        # Try to use pytest's basetemp parent, but fall back to a subdirectory of /tmp if not available
+        # Never use /tmp directly as pytest will try to clean it up and fail on system files
         try:
             basetemp = tmp_path_factory.getbasetemp()
             if basetemp and str(basetemp):
-                root_tmp = basetemp.parent
+                # If basetemp is /tmp, use a subdirectory to avoid permission issues
+                if str(basetemp) == "/tmp":
+                    root_tmp = Path("/tmp/pytest_ref_counting")
+                else:
+                    root_tmp = basetemp.parent
             else:
-                root_tmp = Path("/tmp")
+                root_tmp = Path("/tmp/pytest_ref_counting")
         except (AttributeError, ValueError):
-            root_tmp = Path("/tmp")
+            root_tmp = Path("/tmp/pytest_ref_counting")
 
         # Ensure directory exists
         root_tmp.mkdir(parents=True, exist_ok=True)
