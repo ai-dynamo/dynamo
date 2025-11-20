@@ -21,7 +21,7 @@ from typing import List
 
 import pytest
 
-from dynamo.llm import KvEventPublisher, KvIndexer, RadixTree
+from dynamo.llm import ApproxKvIndexer, KvEventPublisher, KvIndexer, RadixTree
 from dynamo.runtime import Component, DistributedRuntime
 
 pytestmark = pytest.mark.pre_merge
@@ -271,6 +271,37 @@ async def test_event_handler(distributed_runtime):
             assert (
                 not scores.scores
             ), f"Scores still present after {(retry+1)*0.5}s: {scores.scores}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.forked
+async def test_approx_kv_indexer(distributed_runtime):
+    """Test ApproxKvIndexer with TTL-based block tracking"""
+    kv_block_size = 32
+    namespace = "kv_test"
+    component = "approx_kv"
+    kv_listener = distributed_runtime.namespace(namespace).component(component)
+
+    # Create ApproxKvIndexer with default TTL (120s)
+    indexer = ApproxKvIndexer(kv_listener, kv_block_size)
+
+    tokens = [0] * (kv_block_size * 2)
+
+    # Initially no matches
+    scores = await indexer.find_matches_for_request(tokens)
+    assert not scores.scores
+
+    worker_id = 0
+
+    # Process routing decision - this should add blocks to the indexer
+    await indexer.process_routing_decision_for_request(tokens, worker_id)
+
+    # Now we should have matches
+    scores = await indexer.find_matches_for_request(tokens)
+    assert scores.scores
+    worker_key = (worker_id, 0)  # (worker_id, dp_rank)
+    assert worker_key in scores.scores
+    assert scores.scores[worker_key] == 2  # 2 blocks (tokens is 2 blocks long)
 
 
 class EventPublisher:
