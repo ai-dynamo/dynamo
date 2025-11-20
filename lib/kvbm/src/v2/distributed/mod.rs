@@ -6,4 +6,6 @@
 //! This module provides the infrastructure for coordinating distributed
 //! block manager operations across multiple workers led by a single leader.
 
-pub mod cohort;
+// pub mod cohort;
+
+pub mod worker;

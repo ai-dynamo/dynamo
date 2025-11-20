@@ -12,6 +12,7 @@ use client::ActiveMessageClient;
 use handlers::HandlerManager;
 use server::ActiveMessageServer;
 
+use anyhow::Result;
 use std::sync::Arc;
 
 // Re-export shared identity types
@@ -20,6 +21,8 @@ pub use dynamo_nova_backend::{PeerInfo, WorkerAddress};
 pub use handlers::NovaHandler;
 
 use dynamo_nova_backend::{NovaBackend, Transport};
+
+use crate::events::EventHandle;
 
 #[derive(Clone)]
 pub struct Nova {
@@ -126,6 +129,15 @@ impl Nova {
         handler: &str,
     ) -> anyhow::Result<client::builders::TypedUnaryBuilder<R>> {
         client::builders::TypedUnaryBuilder::new(self.client.clone(), handler)
+    }
+
+    // todo: trigger an event on a remote machine
+    pub fn trigger_event(&self, event: EventHandle) -> Result<impl Future<Output = Result<()>>> {
+        Ok(self
+            .am_sync("_trigger_event")?
+            .worker(event.owner_worker())
+            .payload(event)?
+            .send())
     }
 
     pub fn register_handler(&self, handler: NovaHandler) -> anyhow::Result<()> {

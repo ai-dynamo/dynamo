@@ -2772,6 +2772,7 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dynamo-config",
+ "dynamo-identity",
  "dynamo-kvbm-kernels",
  "dynamo-memory",
  "dynamo-nova",

@@ -8,6 +8,8 @@
 //! - RAII MutableBlock guards for automatic return
 //! - Thread-safe access via parking_lot::Mutex
 
+use crate::BlockId;
+
 use super::{Block, BlockAllocator, BlockMetadata, MutableBlock, Reset};
 use parking_lot::Mutex;
 use std::{collections::VecDeque, sync::Arc};
@@ -30,7 +32,7 @@ impl<T: BlockMetadata> ResetPool<T> {
         block_size: usize,
     ) -> Self {
         for (i, block) in blocks.iter().enumerate() {
-            if block.block_id() != i as u64 {
+            if block.block_id() != i as BlockId {
                 panic!("Block ids must be monotonically increasing starting at 0");
             }
         }

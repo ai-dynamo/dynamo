@@ -11,10 +11,46 @@ use super::strategy::select_strategy;
 use super::validation::validate_block_transfer;
 use super::{PhysicalLayout, TransferContext, TransferOptions, TransferPlan, TransferStrategy};
 use crate::v2::physical::transfer::{StorageKind, context::TransferCompleteNotification};
+use crate::{BlockId, SequenceHash};
 use anyhow::Result;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+pub(crate) struct G4OnboardContext {}
+pub(crate) struct G4OffloadContext {}
+
+pub(crate) fn g4_read(
+    src: &G4OnboardContext,
+    src_seq_hash: &[SequenceHash],
+    dst: &PhysicalLayout,
+    dst_block_ids: &[BlockId],
+    ctx: &TransferContext,
+) -> Result<()> {
+    unimplemented!()
+}
+
+pub(crate) fn g4_write(
+    src: &PhysicalLayout,
+    src_block_ids: &[BlockId],
+    dst: &G4OffloadContext,
+    dst_seq_hash: &[SequenceHash],
+    ctx: &TransferContext,
+) -> Result<()> {
+    if !src.layout().is_fully_contiguous() {
+        anyhow::bail!("G4 write source layout must be fully contiguous");
+    }
+
+    // logical instance has created a multi-part upload
+    // this method simply dumps the full block into the offload context
+    // the offload context will consist of:
+    // - bucket name
+    // - object name
+    // - upload id
+    // - part number
+
+    unimplemented!()
+}
 
 // Re-export the NIXL transfer builder for public use
 pub use nixl::NixlTransferBuilder;
@@ -34,8 +70,8 @@ pub use nixl::NixlTransferBuilder;
 pub(crate) fn execute_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
     options: TransferOptions,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
@@ -78,8 +114,8 @@ pub(crate) fn execute_transfer(
 fn execute_direct_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
     ctx: &TransferContext,
@@ -132,7 +168,7 @@ fn execute_direct_transfer(
 }
 
 /// Type alias for transfer group: (block_ids, bounce_buffer_group_index)
-type TransferGroup = (Vec<usize>, bool);
+type TransferGroup = (Vec<BlockId>, bool);
 
 /// Optimized bounce buffer transfer using double-buffering.
 ///
@@ -151,9 +187,9 @@ async fn handle_buffered_transfer(
     src: &PhysicalLayout,
     bounce_layout: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    bounce_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[BlockId],
+    bounce_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
     first_strategy: TransferStrategy,
     second_strategy: TransferStrategy,
     layer_range: &Option<Range<usize>>,
@@ -251,9 +287,9 @@ async fn execute_two_hop_transfer_chunk(
     src: &PhysicalLayout,
     bounce_layout: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    bounce_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[BlockId],
+    bounce_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
     first_strategy: TransferStrategy,
     second_strategy: TransferStrategy,
     layer_range: &Option<Range<usize>>,
@@ -290,8 +326,8 @@ async fn execute_two_hop_transfer_chunk(
 struct TwoHopTransferParams<'a> {
     src: &'a PhysicalLayout,
     dst: &'a PhysicalLayout,
-    src_block_ids: &'a [usize],
-    dst_block_ids: &'a [usize],
+    src_block_ids: &'a [BlockId],
+    dst_block_ids: &'a [BlockId],
     first_strategy: TransferStrategy,
     bounce_location: StorageKind,
     second_strategy: TransferStrategy,

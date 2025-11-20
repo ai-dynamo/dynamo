@@ -22,12 +22,12 @@ pub(crate) mod fixtures {
     use dynamo_tokens::{TokenBlock, TokenBlockSequence};
     use std::sync::Arc;
 
-    pub fn create_reset_block(id: u64) -> Block<TestData, Reset> {
+    pub fn create_reset_block(id: BlockId) -> Block<TestData, Reset> {
         Block::new(id, 4)
     }
 
     pub fn create_reset_blocks(count: usize) -> Vec<Block<TestData, Reset>> {
-        (0..count as u64).map(|id| Block::new(id, 4)).collect()
+        (0..count as BlockId).map(|id| Block::new(id, 4)).collect()
     }
 
     pub fn create_token_block(tokens: &[u32], block_size: u32) -> TokenBlock {
@@ -40,7 +40,7 @@ pub(crate) mod fixtures {
         }
     }
 
-    pub fn create_complete_block(id: u64, tokens: &[u32]) -> Block<TestData, Complete> {
+    pub fn create_complete_block(id: BlockId, tokens: &[u32]) -> Block<TestData, Complete> {
         let token_block = create_token_block(tokens, 4);
         Block::new(id, 4)
             .complete(token_block)
@@ -48,7 +48,7 @@ pub(crate) mod fixtures {
     }
 
     pub fn create_registered_block(
-        id: u64,
+        id: BlockId,
         tokens: &[u32],
     ) -> (Block<TestData, Registered>, SequenceHash) {
         let complete_block = create_complete_block(id, tokens);
@@ -82,7 +82,7 @@ pub(crate) mod fixtures {
     /// explicit configuration of all parameters, reducing the likelihood
     /// of block size mismatches in tests.
     pub struct TestBlockBuilder {
-        id: u64,
+        id: BlockId,
         block_size: usize,
         tokens: Option<Vec<u32>>,
     }
@@ -91,7 +91,7 @@ pub(crate) mod fixtures {
         /// Create a new test block builder with the given ID
         ///
         /// Uses the default test block size (4) but allows override.
-        pub fn new(id: u64) -> Self {
+        pub fn new(id: BlockId) -> Self {
             use crate::v2::test_config::DEFAULT_TEST_BLOCK_SIZE;
             Self {
                 id,
@@ -195,7 +195,7 @@ pub(crate) mod fixtures {
         }
 
         /// Get the configured block ID
-        pub fn block_id(&self) -> u64 {
+        pub fn block_id(&self) -> BlockId {
             self.id
         }
     }
@@ -290,7 +290,7 @@ pub(crate) mod fixtures {
         }
 
         /// Add a block to the sequence (Individual mode only)
-        pub fn add_block(mut self, id: u64) -> Self {
+        pub fn add_block(mut self, id: BlockId) -> Self {
             if let BuilderMode::Individual {
                 mut blocks,
                 parent_hash,
@@ -308,7 +308,7 @@ pub(crate) mod fixtures {
         }
 
         /// Add a block with specific configuration (Individual mode only)
-        pub fn add_block_with<F>(mut self, id: u64, f: F) -> Self
+        pub fn add_block_with<F>(mut self, id: BlockId, f: F) -> Self
         where
             F: FnOnce(TestBlockBuilder) -> TestBlockBuilder,
         {
@@ -370,7 +370,7 @@ pub(crate) mod fixtures {
             let token_blocks = token_seq.blocks();
 
             for (idx, token_block) in token_blocks.iter().enumerate() {
-                let block_id = idx as u64;
+                let block_id = idx as BlockId;
                 let complete_block = Block::new(block_id, block_size)
                     .complete(token_block.clone())
                     .expect("Block size should match");

@@ -97,7 +97,7 @@ mod tests {
     struct TestData;
 
     /// Helper function to create InactiveBlock instances for testing
-    fn create_inactive_block(block_id: u64, seq_hash: u64) -> InactiveBlock {
+    fn create_inactive_block(block_id: BlockId, seq_hash: u64) -> InactiveBlock {
         let complete_block = create_completed_block::<TestData>(&[seq_hash as u32], block_id);
         InactiveBlock {
             block_id,
@@ -317,7 +317,9 @@ mod tests {
 
         for i in 1..=5 {
             let elapsed_before = start.elapsed().as_millis() as u64;
-            policy.insert(create_inactive_block(i, i * 100)).unwrap();
+            policy
+                .insert(create_inactive_block(i, i as u64 * 100))
+                .unwrap();
             let elapsed_after = start.elapsed().as_millis() as u64;
             insertion_times.push((i, elapsed_before, elapsed_after));
 
@@ -326,12 +328,12 @@ mod tests {
         }
 
         // Retrieve all blocks and verify they come out in insertion order
-        let mut retrieval_order: Vec<u64> = Vec::new();
+        let mut retrieval_order: Vec<BlockId> = Vec::new();
         while let Some(block) = policy.next_free() {
             retrieval_order.push(block.block_id);
         }
 
-        let expected_order: Vec<u64> = (1..=5).collect();
+        let expected_order: Vec<BlockId> = (1..=5).collect();
         assert_eq!(retrieval_order, expected_order);
 
         // Print timing information for manual verification

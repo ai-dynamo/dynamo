@@ -5,6 +5,7 @@
 
 use super::TransferContext;
 use super::{PhysicalLayout, TransferStrategy};
+use crate::BlockId;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
 use anyhow::{Result, anyhow};
 use cudarc::driver::result as cuda_result;
@@ -30,8 +31,8 @@ use std::ops::Range;
 pub fn execute_cuda_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
     ctx: &TransferContext,
@@ -185,8 +186,8 @@ pub fn execute_cuda_transfer(
 fn execute_h2d(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
     layers: Range<usize>,
     stream: &cudarc::driver::CudaStream,
 ) -> Result<()> {
@@ -224,8 +225,8 @@ fn execute_h2d(
 fn execute_d2h(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
     layers: Range<usize>,
     stream: &cudarc::driver::CudaStream,
 ) -> Result<()> {
@@ -263,8 +264,8 @@ fn execute_d2h(
 fn execute_d2d(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
     layers: Range<usize>,
     stream: &cudarc::driver::CudaStream,
 ) -> Result<()> {
@@ -332,8 +333,8 @@ fn map_dtype(dtype_width_bytes: usize) -> Option<TensorDataType> {
 pub(crate) fn try_execute_operational_kernel(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
     layers: Range<usize>,
     stream: &cudarc::driver::CudaStream,
     backend: OperationalCopyBackend,

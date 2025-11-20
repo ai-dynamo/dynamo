@@ -3,7 +3,9 @@
 
 //! RAII guards for immutable and weak block references
 
-use super::{BlockId, BlockMetadata, RegisteredBlock, SequenceHash};
+use super::{
+    BlockId, BlockMetadata, BlockRegistrationHandle, RegisteredBlock, SequenceHash,
+};
 
 use std::sync::{Arc, Weak};
 
@@ -46,6 +48,10 @@ impl<T: BlockMetadata> ImmutableBlock<T> {
     /// Get the sequence hash
     pub fn sequence_hash(&self) -> SequenceHash {
         self.block.sequence_hash()
+    }
+
+    pub(crate) fn registration_handle(&self) -> BlockRegistrationHandle {
+        self.block.registration_handle().clone()
     }
 }
 

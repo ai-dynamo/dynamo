@@ -59,6 +59,16 @@ impl<T: BlockMetadata> MutableBlock<T> {
             }
         }
     }
+
+    pub(crate) fn into_parts(
+        mut self,
+    ) -> (
+        Block<T, Reset>,
+        Arc<dyn Fn(Block<T, Reset>) + Send + Sync>,
+    ) {
+        let block = self.block.take().expect("MutableBlock missing block");
+        (block, self.return_fn.clone())
+    }
 }
 
 impl<T: BlockMetadata> Drop for MutableBlock<T> {

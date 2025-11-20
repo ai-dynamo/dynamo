@@ -3,6 +3,7 @@
 
 //! Memcpy executor for host-to-host transfers.
 
+use crate::BlockId;
 use crate::v2::physical::transfer::PhysicalLayout;
 use crate::v2::physical::transfer::TransferContext;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
@@ -23,8 +24,8 @@ use std::ops::Range;
 pub fn execute_memcpy_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
     layer_range: Option<Range<usize>>,
     _ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {

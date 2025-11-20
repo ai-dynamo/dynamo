@@ -6,6 +6,8 @@
 //! This module provides utilities to populate blocks with specific patterns
 //! for verification in round-trip tests.
 
+use crate::BlockId;
+
 use super::PhysicalLayout;
 
 use aligned_vec::{AVec, avec};
@@ -48,7 +50,7 @@ pub enum FillPattern {
 /// - Memory access fails
 pub fn fill_blocks(
     layout: &PhysicalLayout,
-    block_ids: &[usize],
+    block_ids: &[BlockId],
     pattern: FillPattern,
 ) -> Result<()> {
     // Can only fill local layouts
@@ -57,7 +59,7 @@ pub fn fill_blocks(
     let outer_dim = config.outer_dim;
 
     for &block_id in block_ids {
-        if block_id >= config.num_blocks {
+        if block_id >= config.num_blocks as BlockId {
             return Err(anyhow!("Block ID {} out of range", block_id));
         }
 
@@ -170,7 +172,7 @@ pub fn fill_layers(
 fn fill_memory_region(
     addr: usize,
     size: usize,
-    block_id: usize,
+    block_id: BlockId,
     layer_id: usize,
     pattern: FillPattern,
 ) -> Result<()> {

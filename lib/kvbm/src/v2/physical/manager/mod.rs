@@ -15,6 +15,7 @@ pub(crate) use local::LocalLayout;
 pub(crate) use metadata::LocalLayoutDescriptor;
 pub(crate) use remote::RemoteLayout;
 
+use crate::BlockId;
 use crate::v2::physical::layout::PhysicalLayout;
 use crate::v2::physical::transfer::TransferContext;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
@@ -155,9 +156,9 @@ impl TransportManager {
     pub fn execute_transfer(
         &self,
         src_handle: LayoutHandle,
-        src_blocks: &[usize],
+        src_blocks: &[BlockId],
         dst_handle: LayoutHandle,
-        dst_blocks: &[usize],
+        dst_blocks: &[BlockId],
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
         // Clone layouts inside the lock, then drop lock before transfer

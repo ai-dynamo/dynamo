@@ -4,11 +4,13 @@
 //! Generational event system for coordinating local awaiters with minimal overhead.
 
 mod local;
+use dynamo_identity::WorkerId;
 pub use local::{LocalEvent, LocalEventSystem};
 
 use anyhow::{Result, anyhow, bail};
 use dashmap::DashMap;
 use parking_lot::Mutex as ParkingMutex;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
@@ -50,7 +52,7 @@ impl EventKey {
 
     fn from_handle(handle: EventHandle) -> Self {
         Self {
-            worker: handle.owner_worker(),
+            worker: handle.owner_worker().as_u64(),
             index: handle.local_index(),
         }
     }
@@ -67,7 +69,7 @@ impl Display for EventKey {
 }
 
 /// Public event handle encoded in a single u128 value.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EventHandle(u128);
 
 impl EventHandle {
@@ -93,8 +95,8 @@ impl EventHandle {
         self.0
     }
 
-    pub fn owner_worker(&self) -> u64 {
-        ((self.0 & WORKER_MASK) >> WORKER_SHIFT) as u64
+    pub fn owner_worker(&self) -> WorkerId {
+        WorkerId::from_u64(((self.0 & WORKER_MASK) >> WORKER_SHIFT) as u64)
     }
 
     pub fn local_index(&self) -> u32 {
@@ -110,7 +112,7 @@ impl EventHandle {
     }
 
     pub fn with_generation(&self, generation: Generation) -> Result<Self> {
-        EventHandle::new(self.owner_worker(), self.local_index(), generation)
+        EventHandle::new(self.owner_worker().as_u64(), self.local_index(), generation)
     }
 }
 

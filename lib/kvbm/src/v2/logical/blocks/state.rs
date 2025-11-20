@@ -67,6 +67,25 @@ impl<T> Block<T, Reset> {
     }
 }
 
+impl<T: BlockMetadata> Block<T, Reset> {
+    pub(crate) fn register_with_handle(
+        self,
+        registration_handle: BlockRegistrationHandle,
+    ) -> Block<T, Registered> {
+        registration_handle.mark_present::<T>();
+
+        Block {
+            block_id: self.block_id,
+            block_size: self.block_size,
+            state: Registered {
+                sequence_hash: registration_handle.seq_hash(),
+                registration_handle,
+            },
+            marker: PhantomData,
+        }
+    }
+}
+
 // Implementation for Complete state
 impl<T: BlockMetadata> Block<T, Complete> {
     pub fn register(self, registration_handle: BlockRegistrationHandle) -> Block<T, Registered> {

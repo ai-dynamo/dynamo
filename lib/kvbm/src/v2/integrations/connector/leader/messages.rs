@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use derive_builder::Builder;
-use dynamo_am::EventHandle;
+use dynamo_nova::events::EventHandle;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::{Validate, ValidationError};

@@ -10,9 +10,12 @@ use super::{
     BlockChecksum, FillPattern, NixlAgent, PhysicalLayout, StorageKind, TransferCapabilities,
     compute_block_checksums, compute_layer_checksums, fill_blocks, fill_layers,
 };
-use crate::v2::physical::layout::{
-    BlockDimension, LayoutConfig,
-    builder::{HasConfig, NoLayout, NoMemory, PhysicalLayoutBuilder},
+use crate::{
+    BlockId,
+    v2::physical::layout::{
+        BlockDimension, LayoutConfig,
+        builder::{HasConfig, NoLayout, NoMemory, PhysicalLayoutBuilder},
+    },
 };
 use anyhow::Result;
 use cudarc::driver::sys::CUdevice_attribute_enum;
@@ -180,9 +183,9 @@ pub fn create_transfer_context(
 /// This can only be called on System or Pinned layouts.
 pub fn fill_and_checksum(
     layout: &PhysicalLayout,
-    block_ids: &[usize],
+    block_ids: &[BlockId],
     pattern: FillPattern,
-) -> Result<HashMap<usize, BlockChecksum>> {
+) -> Result<HashMap<BlockId, BlockChecksum>> {
     fill_blocks(layout, block_ids, pattern)?;
     compute_block_checksums(layout, block_ids)
 }
@@ -193,10 +196,10 @@ pub fn fill_and_checksum(
 /// full block transfers and layer-wise transfers.
 pub fn fill_and_checksum_with_mode(
     layout: &PhysicalLayout,
-    block_ids: &[usize],
+    block_ids: &[BlockId],
     pattern: FillPattern,
     mode: TransferMode,
-) -> Result<HashMap<usize, BlockChecksum>> {
+) -> Result<HashMap<BlockId, BlockChecksum>> {
     match mode {
         TransferMode::FullBlocks => {
             fill_blocks(layout, block_ids, pattern)?;
@@ -218,10 +221,10 @@ pub fn fill_and_checksum_with_mode(
 /// This function compares checksums in order, assuming the source and destination
 /// block arrays have a 1:1 correspondence (src[i] was transferred to dst[i]).
 pub fn verify_checksums_by_position(
-    src_checksums: &HashMap<usize, BlockChecksum>,
-    src_block_ids: &[usize],
+    src_checksums: &HashMap<BlockId, BlockChecksum>,
+    src_block_ids: &[BlockId],
     dst_layout: &PhysicalLayout,
-    dst_block_ids: &[usize],
+    dst_block_ids: &[BlockId],
 ) -> Result<()> {
     assert_eq!(
         src_block_ids.len(),
@@ -253,10 +256,10 @@ pub fn verify_checksums_by_position(
 ///
 /// This is a mode-aware version that handles both full block and layer-wise verification.
 pub fn verify_checksums_by_position_with_mode(
-    src_checksums: &HashMap<usize, BlockChecksum>,
-    src_block_ids: &[usize],
+    src_checksums: &HashMap<BlockId, BlockChecksum>,
+    src_block_ids: &[BlockId],
     dst_layout: &PhysicalLayout,
-    dst_block_ids: &[usize],
+    dst_block_ids: &[BlockId],
     mode: TransferMode,
 ) -> Result<()> {
     assert_eq!(

@@ -5,6 +5,9 @@
 //!
 //! This module provides validation functions to ensure block transfers are safe and correct.
 
+#[cfg(debug_assertions)]
+use crate::BlockId;
+
 use super::PhysicalLayout;
 use std::collections::HashSet;
 use thiserror::Error;
@@ -14,11 +17,11 @@ use thiserror::Error;
 pub enum BlockValidationError {
     /// Destination block IDs contain duplicates.
     #[error("Destination block IDs are not unique: duplicates = {duplicates:?}")]
-    DuplicateDestinationBlocks { duplicates: Vec<usize> },
+    DuplicateDestinationBlocks { duplicates: Vec<BlockId> },
 
     /// Source and destination blocks overlap when using the same layout.
     #[error("Source and destination blocks overlap (same layout): overlapping = {overlapping:?}")]
-    OverlappingBlocks { overlapping: Vec<usize> },
+    OverlappingBlocks { overlapping: Vec<BlockId> },
 
     /// Lists have mismatched lengths.
     #[error(
@@ -33,14 +36,14 @@ pub enum BlockValidationError {
     /// Block ID is out of range for the layout.
     #[error("Block ID {block_id} out of range for {layout_name} (max={max})")]
     BlockOutOfRange {
-        block_id: usize,
+        block_id: BlockId,
         layout_name: &'static str,
         max: usize,
     },
 
     /// Bounce block IDs contain duplicates.
     #[error("Bounce block IDs are not unique: duplicates = {duplicates:?}")]
-    DuplicateBounceBlocks { duplicates: Vec<usize> },
+    DuplicateBounceBlocks { duplicates: Vec<BlockId> },
 }
 
 /// Validate that destination block IDs are unique (no duplicates).
@@ -50,7 +53,7 @@ pub enum BlockValidationError {
 ///
 /// # Returns
 /// Ok(()) if unique, Err with duplicate IDs otherwise
-pub fn validate_dst_unique(dst_block_ids: &[usize]) -> Result<(), BlockValidationError> {
+pub fn validate_dst_unique(dst_block_ids: &[BlockId]) -> Result<(), BlockValidationError> {
     let mut seen = HashSet::new();
     let mut duplicates = Vec::new();
 
@@ -68,7 +71,7 @@ pub fn validate_dst_unique(dst_block_ids: &[usize]) -> Result<(), BlockValidatio
 }
 
 /// Validate that bounce block IDs are unique (no duplicates).
-pub fn validate_bounce_unique(bounce_block_ids: &[usize]) -> Result<(), BlockValidationError> {
+pub fn validate_bounce_unique(bounce_block_ids: &[BlockId]) -> Result<(), BlockValidationError> {
     let mut seen = HashSet::new();
     let mut duplicates = Vec::new();
 
@@ -108,8 +111,8 @@ fn are_same_layout(layout1: &PhysicalLayout, layout2: &PhysicalLayout) -> bool {
 /// * `dst_layout` - Destination physical layout
 #[cfg(debug_assertions)]
 pub fn validate_disjoint_same_layout(
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
     src_layout: &PhysicalLayout,
     dst_layout: &PhysicalLayout,
 ) -> Result<(), BlockValidationError> {
@@ -135,14 +138,14 @@ pub fn validate_disjoint_same_layout(
 /// Validate block IDs are in range for a layout.
 #[cfg(debug_assertions)]
 pub fn validate_block_ids_in_range(
-    block_ids: &[usize],
+    block_ids: &[BlockId],
     layout: &PhysicalLayout,
     layout_name: &'static str,
 ) -> Result<(), BlockValidationError> {
     let max_blocks = layout.layout().config().num_blocks;
 
     for &block_id in block_ids {
-        if block_id >= max_blocks {
+        if block_id >= max_blocks as BlockId {
             return Err(BlockValidationError::BlockOutOfRange {
                 block_id,
                 layout_name,
@@ -164,9 +167,9 @@ pub fn validate_block_ids_in_range(
 /// - All block IDs are in range for their respective layouts
 #[cfg(debug_assertions)]
 pub fn validate_block_transfer(
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
-    bounce_block_ids: Option<&[usize]>,
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
+    bounce_block_ids: Option<&[BlockId]>,
     src_layout: &PhysicalLayout,
     dst_layout: &PhysicalLayout,
     bounce_layout: Option<&PhysicalLayout>,
@@ -221,9 +224,9 @@ pub fn validate_block_transfer(
 /// - Destination IDs are unique
 #[cfg(not(debug_assertions))]
 pub fn validate_block_transfer(
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
-    bounce_block_ids: Option<&[usize]>,
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
+    bounce_block_ids: Option<&[BlockId]>,
     _src_layout: &PhysicalLayout,
     _dst_layout: &PhysicalLayout,
     _bounce_layout: Option<&PhysicalLayout>,

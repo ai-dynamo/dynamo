@@ -42,7 +42,6 @@ pub mod checksum;
 pub mod context;
 pub mod executor;
 pub mod fill;
-// pub mod nixl_agent;
 pub mod notifications;
 pub mod options;
 pub mod preferences;
@@ -67,6 +66,8 @@ pub use validation::BlockValidationError;
 // Internal - TransferContext is now managed by TransportManager
 pub(crate) use context::TransferContext;
 
+use crate::BlockId;
+
 pub use super::layout::PhysicalLayout;
 
 // Re-export manager types - TransportManager is the primary public API
@@ -88,7 +89,7 @@ pub type TransferFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Res
 /// staging area when direct transfers are not allowed.
 pub trait BounceBufferSpec: Send + Sync {
     fn layout(&self) -> &PhysicalLayout;
-    fn block_ids(&self) -> &[usize];
+    fn block_ids(&self) -> &[BlockId];
 }
 
 // #[cfg(all(test, feature = "testing-cuda"))]

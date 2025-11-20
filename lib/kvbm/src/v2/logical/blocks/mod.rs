@@ -27,11 +27,8 @@ pub(crate) use registry::{BlockRegistrationHandle, BlockRegistry};
 pub trait BlockMetadata: Clone + Send + Sync + 'static {}
 impl<T: Clone + Send + Sync + 'static> BlockMetadata for T {}
 
-/// Physical Block Identifier
-pub type BlockId = u64;
-
 /// Logical Block Identifier
-pub use super::SequenceHash;
+pub use super::{BlockId, SequenceHash};
 use dynamo_tokens::TokenBlock;
 
 /// Error type for block operations that returns the block to prevent leaks

@@ -9,6 +9,7 @@
 
 pub mod config;
 pub mod connector;
+pub mod session;
 // pub mod vllm;
 
 // Re-export key types for convenience

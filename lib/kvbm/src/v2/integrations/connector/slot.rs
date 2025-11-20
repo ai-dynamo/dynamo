@@ -14,7 +14,7 @@ use std::{
 
 use super::{G1, G2, G3};
 
-use dynamo_am::EventHandle;
+use dynamo_nova::events::EventHandle;
 use dynamo_tokens::{TokenBlock, TokenBlockSequence};
 use tracing::error;
 use uuid::Uuid;

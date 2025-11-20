@@ -3,6 +3,8 @@
 
 //! Physical layout types that combine abstract layouts with storage location metadata.
 
+use crate::BlockId;
+
 use super::{
     FullyContiguousLayout, LayerSeparateLayout, Layout, MemoryRegion,
     builder::{PhysicalLayoutBuilder, PhysicalLayoutBuilderDefault},
@@ -142,7 +144,7 @@ impl PhysicalLayout {
     /// * `outer_id` - Outer dimension identifier
     pub fn memory_region(
         &self,
-        block_id: usize,
+        block_id: BlockId,
         layer_id: usize,
         outer_id: usize,
     ) -> Result<MemoryRegion> {

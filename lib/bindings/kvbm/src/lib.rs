@@ -9,7 +9,7 @@ use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_runtime::{self as rs, RuntimeConfig, logging, traits::DistributedRuntimeProvider};
+use dynamo_runtime::{self as rs, logging, traits::DistributedRuntimeProvider, RuntimeConfig};
 
 use dynamo_llm::{self as llm_rs};
 
@@ -18,11 +18,15 @@ mod block_manager;
 #[cfg(feature = "block-manager")]
 mod kernels;
 
+mod v2;
+
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+
     // Initialize tokio runtime first to avoid panics when OTEL_EXPORT_ENABLED=1
     init_pyo3_tokio_rt();
 
@@ -48,6 +52,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         kernels::add_to_module(&kernels)?;
         m.add_submodule(&kernels)?;
     }
+
+    let v2 = PyModule::new(m.py(), "v2")?;
+    v2::add_to_module(&v2)?;
+    m.add_submodule(&v2)?;
 
     Ok(())
 }

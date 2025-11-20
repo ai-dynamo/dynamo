@@ -13,6 +13,7 @@
 //! It implements a simplified Block<T, State> API that differs from the
 //! main codebase's Block<Storage, LocalityProvider, Metadata> API.
 
+pub mod distributed;
 pub mod logical;
 pub mod physical;
 pub mod sessions;
@@ -31,7 +32,7 @@ pub mod types;
 // pub mod hub;
 
 // // Integration modules for external frameworks
-// pub mod integrations;
+pub mod integrations;
 
 // Re-export common types and traits
 // pub use config::{AttentionConfig, ParallelConfig};
@@ -41,6 +42,8 @@ pub use types::{CacheDtype, CacheLayout, ModelExecutorBackend};
 #[cfg(test)]
 pub mod test_config;
 
+pub use dynamo_identity::InstanceId;
 pub use dynamo_tokens::{PositionalSequenceHash, SequenceHash as SequenceHashV1};
 
+pub type BlockId = usize;
 pub type SequenceHash = PositionalSequenceHash;

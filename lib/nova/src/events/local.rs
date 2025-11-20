@@ -264,7 +264,7 @@ impl LocalEventSystem {
     }
 
     fn ensure_local_handle(&self, handle: EventHandle) -> Result<()> {
-        if handle.owner_worker() != self.worker_id {
+        if handle.owner_worker().as_u64() != self.worker_id {
             bail!(
                 "Event {} does not belong to worker {}",
                 handle,

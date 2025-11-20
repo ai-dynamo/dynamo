@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::utils::tinylfu::TinyLFUTracker;
+use crate::{BlockId, utils::tinylfu::TinyLFUTracker};
 
 use super::{
     blocks::{
@@ -163,6 +163,27 @@ impl<T: BlockMetadata> BlockManager<T> {
                 ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
             })
             .collect()
+    }
+
+    pub(crate) fn register_mutable_block_from_existing<U: BlockMetadata>(
+        &self,
+        block: MutableBlock<T>,
+        existing: &ImmutableBlock<U>,
+    ) -> ImmutableBlock<T> {
+        let handle = existing.registration_handle();
+
+        assert!(
+            handle.is_from_registry(&self.block_registry),
+            "Attempted to register block with handle from different registry"
+        );
+
+        let registered_block = handle.register_mutable_block(
+            block,
+            self.duplication_policy,
+            self.inactive_pool.return_fn(),
+        );
+
+        ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
     }
 
     pub fn match_blocks(&self, seq_hash: &[SequenceHash]) -> Vec<ImmutableBlock<T>> {
@@ -394,7 +415,7 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         let registry = self.registry.unwrap();
 
         // Create reset pool
-        let blocks: Vec<Block<T, Reset>> = (0..block_count as u64)
+        let blocks: Vec<Block<T, Reset>> = (0..block_count as BlockId)
             .map(|id| Block::new(id, block_size))
             .collect();
         let reset_pool = ResetPool::new(blocks, block_size);
@@ -1360,6 +1381,64 @@ mod tests {
                     policy_name
                 );
             }
+        }
+
+        #[test]
+        fn test_register_mutable_block_from_existing_reject_returns_block_to_reset_pool() {
+            let registry = BlockRegistry::new();
+            let manager = BlockManager::<TestBlockData>::builder()
+                .block_count(2)
+                .block_size(4)
+                .registry(registry)
+                .duplication_policy(BlockDuplicationPolicy::Reject)
+                .build()
+                .expect("Should build manager");
+
+            let mut blocks = manager
+                .allocate_blocks(2)
+                .expect("Should allocate two blocks");
+            let mut iter = blocks.into_iter();
+            let primary_mutable = iter.next().expect("Should have first block");
+            let duplicate_mutable = iter.next().expect("Should have second block");
+
+            let primary_id = primary_mutable.block_id();
+            let duplicate_id = duplicate_mutable.block_id();
+
+            let token_block = create_test_token_block_from_iota(42);
+            let primary_complete = primary_mutable
+                .complete(token_block)
+                .expect("Should complete primary block");
+
+            let mut registered = manager.register_blocks(vec![primary_complete]);
+            let primary_immutable = registered.pop().expect("Should register primary block");
+
+            let result =
+                manager.register_mutable_block_from_existing(duplicate_mutable, &primary_immutable);
+
+            assert_eq!(
+                result.block_id(),
+                primary_id,
+                "Should reuse existing primary when duplicates are rejected"
+            );
+
+            assert_eq!(
+                manager.available_blocks(),
+                1,
+                "Rejected duplicate should be returned to the reset pool"
+            );
+
+            let mut returned_blocks = manager
+                .allocate_blocks(1)
+                .expect("Should allocate returned reset block");
+            let returned_block = returned_blocks
+                .pop()
+                .expect("Should contain one returned block");
+
+            assert_eq!(
+                returned_block.block_id(),
+                duplicate_id,
+                "Returned block should be the rejected duplicate"
+            );
         }
     }
 

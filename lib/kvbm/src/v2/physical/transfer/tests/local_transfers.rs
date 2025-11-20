@@ -9,6 +9,7 @@
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
 
 use super::*;
+use crate::BlockId;
 use crate::physical::transfer::{BounceBufferSpec, TransferCapabilities, TransferOptions};
 use crate::v2::physical::transfer::executor::execute_transfer;
 use anyhow::Result;
@@ -45,7 +46,7 @@ impl BounceBufferSpec for DummyBounceBufferSpec {
     fn layout(&self) -> &PhysicalLayout {
         &self.layout
     }
-    fn block_ids(&self) -> &[usize] {
+    fn block_ids(&self) -> &[BlockId] {
         &self.block_ids
     }
 }

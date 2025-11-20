@@ -13,8 +13,8 @@
 use crate::v2::{logical::events::EventsManager, utils::tinylfu::FrequencyTracker};
 
 use super::{
-    Block, BlockDuplicationPolicy, BlockMetadata, CompleteBlock, DuplicateBlock, PrimaryBlock,
-    RegisteredBlock, SequenceHash, state::Registered,
+    Block, BlockDuplicationPolicy, BlockMetadata, CompleteBlock, DuplicateBlock, MutableBlock,
+    PrimaryBlock, RegisteredBlock, SequenceHash, state::Registered,
 };
 
 use std::any::{Any, TypeId};
@@ -376,6 +376,14 @@ impl BlockRegistrationHandle {
         self.inner.seq_hash
     }
 
+    pub(crate) fn is_from_registry(&self, registry: &BlockRegistry) -> bool {
+        self.inner
+            .registry
+            .upgrade()
+            .map(|reg| Arc::ptr_eq(&reg, &registry.prt))
+            .unwrap_or(false)
+    }
+
     /// Mark that a Block<T, Registered> exists for this sequence hash.
     /// Called when transitioning from Complete to Registered state.
     pub(crate) fn mark_present<T: BlockMetadata>(&self) {
@@ -523,6 +531,12 @@ impl BlockRegistrationHandle {
         duplication_policy: BlockDuplicationPolicy,
         pool_return_fn: RegisteredReturnFn<T>,
     ) -> Arc<dyn RegisteredBlock<T>> {
+        assert_eq!(
+            block.sequence_hash(),
+            self.seq_hash(),
+            "Attempted to register block with different sequence hash"
+        );
+
         let type_id = TypeId::of::<Weak<Block<T, Registered>>>();
         let block_id = block.block_id();
 
@@ -560,6 +574,8 @@ impl BlockRegistrationHandle {
                     BlockDuplicationPolicy::Reject => {
                         // Return existing primary, discard new block
                         // The registered_block will be dropped and eventually returned to reset pool
+                        let reset_block = registered_block.reset();
+                        reset_return_fn(reset_block);
                         return existing_primary as Arc<dyn RegisteredBlock<T>>;
                     }
                 }
@@ -630,6 +646,71 @@ impl BlockRegistrationHandle {
         }
 
         None
+    }
+
+    pub(crate) fn register_mutable_block<T: BlockMetadata + Sync>(
+        &self,
+        mutable_block: MutableBlock<T>,
+        duplication_policy: BlockDuplicationPolicy,
+        pool_return_fn: RegisteredReturnFn<T>,
+    ) -> Arc<dyn RegisteredBlock<T>> {
+        let type_id = TypeId::of::<Weak<Block<T, Registered>>>();
+        let block_id = mutable_block.block_id();
+
+        let (inner_block, reset_return_fn) = mutable_block.into_parts();
+        let registered_block = inner_block.register_with_handle(self.clone());
+
+        let mut attachments = self.inner.attachments.lock();
+
+        // Check for existing blocks with same sequence hash
+        if let Some(weak_any) = attachments.weak_blocks.get(&type_id)
+            && let Some(weak_block) = weak_any.downcast_ref::<WeakBlockEntry<T>>()
+        {
+            // Try to get the existing primary block
+            if let Some(existing_primary) = weak_block.primary_block.upgrade() {
+                // Check if same block_id (shouldn't happen)
+                if existing_primary.block_id() == block_id {
+                    panic!("Attempted to register block with same block_id as existing");
+                }
+
+                // Handle duplicate based on policy
+                match duplication_policy {
+                    BlockDuplicationPolicy::Allow => {
+                        let duplicate = DuplicateBlock::new(
+                            registered_block,
+                            existing_primary.clone(),
+                            reset_return_fn,
+                        );
+                        return Arc::new(duplicate);
+                    }
+                    BlockDuplicationPolicy::Reject => {
+                        let reset_block = registered_block.reset();
+                        reset_return_fn(reset_block);
+                        return existing_primary as Arc<dyn RegisteredBlock<T>>;
+                    }
+                }
+            }
+        }
+
+        // No existing block or couldn't upgrade - create new primary
+        let primary = PrimaryBlock::new(Arc::new(registered_block), pool_return_fn);
+
+        // Store weak references for future lookups
+        let primary_arc = Arc::new(primary);
+        let raw_block = Arc::downgrade(primary_arc.block.as_ref().unwrap());
+        let primary_block = Arc::downgrade(&primary_arc);
+
+        attachments.weak_blocks.insert(
+            type_id,
+            Box::new(WeakBlockEntry {
+                raw_block,
+                primary_block,
+            }),
+        );
+
+        drop(attachments); // Release lock
+
+        primary_arc as Arc<dyn RegisteredBlock<T>>
     }
 }
 
@@ -760,7 +841,7 @@ struct RegistryState {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::utils::tinylfu::TinyLFUTracker;
+    use crate::{BlockId, utils::tinylfu::TinyLFUTracker};
 
     use super::*;
 
@@ -794,7 +875,7 @@ pub(crate) mod tests {
 
     pub fn create_completed_block<T: BlockMetadata + std::fmt::Debug>(
         tokens: &[u32],
-        block_id: u64,
+        block_id: BlockId,
     ) -> Block<T, crate::v2::logical::blocks::state::Complete> {
         use crate::v2::logical::blocks::{Block, state::Reset};
         let token_block = create_test_token_block(tokens);
@@ -805,7 +886,7 @@ pub(crate) mod tests {
     /// Helper to create and register a block with specific metadata type
     pub fn register_test_block<T: BlockMetadata + std::fmt::Debug>(
         registry: &BlockRegistry,
-        block_id: u64,
+        block_id: BlockId,
         tokens: &[u32],
     ) -> crate::v2::logical::blocks::Block<T, crate::v2::logical::blocks::state::Registered> {
         let complete = create_completed_block::<T>(tokens, block_id);

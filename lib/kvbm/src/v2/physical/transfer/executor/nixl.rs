@@ -7,6 +7,7 @@
 //! all required parameters are set before execution.
 
 use super::{PhysicalLayout, TransferContext, TransferStrategy};
+use crate::BlockId;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
 use anyhow::{Result, anyhow};
 use dynamo_memory::nixl::{XferDescList, XferOp};
@@ -31,8 +32,8 @@ pub struct Set;
 pub struct NixlTransferBuilder<'a, TSrc, TDst, TSrcBlocks, TDstBlocks, TStrategy> {
     src: Option<&'a PhysicalLayout>,
     dst: Option<&'a PhysicalLayout>,
-    src_block_ids: Option<&'a [usize]>,
-    dst_block_ids: Option<&'a [usize]>,
+    src_block_ids: Option<&'a [BlockId]>,
+    dst_block_ids: Option<&'a [BlockId]>,
     strategy: Option<TransferStrategy>,
     layer_range: Option<Range<usize>>,
     write_notif: Option<uuid::Uuid>,
@@ -111,7 +112,7 @@ impl<'a, TSrc, TDst, TDstBlocks, TStrategy>
     /// Sets the source block IDs to transfer.
     pub fn src_blocks(
         self,
-        src_block_ids: &'a [usize],
+        src_block_ids: &'a [BlockId],
     ) -> NixlTransferBuilder<'a, TSrc, TDst, Set, TDstBlocks, TStrategy> {
         NixlTransferBuilder {
             src: self.src,
@@ -132,7 +133,7 @@ impl<'a, TSrc, TDst, TSrcBlocks, TStrategy>
     /// Sets the destination block IDs to transfer.
     pub fn dst_blocks(
         self,
-        dst_block_ids: &'a [usize],
+        dst_block_ids: &'a [BlockId],
     ) -> NixlTransferBuilder<'a, TSrc, TDst, TSrcBlocks, Set, TStrategy> {
         NixlTransferBuilder {
             src: self.src,
