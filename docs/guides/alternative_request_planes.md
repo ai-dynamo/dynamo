@@ -31,11 +31,11 @@ This guide explains how to configure and use alternative request planes in your 
 
 The request plane is the transport layer that handles communication between Dynamo services (e.g., frontend to backend, worker to worker). Different request planes offer different trade-offs:
 
-| Request Plane | Suitable For | Characteristics | KV Routing Support |
-|--------------|----------|-----------------|-------------------|
-| **NATS** | Production deployments with KV routing | Requires NATS infrastructure, provides pub/sub patterns, highest flexibility | ✓ Yes |
-| **TCP** | Low-latency direct communication | Direct connections, minimal overhead | ✗ Need NATS for KV routing |
-| **HTTP** | Standard deployments, debugging | HTTP/2 protocol, easier observability with standard tools, widely compatible | ✗ Need NATS for KV routing |
+| Request Plane | Suitable For | Characteristics |
+|--------------|----------|-----------------|
+| **NATS** | Production deployments with KV routing | Requires NATS infrastructure, provides pub/sub patterns, highest flexibility |
+| **TCP** | Low-latency direct communication | Direct connections, minimal overhead |
+| **HTTP** | Standard deployments, debugging | HTTP/2 protocol, easier observability with standard tools, widely compatible |
 
 ## Configuration
 
