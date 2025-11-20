@@ -555,6 +555,10 @@ impl JailedStream {
                                 yield emitted_response;
                             }
                         }
+                    } else if chat_response.choices.is_empty() {
+                        // No choices processed (e.g., usage-only chunk)
+                        // Pass through as-is to preserve usage and other metadata
+                        yield response;
                     }
                 } else {
                     // No response data, pass through as-is
