@@ -1151,3 +1151,105 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		})
 	}
 }
+
+func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_ReplicaReconciliation(t *testing.T) {
+	ctx := context.Background()
+	g := gomega.NewGomegaWithT(t)
+
+	// Create a scheme with necessary types
+	s := scheme.Scheme
+	err := v1alpha1.AddToScheme(s)
+	if err != nil {
+		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+	err = appsv1.AddToScheme(s)
+	if err != nil {
+		t.Fatalf("Failed to add appsv1 to scheme: %v", err)
+	}
+	err = corev1.AddToScheme(s)
+	if err != nil {
+		t.Fatalf("Failed to add corev1 to scheme: %v", err)
+	}
+
+	// Create DynamoComponentDeployment with 1 replica
+	replicaCount := int32(1)
+	dcd := &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-component",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:     "test-service",
+				DynamoNamespace: ptr.To("default"),
+				ComponentType:   string(commonconsts.ComponentTypeDecode),
+				Replicas:        &replicaCount,
+			},
+		},
+	}
+
+	// Set up fake client with the DCD
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dcd).
+		Build()
+
+	// Set up reconciler
+	recorder := record.NewFakeRecorder(100)
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:      fakeKubeClient,
+		Recorder:    recorder,
+		Config:      controller_common.Config{},
+		EtcdStorage: nil,
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return []string{}, nil
+			},
+		},
+	}
+
+	opt := generateResourceOption{
+		dynamoComponentDeployment: dcd,
+	}
+
+	// Step 1: Create the deployment with 1 replica
+	modified, deployment, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified).To(gomega.BeTrue(), "Deployment should have been created")
+	g.Expect(deployment).NotTo(gomega.BeNil())
+
+	// Verify deployment was created with 1 replica
+	deploymentName := "test-component"
+	createdDeployment := &appsv1.Deployment{}
+	err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: "default"}, createdDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(createdDeployment.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*createdDeployment.Spec.Replicas).To(gomega.Equal(int32(1)), "Initial deployment should have 1 replica")
+
+	// Step 2: Manually update the deployment to 2 replicas (simulating manual edit)
+	manualReplicaCount := int32(2)
+	createdDeployment.Spec.Replicas = &manualReplicaCount
+	err = fakeKubeClient.Update(ctx, createdDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify the manual update
+	updatedDeployment := &appsv1.Deployment{}
+	err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: "default"}, updatedDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(updatedDeployment.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*updatedDeployment.Spec.Replicas).To(gomega.Equal(int32(2)), "Deployment should have been manually updated to 2 replicas")
+
+	// Step 3: Call createOrUpdateOrDeleteDeployments again - it should reconcile back to 1 replica
+	modified2, deployment2, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified2).To(gomega.BeTrue(), "Deployment should have been updated to reconcile replica count")
+	g.Expect(deployment2).NotTo(gomega.BeNil())
+
+	// Step 4: Verify the deployment was reconciled back to 1 replica
+	reconciledDeployment := &appsv1.Deployment{}
+	err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: "default"}, reconciledDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(reconciledDeployment.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*reconciledDeployment.Spec.Replicas).To(gomega.Equal(int32(1)), "Deployment should have been reconciled back to 1 replica")
+}
