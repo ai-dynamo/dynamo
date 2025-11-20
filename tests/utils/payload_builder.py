@@ -276,3 +276,44 @@ def make_completions_health_check(port: int, model: str):
             return False
 
     return _check_completions_endpoint
+
+
+def backend_health_check_payload(
+    port: int = 8080,
+    expected_log: Optional[List[str]] = None,
+):
+    """Create a backend health check payload that validates system status health endpoint."""
+    from tests.utils.payloads import BasePayload
+
+    class BackendHealthPayload(BasePayload):
+        endpoint: str = "/health"
+        method: str = "GET"
+
+        def response_handler(self, response):
+            response.raise_for_status()
+            data = response.json()
+
+            # Check status is "ready"
+            status = data.get("status", "")
+            if status != "ready":
+                raise AssertionError(
+                    f"Backend health status is '{status}', expected 'ready'"
+                )
+
+            # Check that endpoints are listed
+            endpoints = data.get("endpoints", {})
+            if not endpoints:
+                raise AssertionError("Backend health check returned no endpoints")
+
+            # Return summary for validation
+            return (
+                f"Backend healthy: status={status}, endpoints={list(endpoints.keys())}"
+            )
+
+    return BackendHealthPayload(
+        body={},
+        port=port,
+        repeat_count=1,
+        expected_log=expected_log or [],
+        expected_response=["Backend healthy"],
+    )

@@ -14,6 +14,7 @@ from tests.serve.common import (
 )
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
+    backend_health_check_payload,
     chat_payload,
     chat_payload_default,
     completion_payload_default,
@@ -43,6 +44,7 @@ vllm_configs = {
         marks=[pytest.mark.gpu_1],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
+            backend_health_check_payload(port=8081),
             chat_payload_default(),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="vllm"),
@@ -56,6 +58,7 @@ vllm_configs = {
         model="Qwen/Qwen3-0.6B",
         script_args=["--tcp"],
         request_payloads=[
+            backend_health_check_payload(port=8081),
             chat_payload_default(),
             completion_payload_default(),
         ],
@@ -68,6 +71,7 @@ vllm_configs = {
         model="Qwen/Qwen3-0.6B",
         script_args=["--http"],
         request_payloads=[
+            backend_health_check_payload(port=8081),
             chat_payload_default(),
             completion_payload_default(),
         ],
