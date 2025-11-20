@@ -42,22 +42,6 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-def setup_lmcache_environment():
-    """Setup LMCache environment variables for KV cache offloading"""
-    # LMCache configuration for matching logic
-    lmcache_config = {
-        "LMCACHE_CHUNK_SIZE": "256",  # Token chunk size
-        "LMCACHE_LOCAL_CPU": "True",  # Enable CPU memory backend
-        "LMCACHE_MAX_LOCAL_CPU_SIZE": "20",  # CPU memory limit in GB
-    }
-
-    # Set environment variables
-    for key, value in lmcache_config.items():
-        if key not in os.environ:  # Only set if not already configured
-            os.environ[key] = value
-            logger.info(f"Set LMCache environment variable: {key}={value}")
-
-
 async def graceful_shutdown(runtime):
     """
     Shutdown dynamo distributed runtime.
