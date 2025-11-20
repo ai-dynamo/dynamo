@@ -56,7 +56,10 @@ impl AlignedBuffer {
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
 
         if ptr.is_null() {
-            anyhow::bail!("Failed to allocate aligned buffer of {} bytes", aligned_size);
+            anyhow::bail!(
+                "Failed to allocate aligned buffer of {} bytes",
+                aligned_size
+            );
         }
 
         tracing::trace!(
@@ -130,7 +133,8 @@ fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
                             buf.len()
                         } else {
                             // Last partial write - round up to page size for O_DIRECT
-                            let aligned = ((remaining as usize + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+                            let aligned =
+                                ((remaining as usize + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
                             std::cmp::min(aligned, buf.len())
                         };
 
@@ -250,29 +254,88 @@ impl DiskStorage {
         let template = CString::new(file_path.to_str().unwrap()).unwrap();
         let mut template_bytes = template.into_bytes_with_nul();
 
+        // mkostemp only supports flags like O_CLOEXEC, not O_RDWR/O_DIRECT.
+        // The file is always opened O_RDWR by mkostemp.
+        // We'll use fcntl to set O_DIRECT after creation.
+        let raw_fd = unsafe {
+            nix::libc::mkostemp(
+                template_bytes.as_mut_ptr() as *mut c_char,
+                nix::libc::O_CLOEXEC,
+            )
+        };
+
+        if raw_fd < 0 {
+            let file_name = CStr::from_bytes_with_nul(template_bytes.as_slice())
+                .unwrap()
+                .to_str()
+                .unwrap_or("<invalid utf8>");
+            return Err(StorageError::AllocationFailed(format!(
+                "Failed to create temp file {}: {}",
+                file_name,
+                std::io::Error::last_os_error()
+            )));
+        }
+
         // Determine whether to use O_DIRECT based on environment variable.
         // O_DIRECT is required for GPU DirectStorage but has strict alignment requirements.
         // For debugging or when filesystems don't support O_DIRECT alignment, it can be disabled.
         let disable_o_direct = std::env::var(DISK_DISABLE_O_DIRECT_KEY).is_ok();
-        let flags = if disable_o_direct {
+
+        if !disable_o_direct {
+            // Set O_DIRECT via fcntl after file creation.
+            // For maximum performance, GPU DirectStorage requires O_DIRECT.
+            // This allows transfers to bypass the kernel page cache.
+            // It also introduces the restriction that all accesses must be page-aligned.
+            use nix::fcntl::{FcntlArg, OFlag, fcntl};
+
+            // Get current flags
+            let current_flags = match fcntl(raw_fd, FcntlArg::F_GETFL) {
+                Ok(flags) => OFlag::from_bits_truncate(flags),
+                Err(e) => {
+                    unsafe { nix::libc::close(raw_fd) };
+                    let file_name = CStr::from_bytes_with_nul(template_bytes.as_slice())
+                        .unwrap()
+                        .to_str()
+                        .unwrap_or("<invalid utf8>");
+                    let _ = unlink(file_name);
+                    return Err(StorageError::AllocationFailed(format!(
+                        "Failed to get file flags for {}: {}",
+                        file_name, e
+                    )));
+                }
+            };
+
+            // Add O_DIRECT to existing flags
+            let new_flags = current_flags | OFlag::O_DIRECT;
+
+            if let Err(e) = fcntl(raw_fd, FcntlArg::F_SETFL(new_flags)) {
+                tracing::error!(
+                    "Failed to set O_DIRECT on file descriptor {}: {}. \
+                     This may indicate filesystem doesn't support O_DIRECT. \
+                     Consider setting {}=true to disable O_DIRECT.",
+                    raw_fd,
+                    e,
+                    DISK_DISABLE_O_DIRECT_KEY
+                );
+                unsafe { nix::libc::close(raw_fd) };
+                let file_name = CStr::from_bytes_with_nul(template_bytes.as_slice())
+                    .unwrap()
+                    .to_str()
+                    .unwrap_or("<invalid utf8>");
+                let _ = unlink(file_name);
+                return Err(StorageError::AllocationFailed(format!(
+                    "Failed to set O_DIRECT: {}. Try {}=true",
+                    e, DISK_DISABLE_O_DIRECT_KEY
+                )));
+            }
+
+            tracing::debug!("O_DIRECT enabled for disk cache (fd={})", raw_fd);
+        } else {
             tracing::warn!(
                 "O_DIRECT disabled via {}. GPU DirectStorage performance may be reduced.",
                 DISK_DISABLE_O_DIRECT_KEY
             );
-            nix::libc::O_RDWR
-        } else {
-            // For maximum performance, GPU DirectStorage requires O_DIRECT.
-            // This allows transfers to bypass the kernel page cache.
-            // It also introduces the restriction that all accesses must be page-aligned.
-            nix::libc::O_RDWR | nix::libc::O_DIRECT
-        };
-
-        let raw_fd = unsafe {
-            nix::libc::mkostemp(
-                template_bytes.as_mut_ptr() as *mut c_char,
-                flags,
-            )
-        };
+        }
 
         let file_name = CStr::from_bytes_with_nul(template_bytes.as_slice())
             .unwrap()
@@ -442,8 +505,7 @@ mod tests {
         ];
 
         for requested_size in test_sizes {
-            let buf = AlignedBuffer::new(requested_size)
-                .expect("Failed to create aligned buffer");
+            let buf = AlignedBuffer::new(requested_size).expect("Failed to create aligned buffer");
 
             let mut writer = StrictODirectWriter::new();
 
@@ -487,9 +549,7 @@ mod tests {
             );
             eprintln!("✓ Confirmed: vec! buffer failed strict alignment check (as expected)");
         } else {
-            eprintln!(
-                "⚠ vec! happened to be aligned this time (lucky!), but not guaranteed"
-            );
+            eprintln!("⚠ vec! happened to be aligned this time (lucky!), but not guaranteed");
         }
     }
 
@@ -497,14 +557,13 @@ mod tests {
     #[test]
     fn test_zerofill_write_loop_alignment() {
         let test_sizes = vec![
-            1_000_000,        // 1 MB non-aligned
-            10_000_000,       // 10 MB non-aligned
-            100_000_000,      // 100 MB non-aligned
+            1_000_000,   // 1 MB non-aligned
+            10_000_000,  // 10 MB non-aligned
+            100_000_000, // 100 MB non-aligned
         ];
 
         for total_size in test_sizes {
-            let buf = AlignedBuffer::new(ZERO_BUF_SIZE)
-                .expect("Failed to create buffer");
+            let buf = AlignedBuffer::new(ZERO_BUF_SIZE).expect("Failed to create buffer");
 
             let mut writer = StrictODirectWriter::new();
             let mut written: u64 = 0;
@@ -520,11 +579,14 @@ mod tests {
                 };
 
                 // This should always succeed with our aligned buffer
-                writer.write(&buf.as_slice()[..to_write])
-                    .unwrap_or_else(|e| panic!(
-                        "Write failed at offset {} for total size {}: {:?}",
-                        written, total_size, e
-                    ));
+                writer
+                    .write(&buf.as_slice()[..to_write])
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "Write failed at offset {} for total size {}: {:?}",
+                            written, total_size, e
+                        )
+                    });
 
                 written += to_write as u64;
             }
@@ -567,8 +629,9 @@ mod tests {
         for (name, size) in test_cases {
             eprintln!("Testing: {} ({} bytes)", name, size);
 
-            let storage = DiskStorage::new(size)
-                .unwrap_or_else(|e| panic!("Failed to allocate {} bytes ({}): {:?}", size, name, e));
+            let storage = DiskStorage::new(size).unwrap_or_else(|e| {
+                panic!("Failed to allocate {} bytes ({}): {:?}", size, name, e)
+            });
 
             // Verify the file is actually the correct size
             assert_eq!(storage.size(), size, "Size mismatch for {}", name);
@@ -583,7 +646,11 @@ mod tests {
             };
 
             assert!(bytes_read > 0, "No data read back for {}", name);
-            assert!(buf.iter().all(|&b| b == 0), "File should be zero-filled for {}", name);
+            assert!(
+                buf.iter().all(|&b| b == 0),
+                "File should be zero-filled for {}",
+                name
+            );
 
             eprintln!("✓ {} passed", name);
         }
@@ -599,8 +666,7 @@ mod tests {
         std::env::set_var(DISK_ZEROFILL_FALLBACK_KEY, "1");
 
         let size = 1024 * 1024;
-        let storage = DiskStorage::new(size)
-            .expect("Failed to allocate with O_DIRECT disabled");
+        let storage = DiskStorage::new(size).expect("Failed to allocate with O_DIRECT disabled");
 
         assert_eq!(storage.size(), size);
 
