@@ -26,8 +26,8 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "nixl==0.7.0",
-    "pydantic>=2.0",
+    "nixl[cu12]==0.7.1",
+    "pydantic>=2.0"
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -45,6 +45,8 @@ classifiers = [
 keywords = ["llm", "genai", "inference", "nvidia", "kvcache", "dynamo"]
 
 [project.optional-dependencies]
+cu12 = ["nixl[cu12]==0.7.1"]
+cu13 = ["nixl[cu13]==0.7.1"]
 test = [
     "pytest>=8.3.4",
     "pytest-mypy",
@@ -61,10 +63,10 @@ module-name = "kvbm._core"
 manifest-path = "Cargo.toml"
 python-packages = ["kvbm"]
 python-source = "python"
+# Skip auditwheel here - we'll run it manually in dynamo/container/Dockerfile with exclusions
+skip-auditwheel = true
 
 [build-system]
 requires = ["maturin>=1.0,<2.0", "patchelf"]
 build-backend = "maturin"
 
-[tool.uv]
-config-settings = { build-args = '--auditwheel repair --manylinux' }

@@ -21,12 +21,11 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["block-manager"]
-block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc", "dep:kvbm_kernels"]
+block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }
 dynamo-runtime = { path = "../../runtime" }
-kvbm_kernels = { path = "../../kvbm-kernels", package = "dynamo-kvbm-kernels", optional = true }
 
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }
@@ -69,7 +68,7 @@ pyo3-async-runtimes = { version = "0.23.0", default-features = false, features =
 pythonize = "0.23"
 
 dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
-cudarc = { version = "0.17.1", features = ["cuda-12020"], optional = true }
+cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
 prometheus = "0.14.0"
 
 [dev-dependencies]

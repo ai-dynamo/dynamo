@@ -48,7 +48,9 @@ show_and_run() {
     # Run commands with debug output shown
     set -x
     "$@"
+    local exit_code=$?
     { set +x; } 2>/dev/null
+    return $exit_code
 }
 
 set -x
@@ -62,28 +64,7 @@ pre-commit run --all-files || true # don't fail the build if pre-commit hooks fa
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$WORKSPACE_DIR/target}
 mkdir -p $CARGO_TARGET_DIR
 
-uv pip uninstall --yes ai-dynamo ai-dynamo-runtime 2>/dev/null || true
-
-# Build project, with `dev` profile it will be saved at $CARGO_TARGET_DIR/debug
-cargo build --locked --profile dev --features dynamo-llm/block-manager
-
-# install the python bindings
-
-# Install maturin if not already installed.
-# TODO: Uncomment for SGLANG. Right now, the CI team is making a refactor
-#       to the Dockerfile, so this is a temporary fix.
-# if ! command -v maturin &> /dev/null; then
-#     echo "Installing maturin..."
-#     retry uv pip install maturin[patchelf]
-# else
-#     echo "maturin is already installed"
-# fi
-
-# install ai-dynamo-runtime
-(cd $WORKSPACE_DIR/lib/bindings/python && retry maturin develop)
-
-# install ai-dynamo
-cd $WORKSPACE_DIR && retry env DYNAMO_BIN_PATH=$CARGO_TARGET_DIR/debug uv pip install -e .
+# Note: Build steps moved to after sanity check - see instructions at the end
 
 { set +x; } 2>/dev/null
 
@@ -114,16 +95,26 @@ else
     echo "⚠️ SSH agent forwarding not configured - SSH_AUTH_SOCK is not set"
 fi
 
-show_and_run $WORKSPACE_DIR/deploy/sanity_check.py
+echo -e "\n🔍 Running sanity check..."
+if show_and_run $WORKSPACE_DIR/deploy/sanity_check.py; then
+    SANITY_STATUS="✅ Sanity check passed"
+else
+    SANITY_STATUS="⚠️ Sanity check failed - review output above"
+fi
 
 cat <<EOF
 
-✅ SUCCESS: Built cargo project, installed Python bindings, configured pre-commit hooks
+========================================
+$SANITY_STATUS
+✅ Pre-commit hooks configured
 
-Example commands:
-  cargo build --locked --profile dev              # Build Rust project in $CARGO_TARGET_DIR
-  cd lib/bindings/python && maturin develop --uv  # Update Python bindings (if you changed them)
-  cargo fmt && cargo clippy                       # Format and lint code before committing
-  cargo doc --no-deps                             # Generate documentation
-  uv pip install -e .                             # Install various Python packages Dynamo depends on
+Now build the project:
+  cargo build --locked --profile dev --features dynamo-llm/block-manager
+  cd lib/bindings/python && maturin develop --uv
+  DYNAMO_BIN_PATH=$CARGO_TARGET_DIR/debug uv pip install -e .
+
+Optional: cd lib/bindings/kvbm && maturin develop --uv  # For KVBM support
+
+If cargo build fails with a Cargo.lock error, try to update it with 'cargo update'
+========================================
 EOF

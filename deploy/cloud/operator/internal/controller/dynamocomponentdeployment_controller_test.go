@@ -952,7 +952,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
 										Command: []string{"/bin/sh", "-c"},
-										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
+										Args:    []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
