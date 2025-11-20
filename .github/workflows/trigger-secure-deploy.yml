@@ -15,9 +15,20 @@ on:
         type: string
 
 jobs:
-  call-container-validation:
-    uses: ./.github/workflows/container-validation-backends.yml
-    with:
-      run_deploy_operator: ${{ github.event.inputs.run_deploy_operator }}
-      target_branch: ${{ github.event.inputs.target_branch }}
-    environment: protected-deploy # manual approval before triggering
+  trigger-deploy-tests:
+    runs-on: ubuntu-latest
+    environment: protected-deploy  # manual approval before triggering
+    steps:
+      - name: Send Repository Dispatch Event
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              event_type: 'run-deploy-tests',
+              client_payload: {
+                triggered_by: '${{ github.actor }}',
+                run_deploy_operator: '${{ github.event.inputs.run_deploy_operator }}'
+              }
+            });
