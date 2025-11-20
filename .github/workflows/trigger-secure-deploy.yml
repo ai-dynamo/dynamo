@@ -19,16 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: protected-deploy  # manual approval before triggering
     steps:
-      - name: Send Repository Dispatch Event
-        uses: actions/github-script@v7
+      - name: Call Main Deploy Workflow
+        uses: ./.github/workflows/container-validation-backends.yml
         with:
-          script: |
-            await github.rest.repos.createDispatchEvent({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              event_type: 'run-deploy-tests',
-              client_payload: {
-                triggered_by: '${{ github.actor }}',
-                run_deploy_operator: '${{ github.event.inputs.run_deploy_operator }}'
-              }
-            });
+          run_deploy_operator: ${{ github.event.inputs.run_deploy_operator }}
