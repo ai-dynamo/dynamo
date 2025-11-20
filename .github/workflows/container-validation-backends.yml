@@ -50,8 +50,7 @@ jobs:
 
   operator:
     needs: changed-files
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: inputs.run_deploy_operator
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -131,7 +130,7 @@ jobs:
 
   vllm:
     needs: changed-files
-    if: inputs.run_deploy_operator == true
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -200,7 +199,7 @@ jobs:
 
   sglang:
     needs: changed-files
-    if: inputs.run_deploy_operator == false
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -529,7 +528,7 @@ jobs:
     runs-on: cpu-amd-m5-2xlarge
     # TODO: Uncomment this when we have a way to test the deploy-operator job in CI.
     #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: inputs.run_deploy_operator == 'true'
+    if: inputs.run_deploy_operator
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -607,7 +606,7 @@ jobs:
     runs-on: cpu-amd-m5-2xlarge
     # TODO: Uncomment this when we have a way to test the deploy-test-vllm job in CI.
     #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: inputs.run_deploy_operator == 'true'
+    if: inputs.run_deploy_operator
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
