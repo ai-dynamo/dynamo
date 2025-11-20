@@ -236,6 +236,8 @@ def setup_vllm_engine(config, stat_logger=None):
         disable_log_stats=engine_args.disable_log_stats,
     )
 
+    logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
+
     return engine_client, vllm_config, default_sampling_params, prometheus_temp_dir
 
 
