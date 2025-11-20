@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = ROUTER_MODEL_NAME
 NUM_MOCKERS = 2
 SPEEDUP_RATIO = 10.0
-BASE_PORT = 8011  # Base port for all tests
+BASE_PORT = 9100  # Base port for all tests (high port to avoid conflicts)
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
@@ -210,7 +210,7 @@ def test_mocker_kv_router(request, runtime_services_session, predownload_tokeniz
         # Get unique port for this test
         frontend_port = get_unique_ports(request, num_ports=1)[0]
 
-        # Run basic router test (starts router internally, mocker workers don't need frontend readiness check)
+        # Run basic router test (starts router internally and waits for workers to be ready)
         _test_router_basic(
             engine_workers=mockers,
             block_size=BLOCK_SIZE,
@@ -218,7 +218,6 @@ def test_mocker_kv_router(request, runtime_services_session, predownload_tokeniz
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
-            wait_for_frontend=False,  # Mocker workers are fast, no need to wait
         )
 
     finally:
