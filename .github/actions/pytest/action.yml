@@ -54,22 +54,12 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
-        # Only use parallel execution (-n 4) for tests marked with 'parallel'
-        # Other tests run sequentially to avoid pytest-xdist overhead
-        PYTEST_XDIST_FLAG=""
-        if echo "${{ inputs.pytest_marks }}" | grep -q "parallel"; then
-          PYTEST_XDIST_FLAG="-n 4"
-          echo "🔀 Using parallel execution (4 workers) for parallel-marked tests"
-        else
-          echo "▶️  Running tests sequentially"
-        fi
-
         docker run --runtime=nvidia --gpus all -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
           ${{ inputs.image_tag }} \
-          bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${PYTEST_XDIST_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
