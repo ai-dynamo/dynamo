@@ -134,6 +134,24 @@ def parse_args():
         help="KV Router: Disable KV events. When set, uses ApproxKvRouter for predicting block creation/deletion based only on incoming requests at a timer. By default, KV events are enabled.",
     )
     parser.add_argument(
+        "--router-ttl",
+        type=float,
+        default=None,
+        help="KV Router: Time-to-live in seconds for blocks when KV events are disabled (default: 120.0). Only used when --no-kv-events is set.",
+    )
+    parser.add_argument(
+        "--router-max-tree-size",
+        type=int,
+        default=None,
+        help="KV Router: Maximum tree size before pruning when KV events are disabled (default: 1048576). Only used when --no-kv-events is set.",
+    )
+    parser.add_argument(
+        "--router-prune-target-ratio",
+        type=float,
+        default=None,
+        help="KV Router: Target size ratio after pruning when KV events are disabled (default: 0.8). Only used when --no-kv-events is set.",
+    )
+    parser.add_argument(
         "--namespace",
         type=str,
         default=os.environ.get(DYN_NAMESPACE_ENV_VAR),
@@ -282,6 +300,9 @@ async def async_main():
             router_snapshot_threshold=flags.router_snapshot_threshold,
             router_reset_states=flags.router_reset_states,
             router_track_active_blocks=flags.router_track_active_blocks,
+            router_ttl_secs=flags.router_ttl,
+            router_max_tree_size=flags.router_max_tree_size,
+            router_prune_target_ratio=flags.router_prune_target_ratio,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random

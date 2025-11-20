@@ -5,7 +5,6 @@
 
 import logging
 
-from dynamo._core import ApproxKvIndexer as ApproxKvIndexer
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import ForwardPassMetrics as ForwardPassMetrics

@@ -452,9 +452,12 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                 (router_temperature >= 0.0).then_some(router_temperature),
                 Some(use_kv_events),
                 Some(router_replica_sync),
-                None,
-                None,
-                None,
+                None, // track_active_blocks
+                None, // router_snapshot_threshold
+                None, // router_reset_states
+                None, // router_ttl_secs
+                None, // router_max_tree_size
+                None, // router_prune_target_ratio
             ))
         } else {
             None

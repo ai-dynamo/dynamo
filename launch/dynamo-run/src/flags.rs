@@ -189,6 +189,9 @@ impl Flags {
                 // defaulting below args (no longer maintaining new flags for dynamo-run)
                 None,
                 None,
+                None,
+                None,
+                None,
             ),
         )
     }
