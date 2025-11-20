@@ -317,6 +317,19 @@ class MetricsPayload(BasePayload):
                     multiline=True,
                 )
             )
+        elif backend == "lmcache":
+            metrics_to_check.append(
+                MetricCheck(
+                    # Check: Minimum count of unique lmcache:* metrics
+                    name="lmcache:*",
+                    pattern=lambda name: r"^lmcache:\w+",
+                    validator=lambda value: len(set(value))
+                    >= 1,  # At least 1 lmcache metric
+                    error_msg=lambda name, value: f"Expected at least 1 lmcache:* metric, but found only {len(set(value))}",
+                    success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} lmcache:* metrics",
+                    multiline=True,
+                )
+            )
         elif backend == "sglang":
             metrics_to_check.append(
                 MetricCheck(

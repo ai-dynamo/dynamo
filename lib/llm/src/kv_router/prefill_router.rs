@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
-        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator,
-        PushRouter, RouterMode, ServerStreamingEngine, SingleIn, async_trait,
+        AsyncEngine, AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter,
+        RouterMode, ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -21,6 +21,7 @@ use crate::{
     discovery::ModelManager,
     kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
+    protocols::common::preprocessor::PrefillResult,
 };
 
 /// Errors that can occur during prefill routing
@@ -175,11 +176,11 @@ impl PrefillRouter {
         Ok(())
     }
 
-    /// Call the prefill router and extract disaggregated_params
+    /// Call the prefill router and extract structured prefill result and worker ID
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<serde_json::Value, PrefillError> {
+    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
         // Get the prefill router, error if not activated
         let Some(prefill_router) = self.prefill_router.get() else {
             return Err(PrefillError::NotActivated);
@@ -203,7 +204,22 @@ impl PrefillRouter {
             ));
         };
 
-        while prefill_response.next().await.is_some() {}
+        let mut prompt_tokens_details = first_output
+            .data
+            .as_ref()
+            .and_then(|o| o.completion_usage.as_ref())
+            .and_then(|u| u.prompt_tokens_details.clone());
+
+        while let Some(next) = prefill_response.next().await {
+            if let Some(o) = next.data.as_ref()
+                && prompt_tokens_details.is_none()
+            {
+                prompt_tokens_details = o
+                    .completion_usage
+                    .as_ref()
+                    .and_then(|u| u.prompt_tokens_details.clone());
+            }
+        }
 
         if let Some(err) = first_output.err() {
             return Err(PrefillError::PrefillError(format!(
@@ -223,7 +239,21 @@ impl PrefillRouter {
             ));
         };
 
-        Ok(disaggregated_params)
+        // Extract prefill worker ID from disaggregated_params
+        let prefill_worker_id = disaggregated_params
+            .get("worker_id")
+            .and_then(|worker_id_json| {
+                worker_id_json
+                    .get("prefill_worker_id")
+                    .and_then(|v| v.as_u64())
+            });
+        Ok((
+            PrefillResult {
+                disaggregated_params,
+                prompt_tokens_details,
+            },
+            prefill_worker_id,
+        ))
     }
 }
 
@@ -251,6 +281,7 @@ impl
         // Extract request data while preserving context
         let (req, context) = request.into_parts();
         let request_id = context.id().to_string();
+        let engine_ctx = context.context();
 
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
@@ -261,18 +292,30 @@ impl
         let prefill_context = Context::with_id(prefill_req, request_id.clone());
 
         // Link the prefill context as a child so that kill signals propagate
-        context.controller().link_child(prefill_context.context());
+        engine_ctx.link_child(prefill_context.context());
 
         let prefill_request = prefill_context;
 
-        // Attempt prefill and handle results
-        match self.call_prefill(prefill_request).await {
-            Ok(disaggregated_params) => {
+        // Attempt prefill
+        let prefill_result = self.call_prefill(prefill_request).await;
+
+        // Abort if cancelled during prefill
+        if engine_ctx.is_stopped() || engine_ctx.is_killed() {
+            tracing::debug!("Abort entering decode after context is stopped or killed");
+            return Err(anyhow::anyhow!(
+                "Context id {} is stopped or killed",
+                engine_ctx.id()
+            ));
+        }
+
+        // Handle prefill result
+        match prefill_result {
+            Ok((prefill_result, prefill_worker_id)) => {
                 tracing::debug!("Prefill succeeded, using disaggregated params for decode");
 
-                // Update request with disaggregated_params and router config
                 let mut decode_req = req;
-                decode_req.disaggregated_params = Some(disaggregated_params);
+                // Update request with prefill result
+                decode_req.prefill_result = Some(prefill_result.clone());
                 // Restore original max_tokens for decode
                 decode_req.stop_conditions.max_tokens = original_max_tokens;
 
@@ -283,8 +326,14 @@ impl
                     ..existing_override.unwrap_or_default()
                 });
 
+                // Store prefill worker ID in context if available
+                let mut decode_context = context;
+                if let Some(worker_id) = prefill_worker_id {
+                    decode_context.insert("prefill_worker_id", worker_id);
+                }
+
                 // Map the modified request through with preserved context
-                let decode_request = context.map(|_| decode_req);
+                let decode_request = decode_context.map(|_| decode_req);
                 next.generate(decode_request).await
             }
             Err(PrefillError::NotActivated) => {

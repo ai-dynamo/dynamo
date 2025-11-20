@@ -44,7 +44,6 @@ async def main(runtime: DistributedRuntime):
 
     # Create service
     component = runtime.namespace("test").component("backend")
-    await component.create_service()
     endpoint = component.endpoint("generate")
 
     # Use the existing custom template from fixtures

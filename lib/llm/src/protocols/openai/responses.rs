@@ -31,6 +31,10 @@ pub struct NvCreateResponse {
 pub struct NvResponse {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::responses::Response,
+
+    /// NVIDIA extension field for response metadata (worker IDs, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
 }
 
 /// Implements `NvExtProvider` for `NvCreateResponse`,
@@ -203,6 +207,10 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
 
     fn try_from(nv_resp: NvCreateChatCompletionResponse) -> Result<Self, Self::Error> {
         let chat_resp = nv_resp;
+
+        // Preserve nvext field from chat completion response
+        let nvext = chat_resp.nvext.clone();
+
         let content_text = chat_resp
             .choices
             .into_iter()
@@ -253,7 +261,10 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
             user: None,
         };
 
-        Ok(NvResponse { inner: response })
+        Ok(NvResponse {
+            inner: response,
+            nvext,
+        })
     }
 }
 
@@ -365,6 +376,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion".to_string(),
             usage: None,
+            nvext: None,
         };
 
         let wrapped: NvResponse = chat_resp.try_into().unwrap();

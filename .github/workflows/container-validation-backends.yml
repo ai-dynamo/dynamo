@@ -517,325 +517,325 @@ jobs:
           # Upload complete workflow metrics including container metrics
           python3 .github/workflows/upload_complete_workflow_metrics.py
 
-  deploy-operator:
-    runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
-    needs: [changed-files, operator, vllm, sglang, trtllm]
-    env:
-      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-    outputs:
-      NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
-    steps:
-    - name: Output Node Name
-      shell: bash
-      run: |
-        echo ${K8S_NODE_NAME}
-    - uses: actions/checkout@v4
-    - name: Deploy Operator
-      id: deploy-operator-step
-      env:
-        BRANCH: ${{ github.ref_name }}
-      run: |
-        set -x
+  # deploy-operator:
+  #   runs-on: cpu-amd-m5-2xlarge
+  #   if: needs.changed-files.outputs.has_code_changes == 'true'
+  #   needs: [changed-files, operator, vllm, sglang, trtllm]
+  #   env:
+  #     DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+  #   outputs:
+  #     NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
+  #   steps:
+  #   - name: Output Node Name
+  #     shell: bash
+  #     run: |
+  #       echo ${K8S_NODE_NAME}
+  #   - uses: actions/checkout@v4
+  #   - name: Deploy Operator
+  #     id: deploy-operator-step
+  #     env:
+  #       BRANCH: ${{ github.ref_name }}
+  #     run: |
+  #       set -x
 
-        # Set namespace
-        # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
-        BRANCH_SANITIZED="${BRANCH//\//-}"
-        BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
-        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
-        NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
-        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+  #       # Set namespace
+  #       # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
+  #       BRANCH_SANITIZED="${BRANCH//\//-}"
+  #       BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
+  #       BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+  #       NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
+  #       echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
-        # Setup kubeconfig
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-        kubectl config current-context
+  #       # Setup kubeconfig
+  #       echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+  #       chmod 600 .kubeconfig
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+  #       kubectl config current-context
 
-        # Create a namespace for this job
-        echo "Creating an ephemeral namespace..."
-        kubectl create namespace $NAMESPACE
-        echo "Attaching the labels for secrets and cleanup"
-        kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+  #       # Create a namespace for this job
+  #       echo "Creating an ephemeral namespace..."
+  #       kubectl create namespace $NAMESPACE
+  #       echo "Attaching the labels for secrets and cleanup"
+  #       kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
 
-        # Set the namespace as default
-        kubectl config set-context --current --namespace=$NAMESPACE
+  #       # Set the namespace as default
+  #       kubectl config set-context --current --namespace=$NAMESPACE
 
-        # Check if Istio is installed
-        kubectl get pods -n istio-system
-        # Check if default storage class exists
-        kubectl get storageclass
+  #       # Check if Istio is installed
+  #       kubectl get pods -n istio-system
+  #       # Check if default storage class exists
+  #       kubectl get storageclass
 
-        # Install Helm chart
-        export VIRTUAL_ENV=/opt/dynamo/venv
-        export KUBE_NS=$NAMESPACE
-        export ISTIO_ENABLED=true
-        export ISTIO_GATEWAY=istio-system/ingress-alb
-        export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
-        export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
+  #       # Install Helm chart
+  #       export VIRTUAL_ENV=/opt/dynamo/venv
+  #       export KUBE_NS=$NAMESPACE
+  #       export ISTIO_ENABLED=true
+  #       export ISTIO_GATEWAY=istio-system/ingress-alb
+  #       export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
+  #       export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
 
-        # Install dynamo env secrets
-        kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
-        # Create docker pull secret for operator image
-        kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
-        # Install helm dependencies
-        helm repo add bitnami https://charts.bitnami.com/bitnami
-        cd deploy/cloud/helm/platform/
-        helm dep build .
-        # Install platform with namespace restriction for single profile testing
-        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
-          --set dynamo-operator.namespaceRestriction.enabled=true \
-          --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
-          --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-          --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
-          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
-        # Wait for all deployments to be ready
-        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+  #       # Install dynamo env secrets
+  #       kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
+  #       # Create docker pull secret for operator image
+  #       kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
+  #       # Install helm dependencies
+  #       helm repo add bitnami https://charts.bitnami.com/bitnami
+  #       cd deploy/cloud/helm/platform/
+  #       helm dep build .
+  #       # Install platform with namespace restriction for single profile testing
+  #       helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+  #         --set dynamo-operator.namespaceRestriction.enabled=true \
+  #         --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+  #         --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
+  #         --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
+  #         --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
+  #       # Wait for all deployments to be ready
+  #       timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 
-  deploy-test-vllm:
-    runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
-    needs: [changed-files, deploy-operator, vllm]
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        profile:
-          - agg
-          - agg_router
-          - disagg
-          - disagg_router
-    name: deploy-test-vllm (${{ matrix.profile }})
-    env:
-      FRAMEWORK: vllm
-      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-      DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
-      MODEL_NAME: "Qwen/Qwen3-0.6B"
-    steps: &deploy-test-steps
-    - name: Output Node Name
-      shell: bash
-      run: |
-        echo ${K8S_NODE_NAME}
-    - uses: actions/checkout@v4
-    - name: Setup Kubeconfig
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        # Setup kubeconfig
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-        kubectl config get-contexts
-    - name: Run Tests
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE
+  # deploy-test-vllm:
+  #   runs-on: cpu-amd-m5-2xlarge
+  #   if: needs.changed-files.outputs.has_code_changes == 'true'
+  #   needs: [changed-files, deploy-operator, vllm]
+  #   permissions:
+  #     contents: read
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 1
+  #     matrix:
+  #       profile:
+  #         - agg
+  #         - agg_router
+  #         - disagg
+  #         - disagg_router
+  #   name: deploy-test-vllm (${{ matrix.profile }})
+  #   env:
+  #     FRAMEWORK: vllm
+  #     DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+  #     DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
+  #     MODEL_NAME: "Qwen/Qwen3-0.6B"
+  #   steps: &deploy-test-steps
+  #   - name: Output Node Name
+  #     shell: bash
+  #     run: |
+  #       echo ${K8S_NODE_NAME}
+  #   - uses: actions/checkout@v4
+  #   - name: Setup Kubeconfig
+  #     env:
+  #       NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+  #     run: |
+  #       set -x
+  #       # Setup kubeconfig
+  #       echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+  #       chmod 600 .kubeconfig
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+  #       kubectl config get-contexts
+  #   - name: Run Tests
+  #     env:
+  #       NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+  #     run: |
+  #       set -x
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE
 
-        cd examples/backends/$FRAMEWORK
-        export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
-        export KUBE_NS=$NAMESPACE
-        export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
-        echo "GRAPH_NAME=${GRAPH_NAME}" >> $GITHUB_ENV
-        # Update the deployment file in-place
-        yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
+  #       cd examples/backends/$FRAMEWORK
+  #       export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
+  #       export KUBE_NS=$NAMESPACE
+  #       export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
+  #       echo "GRAPH_NAME=${GRAPH_NAME}" >> $GITHUB_ENV
+  #       # Update the deployment file in-place
+  #       yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
 
-        # Debug: Show updated deployment file
-        echo "=== UPDATED DEPLOYMENT FILE ==="
-        cat $DEPLOYMENT_FILE
+  #       # Debug: Show updated deployment file
+  #       echo "=== UPDATED DEPLOYMENT FILE ==="
+  #       cat $DEPLOYMENT_FILE
 
-        # Apply the updated file
-        kubectl apply -n $KUBE_NS -f $DEPLOYMENT_FILE
+  #       # Apply the updated file
+  #       kubectl apply -n $KUBE_NS -f $DEPLOYMENT_FILE
 
-        # --- Wait for all pods in the dynamo graph deployment to be ready ---
-        sleep 20
-        # Get the deployment name from the file
-        export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
-        echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
-        # Wait for all pods with the deployment label to be ready
-        kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1300s
+  #       # --- Wait for all pods in the dynamo graph deployment to be ready ---
+  #       sleep 20
+  #       # Get the deployment name from the file
+  #       export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
+  #       echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
+  #       # Wait for all pods with the deployment label to be ready
+  #       kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1300s
 
-        # Debug: Show final pod statuses for the deployment
-        echo "=== FINAL POD STATUSES ==="
-        kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $KUBE_NS -o wide
-        echo ""
+  #       # Debug: Show final pod statuses for the deployment
+  #       echo "=== FINAL POD STATUSES ==="
+  #       kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $KUBE_NS -o wide
+  #       echo ""
 
-        kubectl get all -n $KUBE_NS
-        export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} | tail -n1 | awk '{print $1}')
-        export CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${KUBE_NS} -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
-        echo "Container port is ${CONTAINER_PORT}"
-        kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${KUBE_NS} &
-        export LLM_URL="http://localhost:8000"
-        sleep 10  # Give port-forward time to establish the connection
-        echo "LLM URL: ${LLM_URL}"
-        echo "MODEL NAME: ${MODEL_NAME}"
-        # Wait until the model is available in the /v1/models response
-        MAX_ATTEMPTS=30
-        ATTEMPT=1
-        while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-          MODELS_RESPONSE=$(curl -s --retry 5 --retry-delay 2 --retry-connrefused "${LLM_URL}/v1/models")
-          if echo "$MODELS_RESPONSE" | jq -e --arg MODEL_NAME "$MODEL_NAME" '.data[]?.id == $MODEL_NAME' >/dev/null 2>&1; then
-            echo "Model $MODEL_NAME is available in /v1/models"
-            break
-          fi
-          echo "Waiting for model $MODEL_NAME to be available in /v1/models... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
-          sleep 5
-          ATTEMPT=$((ATTEMPT + 1))
-        done
-        if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-          echo "Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts"
-          echo "Last response: $MODELS_RESPONSE"
-          exit 1
-        fi
-        RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused -X POST "${LLM_URL}/v1/chat/completions" \
-          -H 'accept: text/event-stream' \
-          -H 'Content-Type: application/json' \
-          -d '{
-            "model": "'"${MODEL_NAME:-Qwen/Qwen3-0.6B}"'",
-            "messages": [
-            {
-                "role": "user",
-                "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
-            }
-            ],
-            "stream":false,
-            "max_tokens": 30,
-            "temperature": 0.0
-          }' 2>&1)
-        echo "Response: $RESPONSE"
-        TEST_RESULT=0
-        if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
-          echo "Test failed: Response is not valid JSON"
-          echo "Got: $RESPONSE"
-          TEST_RESULT=1
-        elif ! echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
-          echo "Test failed: Message role is not 'assistant'"
-          echo "Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
-          TEST_RESULT=1
-        elif ! echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
-          echo "Test failed: Model name is incorrect"
-          echo "Got: $(echo "$RESPONSE" | jq '.model')"
-          TEST_RESULT=1
-        elif ! echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 100' >/dev/null 2>&1; then
-          echo "Test failed: Response content length is not greater than 100 characters"
-          echo "Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
-          TEST_RESULT=1
-        else
-          echo "Test passed: Response matches expected format and content"
-        fi
-        exit $TEST_RESULT
-    - name: Cleanup
-      if: always()
-      timeout-minutes: 5
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE
+  #       kubectl get all -n $KUBE_NS
+  #       export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} | tail -n1 | awk '{print $1}')
+  #       export CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${KUBE_NS} -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
+  #       echo "Container port is ${CONTAINER_PORT}"
+  #       kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${KUBE_NS} &
+  #       export LLM_URL="http://localhost:8000"
+  #       sleep 10  # Give port-forward time to establish the connection
+  #       echo "LLM URL: ${LLM_URL}"
+  #       echo "MODEL NAME: ${MODEL_NAME}"
+  #       # Wait until the model is available in the /v1/models response
+  #       MAX_ATTEMPTS=30
+  #       ATTEMPT=1
+  #       while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+  #         MODELS_RESPONSE=$(curl -s --retry 5 --retry-delay 2 --retry-connrefused "${LLM_URL}/v1/models")
+  #         if echo "$MODELS_RESPONSE" | jq -e --arg MODEL_NAME "$MODEL_NAME" '.data[]?.id == $MODEL_NAME' >/dev/null 2>&1; then
+  #           echo "Model $MODEL_NAME is available in /v1/models"
+  #           break
+  #         fi
+  #         echo "Waiting for model $MODEL_NAME to be available in /v1/models... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+  #         sleep 5
+  #         ATTEMPT=$((ATTEMPT + 1))
+  #       done
+  #       if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+  #         echo "Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts"
+  #         echo "Last response: $MODELS_RESPONSE"
+  #         exit 1
+  #       fi
+  #       RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused -X POST "${LLM_URL}/v1/chat/completions" \
+  #         -H 'accept: text/event-stream' \
+  #         -H 'Content-Type: application/json' \
+  #         -d '{
+  #           "model": "'"${MODEL_NAME:-Qwen/Qwen3-0.6B}"'",
+  #           "messages": [
+  #           {
+  #               "role": "user",
+  #               "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+  #           }
+  #           ],
+  #           "stream":false,
+  #           "max_tokens": 30,
+  #           "temperature": 0.0
+  #         }' 2>&1)
+  #       echo "Response: $RESPONSE"
+  #       TEST_RESULT=0
+  #       if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
+  #         echo "Test failed: Response is not valid JSON"
+  #         echo "Got: $RESPONSE"
+  #         TEST_RESULT=1
+  #       elif ! echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
+  #         echo "Test failed: Message role is not 'assistant'"
+  #         echo "Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
+  #         TEST_RESULT=1
+  #       elif ! echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
+  #         echo "Test failed: Model name is incorrect"
+  #         echo "Got: $(echo "$RESPONSE" | jq '.model')"
+  #         TEST_RESULT=1
+  #       elif ! echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 100' >/dev/null 2>&1; then
+  #         echo "Test failed: Response content length is not greater than 100 characters"
+  #         echo "Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
+  #         TEST_RESULT=1
+  #       else
+  #         echo "Test passed: Response matches expected format and content"
+  #       fi
+  #       exit $TEST_RESULT
+  #   - name: Cleanup
+  #     if: always()
+  #     timeout-minutes: 5
+  #     env:
+  #       NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+  #     run: |
+  #       set -x
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE
 
-        # For debugging purposes, list all the resources before we delete
-        kubectl get all
+  #       # For debugging purposes, list all the resources before we delete
+  #       kubectl get all
 
-        echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
-        kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE || true
+  #       echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
+  #       kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE || true
 
-  deploy-test-sglang:
-    runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
-    needs: [changed-files, deploy-operator, sglang]
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        profile:
-          - agg
-          - agg_router
-    name: deploy-test-sglang (${{ matrix.profile }})
-    env:
-      FRAMEWORK: sglang
-      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-      DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
-      MODEL_NAME: "Qwen/Qwen3-0.6B"
-    steps: *deploy-test-steps
+  # deploy-test-sglang:
+  #   runs-on: cpu-amd-m5-2xlarge
+  #   if: needs.changed-files.outputs.has_code_changes == 'true'
+  #   needs: [changed-files, deploy-operator, sglang]
+  #   permissions:
+  #     contents: read
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 1
+  #     matrix:
+  #       profile:
+  #         - agg
+  #         - agg_router
+  #   name: deploy-test-sglang (${{ matrix.profile }})
+  #   env:
+  #     FRAMEWORK: sglang
+  #     DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+  #     DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
+  #     MODEL_NAME: "Qwen/Qwen3-0.6B"
+  #   steps: *deploy-test-steps
 
-  deploy-test-trtllm:
-    runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
-    needs: [changed-files, deploy-operator, trtllm]
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        profile:
-          - agg
-          - agg_router
-          - disagg
-          - disagg_router
-    name: deploy-test-trtllm (${{ matrix.profile }})
-    env:
-      FRAMEWORK: trtllm
-      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-      DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
-      MODEL_NAME: "Qwen/Qwen3-0.6B"
-    steps: *deploy-test-steps
+  # deploy-test-trtllm:
+  #   runs-on: cpu-amd-m5-2xlarge
+  #   if: needs.changed-files.outputs.has_code_changes == 'true'
+  #   needs: [changed-files, deploy-operator, trtllm]
+  #   permissions:
+  #     contents: read
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 1
+  #     matrix:
+  #       profile:
+  #         - agg
+  #         - agg_router
+  #         - disagg
+  #         - disagg_router
+  #   name: deploy-test-trtllm (${{ matrix.profile }})
+  #   env:
+  #     FRAMEWORK: trtllm
+  #     DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+  #     DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
+  #     MODEL_NAME: "Qwen/Qwen3-0.6B"
+  #   steps: *deploy-test-steps
 
-  cleanup:
-    runs-on: cpu-amd-m5-2xlarge
-    if: always()
-    needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
-    steps:
-    - name: Output Node Name
-      shell: bash
-      run: |
-        echo ${K8S_NODE_NAME}
-    - uses: actions/checkout@v4
-    - name: Setup Kubeconfig
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        # Setup kubeconfig
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-        kubectl config current-context
-    - name: Cleanup
-      timeout-minutes: 5
-      env:
-        NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-      run: |
-        set -x
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE
+  # cleanup:
+  #   runs-on: cpu-amd-m5-2xlarge
+  #   if: always()
+  #   needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
+  #   steps:
+  #   - name: Output Node Name
+  #     shell: bash
+  #     run: |
+  #       echo ${K8S_NODE_NAME}
+  #   - uses: actions/checkout@v4
+  #   - name: Setup Kubeconfig
+  #     env:
+  #       NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+  #     run: |
+  #       set -x
+  #       # Setup kubeconfig
+  #       echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+  #       chmod 600 .kubeconfig
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+  #       kubectl config current-context
+  #   - name: Cleanup
+  #     timeout-minutes: 5
+  #     env:
+  #       NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+  #     run: |
+  #       set -x
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE
 
-        echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-        chmod 600 .kubeconfig
-        export KUBECONFIG=$(pwd)/.kubeconfig
-        kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+  #       echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+  #       chmod 600 .kubeconfig
+  #       export KUBECONFIG=$(pwd)/.kubeconfig
+  #       kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
 
-        # For debugging purposes, list all the resources before we uninstall
-        kubectl get all
+  #       # For debugging purposes, list all the resources before we uninstall
+  #       kubectl get all
 
-        echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
-        kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+  #       echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
+  #       kubectl delete dynamographdeployments --all -n $NAMESPACE || true
 
-        # Uninstall the helm chart
-        helm ls
-        helm uninstall dynamo-platform --namespace $NAMESPACE || true
+  #       # Uninstall the helm chart
+  #       helm ls
+  #       helm uninstall dynamo-platform --namespace $NAMESPACE || true
 
-        echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
-        kubectl delete namespace $NAMESPACE || true
-        echo "Namespace $NAMESPACE completed."
+  #       echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
+  #       kubectl delete namespace $NAMESPACE || true
+  #       echo "Namespace $NAMESPACE completed."

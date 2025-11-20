@@ -57,7 +57,7 @@ docker cp temp-kvbm-container:/opt/dynamo/wheelhouse/ ./dynamo_wheelhouse
 docker rm temp-kvbm-container
 
 # Install the wheel locally
-pip install ./kvbm*.whl
+pip install ./dynamo_wheelhouse/kvbm*.whl
 ```
 
 Note that the default pip wheel built is not compatible with CUDA 13 at the moment.

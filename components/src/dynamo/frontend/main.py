@@ -78,7 +78,10 @@ def parse_args():
         "-i", "--interactive", action="store_true", help="Interactive text chat"
     )
     parser.add_argument(
-        "--kv-cache-block-size", type=int, help="KV cache block size (u32)."
+        "--kv-cache-block-size",
+        type=int,
+        default=os.environ.get("DYN_KV_CACHE_BLOCK_SIZE"),
+        help="KV cache block size (u32). Can be set via DYN_KV_CACHE_BLOCK_SIZE env var.",
     )
     parser.add_argument(
         "--http-host",
@@ -114,20 +117,20 @@ def parse_args():
     parser.add_argument(
         "--kv-overlap-score-weight",
         type=float,
-        default=1.0,
+        default=float(os.environ.get("DYN_KV_OVERLAP_SCORE_WEIGHT", "1.0")),
         help="KV Router: Weight for overlap score in worker selection. Higher values prioritize KV cache reuse.",
     )
     parser.add_argument(
         "--router-temperature",
         type=float,
-        default=0.0,
+        default=float(os.environ.get("DYN_ROUTER_TEMPERATURE", "0.0")),
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
         "--no-kv-events",
         action="store_false",
         dest="use_kv_events",
-        default=True,
+        default=os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
         help="KV Router: Disable KV events. When set, uses ApproxKvRouter for predicting block creation/deletion based only on incoming requests at a timer. By default, KV events are enabled.",
     )
     parser.add_argument(
