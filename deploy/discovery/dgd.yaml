@@ -22,7 +22,7 @@ spec:
           image: ${IMAGE}
     VllmDecodeWorker:
       dynamoNamespace: vllm-disagg
-      componentType: backend
+      componentType: decode
       replicas: 1
       resources:
         limits:
