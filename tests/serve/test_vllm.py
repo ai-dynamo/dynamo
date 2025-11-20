@@ -36,21 +36,6 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
 
-# Load data for multimodal b64 passthrough, fallback to stub if not available
-B64_IMG = None
-B64_EXPECTED_RESPONSE = []
-
-try:
-    with open(MULTIMODAL_IMG_PATH, "rb") as f:
-        B64_IMG = base64.b64encode(f.read()).decode()
-        B64_EXPECTED_RESPONSE = ["purple"]
-except FileNotFoundError:
-    logger.info(
-        f"Multimodal asset not found at {MULTIMODAL_IMG_PATH}, using 1x1 PNG stub for basic validation"
-    )
-    # 1x1 transparent PNG fallback stub
-    B64_IMG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
-    B64_EXPECTED_RESPONSE = []
 
 # vLLM test configurations
 vllm_configs = {
@@ -209,23 +194,6 @@ vllm_configs = {
         delayed_start=0,
         timeout=360,
         request_payloads=[
-            # Base64-encoded image
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{B64_IMG}"},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=B64_EXPECTED_RESPONSE,
-                max_tokens=100,
-            ),
-            # HTTP URL test
             chat_payload(
                 [
                     {
@@ -326,4 +294,50 @@ def test_serve_deployment(
     Test dynamo serve deployments with different graph configurations.
     """
     config = vllm_config_test
+    run_serve_deployment(config, request)
+
+
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_2
+def test_multimodal_b64(request, runtime_services, predownload_models):
+    """
+    Test multimodal inference with base64 url passthrough.
+
+    This test is separate because it loads the required image at runtime
+    (not collection time), ensuring it only fails when actually executed.
+    """
+    # Load B64 image at test execution time
+    with open(MULTIMODAL_IMG_PATH, "rb") as f:
+        b64_img = base64.b64encode(f.read()).decode()
+
+    # Create payload with B64 image
+    b64_payload = chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "What colors are in the following image? Respond only with the colors.",
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64_img}"},
+            },
+        ],
+        repeat_count=1,
+        expected_response=["purple"],
+        max_tokens=100,
+    )
+
+    # Create test config
+    config = VLLMConfig(
+        name="test_multimodal_b64",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
+        delayed_start=0,
+        timeout=360,
+        request_payloads=[b64_payload],
+    )
+
     run_serve_deployment(config, request)
