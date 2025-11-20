@@ -9,7 +9,7 @@ on:
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
-  workflow_call:
+  workflow_dispatch:
     inputs:
       run_deploy_operator:
         description: 'Run deploy operator and deployment tests'
@@ -28,7 +28,7 @@ concurrency:
 jobs:
   changed-files:
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
       has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
     steps:
@@ -42,7 +42,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     needs: [vllm, sglang, trtllm, operator]
     if: always()
     steps:
@@ -53,7 +53,7 @@ jobs:
   operator:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -134,7 +134,7 @@ jobs:
   vllm:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -204,7 +204,7 @@ jobs:
   sglang:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -272,7 +272,7 @@ jobs:
   trtllm:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -340,7 +340,7 @@ jobs:
   deploy-test-fault-tolerance:
     runs-on: cpu-amd-m5-2xlarge
     if: needs.changed-files.outputs.has_code_changes == 'true'
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     needs: [changed-files, operator, vllm, trtllm, sglang]
     permissions:
       contents: read
@@ -484,7 +484,7 @@ jobs:
   # Upload metrics for this workflow and all its jobs
   upload-workflow-metrics:
     name: Upload Workflow Metrics
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     runs-on: gitlab
     if: always()  # Always run, even if other jobs fail
     needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
@@ -536,8 +536,8 @@ jobs:
     runs-on: cpu-amd-m5-2xlarge
     # TODO: Uncomment this when we have a way to test the deploy-operator job in CI.
     #if: needs.changed-files.outputs.has_code_changes == 'true'
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
-    if: inputs.run_deploy_operator
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
+    if: github.event.inputs.run_deploy_operator
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -615,8 +615,8 @@ jobs:
     runs-on: cpu-amd-m5-2xlarge
     # TODO: Uncomment this when we have a way to test the deploy-test-vllm job in CI.
     #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: inputs.run_deploy_operator
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
+    if: github.event.inputs.run_deploy_operator
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
@@ -772,8 +772,8 @@ jobs:
     runs-on: cpu-amd-m5-2xlarge
     # TODO: Uncomment this when we have a way to test the deploy-test-sglang job in CI.
     #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: inputs.run_deploy_operator
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
+    if: github.event.inputs.run_deploy_operator
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
@@ -796,8 +796,8 @@ jobs:
     runs-on: cpu-amd-m5-2xlarge
     # TODO: Uncomment this when we have a way to test the deploy-test-trtllm job in CI.
     #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: inputs.run_deploy_operator
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
+    if: github.event.inputs.run_deploy_operator
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
@@ -822,8 +822,8 @@ jobs:
     runs-on: cpu-amd-m5-2xlarge
     # TODO: Uncomment the below if statement when we have a way to test the cleanup job in CI.
     # if: always()
-    if: inputs.run_deploy_operator
-    environment: ${{ github.event_name == 'workflow_call' && 'protected-deploy' || '' }}
+    if: github.event.inputs.run_deploy_operator
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
     steps:
     - name: Output Node Name
