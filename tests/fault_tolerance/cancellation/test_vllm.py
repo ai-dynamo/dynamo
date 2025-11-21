@@ -274,13 +274,13 @@ def test_request_cancellation_vllm_decode_cancel(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_cancellation_vllm_remote_prefill_cancel(
+def test_request_cancellation_vllm_prefill_cancel(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
     """
-    End-to-end test for request cancellation during remote prefill phase.
+    End-to-end test for request cancellation during prefill phase.
 
-    This test verifies that when a request is cancelled by the client during the remote prefill phase,
+    This test verifies that when a request is cancelled by the client during the prefill phase,
     the system properly handles the cancellation and cleans up resources
     on both the decode and prefill workers in a disaggregated setup.
     """
@@ -334,6 +334,23 @@ def test_request_cancellation_vllm_remote_prefill_cancel(
                     pattern="issued control message Kill to sender",
                 )
 
+                # Verify decode worker never received the request
+                pattern = "Request ID: "
+                try:
+                    _, decode_log_offset = poll_for_pattern(
+                        process=decode_worker,
+                        pattern=pattern,
+                        max_wait_ms=10,
+                        match_type="contains",
+                    )
+                    pytest.fail(
+                        "Decode worker received request cancelled during prefill phase"
+                    )
+                except AssertionError as e:
+                    assert str(e).startswith(
+                        f"Failed to find '{pattern}' pattern after 2 iterations "
+                    ), f"Unexpected error: {e}"
+
                 logger.info(
-                    "Completion request cancellation during remote prefill phase detected successfully"
+                    "Completion request cancellation during prefill phase detected successfully"
                 )

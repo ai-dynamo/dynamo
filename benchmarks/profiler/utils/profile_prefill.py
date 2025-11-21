@@ -90,7 +90,6 @@ def profile_prefill(
     max_context_length,
     interpolation_granularity,
     attention_dp_size: int = 1,
-    attn_dp_num_req_ratio: int = 4,
 ):
     def get_ttft(isl):
         ai_perf_artifact_dir = f"{work_dir}/aiperf_isl{isl}"
@@ -101,7 +100,6 @@ def profile_prefill(
             tokenizer,
             base_url=url,
             attention_dp_size=attention_dp_size,
-            attn_dp_num_req_ratio=attn_dp_num_req_ratio,
         )
 
     return _profile_prefill_helper(

@@ -106,6 +106,7 @@ struct HfTokenizerConfigJsonFormatter {
     config: ChatTemplate,
     mixins: Arc<ContextMixins>,
     supports_add_generation_prompt: bool,
+    requires_content_arrays: bool,
 }
 
 // /// OpenAI Standard Prompt Formatter

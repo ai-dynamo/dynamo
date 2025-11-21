@@ -22,7 +22,6 @@ spec:
   targetPortNumber: 8000
   selector:
     nvidia.com/dynamo-component: Frontend
-    nvidia.com/dynamo-namespace: llama3-70b-agg # # This is the Dynamo namespace where the model is deployed
   extensionRef:
     failureMode: FailOpen
     group: ""

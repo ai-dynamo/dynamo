@@ -33,11 +33,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"emperror.dev/errors"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
+	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook/validation"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -126,6 +127,73 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	logs = logs.WithValues("dynamoComponentDeployment", dynamoComponentDeployment.Name, "namespace", dynamoComponentDeployment.Namespace)
 
+	// Setup defer to handle errors and update status
+	defer func() {
+		if err == nil {
+			return
+		}
+		reconcileErr := err
+		logs.Error(reconcileErr, "Failed to reconcile DynamoComponentDeployment.")
+		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeWarning, "ReconcileError",
+			"Failed to reconcile DynamoComponentDeployment: %v", reconcileErr)
+		if _, statusErr := r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "Reconciling",
+				Message: fmt.Sprintf("Failed to reconcile DynamoComponentDeployment: %v", reconcileErr),
+			},
+		); statusErr != nil {
+			logs.Error(statusErr, "Failed to update DynamoComponentDeployment status after reconcile error")
+		}
+	}()
+
+	// Validate the DynamoComponentDeployment spec (defense in depth - only when webhooks are disabled)
+	if !r.Config.WebhooksEnabled {
+		validator := webhookvalidation.NewDynamoComponentDeploymentValidator(dynamoComponentDeployment)
+		if _, validationErr := validator.Validate(); validationErr != nil {
+			logs.Error(validationErr, "DynamoComponentDeployment validation failed, refusing to reconcile")
+
+			// Set validation error condition
+			meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, metav1.Condition{
+				Type:               "Valid",
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: dynamoComponentDeployment.Generation,
+				Reason:             "ValidationFailed",
+				Message:            fmt.Sprintf("Validation failed: %v", validationErr),
+			})
+
+			// Update status and don't requeue (user must fix the spec)
+			if statusErr := r.Status().Update(ctx, dynamoComponentDeployment); statusErr != nil {
+				logs.Error(statusErr, "Failed to update DynamoComponentDeployment status with validation error")
+				err = statusErr
+				return ctrl.Result{}, err
+			}
+
+			// Record event for visibility
+			r.Recorder.Event(dynamoComponentDeployment, corev1.EventTypeWarning, "ValidationFailed", validationErr.Error())
+
+			// Don't requeue - user must fix the spec
+			logs.Info("DynamoComponentDeployment is invalid, not reconciling until spec is fixed")
+			err = nil
+			return ctrl.Result{}, nil
+		}
+
+		// Set Valid condition to True and persist it
+		meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, metav1.Condition{
+			Type:               "Valid",
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: dynamoComponentDeployment.Generation,
+			Reason:             "ValidationPassed",
+			Message:            "DynamoComponentDeployment spec is valid",
+		})
+		if statusErr := r.Status().Update(ctx, dynamoComponentDeployment); statusErr != nil {
+			logs.Error(statusErr, "Failed to update DynamoComponentDeployment status with validation success")
+			err = statusErr
+			return ctrl.Result{}, err
+		}
+	}
+
 	deleted, err := commonController.HandleFinalizer(ctx, dynamoComponentDeployment, r.Client, r)
 	if err != nil {
 		logs.Error(err, "Failed to handle finalizer")
@@ -157,25 +225,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 			return
 		}
 	}
-
-	defer func() {
-		if err == nil {
-			return
-		}
-		logs.Error(err, "Failed to reconcile DynamoComponentDeployment.")
-		r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeWarning, "ReconcileError", "Failed to reconcile DynamoComponentDeployment: %v", err)
-		_, err = r.setStatusConditions(ctx, req,
-			metav1.Condition{
-				Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
-				Status:  metav1.ConditionFalse,
-				Reason:  "Reconciling",
-				Message: fmt.Sprintf("Failed to reconcile DynamoComponentDeployment: %v", err),
-			},
-		)
-		if err != nil {
-			return
-		}
-	}()
 
 	modified := false
 
@@ -1003,9 +1052,9 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	resourceAnnotations := getResourceAnnotations(opt.dynamoComponentDeployment)
 	strategyStr := resourceAnnotations[KubeAnnotationDeploymentStrategy]
 	if strategyStr != "" {
-		strategyType := schemas.DeploymentStrategy(strategyStr)
+		strategyType := common.DeploymentStrategy(strategyStr)
 		switch strategyType {
-		case schemas.DeploymentStrategyRollingUpdate:
+		case common.DeploymentStrategyRollingUpdate:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
@@ -1013,11 +1062,11 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 					MaxUnavailable: &defaultMaxUnavailable,
 				},
 			}
-		case schemas.DeploymentStrategyRecreate:
+		case common.DeploymentStrategyRecreate:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RecreateDeploymentStrategyType,
 			}
-		case schemas.DeploymentStrategyRampedSlowRollout:
+		case common.DeploymentStrategyRampedSlowRollout:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
@@ -1025,7 +1074,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 					MaxUnavailable: &[]intstr.IntOrString{intstr.FromInt(0)}[0],
 				},
 			}
-		case schemas.DeploymentStrategyBestEffortControlledRollout:
+		case common.DeploymentStrategyBestEffortControlledRollout:
 			strategy = appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{

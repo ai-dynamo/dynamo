@@ -23,6 +23,7 @@ use crate::SystemHealth;
 use crate::runtime::Runtime;
 
 use async_once_cell::OnceCell;
+use std::fmt;
 use std::sync::{Arc, OnceLock, Weak};
 use tokio::sync::watch::Receiver;
 
@@ -42,13 +43,12 @@ pub struct DistributedRuntime {
     // local runtime
     runtime: Runtime,
 
-    // Unified transport manager
-    etcd_client: Option<transports::etcd::Client>,
     nats_client: Option<transports::nats::Client>,
     store: KeyValueStoreManager,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     network_manager: Arc<OnceCell<Arc<crate::pipeline::network::manager::NetworkManager>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
+    request_plane: RequestPlaneMode,
 
     // Service discovery client
     discovery_client: Arc<dyn discovery::Discovery>,
@@ -95,24 +95,26 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let (selected_kv_store, nats_config) = config.dissolve();
+        let (selected_kv_store, nats_config, request_plane) = config.dissolve();
 
         let runtime_clone = runtime.clone();
 
-        let (etcd_client, store) = match selected_kv_store {
+        let store = match selected_kv_store {
             KeyValueStoreSelect::Etcd(etcd_config) => {
                 let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
                     // The returned error doesn't show because of a dropped runtime error, so
                     // log it first.
                     tracing::error!(%err, "Could not connect to etcd. Pass `--store-kv ..` to use a different backend or start etcd."))?;
-                let store = KeyValueStoreManager::etcd(etcd_client.clone());
-                (Some(etcd_client), store)
+                KeyValueStoreManager::etcd(etcd_client)
             }
-            KeyValueStoreSelect::File(root) => (None, KeyValueStoreManager::file(root)),
-            KeyValueStoreSelect::Memory => (None, KeyValueStoreManager::memory()),
+            KeyValueStoreSelect::File(root) => KeyValueStoreManager::file(root),
+            KeyValueStoreSelect::Memory => KeyValueStoreManager::memory(),
         };
 
-        let nats_client = Some(nats_config.clone().connect().await?);
+        let nats_client = match nats_config {
+            Some(nc) => Some(nc.connect().await?),
+            None => None,
+        };
 
         // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
@@ -171,7 +173,6 @@ impl DistributedRuntime {
 
         let distributed_runtime = Self {
             runtime,
-            etcd_client,
             store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
@@ -183,6 +184,7 @@ impl DistributedRuntime {
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
+            request_plane,
         };
 
         if let Some(nats_client_for_metrics) = nats_client_for_metrics {
@@ -359,6 +361,7 @@ impl DistributedRuntime {
                     self.child_token(),
                     nats_client,
                     self.component_registry.clone(),
+                    self.request_plane,
                 ))
             })
             .await?;
@@ -416,18 +419,15 @@ impl DistributedRuntime {
         self.system_status_server.get().cloned()
     }
 
-    // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
-    //
-    // Try to use `store()` instead of this. Only use this if you have not been able to migrate
-    // yet, or if you require etcd-specific features like distributed locking (rare).
-    pub fn etcd_client(&self) -> Option<etcd::Client> {
-        self.etcd_client.clone()
-    }
-
-    /// An interface to store things. Will eventually replace `etcd_client`.
+    /// An interface to store things outside of the process. Usually backed by something like etcd.
     /// Currently does key-value, but will grow to include whatever we need to store.
     pub fn store(&self) -> &KeyValueStoreManager {
         &self.store
+    }
+
+    /// How the frontend should talk to the backend.
+    pub fn request_plane(&self) -> RequestPlaneMode {
+        self.request_plane
     }
 
     pub fn child_token(&self) -> CancellationToken {
@@ -446,14 +446,21 @@ impl DistributedRuntime {
 #[derive(Dissolve)]
 pub struct DistributedConfig {
     pub store_backend: KeyValueStoreSelect,
-    pub nats_config: nats::ClientOptions,
+    pub nats_config: Option<nats::ClientOptions>,
+    pub request_plane: RequestPlaneMode,
 }
 
 impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
+        let request_plane = RequestPlaneMode::from_env();
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::default()),
-            nats_config: nats::ClientOptions::default(),
+            nats_config: if request_plane.is_nats() {
+                Some(nats::ClientOptions::default())
+            } else {
+                None
+            },
+            request_plane,
         }
     }
 
@@ -462,10 +469,79 @@ impl DistributedConfig {
             attach_lease: false,
             ..Default::default()
         };
+        let request_plane = RequestPlaneMode::from_env();
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::new(etcd_config)),
-            nats_config: nats::ClientOptions::default(),
+            nats_config: if request_plane.is_nats() {
+                Some(nats::ClientOptions::default())
+            } else {
+                None
+            },
+            request_plane,
         }
+    }
+}
+
+/// Request plane transport mode configuration
+///
+/// This determines how requests are distributed from routers to workers:
+/// - `Nats`: Use NATS for request distribution (default, legacy)
+/// - `Http`: Use HTTP/2 for request distribution
+/// - `Tcp`: Use raw TCP for request distribution with msgpack support
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestPlaneMode {
+    /// Use NATS for request plane (default for backward compatibility)
+    Nats,
+    /// Use HTTP/2 for request plane
+    Http,
+    /// Use raw TCP for request plane with msgpack support
+    Tcp,
+}
+
+impl Default for RequestPlaneMode {
+    fn default() -> Self {
+        Self::Nats
+    }
+}
+
+impl fmt::Display for RequestPlaneMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Nats => write!(f, "nats"),
+            Self::Http => write!(f, "http"),
+            Self::Tcp => write!(f, "tcp"),
+        }
+    }
+}
+
+impl std::str::FromStr for RequestPlaneMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "nats" => Ok(Self::Nats),
+            "http" => Ok(Self::Http),
+            "tcp" => Ok(Self::Tcp),
+            _ => Err(anyhow::anyhow!(
+                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'http', 'tcp'",
+                s
+            )),
+        }
+    }
+}
+
+impl RequestPlaneMode {
+    /// Get the request plane mode from environment variable (uncached)
+    /// Reads from `DYN_REQUEST_PLANE` environment variable.
+    fn from_env() -> Self {
+        std::env::var("DYN_REQUEST_PLANE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default()
+    }
+
+    pub fn is_nats(&self) -> bool {
+        matches!(self, RequestPlaneMode::Nats)
     }
 }
 
@@ -482,7 +558,8 @@ pub mod distributed_test_utils {
         let rt = crate::Runtime::from_current().unwrap();
         let config = super::DistributedConfig {
             store_backend: KeyValueStoreSelect::Memory,
-            nats_config: nats::ClientOptions::default(),
+            nats_config: Some(nats::ClientOptions::default()),
+            request_plane: crate::distributed::RequestPlaneMode::default(),
         };
         super::DistributedRuntime::new(rt, config).await.unwrap()
     }
@@ -490,12 +567,14 @@ pub mod distributed_test_utils {
 
 #[cfg(all(test, feature = "integration"))]
 mod tests {
+    use super::RequestPlaneMode;
     use super::distributed_test_utils::create_test_drt_async;
 
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_disabled() {
+        use crate::config::environment_names::runtime::system as env_system;
         // Test uptime with system status server disabled
-        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 
@@ -520,8 +599,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_enabled() {
+        use crate::config::environment_names::runtime::system as env_system;
         // Test uptime with system status server enabled
-        temp_env::async_with_vars([("DYN_SYSTEM_PORT", Some("8081"))], async {
+        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, Some("8081"))], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 
@@ -542,5 +622,41 @@ mod tests {
             );
         })
         .await;
+    }
+
+    #[test]
+    fn test_request_plane_mode_from_str() {
+        assert_eq!(
+            "nats".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Nats
+        );
+        assert_eq!(
+            "http".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Http
+        );
+        assert_eq!(
+            "tcp".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Tcp
+        );
+        assert_eq!(
+            "NATS".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Nats
+        );
+        assert_eq!(
+            "HTTP".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Http
+        );
+        assert_eq!(
+            "TCP".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Tcp
+        );
+        assert!("invalid".parse::<RequestPlaneMode>().is_err());
+    }
+
+    #[test]
+    fn test_request_plane_mode_display() {
+        assert_eq!(RequestPlaneMode::Nats.to_string(), "nats");
+        assert_eq!(RequestPlaneMode::Http.to_string(), "http");
+        assert_eq!(RequestPlaneMode::Tcp.to_string(), "tcp");
     }
 }

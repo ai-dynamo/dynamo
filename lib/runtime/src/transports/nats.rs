@@ -37,6 +37,7 @@ use tokio::time;
 use url::Url;
 use validator::{Validate, ValidationError};
 
+use crate::config::environment_names::nats as env_nats;
 use crate::metrics::prometheus_names::nats_client as nats_metrics;
 pub use crate::slug::Slug;
 use tracing as log;
@@ -283,7 +284,7 @@ pub struct ClientOptions {
 }
 
 fn default_server() -> String {
-    if let Ok(server) = std::env::var("NATS_SERVER") {
+    if let Ok(server) = std::env::var(env_nats::NATS_SERVER) {
         return server;
     }
 
@@ -378,21 +379,21 @@ impl std::fmt::Debug for NatsAuth {
 impl Default for NatsAuth {
     fn default() -> Self {
         if let (Ok(username), Ok(password)) = (
-            std::env::var("NATS_AUTH_USERNAME"),
-            std::env::var("NATS_AUTH_PASSWORD"),
+            std::env::var(env_nats::auth::NATS_AUTH_USERNAME),
+            std::env::var(env_nats::auth::NATS_AUTH_PASSWORD),
         ) {
             return NatsAuth::UserPass(username, password);
         }
 
-        if let Ok(token) = std::env::var("NATS_AUTH_TOKEN") {
+        if let Ok(token) = std::env::var(env_nats::auth::NATS_AUTH_TOKEN) {
             return NatsAuth::Token(token);
         }
 
-        if let Ok(nkey) = std::env::var("NATS_AUTH_NKEY") {
+        if let Ok(nkey) = std::env::var(env_nats::auth::NATS_AUTH_NKEY) {
             return NatsAuth::NKey(nkey);
         }
 
-        if let Ok(path) = std::env::var("NATS_AUTH_CREDENTIALS_FILE") {
+        if let Ok(path) = std::env::var(env_nats::auth::NATS_AUTH_CREDENTIALS_FILE) {
             return NatsAuth::CredentialsFile(PathBuf::from(path));
         }
 
@@ -516,7 +517,7 @@ impl NatsQueue {
             let client = client_options.connect().await?;
 
             // messages older than a hour in the stream will be automatically purged
-            let max_age = std::env::var("DYN_NATS_STREAM_MAX_AGE")
+            let max_age = std::env::var(env_nats::stream::DYN_NATS_STREAM_MAX_AGE)
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(time::Duration::from_secs)
@@ -1012,9 +1013,9 @@ mod tests {
         });
 
         Jail::expect_with(|jail| {
-            jail.set_env("NATS_SERVER", "nats://localhost:5222");
-            jail.set_env("NATS_AUTH_USERNAME", "user");
-            jail.set_env("NATS_AUTH_PASSWORD", "pass");
+            jail.set_env(env_nats::NATS_SERVER, "nats://localhost:5222");
+            jail.set_env(env_nats::auth::NATS_AUTH_USERNAME, "user");
+            jail.set_env(env_nats::auth::NATS_AUTH_PASSWORD, "pass");
 
             let opts = ClientOptions::builder().build();
             assert!(opts.is_ok());
@@ -1030,9 +1031,9 @@ mod tests {
         });
 
         Jail::expect_with(|jail| {
-            jail.set_env("NATS_SERVER", "nats://localhost:5222");
-            jail.set_env("NATS_AUTH_USERNAME", "user");
-            jail.set_env("NATS_AUTH_PASSWORD", "pass");
+            jail.set_env(env_nats::NATS_SERVER, "nats://localhost:5222");
+            jail.set_env(env_nats::auth::NATS_AUTH_USERNAME, "user");
+            jail.set_env(env_nats::auth::NATS_AUTH_PASSWORD, "pass");
 
             let opts = ClientOptions::builder()
                 .server("nats://localhost:6222")

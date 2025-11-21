@@ -15,7 +15,7 @@
 
 use super::egress::unified_client::RequestPlaneClient;
 use super::ingress::unified_server::RequestPlaneServer;
-use crate::config::RequestPlaneMode;
+use crate::distributed::RequestPlaneMode;
 use anyhow::Result;
 use async_once_cell::OnceCell;
 use std::sync::Arc;
@@ -99,7 +99,7 @@ impl NetworkConfig {
 ///
 /// ```ignore
 /// // Create manager (typically done once in DistributedRuntime)
-/// let manager = NetworkManager::new(cancel_token, nats_client, component_registry);
+/// let manager = NetworkManager::new(cancel_token, nats_client, component_registry, request_plane_mode);
 ///
 /// // Get server (lazy init, cached)
 /// let server = manager.server().await?;
@@ -136,12 +136,12 @@ impl NetworkManager {
         cancellation_token: CancellationToken,
         nats_client: Option<async_nats::Client>,
         component_registry: crate::component::Registry,
+        mode: RequestPlaneMode,
     ) -> Arc<Self> {
-        let mode = RequestPlaneMode::get();
         let config = NetworkConfig::from_env(nats_client);
 
         tracing::info!(
-            mode = %mode,
+            %mode,
             http_port = config.http_port,
             tcp_port = config.tcp_port,
             "Initializing NetworkManager"
