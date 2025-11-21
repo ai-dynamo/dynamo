@@ -3,9 +3,7 @@
 
 //! RAII guards for immutable and weak block references
 
-use super::{
-    BlockId, BlockMetadata, BlockRegistrationHandle, RegisteredBlock, SequenceHash,
-};
+use super::{BlockId, BlockMetadata, BlockRegistrationHandle, RegisteredBlock, SequenceHash};
 
 use std::sync::{Arc, Weak};
 

@@ -9,10 +9,10 @@
 //!
 //! # Usage Pattern
 //!
-//! ```no_run
-//! use nova::am::common::responses::ResponseManager;
+//! ```ignore
+//! use dynamo_nova::am::common::responses::ResponseManager;
 //!
-//! let manager = ResponseManager::new(worker_id);
+//! let manager = ResponseManager::new(0); // worker_id = 0
 //!
 //! // Register an outcome to await
 //! let mut awaiter = manager.register_outcome()?;
@@ -20,8 +20,8 @@
 //! // Send the response_id in your request (it serves as both message and response identifier)
 //! let response_id = awaiter.response_id();
 //!
-//! // Later, receive the response
-//! let result = awaiter.recv().await?;
+//! // Later, receive the response (must be in async context)
+//! // let result = awaiter.recv().await?;
 //! ```
 //!
 //! # Generation-Based ABA Protection

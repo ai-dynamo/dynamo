@@ -8,12 +8,14 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 
 use super::ActiveMessageClient;
 use crate::am::{
@@ -211,6 +213,120 @@ where
     }
 }
 
+/// Error type for target resolution in message builders.
+#[derive(Debug)]
+enum ResolveError {
+    /// Peer not found in cache - discovery needed
+    UnresolvedPeer,
+    /// Other validation or configuration errors
+    Other(anyhow::Error),
+}
+
+/// Message type for metadata creation
+#[derive(Debug, Clone, Copy)]
+enum MessageType {
+    Sync,
+    Unary,
+}
+
+impl From<ResolveError> for anyhow::Error {
+    fn from(err: ResolveError) -> Self {
+        match err {
+            ResolveError::UnresolvedPeer => anyhow!("Peer not found"),
+            ResolveError::Other(e) => e,
+        }
+    }
+}
+
+/// Result wrapper for sync operations (acknowledgment only)
+pub struct SyncResult {
+    inner: Pin<Box<dyn Future<Output = Result<Option<Bytes>, String>> + Send>>,
+}
+
+impl SyncResult {
+    fn new(mut awaiter: crate::am::common::responses::ResponseAwaiter) -> Self {
+        Self {
+            inner: Box::pin(async move { awaiter.recv().await }),
+        }
+    }
+}
+
+impl Future for SyncResult {
+    type Output = Result<()>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.inner.as_mut().poll(cx) {
+            Poll::Ready(result) => match result {
+                Ok(None) | Ok(Some(_)) => Poll::Ready(Ok(())),
+                Err(err) => Poll::Ready(Err(anyhow!(err))),
+            },
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Result wrapper for unary operations returning raw bytes
+pub struct UnaryResult {
+    inner: Pin<Box<dyn Future<Output = Result<Option<Bytes>, String>> + Send>>,
+}
+
+impl UnaryResult {
+    fn new(mut awaiter: crate::am::common::responses::ResponseAwaiter) -> Self {
+        Self {
+            inner: Box::pin(async move { awaiter.recv().await }),
+        }
+    }
+}
+
+impl Future for UnaryResult {
+    type Output = Result<Bytes>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.inner.as_mut().poll(cx) {
+            Poll::Ready(result) => match result {
+                Ok(Some(bytes)) => Poll::Ready(Ok(bytes)),
+                Ok(None) => Poll::Ready(Ok(Bytes::new())),
+                Err(err) => Poll::Ready(Err(anyhow!(err))),
+            },
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Result wrapper for typed unary operations with deserialization
+pub struct TypedUnaryResult<R> {
+    inner: Pin<Box<dyn Future<Output = Result<Option<Bytes>, String>> + Send>>,
+    _marker: std::marker::PhantomData<R>,
+}
+
+impl<R> TypedUnaryResult<R> {
+    fn new(mut awaiter: crate::am::common::responses::ResponseAwaiter) -> Self {
+        Self {
+            inner: Box::pin(async move { awaiter.recv().await }),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<R: DeserializeOwned> Future for TypedUnaryResult<R> {
+    type Output = Result<R>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = unsafe { self.get_unchecked_mut() };
+        match this.inner.as_mut().poll(cx) {
+            Poll::Ready(result) => match result {
+                Ok(Some(bytes)) => match serde_json::from_slice(&bytes) {
+                    Ok(value) => Poll::Ready(Ok(value)),
+                    Err(e) => Poll::Ready(Err(anyhow!("Failed to deserialize response: {}", e))),
+                },
+                Ok(None) => Poll::Ready(Err(anyhow!("Expected response data, got empty"))),
+                Err(err) => Poll::Ready(Err(anyhow!(err))),
+            },
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 /// Minimal message builder supporting fire-and-forget and unary-style sends.
 pub struct MessageBuilder {
     client: Arc<ActiveMessageClient>,
@@ -265,23 +381,148 @@ impl MessageBuilder {
         self
     }
 
-    fn resolve_target(&self) -> anyhow::Result<InstanceId> {
+    fn resolve_target(&self) -> Result<InstanceId, ResolveError> {
         match (self.target_instance, self.target_worker) {
             (Some(instance), None) => Ok(instance),
             (None, Some(worker)) => self
                 .client
                 .backend
-                .translate_worker_id(worker)
-                .map_err(|e| anyhow::anyhow!("{}", e)),
-            (Some(_), Some(_)) => {
-                anyhow::bail!(
-                    "Cannot set both .instance() and .worker() - they are mutually exclusive"
-                )
+                .try_translate_worker_id(worker)
+                .map_err(|_| ResolveError::UnresolvedPeer),
+            (Some(_), Some(_)) => Err(ResolveError::Other(anyhow!(
+                "Cannot set both .instance() and .worker() - they are mutually exclusive"
+            ))),
+            (None, None) => Err(ResolveError::Other(anyhow!(
+                "Target not set. Call .instance() or .worker() before sending"
+            ))),
+        }
+    }
+
+    fn create_metadata(
+        &self,
+        response_id: crate::am::common::responses::ResponseId,
+        message_type: MessageType,
+    ) -> MessageMetadata {
+        match message_type {
+            MessageType::Sync => {
+                MessageMetadata::new_sync(response_id, self.handler.clone(), self.headers.clone())
             }
-            (None, None) => {
-                anyhow::bail!("Target not set. Call .instance() or .worker() before sending")
+            MessageType::Unary => {
+                MessageMetadata::new_unary(response_id, self.handler.clone(), self.headers.clone())
             }
         }
+    }
+
+    fn spawn_handshake_task(
+        &self,
+        target: InstanceId,
+        response_id: crate::am::common::responses::ResponseId,
+        message_type: MessageType,
+    ) {
+        let client = self.client.clone();
+        let handler = self.handler.clone();
+        let payload = self.payload.clone();
+        let headers = self.headers.clone();
+        let response_manager = client.response_manager.clone();
+
+        tokio::spawn(async move {
+            // Ensure peer ready (handshake)
+            if let Err(e) = client.ensure_peer_ready(target, &handler).await {
+                tracing::error!(
+                    target: "dynamo_nova::client",
+                    error = %e,
+                    "Failed to prepare peer in slow path"
+                );
+                let _ = response_manager
+                    .complete_outcome(response_id, Err(format!("Handshake failed: {}", e)));
+                return;
+            }
+
+            // Send message
+            let metadata = match message_type {
+                MessageType::Sync => MessageMetadata::new_sync(response_id, handler, headers),
+                MessageType::Unary => MessageMetadata::new_unary(response_id, handler, headers),
+            };
+
+            let message = ActiveMessage {
+                metadata,
+                payload: payload.unwrap_or_default(),
+            };
+
+            if let Err(e) = client.send_message(target, message) {
+                tracing::error!(
+                    target: "dynamo_nova::client",
+                    error = %e,
+                    "Failed to send message in slow path"
+                );
+                let _ = response_manager
+                    .complete_outcome(response_id, Err(format!("Send failed: {}", e)));
+            }
+        });
+    }
+
+    fn spawn_discovery_task(
+        &self,
+        worker_id: dynamo_identity::WorkerId,
+        response_id: crate::am::common::responses::ResponseId,
+        message_type: MessageType,
+    ) {
+        let client = self.client.clone();
+        let handler = self.handler.clone();
+        let payload = self.payload.clone();
+        let headers = self.headers.clone();
+        let response_manager = client.response_manager.clone();
+
+        tokio::spawn(async move {
+            // Resolve via discovery
+            let target = match client.resolve_peer_via_discovery(worker_id).await {
+                Ok(instance_id) => instance_id,
+                Err(e) => {
+                    tracing::error!(
+                        target: "dynamo_nova::client",
+                        error = %e,
+                        worker_id = %worker_id,
+                        "Discovery failed"
+                    );
+                    let _ = response_manager
+                        .complete_outcome(response_id, Err(format!("Discovery failed: {}", e)));
+                    return;
+                }
+            };
+
+            // Ensure peer ready (handshake)
+            if let Err(e) = client.ensure_peer_ready(target, &handler).await {
+                tracing::error!(
+                    target: "dynamo_nova::client",
+                    error = %e,
+                    "Failed to prepare peer after discovery"
+                );
+                let _ = response_manager
+                    .complete_outcome(response_id, Err(format!("Handshake failed: {}", e)));
+                return;
+            }
+
+            // Send message
+            let metadata = match message_type {
+                MessageType::Sync => MessageMetadata::new_sync(response_id, handler, headers),
+                MessageType::Unary => MessageMetadata::new_unary(response_id, handler, headers),
+            };
+
+            let message = ActiveMessage {
+                metadata,
+                payload: payload.unwrap_or_default(),
+            };
+
+            if let Err(e) = client.send_message(target, message) {
+                tracing::error!(
+                    target: "dynamo_nova::client",
+                    error = %e,
+                    "Failed to send message after discovery"
+                );
+                let _ = response_manager
+                    .complete_outcome(response_id, Err(format!("Send failed: {}", e)));
+            }
+        });
     }
 
     pub async fn fire(self) -> Result<()> {
@@ -298,7 +539,7 @@ impl MessageBuilder {
                 ),
                 payload: self.payload.unwrap_or_default(),
             };
-            return Ok(self.client.send_message(target, message)?);
+            return self.client.send_message(target, message);
         }
 
         // Slow path: spawn task to handle discovery, then send
@@ -352,104 +593,172 @@ impl MessageBuilder {
         Ok(())
     }
 
-    pub async fn sync(self) -> Result<()> {
-        self.await_outcome(None, |outcome| match outcome {
-            Ok(None) => Ok(()),
-            Ok(Some(_bytes)) => Ok(()),
-            Err(err) => Err(anyhow!(err)),
-        })
-        .await
+    pub fn sync(self) -> SyncResult {
+        let target_result = self.resolve_target();
+        let worker_id = self.target_worker;
+
+        let awaiter = match self.client.register_outcome() {
+            Ok(awaiter) => awaiter,
+            Err(e) => {
+                tracing::error!(target: "dynamo_nova::client", error = %e, "Failed to register outcome");
+                panic!("Failed to register outcome: {}", e);
+            }
+        };
+
+        let response_id = awaiter.response_id();
+
+        match target_result {
+            Ok(target) if self.client.can_send_directly(target, &self.handler) => {
+                // Fast path: send immediately
+                let message = ActiveMessage {
+                    metadata: self.create_metadata(response_id, MessageType::Sync),
+                    payload: self.payload.unwrap_or_default(),
+                };
+
+                if let Err(e) = self.client.send_message(target, message) {
+                    tracing::error!(target: "dynamo_nova::client", error = %e, "Failed to send message in fast path");
+                }
+
+                SyncResult::new(awaiter)
+            }
+            Ok(target) => {
+                // Slow path: handshake needed
+                self.spawn_handshake_task(target, response_id, MessageType::Sync);
+                SyncResult::new(awaiter)
+            }
+            Err(ResolveError::UnresolvedPeer) => {
+                // Slow path: discovery + handshake needed
+                let Some(worker_id) = worker_id else {
+                    tracing::error!(target: "dynamo_nova::client", "UnresolvedPeer but no worker_id set");
+                    return SyncResult::new(awaiter);
+                };
+
+                self.spawn_discovery_task(worker_id, response_id, MessageType::Sync);
+                SyncResult::new(awaiter)
+            }
+            Err(ResolveError::Other(e)) => {
+                // Validation error - complete immediately with error
+                tracing::error!(target: "dynamo_nova::client", error = %e, "Target resolution failed");
+                let _ = self
+                    .client
+                    .response_manager
+                    .complete_outcome(response_id, Err(format!("Resolution failed: {}", e)));
+                SyncResult::new(awaiter)
+            }
+        }
     }
 
-    pub async fn unary(self) -> Result<Bytes> {
-        self.await_outcome(
-            Some(ClientExpectation::unary_bytes()),
-            |outcome| match outcome {
-                Ok(Some(bytes)) => Ok(bytes),
-                Ok(None) => Ok(Bytes::new()),
-                Err(err) => Err(anyhow!(err)),
-            },
-        )
-        .await
+    pub fn unary(self) -> UnaryResult {
+        let target_result = self.resolve_target();
+        let worker_id = self.target_worker;
+
+        let awaiter = match self.client.register_outcome() {
+            Ok(awaiter) => awaiter,
+            Err(e) => {
+                tracing::error!(target: "dynamo_nova::client", error = %e, "Failed to register outcome");
+                panic!("Failed to register outcome: {}", e);
+            }
+        };
+
+        let response_id = awaiter.response_id();
+
+        match target_result {
+            Ok(target) if self.client.can_send_directly(target, &self.handler) => {
+                // Fast path: send immediately
+                let message = ActiveMessage {
+                    metadata: self.create_metadata(response_id, MessageType::Unary),
+                    payload: self.payload.unwrap_or_default(),
+                };
+
+                if let Err(e) = self.client.send_message(target, message) {
+                    tracing::error!(target: "dynamo_nova::client", error = %e, "Failed to send message in fast path");
+                }
+
+                UnaryResult::new(awaiter)
+            }
+            Ok(target) => {
+                // Slow path: handshake needed
+                self.spawn_handshake_task(target, response_id, MessageType::Unary);
+                UnaryResult::new(awaiter)
+            }
+            Err(ResolveError::UnresolvedPeer) => {
+                // Slow path: discovery + handshake needed
+                let Some(worker_id) = worker_id else {
+                    tracing::error!(target: "dynamo_nova::client", "UnresolvedPeer but no worker_id set");
+                    return UnaryResult::new(awaiter);
+                };
+
+                self.spawn_discovery_task(worker_id, response_id, MessageType::Unary);
+                UnaryResult::new(awaiter)
+            }
+            Err(ResolveError::Other(e)) => {
+                // Validation error - complete immediately with error
+                tracing::error!(target: "dynamo_nova::client", error = %e, "Target resolution failed");
+                let _ = self
+                    .client
+                    .response_manager
+                    .complete_outcome(response_id, Err(format!("Resolution failed: {}", e)));
+                UnaryResult::new(awaiter)
+            }
+        }
     }
 
-    pub async fn typed<R>(self) -> Result<R>
+    pub fn typed<R>(self) -> TypedUnaryResult<R>
     where
         R: DeserializeOwned + Send + 'static,
     {
-        let expectation = ClientExpectation::unary_typed(std::any::type_name::<R>().to_string());
-        let bytes = self
-            .await_outcome(Some(expectation), |outcome| match outcome {
-                Ok(Some(bytes)) => Ok(bytes),
-                Ok(None) => Ok(Bytes::new()),
-                Err(err) => Err(anyhow!(err)),
-            })
-            .await?;
+        let target_result = self.resolve_target();
+        let worker_id = self.target_worker;
 
-        serde_json::from_slice(&bytes).map_err(|e| anyhow!("failed to deserialize response: {}", e))
-    }
+        let awaiter = match self.client.register_outcome() {
+            Ok(awaiter) => awaiter,
+            Err(e) => {
+                tracing::error!(target: "dynamo_nova::client", error = %e, "Failed to register outcome");
+                panic!("Failed to register outcome: {}", e);
+            }
+        };
 
-    async fn await_outcome<F, R>(self, expectation: Option<ClientExpectation>, map: F) -> Result<R>
-    where
-        F: FnOnce(Result<Option<Bytes>, String>) -> Result<R>,
-    {
-        let target = self.resolve_target()?;
+        let response_id = awaiter.response_id();
 
-        // Fast path: if we can send directly, do so immediately
-        if self.client.can_send_directly(target, &self.handler) {
-            let mut outcome = self.client.register_outcome()?;
-            let response_id = outcome.response_id();
+        match target_result {
+            Ok(target) if self.client.can_send_directly(target, &self.handler) => {
+                // Fast path: send immediately
+                let message = ActiveMessage {
+                    metadata: self.create_metadata(response_id, MessageType::Unary),
+                    payload: self.payload.unwrap_or_default(),
+                };
 
-            // Determine response type based on expectation
-            let metadata = match expectation {
-                Some(_) => MessageMetadata::new_unary(response_id, self.handler, self.headers), // unary or typed unary
-                None => MessageMetadata::new_sync(response_id, self.handler, self.headers), // sync
-            };
+                if let Err(e) = self.client.send_message(target, message) {
+                    tracing::error!(target: "dynamo_nova::client", error = %e, "Failed to send message in fast path");
+                }
 
-            let message = ActiveMessage {
-                metadata,
-                payload: self.payload.unwrap_or_default(),
-            };
-            self.client.send_message(target, message)?;
+                TypedUnaryResult::new(awaiter)
+            }
+            Ok(target) => {
+                // Slow path: handshake needed
+                self.spawn_handshake_task(target, response_id, MessageType::Unary);
+                TypedUnaryResult::new(awaiter)
+            }
+            Err(ResolveError::UnresolvedPeer) => {
+                // Slow path: discovery + handshake needed
+                let Some(worker_id) = worker_id else {
+                    tracing::error!(target: "dynamo_nova::client", "UnresolvedPeer but no worker_id set");
+                    return TypedUnaryResult::new(awaiter);
+                };
 
-            let result = outcome.recv().await;
-            return map(result);
+                self.spawn_discovery_task(worker_id, response_id, MessageType::Unary);
+                TypedUnaryResult::new(awaiter)
+            }
+            Err(ResolveError::Other(e)) => {
+                // Validation error - complete immediately with error
+                tracing::error!(target: "dynamo_nova::client", error = %e, "Target resolution failed");
+                let _ = self
+                    .client
+                    .response_manager
+                    .complete_outcome(response_id, Err(format!("Resolution failed: {}", e)));
+                TypedUnaryResult::new(awaiter)
+            }
         }
-
-        // Slow path: ensure peer is ready, then send
-        // For sync/unary, we must wait since caller needs the response
-        self.client.ensure_peer_ready(target, &self.handler).await?;
-
-        let mut outcome = self.client.register_outcome()?;
-        let response_id = outcome.response_id();
-
-        // Determine response type based on expectation
-        let metadata = match expectation {
-            Some(_) => MessageMetadata::new_unary(response_id, self.handler, self.headers), // unary or typed unary
-            None => MessageMetadata::new_sync(response_id, self.handler, self.headers),     // sync
-        };
-
-        let message = ActiveMessage {
-            metadata,
-            payload: self.payload.unwrap_or_default(),
-        };
-        self.client.send_message(target, message)?;
-
-        let result = outcome.recv().await;
-        map(result)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ClientExpectation;
-
-impl ClientExpectation {
-    pub fn unary_bytes() -> Self {
-        Self
-    }
-
-    pub fn unary_typed(_response_type_id: String) -> Self {
-        Self
     }
 }
 

@@ -151,7 +151,7 @@ fn main() -> Result<()> {
                 &nats_url_server,
             )
             .unwrap();
-            let nova = Nova::new(vec![transport]).await.unwrap();
+            let nova = Nova::new(vec![transport], vec![]).await.unwrap();
 
             // Give transport a moment to bind and start accepting connections
             sleep(Duration::from_millis(100)).await;
@@ -187,7 +187,7 @@ fn main() -> Result<()> {
                 &nats_url_client,
             )
             .unwrap();
-            let nova = Nova::new(vec![transport]).await.unwrap();
+            let nova = Nova::new(vec![transport], vec![]).await.unwrap();
 
             // Give transport a moment to bind
             sleep(Duration::from_millis(100)).await;

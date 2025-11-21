@@ -23,8 +23,8 @@ pub use handlers::NovaHandler;
 use dynamo_nova_backend::{NovaBackend, Transport};
 
 use crate::am::client::builders::MessageBuilder;
-use crate::events::EventHandle;
 use crate::am::handlers::events::EventMessenger;
+use crate::events::EventHandle;
 use tracing::warn;
 
 #[derive(Clone)]
@@ -35,11 +35,89 @@ pub struct Nova {
     server: Arc<ActiveMessageServer>,
     handlers: HandlerManager,
     events: Arc<handlers::NovaEvents>,
-    discovery: Arc<dynamo_discovery::peer::PeerDiscoveryManager>,
+    _discovery: Arc<dynamo_discovery::peer::PeerDiscoveryManager>,
+}
+
+/// Builder for Nova system allowing incremental configuration of transports and discovery backends.
+pub struct NovaBuilder {
+    transports: Vec<Arc<dyn Transport>>,
+    discovery_backends: Vec<Arc<dyn dynamo_discovery::peer::PeerDiscovery>>,
+}
+
+impl NovaBuilder {
+    /// Create a new empty NovaBuilder.
+    pub fn new() -> Self {
+        Self {
+            transports: Vec::new(),
+            discovery_backends: Vec::new(),
+        }
+    }
+
+    /// Add a transport to the Nova system.
+    pub fn add_transport(mut self, transport: Arc<dyn Transport>) -> Self {
+        self.transports.push(transport);
+        self
+    }
+
+    /// Add a peer discovery backend to the Nova system.
+    pub fn add_discovery_backend(
+        mut self,
+        backend: Arc<dyn dynamo_discovery::peer::PeerDiscovery>,
+    ) -> Self {
+        self.discovery_backends.push(backend);
+        self
+    }
+
+    /// Build the Nova system with the configured transports and discovery backends.
+    pub async fn build(self) -> anyhow::Result<Arc<Nova>> {
+        Nova::new(self.transports, self.discovery_backends).await
+    }
+}
+
+impl Default for NovaBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Nova {
-    pub async fn new(transports: Vec<Arc<dyn Transport>>) -> anyhow::Result<Arc<Self>> {
+    /// Create a builder for configuring Nova with transports and discovery backends.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let nova = Nova::builder()
+    ///     .add_transport(tcp_transport)
+    ///     .add_discovery_backend(etcd_discovery)
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn builder() -> NovaBuilder {
+        NovaBuilder::new()
+    }
+
+    /// Create a new Nova system with the given transports and discovery backends.
+    ///
+    /// For a more ergonomic API, consider using [`Nova::builder()`] instead.
+    ///
+    /// # Arguments
+    /// * `transports` - Transport layers for network communication
+    /// * `discovery_backends` - Peer discovery backends for finding remote peers
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Simple case with no discovery
+    /// let nova = Nova::new(vec![tcp_transport], vec![]).await?;
+    ///
+    /// // With discovery backends
+    /// let nova = Nova::new(
+    ///     vec![tcp_transport, nats_transport],
+    ///     vec![etcd_discovery, consul_discovery],
+    /// ).await?;
+    /// ```
+    pub async fn new(
+        transports: Vec<Arc<dyn Transport>>,
+        discovery_backends: Vec<Arc<dyn dynamo_discovery::peer::PeerDiscovery>>,
+    ) -> anyhow::Result<Arc<Self>> {
         // 1. Setup infrastructure
         let (backend, data_streams) = NovaBackend::new(transports).await?;
         let backend = Arc::new(backend);
@@ -48,16 +126,21 @@ impl Nova {
         let response_manager = common::responses::ResponseManager::new(worker_id.as_u64());
         let local_events = crate::events::LocalEventSystem::new(worker_id.as_u64());
 
-        // Create peer discovery manager with local peer info
+        // Create peer discovery manager with local peer info and provided backends
         let peer_info = backend.peer_info();
-        let discovery = dynamo_discovery::peer::PeerDiscoveryManager::new(
-            Some(peer_info),
-            vec![], // No remote backends for now
-        ).await?;
+        let discovery =
+            dynamo_discovery::peer::PeerDiscoveryManager::new(Some(peer_info), discovery_backends)
+                .await?;
         let discovery = Arc::new(discovery);
 
-        let event_manager =
-            handlers::NovaEvents::new(worker_id, instance_id, local_events.clone(), backend.clone(), Arc::new(response_manager.clone()), discovery.clone());
+        let event_manager = handlers::NovaEvents::new(
+            worker_id,
+            instance_id,
+            local_events.clone(),
+            backend.clone(),
+            Arc::new(response_manager.clone()),
+            discovery.clone(),
+        );
 
         // 2. Create server (creates hub internally)
         let server = ActiveMessageServer::new(
@@ -81,6 +164,7 @@ impl Nova {
             response_manager,
             backend.clone(),
             Arc::new(DefaultErrorHandler),
+            discovery.clone(),
         ));
 
         // 4. Create handler manager
@@ -95,7 +179,7 @@ impl Nova {
             server: server.clone(),
             handlers,
             events: event_manager.clone(),
-            discovery: discovery.clone(),
+            _discovery: discovery,
         });
 
         // 5. Initialize hub's system reference (OnceLock)
@@ -177,17 +261,12 @@ impl Nova {
     /// an automatic handshake to exchange handler lists.
     pub fn register_peer(&self, peer_info: PeerInfo) -> anyhow::Result<()> {
         let instance_id = peer_info.instance_id();
-        let worker_id = peer_info.worker_id();
 
         // Register with backend (registers with transports)
         self.backend.register_peer(peer_info)?;
 
         // Register in client peer registry
         self.client.register_peer(instance_id);
-
-        // Pre-populate routing table for fast-path event lookups
-        self.events
-            .register_worker_mapping(worker_id.as_u64(), instance_id);
 
         Ok(())
     }

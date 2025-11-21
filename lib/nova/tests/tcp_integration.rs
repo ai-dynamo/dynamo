@@ -39,7 +39,7 @@ async fn test_handler_discovery_via_handshake() {
             .build()
             .unwrap(),
     );
-    let nova_a = Nova::new(vec![transport_a]).await.unwrap();
+    let nova_a = Nova::new(vec![transport_a], vec![]).await.unwrap();
 
     // 2. Create nova_b with TCP transport
     let transport_b = Arc::new(
@@ -49,7 +49,7 @@ async fn test_handler_discovery_via_handshake() {
             .build()
             .unwrap(),
     );
-    let nova_b = Nova::new(vec![transport_b]).await.unwrap();
+    let nova_b = Nova::new(vec![transport_b], vec![]).await.unwrap();
 
     // Give transports a moment to bind and start accepting connections
     sleep(Duration::from_millis(100)).await;

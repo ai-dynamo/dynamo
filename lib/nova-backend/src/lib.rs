@@ -119,12 +119,37 @@ impl NovaBackend {
         self.primary_transport.contains_key(&instance_id)
     }
 
-    pub fn translate_worker_id(&self, worker_id: WorkerId) -> Result<InstanceId, NovaBackendError> {
-        let instance_id = self
-            .workers
+    /// Fast-path lookup of worker_id -> instance_id from cache.
+    ///
+    /// Returns `WorkerNotRegistered` if the worker is not in the cache.
+    /// Higher layers (Nova, NovaEvents, ActiveMessageClient) should handle
+    /// discovery fallback when this returns an error.
+    ///
+    /// # Example
+    /// ```ignore
+    /// match backend.try_translate_worker_id(worker_id) {
+    ///     Ok(instance_id) => { /* fast path: send immediately */ }
+    ///     Err(NovaBackendError::WorkerNotRegistered(_)) => {
+    ///         /* slow path: query discovery, then register_peer() */
+    ///     }
+    /// }
+    /// ```
+    pub fn try_translate_worker_id(&self, worker_id: WorkerId) -> Result<InstanceId, NovaBackendError> {
+        self.workers
             .get(&worker_id)
-            .ok_or(NovaBackendError::WorkerNotRegistered(worker_id))?;
-        Ok(*instance_id)
+            .map(|entry| *entry)
+            .ok_or(NovaBackendError::WorkerNotRegistered(worker_id))
+    }
+
+    /// Deprecated: Use `try_translate_worker_id()` for explicit fast-path semantics.
+    #[deprecated(since = "0.7.0", note = "Use try_translate_worker_id() instead")]
+    pub fn translate_worker_id(&self, worker_id: WorkerId) -> Result<InstanceId, NovaBackendError> {
+        self.try_translate_worker_id(worker_id)
+    }
+
+    /// Check if an instance_id is registered.
+    pub fn has_instance(&self, instance_id: InstanceId) -> bool {
+        self.primary_transport.contains_key(&instance_id)
     }
 
     pub fn send_message(
@@ -181,6 +206,23 @@ impl NovaBackend {
         Err(NovaBackendError::NoCompatibleTransports)?
     }
 
+    /// Send message to a worker (fast-path only).
+    ///
+    /// This method uses `try_translate_worker_id()` for fast-path lookup.
+    /// Returns `WorkerNotRegistered` error if the worker is not in the cache.
+    ///
+    /// For automatic discovery, use the two-phase pattern:
+    /// ```ignore
+    /// match backend.send_message_to_worker(...) {
+    ///     Ok(()) => { /* success */ }
+    ///     Err(e) if matches_worker_not_registered(&e) => {
+    ///         tokio::spawn(async move {
+    ///             let instance_id = backend.resolve_and_register_worker(worker_id).await?;
+    ///             backend.send_message(instance_id, ...)?;
+    ///         });
+    ///     }
+    /// }
+    /// ```
     pub fn send_message_to_worker(
         &self,
         worker_id: WorkerId,
@@ -189,17 +231,8 @@ impl NovaBackend {
         message_type: MessageType,
         on_error: Arc<dyn TransportErrorHandler>,
     ) -> anyhow::Result<()> {
-        match self.translate_worker_id(worker_id) {
-            Ok(instance_id) => {
-                self.send_message(instance_id, header, payload, message_type, on_error)
-            }
-            Err(_) => {
-                // slow path
-                // need to try to look up the instance_id by worker_id via the discover plane
-                // this might neeed the full connect, handshake protocol before succeeding
-                unimplemented!("slow path");
-            }
-        }
+        let instance_id = self.try_translate_worker_id(worker_id)?;
+        self.send_message(instance_id, header, payload, message_type, on_error)
     }
 
     pub fn register_peer(&self, peer: PeerInfo) -> Result<(), NovaBackendError> {

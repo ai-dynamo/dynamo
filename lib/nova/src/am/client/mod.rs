@@ -22,6 +22,7 @@ pub struct ActiveMessageClient {
     backend: Arc<NovaBackend>,
     error_handler: Arc<dyn TransportErrorHandler>,
     peer_registry: Arc<PeerRegistry>,
+    discovery: Arc<dynamo_discovery::peer::PeerDiscoveryManager>,
 }
 
 impl ActiveMessageClient {
@@ -29,12 +30,14 @@ impl ActiveMessageClient {
         response_manager: ResponseManager,
         backend: Arc<NovaBackend>,
         error_handler: Arc<dyn TransportErrorHandler>,
+        discovery: Arc<dynamo_discovery::peer::PeerDiscoveryManager>,
     ) -> Self {
         Self {
             response_manager,
             backend,
             error_handler,
             peer_registry: Arc::new(PeerRegistry::new()),
+            discovery,
         }
     }
 
@@ -191,6 +194,55 @@ impl ActiveMessageClient {
     /// Refresh the handler list for a peer
     pub(crate) async fn refresh_handler_list(&self, instance_id: InstanceId) -> Result<()> {
         self.handshake_with_peer(instance_id).await
+    }
+
+    /// Resolve a peer via discovery and perform partial registration
+    ///
+    /// This performs 2 of the 3 registrations from Nova::register_peer():
+    /// 1. backend.register_peer() - registers with transports
+    /// 2. peer_registry.register_peer() - enables handler discovery
+    /// 3. SKIP events.register_worker_mapping() - events self-populate via own discovery
+    pub(crate) async fn resolve_peer_via_discovery(
+        &self,
+        worker_id: dynamo_identity::WorkerId,
+    ) -> Result<InstanceId> {
+        tracing::debug!(
+            target: "dynamo_nova::client",
+            worker_id = %worker_id,
+            "Resolving peer via discovery"
+        );
+
+        // Query discovery system
+        let either = self.discovery.discover_by_worker_id(worker_id).await;
+
+        // Handle Either<Ready<T>, Shared<BoxFuture<T>>>
+        let result = match either {
+            futures::future::Either::Left(ready) => ready.await,
+            futures::future::Either::Right(shared_future) => shared_future.await,
+        };
+
+        let peer_info = result
+            .map_err(|e| anyhow::anyhow!("Discovery failed for worker {}: {:?}", worker_id, e))?;
+
+        let instance_id = peer_info.instance_id();
+
+        tracing::debug!(
+            target: "dynamo_nova::client",
+            worker_id = %worker_id,
+            instance_id = %instance_id,
+            "Discovery resolved peer, performing partial registration"
+        );
+
+        // Partial registration (2 of 3 steps)
+        // 1. Register with backend (transports)
+        self.backend.register_peer(peer_info)?;
+
+        // 2. Register in peer registry (handler discovery)
+        self.peer_registry.register_peer(instance_id);
+
+        // 3. SKIP event routing table - events subsystem self-populates
+
+        Ok(instance_id)
     }
 
     fn register_outcome(
