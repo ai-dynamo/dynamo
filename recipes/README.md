@@ -94,7 +94,7 @@ cd recipes
 # Update storageClassName in model-cache.yaml first!
 kubectl apply -f <model>/model-cache/ -n ${NAMESPACE}
 
-# Create job
+# Create model cache PVC
 kubectl apply -f <model>/model-cache/model-download.yaml -n ${NAMESPACE}
 
 # Wait for download to complete (may take 10-60 minutes depending on model size)
@@ -106,7 +106,7 @@ kubectl logs -f job/model-download -n ${NAMESPACE}
 
 **Step 2: Deploy Service**
 
-Update the image in <model>/<framework>/<mode>/deploy.yaml.
+Update the image in `<model>/<framework>/<mode>/deploy.yaml`.
 
 ```bash
 kubectl apply -f <model>/<framework>/<mode>/deploy.yaml -n ${NAMESPACE}
