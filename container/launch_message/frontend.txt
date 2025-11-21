@@ -51,7 +51,7 @@ Benefits:
 Quick Start:
 
 Start mocker with custom configuration:
-python -m dynamo.mocker \
+> python -m dynamo.mocker \
   --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
   --num-gpu-blocks-override 8192 \
   --block-size 16 \
