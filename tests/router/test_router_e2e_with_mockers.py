@@ -29,12 +29,48 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = ROUTER_MODEL_NAME
 NUM_MOCKERS = 2
 SPEEDUP_RATIO = 10.0
-PORTS = [
-    8011,
-    8022,
-]  # Frontend ports: use PORTS[0] for single router, PORTS for multi-router
+BASE_PORT = 9100  # Base port for all tests (high port to avoid conflicts)
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
+
+
+def get_unique_ports(
+    request, num_ports: int = 1, store_backend: str = "etcd"
+) -> list[int]:
+    """Generate unique ports for parallel test execution.
+
+    Ports are unique based on:
+    - Test function name (each test gets a base offset)
+    - Parametrization value (etcd=0, file=50)
+    - Port index (for multi-port tests)
+
+    Args:
+        request: Pytest request fixture
+        num_ports: Number of ports needed (1 for single router, 2 for two routers)
+        store_backend: Storage backend parameter ("etcd" or "file")
+
+    Returns:
+        List of unique port numbers
+    """
+    # Get test name without parametrization suffix
+    test_name = request.node.name.split("[")[0]
+
+    # Base offsets per test function (ensures each test gets unique range)
+    test_offsets = {
+        "test_mocker_kv_router": 0,
+        "test_mocker_two_kv_router": 100,
+        "test_mocker_kv_router_overload_503": 200,
+        "test_query_instance_id_returns_worker_and_tokens": 300,
+    }
+
+    base_offset = test_offsets.get(test_name, 0)
+
+    # Parametrization offset (etcd=0, file=50)
+    param_offset = 0 if store_backend == "etcd" else 50
+
+    # Generate ports
+    ports = [BASE_PORT + base_offset + param_offset + i for i in range(num_ports)]
+    return ports
 
 
 # Shared test payload for all tests
@@ -148,8 +184,9 @@ class MockerProcess:
 
 
 @pytest.mark.pre_merge
+@pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
-def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
+def test_mocker_kv_router(request, runtime_services_session, predownload_tokenizers):
     """
     Test KV router with multiple mocker engine instances.
     This test doesn't require GPUs and runs quickly for pre-merge validation.
@@ -170,15 +207,17 @@ def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
-        # Run basic router test (starts router internally, mocker workers don't need frontend readiness check)
+        # Get unique port for this test
+        frontend_port = get_unique_ports(request, num_ports=1)[0]
+
+        # Run basic router test (starts router internally and waits for workers to be ready)
         _test_router_basic(
             engine_workers=mockers,
             block_size=BLOCK_SIZE,
             request=request,
-            frontend_port=PORTS[0],
+            frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
-            wait_for_frontend=False,  # Mocker workers are fast, no need to wait
         )
 
     finally:
@@ -187,11 +226,12 @@ def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
 
 
 @pytest.mark.pre_merge
+@pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
 def test_mocker_two_kv_router(
     request,
-    runtime_services,
+    runtime_services_session,
     predownload_tokenizers,
     file_storage_backend,
     store_backend,
@@ -222,12 +262,17 @@ def test_mocker_two_kv_router(
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
+        # Get unique ports for this test (2 ports for two routers)
+        router_ports = get_unique_ports(
+            request, num_ports=2, store_backend=store_backend
+        )
+
         # Run two-router test (starts KV routers internally and manages their lifecycle)
         _test_router_two_routers(
             engine_workers=mockers,
             block_size=BLOCK_SIZE,
             request=request,
-            router_ports=PORTS,
+            router_ports=router_ports,
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
             store_backend=store_backend,
@@ -239,10 +284,11 @@ def test_mocker_two_kv_router(
 
 
 @pytest.mark.pre_merge
+@pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
 def test_mocker_kv_router_overload_503(
-    request, runtime_services, predownload_tokenizers
+    request, runtime_services_session, predownload_tokenizers
 ):
     """Test that KV router returns 503 when mocker workers are overloaded."""
     logger.info("Starting mocker KV router overload test for 503 status")
@@ -260,8 +306,10 @@ def test_mocker_kv_router_overload_503(
         logger.info(f"Mocker using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
+        # Get unique port for this test
+        frontend_port = get_unique_ports(request, num_ports=1)[0]
+
         # Run overload 503 test
-        frontend_port = PORTS[0] + 10  # Use different port to avoid conflicts
         _test_router_overload_503(
             engine_workers=mockers,
             block_size=4,  # Match the mocker's block size
@@ -277,8 +325,11 @@ def test_mocker_kv_router_overload_503(
 
 
 @pytest.mark.pre_merge
+@pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
-def test_kv_push_router_bindings(request, runtime_services, predownload_tokenizers):
+def test_kv_push_router_bindings(
+    request, runtime_services_session, predownload_tokenizers
+):
     """Test KvPushRouter Python bindings with mocker engines."""
     logger.info("Starting KvPushRouter bindings test")
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
@@ -313,11 +364,12 @@ def test_kv_push_router_bindings(request, runtime_services, predownload_tokenize
 
 
 @pytest.mark.pre_merge
+@pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
 def test_indexers_sync(
     request,
-    runtime_services,
+    runtime_services_session,
     predownload_tokenizers,
     file_storage_backend,
     store_backend,
@@ -364,9 +416,10 @@ def test_indexers_sync(
 
 
 @pytest.mark.pre_merge
+@pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
 def test_query_instance_id_returns_worker_and_tokens(
-    request, runtime_services, predownload_tokenizers
+    request, runtime_services_session, predownload_tokenizers
 ):
     """Test query_instance_id annotation with mocker engines."""
     logger.info("Starting KV router query_instance_id annotation test")
@@ -382,8 +435,10 @@ def test_query_instance_id_returns_worker_and_tokens(
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
+        # Get unique port for this test
+        frontend_port = get_unique_ports(request, num_ports=1)[0]
+
         # Run query_instance_id annotation test
-        frontend_port = PORTS[0] + 30  # Use unique port to avoid conflicts
         _test_router_query_instance_id(
             engine_workers=mockers,
             block_size=BLOCK_SIZE,
@@ -398,8 +453,9 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 
 @pytest.mark.pre_merge
+@pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
-def test_router_decisions(request, runtime_services, predownload_tokenizers):
+def test_router_decisions(request, runtime_services_session, predownload_tokenizers):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes."""
 
     # runtime_services starts etcd and nats
