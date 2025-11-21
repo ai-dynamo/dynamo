@@ -639,8 +639,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             prefill_marked = true;
                         }
 
-                        yield item.clone();
-
                         // Inject worker_id in first item's disaggregated_params if requested
                         if first_item && should_populate_worker_id {
                             if let Some(ref mut data) = item.data {
@@ -660,6 +658,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             }
                             first_item = false;
                         }
+
+                        yield item;
                     }
                 }
             }
