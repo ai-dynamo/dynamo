@@ -201,7 +201,7 @@ ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         ARCH_FOR_GPG=${ARCH_ALT}; \
     else \
-        ARCH_FOR_GPG="arm64"; \
+        ARCH_FOR_GPG="sbsa"; \
     fi && \
     curl -fsSL \
         https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${ARCH_FOR_GPG}/cuda-archive-keyring.gpg \
