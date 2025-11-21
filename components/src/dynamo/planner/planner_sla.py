@@ -40,7 +40,6 @@ async def init_planner(runtime: DistributedRuntime, args):
     await start_sla_planner(runtime, args)
 
     component = runtime.namespace(args.namespace).component("Planner")
-    await component.create_service()
 
     async def generate(request: RequestType):
         """Dummy endpoint to satisfy that each component has an endpoint"""

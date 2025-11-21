@@ -25,7 +25,7 @@ import (
 	"reflect"
 	"sort"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
@@ -248,17 +248,26 @@ func getSpec(obj client.Object) (any, error) {
 }
 
 // IsSpecChanged returns the new hash if the spec has changed between the existing one
+// It compares the actual current spec hash with the desired spec hash to detect manual edits
 func IsSpecChanged(current client.Object, desired client.Object) (*string, error) {
-	hashStr, err := GetSpecHash(desired)
+	desiredHash, err := GetSpecHash(desired)
 	if err != nil {
 		return nil, err
 	}
-	if currentHash, ok := current.GetAnnotations()[NvidiaAnnotationHashKey]; ok {
-		if currentHash == hashStr {
-			return nil, nil
-		}
+
+	// Compute hash of the actual current spec (not just the annotation)
+	// This ensures we detect manual edits even if the annotation is stale
+	currentHash, err := GetSpecHash(current)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current spec hash: %w", err)
 	}
-	return &hashStr, nil
+
+	// Compare actual spec hashes
+	if currentHash == desiredHash {
+		return nil, nil
+	}
+
+	return &desiredHash, nil
 }
 
 // generateSpecDiff creates a unified diff showing changes between old and new resource specs
@@ -386,7 +395,7 @@ func firstKey(m map[string]interface{}) string {
 	return keys[0]
 }
 
-func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequirements, error) {
+func GetResourcesConfig(resources *v1alpha1.Resources) (*corev1.ResourceRequirements, error) {
 
 	if resources == nil {
 		return nil, nil
@@ -423,7 +432,7 @@ func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequiremen
 			if currentResources.Limits == nil {
 				currentResources.Limits = make(corev1.ResourceList)
 			}
-			currentResources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)] = q
+			currentResources.Limits[getGPUResourceName(resources.Limits)] = q
 		}
 		for k, v := range resources.Limits.Custom {
 			q, err := resource.ParseQuantity(v)
@@ -475,6 +484,16 @@ func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequiremen
 		currentResources.Claims = append(currentResources.Claims, resources.Claims...)
 	}
 	return currentResources, nil
+}
+
+func getGPUResourceName(resourceItem *v1alpha1.ResourceItem) corev1.ResourceName {
+	if resourceItem == nil {
+		return corev1.ResourceName(consts.KubeResourceGPUNvidia)
+	}
+	if resourceItem.GPUType != "" {
+		return corev1.ResourceName(resourceItem.GPUType)
+	}
+	return corev1.ResourceName(consts.KubeResourceGPUNvidia)
 }
 
 type Resource struct {

@@ -43,7 +43,7 @@ async fn test_recursive_namespace_implementation() {
     let runtime = Runtime::from_current().unwrap();
     let config = DistributedConfig {
         store_backend: KeyValueStoreSelect::Memory,
-        nats_config: nats::ClientOptions::default(),
+        nats_config: Some(nats::ClientOptions::default()),
         request_plane: dynamo_runtime::distributed::RequestPlaneMode::default(),
     };
     let distributed_runtime = DistributedRuntime::new(runtime, config).await.unwrap();
@@ -90,7 +90,7 @@ async fn test_multiple_branches_recursive_namespaces() {
     let runtime = Runtime::from_current().unwrap();
     let config = DistributedConfig {
         store_backend: KeyValueStoreSelect::Memory,
-        nats_config: nats::ClientOptions::default(),
+        nats_config: Some(nats::ClientOptions::default()),
         request_plane: dynamo_runtime::distributed::RequestPlaneMode::default(),
     };
     let distributed_runtime = DistributedRuntime::new(runtime, config).await.unwrap();

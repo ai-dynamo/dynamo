@@ -37,15 +37,16 @@ class TestProfileSlaAiconfigurator:
     """Test class for profile_sla aiconfigurator functionality."""
 
     @pytest.fixture
-    def llm_args(self):
+    def llm_args(self, request):
         class Args:
             def __init__(self):
                 self.model = ""
                 self.dgd_image = ""
                 self.backend = "trtllm"
                 self.config = "examples/backends/trtllm/deploy/disagg.yaml"
-                self.output_dir = "/tmp/test_profiling_results"
-                self.namespace = "test-namespace"
+                # Use unique output directory per test for parallel execution
+                self.output_dir = f"/tmp/test_profiling_results_{request.node.name}"
+                self.namespace = f"test-namespace-{request.node.name}"
                 self.min_num_gpus_per_engine = 1
                 self.max_num_gpus_per_engine = 8
                 self.skip_existing_results = False
@@ -76,6 +77,7 @@ class TestProfileSlaAiconfigurator:
         return Args()
 
     @pytest.mark.pre_merge
+    @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.parametrize("missing_arg", ["aic_system", "aic_hf_id"])
     async def test_aiconfigurator_missing_args(self, llm_args, missing_arg):
@@ -86,6 +88,7 @@ class TestProfileSlaAiconfigurator:
             await run_profile(llm_args)
 
     @pytest.mark.pre_merge
+    @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "arg_name, bad_value",
@@ -103,11 +106,13 @@ class TestProfileSlaAiconfigurator:
             await run_profile(llm_args)
 
     @pytest.mark.pre_merge
+    @pytest.mark.parallel
     @pytest.mark.asyncio
     async def test_trtllm_aiconfigurator_single_model(self, llm_args):
         # Test that profile_sla works with the model & backend in the llm_args fixture.
         await run_profile(llm_args)
 
+    @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "backend, aic_backend_version",

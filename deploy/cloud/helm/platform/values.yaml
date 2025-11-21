@@ -144,6 +144,67 @@ dynamo-operator:
         # -- Whether to enable SSH key generation for MPI Run
         enabled: true
 
+  # Webhook configuration for admission control and validation
+  webhook:
+    # -- Whether to enable admission webhooks for resource validation. When enabled, the operator will validate DynamoComponentDeployment and DynamoGraphDeployment resources before they are created or updated in the cluster. Enabled by default for production-ready validation and better error reporting.
+    enabled: true
+
+    # Certificate configuration for webhook TLS
+    certificateSecret:
+      # -- Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate).
+      name: webhook-server-cert
+
+      # -- Whether to manage the certificate secret externally. When false (default), certificates are automatically generated via Helm hooks during installation. When true, you must create the secret manually before installing the chart.
+      external: false
+
+    # -- Certificate validity duration in days for auto-generated certificates. Only used when certManager.enabled=false and certificateSecret.external=false. After this duration, certificates will expire and need to be regenerated.
+    certificateValidity: 365
+
+    # Container image for certificate generation and CA injection jobs
+    # Only used when certManager.enabled=false and certificateSecret.external=false
+    certGenerator:
+      image:
+        # -- Container image repository for certificate generation jobs. This image must contain both openssl and kubectl commands.
+        repository: bitnami/kubectl
+        # -- Container image tag for certificate generation jobs
+        tag: latest
+        # -- Image pull policy for certificate generation jobs
+        pullPolicy: IfNotPresent
+
+    # -- CA bundle (base64 encoded) for webhook validation. Only used when certificateSecret.external=true. For automatic certificate generation or cert-manager integration, leave this empty as it will be injected automatically.
+    caBundle: ""
+
+    # -- Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees.
+    failurePolicy: Fail
+
+    # -- Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy.
+    timeoutSeconds: 10
+
+    # Namespace selector for webhook scope control
+    # -- Custom namespace selector for webhook validation. Use this to include or exclude specific namespaces from webhook validation. For CLUSTER-WIDE operators, you can exclude namespaces managed by namespace-restricted operators by using: matchExpressions: [{ key: "dynamo-operator", operator: "NotIn", values: ["namespace-restricted"] }]. For NAMESPACE-RESTRICTED operators, leave empty as it will be auto-configured to match only the operator's namespace.
+    namespaceSelector: {}
+
+    # cert-manager integration for automated certificate lifecycle management
+    certManager:
+      # -- Whether to use cert-manager for automatic certificate management. Requires cert-manager to be installed in the cluster. When enabled, cert-manager will automatically generate, renew, and rotate certificates, and the automatic certificate generation via Helm hooks will be disabled.
+      enabled: false
+
+      # Certificate configuration for cert-manager
+      certificate:
+        # -- Certificate duration for webhook certificates managed by cert-manager (e.g., "8760h" for 1 year). cert-manager will automatically renew the certificate before it expires.
+        duration: "8760h"
+
+        # -- Time before certificate expiration to trigger renewal (e.g., "360h" for 15 days). cert-manager will attempt to renew the certificate when this threshold is reached.
+        renewBefore: "360h"
+
+        # Root CA configuration for cert-manager
+        rootCA:
+          # -- Duration for the root CA certificate (e.g., "87600h" for 10 years). The root CA typically has a much longer lifetime than the leaf certificates it signs.
+          duration: "87600h"
+
+          # -- Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued.
+          renewBefore: "720h"
+
 
 # Grove component - distributed inference orchestration
 grove:

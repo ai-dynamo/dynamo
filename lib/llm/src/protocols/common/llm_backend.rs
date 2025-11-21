@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub use super::FinishReason;
 pub use super::preprocessor::PreprocessedRequest;
 use crate::protocols::TokenIdType;
+use dynamo_async_openai::types::CompletionUsage;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
 pub type TokenType = Option<String>;
@@ -48,6 +49,14 @@ pub struct BackendOutput {
 
     // Index field for batch requests to match OpenAI format
     pub index: Option<u32>,
+
+    // Token usage information
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_usage: Option<CompletionUsage>,
+
+    /// Disaggregated execution parameters (for prefill/decode separation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disaggregated_params: Option<serde_json::Value>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -92,6 +101,10 @@ pub struct LLMEngineOutput {
     /// Additional arguments for extensibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    // Token usage information
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_usage: Option<CompletionUsage>,
 }
 
 impl LLMEngineOutput {
@@ -107,6 +120,7 @@ impl LLMEngineOutput {
             index: None,
             disaggregated_params: None,
             extra_args: None,
+            completion_usage: None,
         }
     }
 
@@ -122,6 +136,7 @@ impl LLMEngineOutput {
             index: None,
             disaggregated_params: None,
             extra_args: None,
+            completion_usage: None,
         }
     }
 
@@ -137,6 +152,7 @@ impl LLMEngineOutput {
             index: None,
             disaggregated_params: None,
             extra_args: None,
+            completion_usage: None,
         }
     }
 
@@ -152,6 +168,7 @@ impl LLMEngineOutput {
             index: None,
             disaggregated_params: None,
             extra_args: None,
+            completion_usage: None,
         }
     }
 }

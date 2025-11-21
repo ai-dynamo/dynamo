@@ -16,7 +16,6 @@ members = [
     "lib/engines/*",
     "lib/discovery",
     "lib/config",
-    "lib/kvbm-kernels",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
