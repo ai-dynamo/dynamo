@@ -118,40 +118,36 @@ jobs:
   #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
   #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-  build-vllm-amd64:
-    name: Build vLLM (amd64)
-    #needs: build-base-amd64
+  build-framework-amd64:
+    name: Build ${{ matrix.framework }} (amd64)
+    # Uncomment the next line if build-base-amd64 is enabled
+    # needs: build-base-amd64
     runs-on: cpu-amd-m5-4xlarge
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
     env:
-      FRAMEWORK: vllm
-      ARCH: amd64
-      BASE_IMAGE_TAG: ''
-      RUNTIME_IMAGE_TAG: ''
-      CUDA_VERSION: ''
-      TORCH_BACKEND: ''
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
         with:
-          framework: ${{ env.FRAMEWORK }}
+          framework: ${{ matrix.framework }}
           target: runtime
-          platform: linux/${{ env.ARCH }}
+          platform: linux/amd64
           dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64
-          enable_kvbm: ${{ env.ENABLE_KVBM }}
-          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
-          runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
-          cuda_version: ${{ env.CUDA_VERSION }}
-          torch_backend: ${{ env.TORCH_BACKEND }}
+          base_image_tag: ''
+          runtime_image_tag: ''
+          cuda_version: ''
+          torch_backend: ''
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -159,19 +155,14 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Tag and Push Nightly Images
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
+      - name: Tag and Push Images
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build.outputs.image_tag }}
           push_tags: |
-            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
+            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
+            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64-run-${{ github.run_id }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -180,40 +171,51 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-  build-vllm-arm64:
-    name: Build vLLM (arm64)
-    #needs: build-base-arm64
+  build-framework-arm64:
+    name: Build ${{ matrix.framework }} (arm64)
+    # Uncomment the next line if build-base-arm64 is enabled
+    # needs: build-base-arm64
     runs-on: cpu-arm-r8g-4xlarge
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: vllm
+            base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
+            runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
+            cuda_version: '129'
+            torch_backend: 'cu129'
+          - framework: trtllm
+            base_image_tag: '25.06-py3'
+            runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
+            cuda_version: '129'
+            torch_backend: 'cu129'
+          - framework: sglang
+            base_image_tag: ''
+            runtime_image_tag: ''
+            cuda_version: ''
+            torch_backend: ''
     env:
-      FRAMEWORK: vllm
-      ARCH: arm64
-      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
-      RUNTIME_IMAGE_TAG: '12.9.0-runtime-ubuntu24.04'
-      CUDA_VERSION: '129'
-      TORCH_BACKEND: 'cu129'
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
         with:
-          framework: ${{ env.FRAMEWORK }}
+          framework: ${{ matrix.framework }}
           target: runtime
-          platform: linux/${{ env.ARCH }}
+          platform: linux/arm64
           dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64
-          enable_kvbm: ${{ env.ENABLE_KVBM }}
-          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
-          runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
-          cuda_version: ${{ env.CUDA_VERSION }}
-          torch_backend: ${{ env.TORCH_BACKEND }}
+          base_image_tag: ${{ matrix.base_image_tag }}
+          runtime_image_tag: ${{ matrix.runtime_image_tag }}
+          cuda_version: ${{ matrix.cuda_version }}
+          torch_backend: ${{ matrix.torch_backend }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -221,247 +223,14 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Tag and Push Nightly Images
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-arm64
+      - name: Tag and Push Images
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build.outputs.image_tag }}
           push_tags: |
-            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-  build-trtllm-amd64:
-    name: Build TRTLLM (amd64)
-    #needs: build-base-amd64
-    runs-on: cpu-amd-m5-4xlarge
-    timeout-minutes: 90
-    env:
-      FRAMEWORK: trtllm
-      ARCH: amd64
-      BASE_IMAGE_TAG: ''
-      RUNTIME_IMAGE_TAG: ''
-      CUDA_VERSION: ''
-      TORCH_BACKEND: ''
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Build Docker Image
-        id: build
-        uses: ./.github/actions/docker-build
-        with:
-          framework: ${{ env.FRAMEWORK }}
-          target: runtime
-          platform: linux/${{ env.ARCH }}
-          dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64
-          enable_kvbm: ${{ env.ENABLE_KVBM }}
-          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
-          runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
-          cuda_version: ${{ env.CUDA_VERSION }}
-          torch_backend: ${{ env.TORCH_BACKEND }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-      - name: Tag and Push Nightly Images
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build.outputs.image_tag }}
-          push_tags: |
-            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}-run-${{ github.run_id }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-  build-trtllm-arm64:
-    name: Build TRTLLM (arm64)
-    #needs: build-base-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 90
-    env:
-      FRAMEWORK: trtllm
-      ARCH: arm64
-      BASE_IMAGE_TAG: '25.06-py3'
-      RUNTIME_IMAGE_TAG: '12.9.0-runtime-ubuntu24.04'
-      CUDA_VERSION: '129'
-      TORCH_BACKEND: 'cu129'
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Build Docker Image
-        id: build
-        uses: ./.github/actions/docker-build
-        with:
-          framework: ${{ env.FRAMEWORK }}
-          target: runtime
-          platform: linux/${{ env.ARCH }}
-          dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64
-          enable_kvbm: ${{ env.ENABLE_KVBM }}
-          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
-          runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
-          cuda_version: ${{ env.CUDA_VERSION }}
-          torch_backend: ${{ env.TORCH_BACKEND }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-      - name: Tag and Push Nightly Images
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build.outputs.image_tag }}
-          push_tags: |
-            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}-run-${{ github.run_id }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-  build-sglang-amd64:
-    name: Build SGLang (amd64)
-    #needs: build-base-amd64
-    runs-on: cpu-amd-m5-4xlarge
-    timeout-minutes: 90
-    env:
-      FRAMEWORK: sglang
-      ARCH: amd64
-      BASE_IMAGE_TAG: ''
-      RUNTIME_IMAGE_TAG: ''
-      CUDA_VERSION: ''
-      TORCH_BACKEND: ''
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Build Docker Image
-        id: build
-        uses: ./.github/actions/docker-build
-        with:
-          framework: ${{ env.FRAMEWORK }}
-          target: runtime
-          platform: linux/${{ env.ARCH }}
-          dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64
-          enable_kvbm: ${{ env.ENABLE_KVBM }}
-          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
-          runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
-          cuda_version: ${{ env.CUDA_VERSION }}
-          torch_backend: ${{ env.TORCH_BACKEND }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-      - name: Tag and Push Nightly Images
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build.outputs.image_tag }}
-          push_tags: |
-            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}-run-${{ github.run_id }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-  build-sglang-arm64:
-    name: Build SGLang (arm64)
-    #needs: build-base-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 90
-    env:
-      FRAMEWORK: sglang
-      ARCH: arm64
-      BASE_IMAGE_TAG: ''
-      RUNTIME_IMAGE_TAG: ''
-      CUDA_VERSION: ''
-      TORCH_BACKEND: ''
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Build Docker Image
-        id: build
-        uses: ./.github/actions/docker-build
-        with:
-          framework: ${{ env.FRAMEWORK }}
-          target: runtime
-          platform: linux/${{ env.ARCH }}
-          dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64
-          enable_kvbm: ${{ env.ENABLE_KVBM }}
-          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
-          runtime_image_tag: ${{ env.RUNTIME_IMAGE_TAG }}
-          cuda_version: ${{ env.CUDA_VERSION }}
-          torch_backend: ${{ env.TORCH_BACKEND }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-      - name: Tag and Push Nightly Images
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build.outputs.image_tag }}
-          push_tags: |
-            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}
-            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ env.FRAMEWORK }}-${{ env.ARCH }}-run-${{ github.run_id }}
+            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-arm64
+            ${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-arm64-run-${{ github.run_id }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -472,1015 +241,197 @@ jobs:
 
 ############################## TEST JOBS ##############################
 
-  unit-vllm-amd64:
-    name: Unit vLLM (amd64)
-    needs: build-vllm-amd64
-    runs-on: cpu-amd-m5-2xlarge
+  unit-tests:
+    name: Unit ${{ matrix.framework }} (${{ matrix.arch }})
+    needs: [build-framework-amd64, build-framework-arm64]
+    if: always()
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { framework: vllm, arch: amd64, runner: cpu-amd-m5-2xlarge }
+          - { framework: vllm, arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { framework: trtllm, arch: amd64, runner: cpu-amd-m5-2xlarge }
+          - { framework: trtllm, arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { framework: sglang, arch: amd64, runner: cpu-amd-m5-2xlarge }
+          - { framework: sglang, arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
+      - name: Pull image
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}" ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          pytest_marks: "vllm and unit and nightly"
-          framework: vllm
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
+          pytest_marks: "${{ matrix.framework }} and unit and nightly"
+          framework: ${{ matrix.framework }}
           test_type: unit
-          platform_arch: amd64
+          platform_arch: ${{ matrix.arch }}
           cpu_limit: '8'
 
-  unit-vllm-arm64:
-    name: Unit vLLM (arm64)
-    needs: build-vllm-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
-      - name: Run Unit Tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
-          pytest_marks: "vllm and unit and nightly"
-          framework: vllm
-          test_type: unit
-          platform_arch: arm64
-          cpu_limit: '8'
-
-  unit-trtllm-amd64:
-    name: Unit TRTLLM (amd64)
-    needs: build-trtllm-amd64
-    runs-on: cpu-amd-m5-2xlarge
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-      - name: Run Unit Tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          pytest_marks: "trtllm and unit and nightly"
-          framework: trtllm
-          test_type: unit
-          platform_arch: amd64
-          cpu_limit: '8'
-
-  unit-trtllm-arm64:
-    name: Unit TRTLLM (arm64)
-    needs: build-trtllm-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
-      - name: Run Unit Tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
-          pytest_marks: "trtllm and unit and nightly"
-          framework: trtllm
-          test_type: unit
-          platform_arch: arm64
-          cpu_limit: '8'
-
-  unit-sglang-amd64:
-    name: Unit SGLang (amd64)
-    needs: build-sglang-amd64
-    runs-on: cpu-amd-m5-2xlarge
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-      - name: Run Unit Tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          pytest_marks: "sglang and unit and nightly"
-          framework: sglang
-          test_type: unit
-          platform_arch: amd64
-          cpu_limit: '8'
-
-  unit-sglang-arm64:
-    name: Unit SGLang (arm64)
-    needs: build-sglang-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
-      - name: Run Unit Tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
-          pytest_marks: "sglang and unit and nightly"
-          framework: sglang
-          test_type: unit
-          platform_arch: arm64
-          cpu_limit: '8'
-
-  integration-vllm-amd64:
-    name: Integration vLLM (amd64)
-    needs: build-vllm-amd64
+  integration-tests:
+    name: Integration ${{ matrix.framework }} (amd64)
+    needs: build-framework-amd64
+    if: always()
     runs-on: gpu-l40-amd64
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
+      - name: Pull image
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          pytest_marks: "vllm and integration and nightly"
-          framework: vllm
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
+          pytest_marks: "${{ matrix.framework }} and integration and nightly"
+          framework: ${{ matrix.framework }}
           test_type: integration
           platform_arch: amd64
 
-  integration-trtllm-amd64:
-    name: Integration TRTLLM (amd64)
-    needs: build-trtllm-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-      - name: Run Integration Tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          pytest_marks: "trtllm and integration and nightly"
-          framework: trtllm
-          test_type: integration
-          platform_arch: amd64
-
-  integration-sglang-amd64:
-    name: Integration SGLang (amd64)
-    needs: build-sglang-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-      - name: Run Integration Tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          pytest_marks: "sglang and integration and nightly"
-          framework: sglang
-          test_type: integration
-          platform_arch: amd64
-
-  e2e-single-vllm-amd64:
-    name: E2E Single GPU vLLM (amd64)
-    needs: build-vllm-amd64
+  e2e-single-gpu:
+    name: E2E Single GPU ${{ matrix.framework }} (amd64)
+    needs: build-framework-amd64
+    if: always()
     runs-on: gpu-l40-amd64
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
+      - name: Pull image
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          pytest_marks: "nightly and vllm and e2e and gpu_1"
-          framework: vllm
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
+          pytest_marks: "nightly and ${{ matrix.framework }} and e2e and gpu_1"
+          framework: ${{ matrix.framework }}
           test_type: e2e
           platform_arch: amd64
 
-  e2e-single-trtllm-amd64:
-    name: E2E Single GPU TRTLLM (amd64)
-    needs: build-trtllm-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-      - name: Run E2E Tests (gpu_1)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          pytest_marks: "nightly and trtllm and e2e and gpu_1"
-          framework: trtllm
-          test_type: e2e
-          platform_arch: amd64
-
-  e2e-single-sglang-amd64:
-    name: E2E Single GPU SGLang (amd64)
-    needs: build-sglang-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-      - name: Run E2E Tests (gpu_1)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          pytest_marks: "nightly and sglang and e2e and gpu_1"
-          framework: sglang
-          test_type: e2e
-          platform_arch: amd64
-
-  e2e-multi-vllm-amd64:
-    name: E2E Multi GPU vLLM (amd64)
-    needs: build-vllm-amd64
+  e2e-multi-gpu:
+    name: E2E Multi GPU ${{ matrix.framework }} (amd64)
+    needs: build-framework-amd64
+    if: always()
     runs-on: gpu-l40-amd64
     timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
+      - name: Pull image
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          pytest_marks: "nightly and vllm and e2e and gpu_2"
-          framework: vllm
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
+          pytest_marks: "nightly and ${{ matrix.framework }} and e2e and gpu_2"
+          framework: ${{ matrix.framework }}
           test_type: e2e
           platform_arch: amd64
 
-  e2e-multi-trtllm-amd64:
-    name: E2E Multi GPU TRTLLM (amd64)
-    needs: build-trtllm-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 150
+  component-tests:
+    name: Component ${{ matrix.framework }} ${{ matrix.component }} (${{ matrix.arch }})
+    needs: [build-framework-amd64, build-framework-arm64]
+    if: always()
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { framework: vllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
+          - { framework: vllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
+          - { framework: vllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and kvbm and not slow" }
+          - { framework: vllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
+          - { framework: vllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
+          - { framework: vllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
+          - { framework: trtllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
+          - { framework: trtllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
+          - { framework: trtllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and kvbm" }
+          - { framework: trtllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
+          - { framework: trtllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
+          - { framework: trtllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
+          - { framework: sglang, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
+          - { framework: sglang, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
+          - { framework: sglang, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and kvbm" }
+          - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
+          - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
+          - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
+      - name: Pull image
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-      - name: Run E2E Tests (gpu_2)
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}"
+          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}" ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
+      - name: Run Component Tests (${{ matrix.component }})
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          pytest_marks: "nightly and trtllm and e2e and gpu_2"
-          framework: trtllm
-          test_type: e2e
-          platform_arch: amd64
-
-  e2e-multi-sglang-amd64:
-    name: E2E Multi GPU SGLang (amd64)
-    needs: build-sglang-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 150
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-      - name: Run E2E Tests (gpu_2)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          pytest_marks: "nightly and sglang and e2e and gpu_2"
-          framework: sglang
-          test_type: e2e
-          platform_arch: amd64
-
-  component-vllm-amd64-router:
-    name: Component vLLM router (amd64)
-    needs: build-vllm-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-      - name: Run Component Tests (router)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          pytest_marks: "nightly and router"
-          framework: vllm
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
+          pytest_marks: ${{ matrix.marks }}
+          framework: ${{ matrix.framework }}
           test_type: component
-          platform_arch: amd64
-
-  component-vllm-amd64-planner:
-    name: Component vLLM planner (amd64)
-    needs: build-vllm-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-      - name: Run Component Tests (planner)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          pytest_marks: "nightly and planner"
-          framework: vllm
-          test_type: component
-          platform_arch: amd64
-
-  component-vllm-amd64-kvbm:
-    name: Component vLLM kvbm (amd64)
-    needs: build-vllm-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-      - name: Run Component Tests (kvbm)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-amd64
-          pytest_marks: "nightly and kvbm and not slow"
-          framework: vllm
-          test_type: component
-          platform_arch: amd64
-
-  component-vllm-arm64-router:
-    name: Component vLLM router (arm64)
-    needs: build-vllm-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
-      - name: Run Component Tests (router)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
-          pytest_marks: "nightly and router"
-          framework: vllm
-          test_type: component
-          platform_arch: arm64
-
-  component-vllm-arm64-planner:
-    name: Component vLLM planner (arm64)
-    needs: build-vllm-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
-      - name: Run Component Tests (planner)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
-          pytest_marks: "nightly and planner"
-          framework: vllm
-          test_type: component
-          platform_arch: arm64
-
-  component-vllm-arm64-kvbm:
-    name: Component vLLM kvbm (arm64)
-    needs: build-vllm-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
-      - name: Run Component Tests (kvbm)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-vllm-arm64
-          pytest_marks: "nightly and kvbm"
-          framework: vllm
-          test_type: component
-          platform_arch: arm64
-
-  component-trtllm-amd64-router:
-    name: Component TRTLLM router (amd64)
-    needs: build-trtllm-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-      - name: Run Component Tests (router)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          pytest_marks: "nightly and router"
-          framework: trtllm
-          test_type: component
-          platform_arch: amd64
-
-  component-trtllm-amd64-planner:
-    name: Component TRTLLM planner (amd64)
-    needs: build-trtllm-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-      - name: Run Component Tests (planner)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          pytest_marks: "nightly and planner"
-          framework: trtllm
-          test_type: component
-          platform_arch: amd64
-
-  component-trtllm-amd64-kvbm:
-    name: Component TRTLLM kvbm (amd64)
-    needs: build-trtllm-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-      - name: Run Component Tests (kvbm)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-amd64
-          pytest_marks: "nightly and kvbm"
-          framework: trtllm
-          test_type: component
-          platform_arch: amd64
-
-  component-trtllm-arm64-router:
-    name: Component TRTLLM router (arm64)
-    needs: build-trtllm-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
-      - name: Run Component Tests (router)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
-          pytest_marks: "nightly and router"
-          framework: trtllm
-          test_type: component
-          platform_arch: arm64
-
-  component-trtllm-arm64-planner:
-    name: Component TRTLLM planner (arm64)
-    needs: build-trtllm-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
-      - name: Run Component Tests (planner)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
-          pytest_marks: "nightly and planner"
-          framework: trtllm
-          test_type: component
-          platform_arch: arm64
-
-  component-trtllm-arm64-kvbm:
-    name: Component TRTLLM kvbm (arm64)
-    needs: build-trtllm-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
-      - name: Run Component Tests (kvbm)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-trtllm-arm64
-          pytest_marks: "nightly and kvbm"
-          framework: trtllm
-          test_type: component
-          platform_arch: arm64
-
-  component-sglang-amd64-router:
-    name: Component SGLang router (amd64)
-    needs: build-sglang-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-      - name: Run Component Tests (router)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          pytest_marks: "nightly and router"
-          framework: sglang
-          test_type: component
-          platform_arch: amd64
-
-  component-sglang-amd64-planner:
-    name: Component SGLang planner (amd64)
-    needs: build-sglang-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-      - name: Run Component Tests (planner)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          pytest_marks: "nightly and planner"
-          framework: sglang
-          test_type: component
-          platform_arch: amd64
-
-  component-sglang-amd64-kvbm:
-    name: Component SGLang kvbm (amd64)
-    needs: build-sglang-amd64
-    runs-on: gpu-l40-amd64
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-      - name: Run Component Tests (kvbm)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-amd64
-          pytest_marks: "nightly and kvbm"
-          framework: sglang
-          test_type: component
-          platform_arch: amd64
-
-  component-sglang-arm64-router:
-    name: Component SGLang router (arm64)
-    needs: build-sglang-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
-      - name: Run Component Tests (router)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
-          pytest_marks: "nightly and router"
-          framework: sglang
-          test_type: component
-          platform_arch: arm64
-
-  component-sglang-arm64-planner:
-    name: Component SGLang planner (arm64)
-    needs: build-sglang-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
-      - name: Run Component Tests (planner)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
-          pytest_marks: "nightly and planner"
-          framework: sglang
-          test_type: component
-          platform_arch: arm64
-
-  component-sglang-arm64-kvbm:
-    name: Component SGLang kvbm (arm64)
-    needs: build-sglang-arm64
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
-      - name: Run Component Tests (kvbm)
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-sglang-arm64
-          pytest_marks: "nightly and kvbm"
-          framework: sglang
-          test_type: component
-          platform_arch: arm64
+          platform_arch: ${{ matrix.arch }}
 
   ############################## RESULTS SUMMARY ##############################
-  #TODO: Update this to add links to the jobs and add more details.
   results-summary:
     name: Results Summary
     runs-on: ubuntu-latest
     if: always()
-    needs:
-      - build-vllm-amd64
-      - build-vllm-arm64
-      - build-trtllm-amd64
-      - build-trtllm-arm64
-      - build-sglang-amd64
-      - build-sglang-arm64
-      - unit-vllm-amd64
-      - unit-vllm-arm64
-      - unit-trtllm-amd64
-      - unit-trtllm-arm64
-      - unit-sglang-amd64
-      - unit-sglang-arm64
-      - integration-vllm-amd64
-      - integration-trtllm-amd64
-      - integration-sglang-amd64
-      - e2e-single-vllm-amd64
-      - e2e-single-trtllm-amd64
-      - e2e-single-sglang-amd64
-      - e2e-multi-vllm-amd64
-      - e2e-multi-trtllm-amd64
-      - e2e-multi-sglang-amd64
-      - component-vllm-amd64-router
-      - component-vllm-amd64-planner
-      - component-vllm-amd64-kvbm
-      - component-vllm-arm64-router
-      - component-vllm-arm64-planner
-      - component-vllm-arm64-kvbm
-      - component-trtllm-amd64-router
-      - component-trtllm-amd64-planner
-      - component-trtllm-amd64-kvbm
-      - component-trtllm-arm64-router
-      - component-trtllm-arm64-planner
-      - component-trtllm-arm64-kvbm
-      - component-sglang-amd64-router
-      - component-sglang-amd64-planner
-      - component-sglang-amd64-kvbm
-      - component-sglang-arm64-router
-      - component-sglang-arm64-planner
-      - component-sglang-arm64-kvbm
+    needs: [build-framework-amd64, build-framework-arm64, unit-tests, integration-tests, e2e-single-gpu, e2e-multi-gpu, component-tests]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -1490,8 +441,8 @@ jobs:
           set -e
           echo "# Nightly CI Results Summary" > results.md
           echo "" >> results.md
-          echo "| Stage            | Status   | Runner                | Duration (min) | Artifacts                  |" >> results.md
-          echo "|------------------|----------|-----------------------|----------------|----------------------------|" >> results.md
+          echo "| Stage | Status | Runner | Duration (min) | Artifacts |" >> results.md
+          echo "|-------|--------|--------|----------------|-----------|" >> results.md
 
           gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs -q ".jobs[] | {id, name, runner_name, conclusion, started_at, completed_at}" > jobs.jsonl
 
@@ -1527,52 +478,3 @@ jobs:
           name: nightly-results-summary
           path: results.md
           retention-days: 7
-  # notify-slack:
-  #   name: Notify Slack
-  #   runs-on: ubuntu-latest
-  #   if: always() && github.event_name == 'schedule' && !github.event.repository.fork
-  #   needs: results-summary
-  #   permissions:
-  #     contents: read
-  #   env:
-  #     HAS_SLACK_WEBHOOK: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL != '' }}
-  #   steps:
-  #     - name: Send Slack notification
-  #       env:
-  #         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
-  #         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-  #       run: |
-  #         set -euo pipefail
-  #         JOBS_JSON=$(mktemp)
-  #         gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs --paginate > "$JOBS_JSON"
-
-  #         FAIL_BLOCK=$(jq -r '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != null) |
-  #            "• " + .name + " (status: " + (.conclusion // "unknown") + ")"' "$JOBS_JSON")
-
-  #         SUMMARY="Nightly CI results: ${RUN_URL}\n\n"
-  #         if [ -z "${FAIL_BLOCK}" ]; then
-  #           SUMMARY+="All jobs succeeded."
-  #         else
-  #           SUMMARY+="Failing jobs:\n${FAIL_BLOCK}"
-  #         fi
-
-  #         PAYLOAD=$(jq -n --arg text "$SUMMARY" '{text: $text}')
-
-  #         send_slack() {
-  #           retry=0
-  #           until [ $retry -ge 3 ]; do
-  #             if curl -sSf -X POST -H "Content-Type: application/json" -d="$PAYLOAD" "$SLACK_WEBHOOK_URL" > /dev/null; then
-  #               echo "Slack notification sent"
-  #               return 0
-  #             fi
-  #             retry=$((retry+1))
-  #             echo "Slack notification failed (attempt ${retry}/3). Retrying in 10s..."
-  #             sleep 10
-  #           done
-  #           echo "Warning: Slack notification failed after 3 attempts" >&2
-  #           return 0
-  #         }
-
-  #         set +x
-  #         send_slack
