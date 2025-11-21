@@ -242,10 +242,10 @@ class BaseWorkerHandler(ABC):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
-                        out["completion_usage"] = (
-                            BaseWorkerHandler._build_completion_usage(
-                                request_output=res
-                            )
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res
                         )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
@@ -398,9 +398,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     # Build disaggregated_params with KV transfer params and router overlap
                     disaggregated_params = {}
                     if res.kv_transfer_params:
-                        disaggregated_params["kv_transfer_params"] = (
-                            res.kv_transfer_params
-                        )
+                        disaggregated_params[
+                            "kv_transfer_params"
+                        ] = res.kv_transfer_params
                     # Include router's overlap calculation for PrefillRouter
                     disaggregated_params["overlap_blocks"] = overlap_blocks
 
