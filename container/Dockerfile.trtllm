@@ -13,7 +13,7 @@ ARG RUNTIME_IMAGE_TAG="25.10-cuda13.0-runtime-ubuntu24.04"
 # TensorRT-LLM specific configuration
 ARG HAS_TRTLLM_CONTEXT=0
 ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
-ARG TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+ARG TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 ARG GITHUB_TRTLLM_COMMIT
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -198,11 +198,16 @@ ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 # Install Python, build-essential and python3-dev as apt dependencies
-RUN curl -fsSL \
-        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-archive-keyring.gpg \
+RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
+        ARCH_FOR_GPG=${ARCH_ALT}; \
+    else \
+        ARCH_FOR_GPG="arm64"; \
+    fi && \
+    curl -fsSL \
+        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${ARCH_FOR_GPG}/cuda-archive-keyring.gpg \
         -o /usr/share/keyrings/cuda-archive-keyring.gpg &&\
     echo "deb [signed-by=/usr/share/keyrings/cuda-archive-keyring.gpg] \
-        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64 /" \
+        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${ARCH_FOR_GPG} /" \
         | tee /etc/apt/sources.list.d/cuda.repo.list > /dev/null &&\
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

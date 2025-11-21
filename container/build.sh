@@ -95,7 +95,7 @@ TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
 
 # TensorRT-LLM PyPI index URL
-DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
 DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc2"
