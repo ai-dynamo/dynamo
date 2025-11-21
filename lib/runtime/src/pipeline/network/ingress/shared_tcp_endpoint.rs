@@ -77,7 +77,7 @@ impl SharedTcpServer {
             namespace,
             component_name,
             endpoint_name: endpoint_name.clone(),
-            system_health,
+            system_health: system_health.clone(),
             inflight: Arc::new(AtomicU64::new(0)),
             notify: Arc::new(Notify::new()),
         });
