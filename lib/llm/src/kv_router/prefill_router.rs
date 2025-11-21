@@ -258,7 +258,8 @@ impl PrefillRouter {
             .as_ref()
             .and_then(|params| params.get("overlap_blocks"))
             .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0);
 
         Ok((
             PrefillResult {
@@ -335,7 +336,7 @@ impl
                 let final_cached_tokens = if let Some(vllm_value) = vllm_cached_tokens {
                     vllm_value
                 } else {
-                    overlap_blocks * self.block_size
+                    overlap_blocks.saturating_mul(self.block_size)
                 };
 
                 prefill_result.prompt_tokens_details =
