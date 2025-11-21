@@ -150,7 +150,6 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.sglang
 @pytest.mark.gpu_1
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.xfail(strict=False)
 def test_request_cancellation_sglang_aggregated(
     request, runtime_services, predownload_models
 ):
@@ -161,8 +160,9 @@ def test_request_cancellation_sglang_aggregated(
     the system properly handles the cancellation and cleans up resources
     on the worker side in aggregated (agg) mode.
 
-    TODO: Test is currently flaky/failing due to SGLang limitations with prefill cancellation.
-    See: https://github.com/sgl-project/sglang/issues/11139
+    Fixed: Implemented two-phase cancellation for SGLang to prevent race conditions
+    between Rust runtime and SGLang cleanup processes. SGLang now gets a 300ms
+    grace period to process cancellation gracefully.
     """
     logger.info("Sanity check if latest test is getting executed")
     # Step 1: Start the frontend
@@ -190,8 +190,9 @@ def test_request_cancellation_sglang_aggregated(
             for request_type, description in test_scenarios:
                 logger.info(f"Testing {description.lower()}...")
 
-                # Send the request (non-blocking)
-                cancellable_req = send_cancellable_request(request_type)
+                # Send the request (non-blocking) with large prompt to reproduce race condition
+                # Large prompts help trigger the timing issue as recommended by project leaders
+                cancellable_req = send_cancellable_request(request_type, use_long_prompt=True)
 
                 # Poll for "New Request ID" pattern (Dynamo context ID)
                 request_id, worker_log_offset = poll_for_pattern(
@@ -218,11 +219,12 @@ def test_request_cancellation_sglang_aggregated(
                 logger.info(f"Cancelled request ID: {request_id}")
 
                 # Poll for "Aborted Request ID" with matching ID
+                # Increased timeout to account for SGLang graceful cleanup grace period
                 _, worker_log_offset = poll_for_pattern(
                     process=worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=worker_log_offset,
-                    max_wait_ms=2000,
+                    max_wait_ms=5000,  # Increased from 2000ms to 5000ms to account for grace period
                 )
 
                 # Verify frontend log has kill message
