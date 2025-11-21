@@ -184,7 +184,7 @@ impl Discovery for KVStoreDiscovery {
             key_path
         );
         let bucket = self.store.get_or_create_bucket(bucket_name, None).await?;
-        let key = crate::storage::key_value_store::Key::from_raw(key_path.clone());
+        let key = crate::storage::key_value_store::Key::new(key_path.clone());
 
         tracing::debug!(
             "KVStoreDiscovery::register: Inserting into bucket={}, key={}",
@@ -251,7 +251,7 @@ impl Discovery for KVStoreDiscovery {
             return Ok(());
         };
 
-        let key = crate::storage::key_value_store::Key::from_raw(key_path.clone());
+        let key = crate::storage::key_value_store::Key::new(key_path.clone());
 
         // Delete the entry from the bucket
         bucket.delete(&key).await?;
@@ -277,12 +277,12 @@ impl Discovery for KVStoreDiscovery {
 
         // Filter by prefix and deserialize
         let mut instances = Vec::new();
-        for (key_str, value) in entries {
-            if Self::matches_prefix(&key_str, &prefix, bucket_name) {
+        for (key, value) in entries {
+            if Self::matches_prefix(key.as_ref(), &prefix, bucket_name) {
                 match Self::parse_instance(&value) {
                     Ok(instance) => instances.push(instance),
                     Err(e) => {
-                        tracing::warn!(key = %key_str, error = %e, "Failed to parse discovery instance");
+                        tracing::warn!(%key, error = %e, "Failed to parse discovery instance");
                     }
                 }
             }
