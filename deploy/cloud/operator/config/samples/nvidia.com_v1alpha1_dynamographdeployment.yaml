@@ -21,5 +21,9 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: dynamographdeployment-sample
 spec:
+  services:
+    Frontend:
+      dynamoNamespace: agg
+    VllmDecodeWorker:
+      dynamoNamespace: agg
   # TODO(user): Add fields here
-  # EXAMPLE: dynamoComponent: basic:dev
