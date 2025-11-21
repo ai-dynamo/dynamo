@@ -152,8 +152,9 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         bash /tmp/install_tensorrt.sh && \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
         # TRTLLM 1.2.0rc2 has issues installing from pypi with uv, installing from direct wheel link works best
-        TENSORRTLLM_PIP_WHEEL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc2-cp312-cp312-linux_${ARCH_ALT}.whl"; \
-        uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" ; \
+        # explicitly installing triton 3.5.0 as trtllm only lists triton as dependency on x64_64 for some reason
+        export TENSORRTLLM_PIP_WHEEL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc2-cp312-cp312-linux_${ARCH_ALT}.whl"; \
+        uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.0; \
     fi
 
 ##################################################
