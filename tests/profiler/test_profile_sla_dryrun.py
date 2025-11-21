@@ -127,8 +127,6 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.parallel
-    @pytest.mark.gpu_0
-    @pytest.mark.integration
     @pytest.mark.asyncio
     async def test_vllm_dryrun(self, vllm_args):
         """Test that profile_sla dry-run works for vllm backend with disagg.yaml config."""
@@ -137,8 +135,6 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.parallel
-    @pytest.mark.gpu_0
-    @pytest.mark.integration
     @pytest.mark.asyncio
     async def test_sglang_dryrun(self, sglang_args):
         """Test that profile_sla dry-run works for sglang backend with disagg.yaml config."""
@@ -189,8 +185,6 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.parallel
-    @pytest.mark.gpu_0
-    @pytest.mark.integration
     @pytest.mark.asyncio
     async def test_trtllm_dryrun(self, trtllm_args):
         """Test that profile_sla dry-run works for trtllm backend with disagg.yaml config."""
@@ -242,8 +236,6 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.parallel
-    @pytest.mark.gpu_0
-    @pytest.mark.integration
     @pytest.mark.asyncio
     async def test_sglang_moe_dryrun(self, sglang_moe_args):
         """Test that profile_sla dry-run works for sglang backend with MoE config."""
@@ -311,8 +303,6 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.parallel
-    @pytest.mark.gpu_0
-    @pytest.mark.integration
     @pytest.mark.asyncio
     @patch("benchmarks.profiler.utils.search_space_autogen.get_gpu_summary")
     @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
@@ -377,8 +367,6 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.parallel
-    @pytest.mark.gpu_0
-    @pytest.mark.integration
     @pytest.mark.asyncio
     @patch("benchmarks.profiler.utils.search_space_autogen.get_gpu_summary")
     @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
@@ -443,8 +431,6 @@ class TestProfileSLADryRun:
 
     @pytest.mark.pre_merge
     @pytest.mark.parallel
-    @pytest.mark.gpu_0
-    @pytest.mark.integration
     @pytest.mark.asyncio
     @patch("benchmarks.profiler.utils.search_space_autogen.get_gpu_summary")
     @patch("benchmarks.profiler.utils.search_space_autogen.get_model_info")
