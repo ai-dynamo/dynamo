@@ -10,7 +10,7 @@ pub mod publisher;
 pub mod subscriber;
 pub mod tracker;
 
-pub use config::KvEventConsolidatorConfig;
+pub use config::{ConsolidatorOutputTransport, KvEventConsolidatorConfig};
 pub use publisher::KvEventConsolidatorPublisher;
 pub use tracker::{CacheStatusTracker, EventSource, StorageTier};
 
@@ -20,6 +20,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use publisher::KvEventConsolidatorPublisherNats;
 use subscriber::start_simple_zmq_listener;
 
 /// Handle for KVBM to send G2/G3 events directly to the KV Event Consolidator
@@ -80,7 +81,8 @@ pub struct KvEventConsolidator {
     tracker: Arc<RwLock<CacheStatusTracker>>,
     subscriber_handle: Option<JoinHandle<()>>,
     cancellation_token: CancellationToken,
-    publisher: Option<KvEventConsolidatorPublisher>,
+    publisher_zmq: Option<KvEventConsolidatorPublisher>,
+    publisher_nats: Option<KvEventConsolidatorPublisherNats>,
 }
 
 impl KvEventConsolidator {
@@ -94,27 +96,36 @@ impl KvEventConsolidator {
             tracker,
             subscriber_handle: None,
             cancellation_token,
-            publisher: None,
+            publisher_zmq: None,
+            publisher_nats: None,
         })
     }
 
     /// Start the KV Event Consolidator
     pub async fn start(&mut self) -> Result<()> {
         tracing::info!(
-            "Starting KV Event Consolidator: subscribe from {}, publish to {}",
+            "Starting KV Event Consolidator: subscribe from {}, publish via {:?}",
             self.config.engine_event_endpoint,
-            self.config.consolidated_event_endpoint
+            self.config.output_transport()
         );
 
-        // Start the publisher first
-        let publisher = KvEventConsolidatorPublisher::new(
-            &self.config.consolidated_event_endpoint,
-            self.tracker.clone(),
-        )?;
-        self.publisher = Some(publisher);
-
-        tracing::info!("Waiting for downstream subscribers to connect...");
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Start the appropriate publisher based on transport type
+        match self.config.output_transport() {
+            ConsolidatorOutputTransport::Zmq => {
+                let publisher = KvEventConsolidatorPublisher::new(
+                    &self.config.consolidated_event_endpoint,
+                    self.tracker.clone(),
+                )?;
+                self.publisher_zmq = Some(publisher);
+                tracing::info!("Waiting for downstream ZMQ subscribers to connect...");
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+            ConsolidatorOutputTransport::Nats => {
+                let publisher = KvEventConsolidatorPublisherNats::new(self.tracker.clone())?;
+                self.publisher_nats = Some(publisher);
+                tracing::info!("NATS publisher started");
+            }
+        }
 
         // Start the subscriber (connects to engine's publisher - vLLM or TensorRT-LLM)
         let handle = start_simple_zmq_listener(
@@ -133,19 +144,23 @@ impl KvEventConsolidator {
     }
 
     /// Shutdown the KV Event Consolidator
-    pub async fn shutdown(&mut self) -> Result<()> {
+    pub async fn shutdown(self) -> Result<()> {
         tracing::info!("Shutting down KV Event Consolidator");
 
         // Cancel the ZMQ listener
         self.cancellation_token.cancel();
 
         // Wait for adapter task to finish
-        if let Some(handle) = self.subscriber_handle.take() {
+        if let Some(handle) = self.subscriber_handle {
             handle.abort();
             let _ = handle.await;
         }
 
-        if let Some(publisher) = self.publisher.take() {
+        if let Some(publisher) = self.publisher_zmq {
+            publisher.shutdown().await?;
+        }
+
+        if let Some(publisher) = self.publisher_nats {
             publisher.shutdown().await?;
         }
 

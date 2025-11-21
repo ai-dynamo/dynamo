@@ -235,6 +235,24 @@ async def init(runtime: DistributedRuntime, config: Config):
             )
             sys.exit(1)
 
+    trtllm_zmq_bind_endpoint = None  # Endpoint for TensorRT-LLM to bind and publish
+
+    try:
+        from kvbm.trtllm_integration.consolidator_config import (
+            get_consolidator_endpoints,
+            should_enable_consolidator,
+        )
+
+        if should_enable_consolidator(arg_map):
+            trtllm_zmq_bind_endpoint = get_consolidator_endpoints()
+    except Exception as e:
+        logging.error(
+            f"Failed to set up consolidator endpoints: {e}. "
+            "Continuing without KV event consolidation. "
+            "Ensure 'kvbm' package is installed if this feature is needed.",
+            exc_info=True,
+        )
+
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
     engine_args = arg_map
 
@@ -399,6 +417,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 int(endpoint.connection_id()),
                 config.kv_block_size,
                 metrics_labels,
+                zmq_endpoint=trtllm_zmq_bind_endpoint,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)

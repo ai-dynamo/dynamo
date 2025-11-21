@@ -16,6 +16,7 @@ kr8s
 kubernetes==32.0.1
 kubernetes_asyncio
 matplotlib
+msgpack
 msgspec
 mypy
 nvidia-ml-py==13.580.65
