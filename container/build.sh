@@ -1234,10 +1234,26 @@ if [ -d "${BUILD_LOG_DIR:-}" ]; then
                 REPORT_FILE="${REPORTS_DIR}/${LOG_BASENAME}-report.txt"
                 JSON_FILE="${REPORTS_DIR}/${LOG_BASENAME}-data.json"
                 
-                echo "   Processing: $(basename ${log_file})"
+                # Determine image name from log file name
+                IMAGE_NAME="Unknown"
+                if [[ "$LOG_BASENAME" == *"base-image"* ]]; then
+                    IMAGE_NAME="Base Image (dynamo-base)"
+                elif [[ "$LOG_BASENAME" == *"framework"* ]]; then
+                    # Extract framework name from filename
+                    if [[ "$LOG_BASENAME" =~ framework-([a-z]+)-build ]]; then
+                        FRAMEWORK_NAME="${BASH_REMATCH[1]}"
+                        IMAGE_NAME="Framework Image (${FRAMEWORK_NAME})"
+                    else
+                        IMAGE_NAME="Framework Image"
+                    fi
+                elif [[ "$LOG_BASENAME" == *"single-stage"* ]]; then
+                    IMAGE_NAME="Single-Stage Image"
+                fi
                 
-                # Parse and generate report
-                if python3 "${BUILDKIT_PARSER}" "${log_file}" "${JSON_FILE}" "${REPORT_FILE}" 2>/dev/null; then
+                echo "   Processing: $(basename ${log_file}) → ${IMAGE_NAME}"
+                
+                # Parse and generate report with image name
+                if python3 "${BUILDKIT_PARSER}" "${log_file}" "${JSON_FILE}" "${REPORT_FILE}" "${IMAGE_NAME}" 2>/dev/null; then
                     echo "   ✅ Report: $(basename ${REPORT_FILE})"
                     echo "   ✅ Data:   $(basename ${JSON_FILE})"
                 else
@@ -1249,19 +1265,37 @@ if [ -d "${BUILD_LOG_DIR:-}" ]; then
             echo "📊 Build Reports generated in: ${REPORTS_DIR}"
             echo ""
             
-            # Display the most relevant report (framework build if available, otherwise latest)
-            MAIN_REPORT=""
-            if [ -n "${FRAMEWORK:-}" ]; then
-                MAIN_REPORT=$(find "${REPORTS_DIR}" -name "*framework-${FRAMEWORK,,}*-report.txt" | head -n 1)
-            fi
-            if [ -z "${MAIN_REPORT}" ]; then
-                MAIN_REPORT=$(find "${REPORTS_DIR}" -name "*-report.txt" | tail -n 1)
+            # Display all reports in order (base image first, then framework)
+            echo ""
+            echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+            echo "║                          📊 BUILD REPORTS SUMMARY                              ║"
+            echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+            echo ""
+            
+            # Show base image report first if it exists
+            BASE_REPORT=$(find "${REPORTS_DIR}" -name "*base-image*-report.txt" | head -n 1)
+            if [ -n "${BASE_REPORT}" ] && [ -f "${BASE_REPORT}" ]; then
+                cat "${BASE_REPORT}"
+                echo ""
+                echo "────────────────────────────────────────────────────────────────────────────────"
+                echo ""
             fi
             
-            if [ -n "${MAIN_REPORT}" ] && [ -f "${MAIN_REPORT}" ]; then
-                echo ""
-                cat "${MAIN_REPORT}"
-                echo ""
+            # Show framework report if it exists
+            if [ -n "${FRAMEWORK:-}" ]; then
+                FRAMEWORK_REPORT=$(find "${REPORTS_DIR}" -name "*framework-${FRAMEWORK,,}*-report.txt" | head -n 1)
+                if [ -n "${FRAMEWORK_REPORT}" ] && [ -f "${FRAMEWORK_REPORT}" ]; then
+                    cat "${FRAMEWORK_REPORT}"
+                    echo ""
+                fi
+            else
+                # If no specific framework, show any other reports
+                for report in $(find "${REPORTS_DIR}" -name "*-report.txt" ! -name "*base-image*" 2>/dev/null); do
+                    if [ -f "${report}" ]; then
+                        cat "${report}"
+                        echo ""
+                    fi
+                done
             fi
         else
             echo "   ⚠️  BuildKit parser not found at: ${BUILDKIT_PARSER}"

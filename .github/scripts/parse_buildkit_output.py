@@ -168,11 +168,13 @@ class BuildKitParser:
 
         return int(val * multipliers.get(unit, 1))
 
-    def generate_report(self, build_data: Dict[str, Any]) -> str:
+    def generate_report(self, build_data: Dict[str, Any], image_name: str = None) -> str:
         """Generate a human-readable report from parsed build data"""
         report = []
         report.append("=" * 80)
         report.append("📊 BUILDKIT DETAILED BUILD REPORT")
+        if image_name:
+            report.append(f"🐳 Image: {image_name}")
         report.append("=" * 80)
         report.append("")
 
@@ -305,7 +307,7 @@ def main():
     """Main entry point"""
     if len(sys.argv) < 2:
         print(
-            "Usage: parse_buildkit_output.py <build_log_file> [output_json] [output_report]",
+            "Usage: parse_buildkit_output.py <build_log_file> [output_json] [output_report] [image_name]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -313,6 +315,7 @@ def main():
     log_file = sys.argv[1]
     output_json = sys.argv[2] if len(sys.argv) > 2 else None
     output_report = sys.argv[3] if len(sys.argv) > 3 else None
+    image_name = sys.argv[4] if len(sys.argv) > 4 else None
 
     # Read build log
     try:
@@ -333,7 +336,7 @@ def main():
         print(f"✅ Build data written to: {output_json}", file=sys.stderr)
 
     # Output report
-    report_text = parser.generate_report(build_data)
+    report_text = parser.generate_report(build_data, image_name)
     if output_report:
         with open(output_report, "w") as f:
             f.write(report_text)

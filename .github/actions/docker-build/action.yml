@@ -290,7 +290,16 @@ runs:
         REPORT_FILE="build-metrics/buildkit-reports/buildkit-report-${{ inputs.framework }}-${PLATFORM_ARCH}.txt"
         JSON_FILE="build-metrics/buildkit-reports/buildkit-data-${{ inputs.framework }}-${PLATFORM_ARCH}.json"
         
+        # Determine image name from build context
+        IMAGE_NAME="${{ inputs.framework }} (${{ inputs.target }})"
+        if [ "${{ inputs.target }}" == "runtime" ]; then
+          IMAGE_NAME="${{ inputs.framework }} Runtime Image"
+        elif [ "${{ inputs.target }}" == "dev" ]; then
+          IMAGE_NAME="${{ inputs.framework }} Development Image"
+        fi
+        
         echo "🚀 Parsing BuildKit output..."
+        echo "Image: ${IMAGE_NAME}"
         echo "Output report: ${REPORT_FILE}"
         echo "Output data: ${JSON_FILE}"
         echo ""
@@ -298,12 +307,13 @@ runs:
         # Make parser executable
         chmod +x .github/scripts/parse_buildkit_output.py
         
-        # Run parser
+        # Run parser with image name
         set +e
         python3 .github/scripts/parse_buildkit_output.py \
           "$BUILD_LOG_FILE" \
           "$JSON_FILE" \
-          "$REPORT_FILE"
+          "$REPORT_FILE" \
+          "$IMAGE_NAME"
         PARSER_EXIT_CODE=$?
         set -e
         
