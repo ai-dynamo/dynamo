@@ -504,6 +504,22 @@ jobs:
           merge-multiple: true
         continue-on-error: true  # Don't fail if artifacts don't exist
 
+      - name: Download layer metrics
+        uses: actions/download-artifact@v4
+        with:
+          pattern: layer-metrics-*
+          path: layer-metrics/
+          merge-multiple: true
+        continue-on-error: true  # Don't fail if artifacts don't exist
+
+      - name: Download build logs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: build-logs-*
+          path: build-logs/
+          merge-multiple: true
+        continue-on-error: true  # Don't fail if artifacts don't exist
+
       - name: Download test results
         uses: actions/download-artifact@v4
         with:
@@ -521,6 +537,7 @@ jobs:
           # Container and test index configuration
           CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
           TEST_INDEX: ${{ secrets.TEST_INDEX }}
+          LAYER_INDEX: ${{ secrets.LAYER_INDEX }}
         run: |
           # Upload complete workflow metrics including container metrics
           python3 .github/workflows/upload_complete_workflow_metrics.py
