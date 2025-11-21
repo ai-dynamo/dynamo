@@ -12,6 +12,7 @@
 //! These capability flags enable optional direct paths that bypass host staging.
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::sync::OnceLock;
 
 use crate::block_manager::v2::physical::{
@@ -118,8 +119,8 @@ impl TransferCapabilities {
             .allocate_disk(None)
             .build()?;
 
-        let src_blocks = vec![0];
-        let dst_blocks = vec![0];
+        let src_blocks = vec![SmallVec::from([0])];
+        let dst_blocks = vec![SmallVec::from([0])];
 
         let ctx = TransportManager::builder()
             .worker_id(0)

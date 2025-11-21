@@ -88,7 +88,8 @@ pub struct KvConnectorLeaderRecorder {
 impl KvConnectorLeaderRecorder {
     pub fn new(
         worker_id: String,
-        page_size: usize,
+        engine_page_size: usize,
+        offload_page_size: usize,
         leader_py: PyKvbmLeader,
         consolidator_vllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
@@ -144,7 +145,8 @@ impl KvConnectorLeaderRecorder {
                 let mut block_manager_builder = BlockManagerBuilder::new()
                     .worker_id(0)
                     .leader(leader_py)
-                    .page_size(page_size)
+                    .engine_page_size(engine_page_size)
+                    .offload_page_size(offload_page_size)
                     .disable_device_pool(false)
                     .kvbm_metrics(kvbm_metrics_clone.clone());
 
@@ -191,7 +193,8 @@ impl KvConnectorLeaderRecorder {
 
         let connector_leader = KvConnectorLeader {
             slot_manager: slot_manager_cell,
-            block_size: page_size,
+            engine_page_size,
+            offload_page_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,

@@ -80,7 +80,8 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 pub struct KvConnectorLeader {
     slot_manager: Arc<OnceLock<ConnectorSlotManager<String>>>,
-    block_size: usize,
+    engine_page_size: usize,
+    offload_page_size: usize,
     inflight_requests: HashSet<String>,
     onboarding_slots: HashSet<String>,
     iteration_counter: u64,
@@ -90,7 +91,8 @@ pub struct KvConnectorLeader {
 impl KvConnectorLeader {
     fn new(
         worker_id: String,
-        page_size: usize,
+        engine_page_size: usize,
+        offload_page_size: usize,
         leader_py: PyKvbmLeader,
         consolidator_vllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
@@ -131,7 +133,8 @@ impl KvConnectorLeader {
                 let mut block_manager_builder = BlockManagerBuilder::new()
                     .worker_id(0)
                     .leader(leader_py)
-                    .page_size(page_size)
+                    .engine_page_size(engine_page_size)
+                    .offload_page_size(offload_page_size)
                     .disable_device_pool(false)
                     .kvbm_metrics(kvbm_metrics_clone.clone());
 
@@ -183,7 +186,8 @@ impl KvConnectorLeader {
 
         Self {
             slot_manager: slot_manager_cell,
-            block_size: page_size,
+            engine_page_size,
+            offload_page_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,
@@ -218,7 +222,7 @@ impl Leader for KvConnectorLeader {
         );
 
         // the number of device matched tokens should be less than or equal to the number of tokens in the request
-        debug_assert!(num_computed_tokens % self.block_size == 0);
+        debug_assert!(num_computed_tokens % self.engine_page_size == 0);
 
         let shared_slot = self.slot_manager().get_slot(&request_id)?;
         let mut slot = shared_slot
@@ -248,7 +252,7 @@ impl Leader for KvConnectorLeader {
         }
 
         // early exit if we cannot match full block
-        if (slot.sequence().total_tokens() - num_computed_tokens) < self.block_size {
+        if (slot.sequence().total_tokens() - num_computed_tokens) < self.offload_page_size {
             return Ok((0, false));
         }
 
@@ -259,7 +263,9 @@ impl Leader for KvConnectorLeader {
         // return the number of external tokens that are ready for onboarding
         // we always return true here as we always asynchronously onboard matched blocks
         if let SlotState::OnboardStaged(num_external_tokens) = slot.state() {
-            debug_assert!((num_computed_tokens + num_external_tokens) % self.block_size == 0);
+            debug_assert!(
+                (num_computed_tokens + num_external_tokens) % self.offload_page_size == 0
+            );
             tracing::debug!(
                 request_id = request_id,
                 "scheduling onboarding for {} external tokens",
@@ -303,7 +309,7 @@ impl Leader for KvConnectorLeader {
         // the second call will show num_external_tokens == 0
         // this call is just letting us know the other blocks that are being used for the remainder of the prefill
         if num_external_tokens > 0 {
-            let num_computed_tokens = block_ids.len() * self.block_size - num_external_tokens;
+            let num_computed_tokens = block_ids.len() * self.engine_page_size - num_external_tokens;
             slot.record_cached_device_tokens(num_computed_tokens);
             slot.advance_computed_position(num_computed_tokens)?;
 
@@ -565,11 +571,12 @@ pub struct PyKvConnectorLeader {
 #[pymethods]
 impl PyKvConnectorLeader {
     #[new]
-    #[pyo3(signature = (worker_id, drt, page_size, leader, consolidator_vllm_endpoint=None, consolidator_output_endpoint=None))]
+    #[pyo3(signature = (worker_id, drt, engine_page_size, offload_page_size, leader, consolidator_vllm_endpoint=None, consolidator_output_endpoint=None))]
     pub fn new(
         worker_id: String,
         drt: Option<PyObject>,
-        page_size: usize,
+        engine_page_size: usize,
+        offload_page_size: usize,
         leader: PyKvbmLeader,
         consolidator_vllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
@@ -586,7 +593,8 @@ impl PyKvConnectorLeader {
         let connector_leader: Box<dyn Leader> = if enable_kvbm_record {
             Box::new(recorder::KvConnectorLeaderRecorder::new(
                 worker_id,
-                page_size,
+                engine_page_size,
+                offload_page_size,
                 leader,
                 consolidator_vllm_endpoint,
                 consolidator_output_endpoint,
@@ -594,7 +602,8 @@ impl PyKvConnectorLeader {
         } else {
             Box::new(KvConnectorLeader::new(
                 worker_id,
-                page_size,
+                engine_page_size,
+                offload_page_size,
                 leader,
                 consolidator_vllm_endpoint,
                 consolidator_output_endpoint,

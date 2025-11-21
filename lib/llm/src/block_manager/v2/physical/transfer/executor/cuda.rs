@@ -9,6 +9,7 @@ use crate::block_manager::v2::kernels::OperationalCopyBackend;
 use crate::block_manager::v2::physical::transfer::context::TransferCompleteNotification;
 use anyhow::{Result, anyhow};
 use cudarc::driver::result as cuda_result;
+use smallvec::SmallVec;
 use std::ops::Range;
 
 // #[cfg(test)]
@@ -30,8 +31,8 @@ use std::ops::Range;
 pub fn execute_cuda_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[SmallVec<[usize; 1]>],
+    dst_block_ids: &[SmallVec<[usize; 1]>],
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
     ctx: &TransferContext,
@@ -185,34 +186,92 @@ pub fn execute_cuda_transfer(
 fn execute_h2d(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[SmallVec<[usize; 1]>],
+    dst_block_ids: &[SmallVec<[usize; 1]>],
     layers: Range<usize>,
     stream: &cudarc::driver::CudaStream,
 ) -> Result<()> {
-    for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
+    for (src_block_id, dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
         for layer_id in layers.clone() {
             for outer_id in 0..src.layout().outer_dim() {
-                let src_region = src.memory_region(src_block_id, layer_id, outer_id)?;
-                let dst_region = dst.memory_region(dst_block_id, layer_id, outer_id)?;
+                if src_block_id.len() != 1 {
+                    let dst_region = dst.memory_region(dst_block_id[0], layer_id, outer_id)?;
+                    let mut dst_ptr = dst_region.addr() as *mut u8;
+                    let n = dst_block_id.len();
 
-                if src_region.size() != dst_region.size() {
-                    return Err(anyhow!(
-                        "Size mismatch at block=({},{}), layer={}, outer={}: src={}, dst={}",
-                        src_block_id,
-                        dst_block_id,
-                        layer_id,
-                        outer_id,
-                        src_region.size(),
-                        dst_region.size()
-                    ));
-                }
+                    for i in 0..n {
+                        let src_region = src.memory_region(src_block_id[i], layer_id, outer_id)?;
+                        if src_region.size() * n != dst_region.size() {
+                            return Err(anyhow!(
+                                "Size mismatch at block=({:?},{:?}), layer={}, outer={}: src={}, dst={}",
+                                src_block_id[i],
+                                dst_block_id,
+                                layer_id,
+                                outer_id,
+                                src_region.size(),
+                                dst_region.size()
+                            ));
+                        }
 
-                unsafe {
-                    let src_ptr = src_region.addr() as *const u8;
-                    let dst_ptr = dst_region.addr() as u64;
-                    let src_slice = std::slice::from_raw_parts(src_ptr, src_region.size());
-                    cuda_result::memcpy_htod_async(dst_ptr, src_slice, stream.cu_stream())?;
+                        unsafe {
+                            let src_ptr = src_region.addr() as *const u8;
+                            let src_slice = std::slice::from_raw_parts(src_ptr, src_region.size());
+                            cuda_result::memcpy_htod_async(
+                                dst_ptr as u64,
+                                src_slice,
+                                stream.cu_stream(),
+                            )?;
+                            dst_ptr = dst_ptr.add(src_region.size());
+                        }
+                    }
+                } else if dst_block_id.len() != 1 {
+                    let src_region = src.memory_region(src_block_id[0], layer_id, outer_id)?;
+                    let mut src_ptr = src_region.addr() as *const u8;
+                    let n = src_block_id.len();
+
+                    for i in 0..n {
+                        let dst_region = dst.memory_region(dst_block_id[i], layer_id, outer_id)?;
+                        if dst_region.size() * n != src_region.size() {
+                            return Err(anyhow!(
+                                "Size mismatch at block=({:?},{:?}), layer={}, outer={}: src={}, dst={}",
+                                src_block_id,
+                                dst_block_id[i],
+                                layer_id,
+                                outer_id,
+                                src_region.size(),
+                                dst_region.size()
+                            ));
+                        }
+
+                        unsafe {
+                            let src_slice = std::slice::from_raw_parts(src_ptr, dst_region.size());
+                            let dst_ptr = dst_region.addr() as u64;
+                            cuda_result::memcpy_htod_async(dst_ptr, src_slice, stream.cu_stream())?;
+                            src_ptr = src_ptr.add(dst_region.size());
+                        }
+                    }
+                } else {
+                    let src_region = src.memory_region(src_block_id[0], layer_id, outer_id)?;
+                    let dst_region = dst.memory_region(dst_block_id[0], layer_id, outer_id)?;
+
+                    if src_region.size() != dst_region.size() {
+                        return Err(anyhow!(
+                            "Size mismatch at block=({:?},{:?}), layer={}, outer={}: src={}, dst={}",
+                            src_block_id,
+                            dst_block_id,
+                            layer_id,
+                            outer_id,
+                            src_region.size(),
+                            dst_region.size()
+                        ));
+                    }
+
+                    unsafe {
+                        let src_ptr = src_region.addr() as *const u8;
+                        let dst_ptr = dst_region.addr() as u64;
+                        let src_slice = std::slice::from_raw_parts(src_ptr, src_region.size());
+                        cuda_result::memcpy_htod_async(dst_ptr, src_slice, stream.cu_stream())?;
+                    }
                 }
             }
         }
@@ -224,34 +283,95 @@ fn execute_h2d(
 fn execute_d2h(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[SmallVec<[usize; 1]>],
+    dst_block_ids: &[SmallVec<[usize; 1]>],
     layers: Range<usize>,
     stream: &cudarc::driver::CudaStream,
 ) -> Result<()> {
-    for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
+    for (src_block_id, dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
         for layer_id in layers.clone() {
             for outer_id in 0..src.layout().outer_dim() {
-                let src_region = src.memory_region(src_block_id, layer_id, outer_id)?;
-                let dst_region = dst.memory_region(dst_block_id, layer_id, outer_id)?;
+                if src_block_id.len() != 1 {
+                    let dst_region = dst.memory_region(dst_block_id[0], layer_id, outer_id)?;
+                    let mut dst_ptr = dst_region.addr() as *mut u8;
+                    let n = dst_block_id.len();
 
-                if src_region.size() != dst_region.size() {
-                    return Err(anyhow!(
-                        "Size mismatch at block=({},{}), layer={}, outer={}: src={}, dst={}",
-                        src_block_id,
-                        dst_block_id,
-                        layer_id,
-                        outer_id,
-                        src_region.size(),
-                        dst_region.size()
-                    ));
-                }
+                    for i in 0..n {
+                        let src_region = src.memory_region(src_block_id[i], layer_id, outer_id)?;
+                        if src_region.size() * n != dst_region.size() {
+                            return Err(anyhow!(
+                                "Size mismatch at block=({:?},{:?}), layer={}, outer={}: src={}, dst={}",
+                                src_block_id[i],
+                                dst_block_id,
+                                layer_id,
+                                outer_id,
+                                src_region.size(),
+                                dst_region.size()
+                            ));
+                        }
 
-                unsafe {
-                    let src_ptr = src_region.addr() as u64;
-                    let dst_ptr = dst_region.addr() as *mut u8;
-                    let dst_slice = std::slice::from_raw_parts_mut(dst_ptr, dst_region.size());
-                    cuda_result::memcpy_dtoh_async(dst_slice, src_ptr, stream.cu_stream())?;
+                        unsafe {
+                            let src_ptr = src_region.addr() as u64;
+                            let dst_slice =
+                                std::slice::from_raw_parts_mut(dst_ptr, src_region.size());
+                            cuda_result::memcpy_dtoh_async(dst_slice, src_ptr, stream.cu_stream())?;
+                            dst_ptr = dst_ptr.add(src_region.size());
+                        }
+                    }
+                } else if dst_block_id.len() != 1 {
+                    let src_region = src.memory_region(src_block_id[0], layer_id, outer_id)?;
+                    let mut src_ptr = src_region.addr() as *const u8;
+                    let n = src_block_id.len();
+
+                    for i in 0..n {
+                        let dst_region = dst.memory_region(dst_block_id[i], layer_id, outer_id)?;
+                        if dst_region.size() * n != src_region.size() {
+                            return Err(anyhow!(
+                                "Size mismatch at block=({:?},{:?}), layer={}, outer={}: src={}, dst={}",
+                                src_block_id,
+                                dst_block_id[i],
+                                layer_id,
+                                outer_id,
+                                src_region.size(),
+                                dst_region.size()
+                            ));
+                        }
+
+                        unsafe {
+                            let dst_slice = std::slice::from_raw_parts_mut(
+                                dst_region.addr() as *mut u8,
+                                dst_region.size(),
+                            );
+                            cuda_result::memcpy_dtoh_async(
+                                dst_slice,
+                                src_ptr as u64,
+                                stream.cu_stream(),
+                            )?;
+                            src_ptr = src_ptr.add(dst_region.size());
+                        }
+                    }
+                } else {
+                    let src_region = src.memory_region(src_block_id[0], layer_id, outer_id)?;
+                    let dst_region = dst.memory_region(dst_block_id[0], layer_id, outer_id)?;
+
+                    if src_region.size() != dst_region.size() {
+                        return Err(anyhow!(
+                            "Size mismatch at block=({:?},{:?}), layer={}, outer={}: src={}, dst={}",
+                            src_block_id,
+                            dst_block_id,
+                            layer_id,
+                            outer_id,
+                            src_region.size(),
+                            dst_region.size()
+                        ));
+                    }
+
+                    unsafe {
+                        let src_ptr = src_region.addr() as u64;
+                        let dst_ptr = dst_region.addr() as *mut u8;
+                        let dst_slice = std::slice::from_raw_parts_mut(dst_ptr, dst_region.size());
+                        cuda_result::memcpy_dtoh_async(dst_slice, src_ptr, stream.cu_stream())?;
+                    }
                 }
             }
         }
@@ -263,38 +383,45 @@ fn execute_d2h(
 fn execute_d2d(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[SmallVec<[usize; 1]>],
+    dst_block_ids: &[SmallVec<[usize; 1]>],
     layers: Range<usize>,
     stream: &cudarc::driver::CudaStream,
 ) -> Result<()> {
-    for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
+    for (src_block_idg, dst_block_idg) in src_block_ids.iter().zip(dst_block_ids.iter()) {
         for layer_id in layers.clone() {
             for outer_id in 0..src.layout().outer_dim() {
-                let src_region = src.memory_region(src_block_id, layer_id, outer_id)?;
-                let dst_region = dst.memory_region(dst_block_id, layer_id, outer_id)?;
+                anyhow::ensure!(
+                    src_block_idg.len() == dst_block_idg.len(),
+                    "D2D needs same layout"
+                );
 
-                if src_region.size() != dst_region.size() {
-                    return Err(anyhow!(
-                        "Size mismatch at block=({},{}), layer={}, outer={}: src={}, dst={}",
-                        src_block_id,
-                        dst_block_id,
-                        layer_id,
-                        outer_id,
-                        src_region.size(),
-                        dst_region.size()
-                    ));
-                }
+                for (src_block_id, dst_block_id) in src_block_idg.iter().zip(dst_block_idg.iter()) {
+                    let src_region = src.memory_region(*src_block_id, layer_id, outer_id)?;
+                    let dst_region = dst.memory_region(*dst_block_id, layer_id, outer_id)?;
 
-                unsafe {
-                    let src_ptr = src_region.addr() as u64;
-                    let dst_ptr = dst_region.addr() as u64;
-                    cuda_result::memcpy_dtod_async(
-                        dst_ptr,
-                        src_ptr,
-                        src_region.size(),
-                        stream.cu_stream(),
-                    )?;
+                    if src_region.size() != dst_region.size() {
+                        return Err(anyhow!(
+                            "Size mismatch at block=({:?},{:?}), layer={}, outer={}: src={}, dst={}",
+                            src_block_id,
+                            dst_block_id,
+                            layer_id,
+                            outer_id,
+                            src_region.size(),
+                            dst_region.size()
+                        ));
+                    }
+
+                    unsafe {
+                        let src_ptr = src_region.addr() as u64;
+                        let dst_ptr = dst_region.addr() as u64;
+                        cuda_result::memcpy_dtod_async(
+                            dst_ptr,
+                            src_ptr,
+                            src_region.size(),
+                            stream.cu_stream(),
+                        )?;
+                    }
                 }
             }
         }
@@ -308,8 +435,8 @@ fn execute_d2d(
 pub(crate) fn try_execute_operational_kernel(
     _src: &PhysicalLayout,
     _dst: &PhysicalLayout,
-    _src_block_ids: &[usize],
-    _dst_block_ids: &[usize],
+    _src_block_ids: &[SmallVec<[usize; 1]>],
+    _dst_block_ids: &[SmallVec<[usize; 1]>],
     _layers: Range<usize>,
     _stream: &cudarc::driver::CudaStream,
     _backend: OperationalCopyBackend,
