@@ -1,23 +1,25 @@
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 -->
 
 # NVIDIA Dynamo Development Environment
 
 > Warning: Dev Containers (aka `devcontainers`) is an evolving feature and we are not testing in CI. Please submit any problem/feedback using the issues on GitHub.
+
+## Known Issues
+
+### Docker Version Compatibility
+
+**Docker 29.x has compatibility issues with Dev Containers (by Anysphere):**
+- It is known that Docker Engine version **29.0.1** (released November 14, 2025) may cause Dev Containers to hang all the time, rendering it unusable
+- The Dev Containers extension (v1.0.26) and devcontainer CLI (v0.75.0) were not tested against Docker 29.x
+- Symptoms: Container builds successfully but connection hangs, requiring a manual reload to connect
+- This may be fixed in a later version of the Anysphere Dev Containers extension and/or Docker Engine patch
+
+**Recommended Docker Version:**
+- Use Docker Engine **28.5.2** or earlier for stable Dev Container operation
+- Docker 27.x and 28.x series are confirmed working with current Dev Containers tooling
 
 ## Framework-Specific Devcontainers
 

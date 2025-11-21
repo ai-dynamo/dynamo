@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"testing"
 
-	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -703,18 +702,18 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								Resources: &dynamoCommon.Resources{
-									Requests: &dynamoCommon.ResourceItem{
+								Resources: &v1alpha1.Resources{
+									Requests: &v1alpha1.ResourceItem{
 										CPU:    "300m",
 										Memory: "500Mi",
 									},
-									Limits: &dynamoCommon.ResourceItem{
+									Limits: &v1alpha1.ResourceItem{
 										GPU:    "1",
 										Memory: "20Gi",
 										CPU:    "10",
 									},
 								},
-								ExtraPodMetadata: &dynamoCommon.ExtraPodMetadata{
+								ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 									Annotations: map[string]string{
 										"nvidia.com/annotation1": "annotation1",
 									},
@@ -722,7 +721,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										"nvidia.com/label1": "label1",
 									},
 								},
-								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+								ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 									PodSpec: &corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
 										Containers: []corev1.Container{
@@ -802,6 +801,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Spec: corev1.PodSpec{
 								SchedulerName:                 "volcano",
 								TerminationGracePeriodSeconds: ptr.To(int64(10)),
+								SecurityContext: &corev1.PodSecurityContext{
+									FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+								},
 								Volumes: []corev1.Volume{
 									{
 										Name: "shared-memory",
@@ -863,7 +865,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											Limits: corev1.ResourceList{
 												corev1.ResourceMemory: resource.MustParse("20Gi"),
 												corev1.ResourceCPU:    resource.MustParse("10"),
-												"nvidia.com/gpu":      resource.MustParse("1"),
+												corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
 											},
 										},
 										LivenessProbe: &corev1.Probe{
@@ -927,6 +929,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Spec: corev1.PodSpec{
 								TerminationGracePeriodSeconds: ptr.To(int64(10)),
 								SchedulerName:                 "volcano",
+								SecurityContext: &corev1.PodSecurityContext{
+									FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+								},
 								Volumes: []corev1.Volume{
 									{
 										Name: "shared-memory",
@@ -947,7 +952,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Name:    commonconsts.MainContainerName,
 										Image:   "test-image:latest",
 										Command: []string{"/bin/sh", "-c"},
-										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
+										Args:    []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default"},
@@ -1018,12 +1023,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								Resources: &dynamoCommon.Resources{
-									Limits: &dynamoCommon.ResourceItem{
+								Resources: &v1alpha1.Resources{
+									Limits: &v1alpha1.ResourceItem{
 										GPU: "1",
 									},
 								},
-								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+								ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 									MainContainer: &corev1.Container{
 										Image: "test-image:latest",
 									},
@@ -1061,12 +1066,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								Resources: &dynamoCommon.Resources{
-									Limits: &dynamoCommon.ResourceItem{
+								Resources: &v1alpha1.Resources{
+									Limits: &v1alpha1.ResourceItem{
 										GPU: "1",
 									},
 								},
-								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+								ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 									MainContainer: &corev1.Container{
 										Image: "", // Image is missing, will cause error in generatePodTemplateSpec
 									},
@@ -1145,4 +1150,106 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 			g.Expect(got1).To(gomega.BeEquivalentTo(tt.want1))
 		})
 	}
+}
+
+func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_ReplicaReconciliation(t *testing.T) {
+	ctx := context.Background()
+	g := gomega.NewGomegaWithT(t)
+
+	// Create a scheme with necessary types
+	s := scheme.Scheme
+	err := v1alpha1.AddToScheme(s)
+	if err != nil {
+		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+	err = appsv1.AddToScheme(s)
+	if err != nil {
+		t.Fatalf("Failed to add appsv1 to scheme: %v", err)
+	}
+	err = corev1.AddToScheme(s)
+	if err != nil {
+		t.Fatalf("Failed to add corev1 to scheme: %v", err)
+	}
+
+	// Create DynamoComponentDeployment with 1 replica
+	replicaCount := int32(1)
+	dcd := &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-component",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:     "test-service",
+				DynamoNamespace: ptr.To("default"),
+				ComponentType:   string(commonconsts.ComponentTypeDecode),
+				Replicas:        &replicaCount,
+			},
+		},
+	}
+
+	// Set up fake client with the DCD
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dcd).
+		Build()
+
+	// Set up reconciler
+	recorder := record.NewFakeRecorder(100)
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:      fakeKubeClient,
+		Recorder:    recorder,
+		Config:      controller_common.Config{},
+		EtcdStorage: nil,
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return []string{}, nil
+			},
+		},
+	}
+
+	opt := generateResourceOption{
+		dynamoComponentDeployment: dcd,
+	}
+
+	// Step 1: Create the deployment with 1 replica
+	modified, deployment, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified).To(gomega.BeTrue(), "Deployment should have been created")
+	g.Expect(deployment).NotTo(gomega.BeNil())
+
+	// Verify deployment was created with 1 replica
+	deploymentName := "test-component"
+	createdDeployment := &appsv1.Deployment{}
+	err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: "default"}, createdDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(createdDeployment.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*createdDeployment.Spec.Replicas).To(gomega.Equal(int32(1)), "Initial deployment should have 1 replica")
+
+	// Step 2: Manually update the deployment to 2 replicas (simulating manual edit)
+	manualReplicaCount := int32(2)
+	createdDeployment.Spec.Replicas = &manualReplicaCount
+	err = fakeKubeClient.Update(ctx, createdDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Verify the manual update
+	updatedDeployment := &appsv1.Deployment{}
+	err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: "default"}, updatedDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(updatedDeployment.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*updatedDeployment.Spec.Replicas).To(gomega.Equal(int32(2)), "Deployment should have been manually updated to 2 replicas")
+
+	// Step 3: Call createOrUpdateOrDeleteDeployments again - it should reconcile back to 1 replica
+	modified2, deployment2, err := reconciler.createOrUpdateOrDeleteDeployments(ctx, opt)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified2).To(gomega.BeTrue(), "Deployment should have been updated to reconcile replica count")
+	g.Expect(deployment2).NotTo(gomega.BeNil())
+
+	// Step 4: Verify the deployment was reconciled back to 1 replica
+	reconciledDeployment := &appsv1.Deployment{}
+	err = fakeKubeClient.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: "default"}, reconciledDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(reconciledDeployment.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*reconciledDeployment.Spec.Replicas).To(gomega.Equal(int32(1)), "Deployment should have been reconciled back to 1 replica")
 }

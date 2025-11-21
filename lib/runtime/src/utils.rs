@@ -5,7 +5,6 @@ pub use tokio::time::{Duration, Instant};
 
 pub mod graceful_shutdown;
 pub mod ip_resolver;
-pub mod leader_worker_barrier;
 pub mod pool;
 pub mod stream;
 pub mod task;

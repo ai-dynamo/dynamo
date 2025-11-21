@@ -25,7 +25,7 @@ spec:
   backend: trtllm
 
   # ProfilerImage is the container image to use for profiling jobs (required)
-  profilerImage: "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.6.1"
+  profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.1"
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   # See benchmarks/profiler/utils/profiler_argparse.py for complete schema

@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::component::Component;
-use crate::config::RequestPlaneMode;
 use async_nats::service::Service as NatsService;
 use async_nats::service::ServiceExt as _;
 use derive_builder::Builder;

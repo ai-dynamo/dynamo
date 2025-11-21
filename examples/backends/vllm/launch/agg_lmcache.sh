@@ -8,6 +8,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 python -m dynamo.frontend --http-port=8000 &
 
 # run worker with LMCache enabled
+DYN_SYSTEM_PORT=8081 \
 ENABLE_LMCACHE=1 \
 LMCACHE_CHUNK_SIZE=256 \
 LMCACHE_LOCAL_CPU=True \
