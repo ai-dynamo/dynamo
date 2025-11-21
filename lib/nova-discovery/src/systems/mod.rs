@@ -13,6 +13,12 @@ mod p2p;
 #[cfg(feature = "p2p")]
 pub use p2p::{P2pConfig, P2pConfigBuilder};
 
+#[cfg(feature = "filesystem")]
+mod filesystem;
+
+#[cfg(feature = "filesystem")]
+pub use filesystem::FilesystemPeerDiscovery;
+
 #[cfg(test)]
 pub(crate) mod test_support;
 

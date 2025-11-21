@@ -40,17 +40,17 @@ const MAX_LOCAL_INDEX: u32 = u32::MAX;
 pub type EventManager = Arc<LocalEventSystem>;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-struct EventKey {
+pub(crate) struct EventKey {
     worker: u64,
     index: u32,
 }
 
 impl EventKey {
-    fn new(worker: u64, index: u32) -> Self {
+    pub(crate) fn new(worker: u64, index: u32) -> Self {
         Self { worker, index }
     }
 
-    fn from_handle(handle: EventHandle) -> Self {
+    pub(crate) fn from_handle(handle: EventHandle) -> Self {
         Self {
             worker: handle.owner_worker().as_u64(),
             index: handle.local_index(),
@@ -321,12 +321,14 @@ impl Future for LocalEventWaiter {
     type Output = Result<()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self;
+
         // Check for immediate result first
-        if let Some(result) = &self.immediate_result {
+        if let Some(result) = &this.immediate_result {
             return Poll::Ready(result.as_ref().as_result().map_err(anyhow::Error::new));
         }
 
-        let state = self
+        let state = this
             .state
             .as_ref()
             .expect("LocalEventWaiter with no state or immediate_result");
@@ -336,7 +338,7 @@ impl Future for LocalEventWaiter {
         let current = state.generation.load(Ordering::Acquire);
 
         // 1. Check generation freshness
-        if current != self.observed_generation {
+        if current != this.observed_generation {
             if let Some(value) = &inner.completion {
                 return Poll::Ready(value.as_ref().as_result().map_err(anyhow::Error::new));
             }
@@ -344,7 +346,7 @@ impl Future for LocalEventWaiter {
                 EventHandle::from_raw(0),
                 format!(
                     "generation expired: observed {}, current {}",
-                    self.observed_generation, current
+                    this.observed_generation, current
                 ),
             ))));
         }
@@ -606,6 +608,14 @@ impl EventEntry {
             state.active_generation
         }?;
         self.key.handle(generation).ok()
+    }
+
+    pub(crate) fn poison_reason(&self, generation: Generation) -> Option<Arc<str>> {
+        let state = self.state.lock();
+        state
+            .poisoned
+            .get(&generation)
+            .map(|p| Arc::<str>::from(p.reason().to_string()))
     }
 }
 

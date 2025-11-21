@@ -63,6 +63,9 @@
 mod manager;
 pub(crate) use manager::HandlerManager;
 
+pub(crate) mod events;
+pub(crate) use events::NovaEvents;
+
 use anyhow::Result;
 use bytes::Bytes;
 use futures::future::{BoxFuture, Ready, ready};

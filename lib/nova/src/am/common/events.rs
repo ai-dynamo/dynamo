@@ -20,42 +20,32 @@ pub(crate) enum EventType {
 
 #[inline]
 pub(crate) fn encode_event_header(event_type: EventType) -> Bytes {
-    // Encode using two bits:
+    // Encode using two bits (always include the u128 identifier):
     // - Bit 0 (LSB): 0 = Ack, 1 = Event
     // - Bit 1: 0 = Ok, 1 = Error
+    //
+    // Errors carry the ID so downstream can route the failure to the correct waiter.
     match event_type {
         EventType::Ack(response_id, outcome) => {
+            let id = response_id.as_u128().to_le_bytes();
             let type_byte = match outcome {
                 Outcome::Error => 0b10, // Ack + Error (bit 0=0 for Ack, bit 1=1 for Error)
                 Outcome::Ok => 0b00,    // Ack + Ok (bit 0=0 for Ack, bit 1=0 for Ok)
             };
-            let mut bytes = BytesMut::with_capacity(
-                1 + match outcome {
-                    Outcome::Error => 0,
-                    Outcome::Ok => size_of::<u128>(),
-                },
-            );
+            let mut bytes = BytesMut::with_capacity(1 + size_of::<u128>());
             bytes.put_u8(type_byte);
-            if matches!(outcome, Outcome::Ok) {
-                bytes.extend_from_slice(&response_id.as_u128().to_le_bytes());
-            }
+            bytes.extend_from_slice(&id);
             bytes.freeze()
         }
         EventType::Event(event_handle, outcome) => {
+            let id = event_handle.as_u128().to_le_bytes();
             let type_byte = match outcome {
                 Outcome::Error => 0b11, // Event + Error (bit 0=1 for Event, bit 1=1 for Error)
                 Outcome::Ok => 0b01,    // Event + Ok (bit 0=1 for Event, bit 1=0 for Ok)
             };
-            let mut bytes = BytesMut::with_capacity(
-                1 + match outcome {
-                    Outcome::Error => 0,
-                    Outcome::Ok => size_of::<u128>(),
-                },
-            );
+            let mut bytes = BytesMut::with_capacity(1 + size_of::<u128>());
             bytes.put_u8(type_byte);
-            if matches!(outcome, Outcome::Ok) {
-                bytes.extend_from_slice(&event_handle.as_u128().to_le_bytes());
-            }
+            bytes.extend_from_slice(&id);
             bytes.freeze()
         }
     }
@@ -75,31 +65,23 @@ pub(crate) fn decode_event_header(header: Bytes) -> Option<EventType> {
     let is_event = (type_byte & 0b01) != 0;
     let is_error = (type_byte & 0b10) != 0;
 
-    if is_error {
-        // Error cases: no u128 value included
-        if is_event {
-            // Need to construct a dummy EventHandle for error case
-            // We'll use all zeros since the error string is external
-            Some(EventType::Event(EventHandle::from_raw(0), Outcome::Error))
-        } else {
-            // Need to construct a dummy ResponseId for error case
-            Some(EventType::Ack(ResponseId::from_u128(0), Outcome::Error))
-        }
-    } else {
-        // Ok cases: must have u128 value
-        if header.len() < size_of::<u128>() {
-            return None;
-        }
+    // All variants carry an ID; header must include u128.
+    if header.len() < size_of::<u128>() {
+        return None;
+    }
 
-        let mut bytes_array = [0u8; 16];
-        header.copy_to_slice(&mut bytes_array);
-        let value = u128::from_le_bytes(bytes_array);
+    let mut bytes_array = [0u8; 16];
+    header.copy_to_slice(&mut bytes_array);
+    let value = u128::from_le_bytes(bytes_array);
 
-        if is_event {
-            Some(EventType::Event(EventHandle::from_raw(value), Outcome::Ok))
-        } else {
-            Some(EventType::Ack(ResponseId::from_u128(value), Outcome::Ok))
-        }
+    match (is_event, is_error) {
+        (true, true) => Some(EventType::Event(
+            EventHandle::from_raw(value),
+            Outcome::Error,
+        )),
+        (true, false) => Some(EventType::Event(EventHandle::from_raw(value), Outcome::Ok)),
+        (false, true) => Some(EventType::Ack(ResponseId::from_u128(value), Outcome::Error)),
+        (false, false) => Some(EventType::Ack(ResponseId::from_u128(value), Outcome::Ok)),
     }
 }
 
@@ -144,8 +126,8 @@ mod tests {
         // Encode Ack + Error
         let encoded = encode_event_header(EventType::Ack(response_id, Outcome::Error));
 
-        // Verify length (1 byte only, no u128 for error)
-        assert_eq!(encoded.len(), 1);
+        // Verify length (1 byte type + 16 bytes u128)
+        assert_eq!(encoded.len(), 1 + size_of::<u128>());
         assert_eq!(encoded[0], 0b10); // Ack + Error
 
         // Decode
@@ -153,8 +135,9 @@ mod tests {
 
         // Verify round-trip
         match decoded {
-            EventType::Ack(_decoded_id, outcome) => {
+            EventType::Ack(decoded_id, outcome) => {
                 assert!(matches!(outcome, Outcome::Error));
+                assert_eq!(decoded_id.as_u128(), response_id.as_u128());
             }
             _ => panic!("Expected Ack variant"),
         }
@@ -180,7 +163,7 @@ mod tests {
             EventType::Event(decoded_handle, outcome) => {
                 assert!(matches!(outcome, Outcome::Ok));
                 assert_eq!(decoded_handle.as_u128(), event_handle.as_u128());
-                assert_eq!(decoded_handle.owner_worker(), 42);
+                assert_eq!(decoded_handle.owner_worker().as_u64(), 42);
                 assert_eq!(decoded_handle.local_index(), 100);
                 assert_eq!(decoded_handle.generation(), 5);
             }
@@ -196,8 +179,8 @@ mod tests {
         // Encode Event + Error
         let encoded = encode_event_header(EventType::Event(event_handle, Outcome::Error));
 
-        // Verify length (1 byte only, no u128 for error)
-        assert_eq!(encoded.len(), 1);
+        // Verify length (1 byte type + 16 bytes u128)
+        assert_eq!(encoded.len(), 1 + size_of::<u128>());
         assert_eq!(encoded[0], 0b11); // Event + Error
 
         // Decode
@@ -205,8 +188,9 @@ mod tests {
 
         // Verify round-trip
         match decoded {
-            EventType::Event(_decoded_handle, outcome) => {
+            EventType::Event(decoded_handle, outcome) => {
                 assert!(matches!(outcome, Outcome::Error));
+                assert_eq!(decoded_handle.as_u128(), event_handle.as_u128());
             }
             _ => panic!("Expected Event variant"),
         }
@@ -214,20 +198,15 @@ mod tests {
 
     #[test]
     fn decode_invalid_length() {
-        // For Ok cases, missing u128 bytes should fail
+        // Missing u128 bytes should fail for all variants
         let short_bytes = Bytes::from_static(&[0b00]); // Ack + Ok but no u128
         assert!(decode_event_header(short_bytes).is_none());
 
-        // Empty
+        let short_error = Bytes::from_static(&[0b11]); // Event + Error but no u128
+        assert!(decode_event_header(short_error).is_none());
+
         let empty_bytes = Bytes::new();
         assert!(decode_event_header(empty_bytes).is_none());
-
-        // For Error cases, single byte is valid
-        let error_ack = Bytes::from_static(&[0b10]); // Ack + Error
-        assert!(decode_event_header(error_ack).is_some());
-
-        let error_event = Bytes::from_static(&[0b11]); // Event + Error
-        assert!(decode_event_header(error_event).is_some());
     }
 
     #[test]
@@ -248,14 +227,16 @@ mod tests {
         assert!(matches!(decoded, EventType::Event(_, Outcome::Ok)));
 
         // 0b10: Ack + Error
-        bytes = BytesMut::with_capacity(1);
+        bytes = BytesMut::with_capacity(1 + size_of::<u128>());
         bytes.put_u8(0b10);
+        bytes.extend_from_slice(&[0u8; 16]);
         let decoded = decode_event_header(bytes.freeze()).expect("0b10 should decode");
         assert!(matches!(decoded, EventType::Ack(_, Outcome::Error)));
 
         // 0b11: Event + Error
-        bytes = BytesMut::with_capacity(1);
+        bytes = BytesMut::with_capacity(1 + size_of::<u128>());
         bytes.put_u8(0b11);
+        bytes.extend_from_slice(&[0u8; 16]);
         let decoded = decode_event_header(bytes.freeze()).expect("0b11 should decode");
         assert!(matches!(decoded, EventType::Event(_, Outcome::Error)));
     }
@@ -348,15 +329,15 @@ mod tests {
         let response_id = ResponseId::from_u128(Uuid::new_v4().as_u128());
         let ack_error = encode_event_header(EventType::Ack(response_id, Outcome::Error));
 
-        // Should be just 1 byte with value 0b10 (Ack + Error)
-        assert_eq!(ack_error.len(), 1);
+        // Should be 1 byte type + 16-byte id with value 0b10 in first byte
+        assert_eq!(ack_error.len(), 1 + size_of::<u128>());
         assert_eq!(ack_error[0], 0b10);
 
         let handle = EventHandle::new(42, 100, 5).expect("should create");
         let event_error = encode_event_header(EventType::Event(handle, Outcome::Error));
 
-        // Should be just 1 byte with value 0b11 (Event + Error)
-        assert_eq!(event_error.len(), 1);
+        // Should be 1 byte type + 16-byte id with value 0b11 in first byte
+        assert_eq!(event_error.len(), 1 + size_of::<u128>());
         assert_eq!(event_error[0], 0b11);
     }
 }

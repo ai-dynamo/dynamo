@@ -263,6 +263,12 @@ impl LocalEventSystem {
         Ok(handle)
     }
 
+    /// Return the poison reason for a completed generation, if any.
+    pub(crate) fn poison_reason(&self, handle: EventHandle) -> Option<Arc<str>> {
+        let entry = self.events.get(&handle.key())?;
+        entry.poison_reason(handle.generation())
+    }
+
     fn ensure_local_handle(&self, handle: EventHandle) -> Result<()> {
         if handle.owner_worker().as_u64() != self.worker_id {
             bail!(

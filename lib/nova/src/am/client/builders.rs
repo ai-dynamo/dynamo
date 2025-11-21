@@ -289,7 +289,7 @@ impl MessageBuilder {
 
         // Fast path: if we can send directly, do so immediately
         if self.client.can_send_directly(target, &self.handler) {
-            let outcome = self.client.register_outcome().await?;
+            let outcome = self.client.register_outcome()?;
             let message = ActiveMessage {
                 metadata: MessageMetadata::new_fire(
                     outcome.response_id(),
@@ -298,11 +298,12 @@ impl MessageBuilder {
                 ),
                 payload: self.payload.unwrap_or_default(),
             };
-            return self.client.send_message(target, message).await;
+            return Ok(self.client.send_message(target, message)?);
         }
 
         // Slow path: spawn task to handle discovery, then send
         // For fire-and-forget, we don't wait for the task to complete
+        // perhaps we dissolve this  or into_parts() this, unless we can move self into the task as say `this`
         let client = self.client.clone();
         let handler = self.handler.clone();
         let payload = self.payload.clone();
@@ -310,7 +311,7 @@ impl MessageBuilder {
 
         tokio::spawn(async move {
             match client.ensure_peer_ready(target, &handler).await {
-                Ok(_) => match client.register_outcome().await {
+                Ok(_) => match client.register_outcome() {
                     Ok(outcome) => {
                         let message = ActiveMessage {
                             metadata: MessageMetadata::new_fire(
@@ -320,7 +321,7 @@ impl MessageBuilder {
                             ),
                             payload: payload.unwrap_or_default(),
                         };
-                        if let Err(e) = client.send_message(target, message).await {
+                        if let Err(e) = client.send_message(target, message) {
                             tracing::error!(
                                 target: "dynamo_nova::client",
                                 error = %e,
@@ -396,7 +397,7 @@ impl MessageBuilder {
 
         // Fast path: if we can send directly, do so immediately
         if self.client.can_send_directly(target, &self.handler) {
-            let mut outcome = self.client.register_outcome().await?;
+            let mut outcome = self.client.register_outcome()?;
             let response_id = outcome.response_id();
 
             // Determine response type based on expectation
@@ -409,7 +410,7 @@ impl MessageBuilder {
                 metadata,
                 payload: self.payload.unwrap_or_default(),
             };
-            self.client.send_message(target, message).await?;
+            self.client.send_message(target, message)?;
 
             let result = outcome.recv().await;
             return map(result);
@@ -419,7 +420,7 @@ impl MessageBuilder {
         // For sync/unary, we must wait since caller needs the response
         self.client.ensure_peer_ready(target, &self.handler).await?;
 
-        let mut outcome = self.client.register_outcome().await?;
+        let mut outcome = self.client.register_outcome()?;
         let response_id = outcome.response_id();
 
         // Determine response type based on expectation
@@ -432,7 +433,7 @@ impl MessageBuilder {
             metadata,
             payload: self.payload.unwrap_or_default(),
         };
-        self.client.send_message(target, message).await?;
+        self.client.send_message(target, message)?;
 
         let result = outcome.recv().await;
         map(result)

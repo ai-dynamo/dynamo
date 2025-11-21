@@ -22,6 +22,7 @@ nats = ["dynamo-nova-backend/nats"]
 [dependencies]
 dynamo-identity = { workspace = true }
 dynamo-nova-backend = { workspace = true }
+dynamo-discovery = { workspace = true }
 
 anyhow = { workspace = true }
 bs58 = { workspace = true }
@@ -42,6 +43,7 @@ uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 
 dashmap = "6.1.0"
+either = "1.13"
 flume = "0.11.1"
 lru = "0.16"
 

@@ -71,7 +71,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 default = ["p2p", "etcd"]
 etcd = ["dep:etcd-client", "dep:tonic"]
 p2p = ["dep:libp2p", "dep:libp2p-kad", "dep:libp2p-mdns", "dep:libp2p-swarm", "dep:libp2p-identity", "dep:blake2"]
-full = ["etcd", "p2p"]
+filesystem = []  # Filesystem-based discovery for development/testing
+full = ["etcd", "p2p", "filesystem"]
 testing-etcd = []  # Enable etcd tests (default on, disable with --no-default-features)
 integration-etcd = []  # Feature flag for integration tests with real etcd (requires Docker)
 # http-service = ["dep:axum", "dep:tower", "dep:tower-http", "dep:hyper", "dep:reqwest", "dep:tracing-subscriber", "dep:tokio-stream", "dep:futures-util"]

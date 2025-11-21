@@ -38,11 +38,7 @@ impl ActiveMessageClient {
         }
     }
 
-    pub(crate) async fn send_message(
-        &self,
-        target: InstanceId,
-        message: ActiveMessage,
-    ) -> Result<()> {
+    pub(crate) fn send_message(&self, target: InstanceId, message: ActiveMessage) -> Result<()> {
         let (header, payload, message_type) = message.encode()?;
         self.backend.send_message(
             target,
@@ -104,7 +100,7 @@ impl ActiveMessageClient {
             .map_err(|e| anyhow::anyhow!("Failed to serialize _hello request: {}", e))?;
 
         // Register response and send message
-        let mut outcome = self.register_outcome().await?;
+        let mut outcome = self.register_outcome()?;
         let response_id = outcome.response_id();
 
         let message = crate::am::common::ActiveMessage {
@@ -116,7 +112,7 @@ impl ActiveMessageClient {
             payload: bytes::Bytes::from(payload),
         };
 
-        self.send_message(target, message).await?;
+        self.send_message(target, message)?;
 
         // Wait for response
         let result = outcome.recv().await;
@@ -197,7 +193,7 @@ impl ActiveMessageClient {
         self.handshake_with_peer(instance_id).await
     }
 
-    async fn register_outcome(
+    fn register_outcome(
         &self,
     ) -> Result<
         crate::am::common::responses::ResponseAwaiter,
