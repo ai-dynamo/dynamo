@@ -422,9 +422,14 @@ RUN ls -lah /opt/dynamo/wheelhouse/ &&\
     && UV_GIT_LFS=1 uv pip install --no-cache . \
     && cd - \
     && rm -rf /opt/dynamo/benchmarks
-RUN uv pip list
-# Setup launch banner
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
+    if [ "$ENABLE_KVBM" = "true" ]; then \
+        uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
+    fi \
+    && cd /workspace/benchmarks \
+    && UV_GIT_LFS=1 uv pip install --no-cache .
+
+# Setup launch banner in common directory accessible to all users
+RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
 
 # Setup environment for all users
