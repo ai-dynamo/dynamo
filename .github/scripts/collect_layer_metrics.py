@@ -109,7 +109,7 @@ def parse_size_to_bytes(size_str: str) -> int:
 def get_layer_cache_info(build_log: Optional[str] = None) -> Dict[str, str]:
     """
     Parse build log to determine which layers were cached.
-    Returns a dict mapping layer index to cache status.
+    Returns a dict mapping step number to cache status.
     """
     cache_info = {}
     
@@ -117,19 +117,33 @@ def get_layer_cache_info(build_log: Optional[str] = None) -> Dict[str, str]:
         return cache_info
     
     # Parse build log for CACHED indicators
-    # This is best-effort as docker build output format can vary
-    layer_idx = 0
-    for line in build_log.split("\n"):
-        if "CACHED" in line:
-            cache_info[str(layer_idx)] = "cached"
-        elif line.strip().startswith("Step "):
-            layer_idx += 1
+    # Docker build output format: "Step X/Y : COMMAND" followed by " ---> Using cache" or " ---> Running in..."
+    import re
+    
+    lines = build_log.split("\n")
+    current_step = None
+    
+    for i, line in enumerate(lines):
+        # Match "Step X/Y" pattern
+        step_match = re.match(r"^Step (\d+)/(\d+)", line.strip())
+        if step_match:
+            current_step = int(step_match.group(1))
+            continue
+        
+        # Check if current step used cache
+        if current_step is not None:
+            if "CACHED" in line or "Using cache" in line:
+                cache_info[str(current_step)] = "cached"
+                current_step = None
+            elif "Running in" in line or "Removing intermediate container" in line:
+                cache_info[str(current_step)] = "built"
+                current_step = None
     
     return cache_info
 
 
 def collect_layer_metrics(
-    image_tag: str, framework: str, platform: str, build_log: Optional[str] = None
+    image_tag: str, framework: str, platform: str, build_log_file: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Collect comprehensive layer metrics for a Docker image.
@@ -138,7 +152,7 @@ def collect_layer_metrics(
         image_tag: Docker image tag
         framework: Framework name (vllm, sglang, trtllm)
         platform: Platform architecture (amd64, arm64)
-        build_log: Optional build log for cache information
+        build_log_file: Optional path to build log file for cache information
         
     Returns:
         Dictionary containing layer metrics
@@ -151,16 +165,40 @@ def collect_layer_metrics(
     if not layers:
         print(f"Warning: No layers found for {image_tag}", file=sys.stderr)
     
-    # Get cache information if build log is provided
-    cache_info = get_layer_cache_info(build_log) if build_log else {}
+    # Get cache information if build log file is provided
+    build_log_content = None
+    if build_log_file:
+        try:
+            with open(build_log_file, "r") as f:
+                build_log_content = f.read()
+            print(f"Loaded build log from: {build_log_file}", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Could not read build log file: {e}", file=sys.stderr)
+    
+    cache_info = get_layer_cache_info(build_log_content) if build_log_content else {}
     
     # Add cache status to layers
+    # Note: Docker history shows layers in reverse order compared to build steps
+    # We'll try to match based on the created_by command
+    cached_count = 0
+    built_count = 0
     for layer in layers:
         layer_idx_str = str(layer["layer_index"])
-        layer["cache_status"] = cache_info.get(layer_idx_str, "unknown")
+        cache_status = cache_info.get(layer_idx_str, "unknown")
+        layer["cache_status"] = cache_status
+        
+        if cache_status == "cached":
+            cached_count += 1
+        elif cache_status == "built":
+            built_count += 1
     
     # Calculate total sizes
     total_size_bytes = sum(layer["size_bytes"] for layer in layers)
+    
+    # Calculate cache hit rate
+    cache_hit_rate = 0.0
+    if cached_count + built_count > 0:
+        cache_hit_rate = (cached_count / (cached_count + built_count)) * 100
     
     metrics = {
         "image_tag": image_tag,
@@ -168,12 +206,19 @@ def collect_layer_metrics(
         "platform": platform,
         "total_layers": len(layers),
         "total_size_bytes": total_size_bytes,
+        "cached_layers_count": cached_count,
+        "built_layers_count": built_count,
+        "cache_hit_rate_percent": round(cache_hit_rate, 2),
         "layers": layers,
         "collection_time": datetime.now(timezone.utc).isoformat(),
     }
     
     print(
         f"Collected metrics for {len(layers)} layers (total size: {total_size_bytes} bytes)",
+        file=sys.stderr,
+    )
+    print(
+        f"Cache info: {cached_count} cached, {built_count} built, {cache_hit_rate:.1f}% hit rate",
         file=sys.stderr,
     )
     
@@ -184,7 +229,7 @@ def main():
     """Main entry point"""
     if len(sys.argv) < 4:
         print(
-            "Usage: collect_layer_metrics.py <image_tag> <framework> <platform> [output_file]",
+            "Usage: collect_layer_metrics.py <image_tag> <framework> <platform> [output_file] [build_log_file]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -193,9 +238,10 @@ def main():
     framework = sys.argv[2]
     platform = sys.argv[3]
     output_file = sys.argv[4] if len(sys.argv) > 4 else None
+    build_log_file = sys.argv[5] if len(sys.argv) > 5 else None
     
     # Collect metrics
-    metrics = collect_layer_metrics(image_tag, framework, platform)
+    metrics = collect_layer_metrics(image_tag, framework, platform, build_log_file)
     
     # Output results
     if output_file:

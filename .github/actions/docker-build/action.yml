@@ -62,6 +62,8 @@ runs:
       uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
       with:
         driver: docker
+        # Enable BuildKit for enhanced metadata
+        buildkitd-flags: --debug
     - name: Login to ECR
       shell: bash
       env:
@@ -363,18 +365,52 @@ runs:
         
         echo "🚀 Running layer metrics collection..."
         echo "Output file: ${LAYER_METRICS_FILE}"
+        
+        # Try to find the build log file
+        FOUND_BUILD_LOG=""
+        if [ -f "$BUILD_LOG_FILE" ]; then
+          echo "Found build log: ${BUILD_LOG_FILE}"
+          FOUND_BUILD_LOG="${BUILD_LOG_FILE}"
+        elif [ -d "build-logs" ]; then
+          # Look for framework-specific build log
+          FRAMEWORK_LOG=$(find build-logs -name "*${{ inputs.framework }}*build.log" | head -n 1)
+          if [ -n "$FRAMEWORK_LOG" ]; then
+            echo "Found framework build log: ${FRAMEWORK_LOG}"
+            FOUND_BUILD_LOG="${FRAMEWORK_LOG}"
+          else
+            # Look for any build log
+            ANY_LOG=$(find build-logs -name "*.log" | head -n 1)
+            if [ -n "$ANY_LOG" ]; then
+              echo "Found build log: ${ANY_LOG}"
+              FOUND_BUILD_LOG="${ANY_LOG}"
+            fi
+          fi
+        fi
+        
+        if [ -z "$FOUND_BUILD_LOG" ]; then
+          echo "⚠️  No build log found, cache status will be unknown"
+        fi
         echo ""
         
         # Make script executable
         chmod +x .github/scripts/collect_layer_metrics.py
         
-        # Run with explicit error handling
+        # Run with explicit error handling, passing build log if found
         set +e
-        python3 .github/scripts/collect_layer_metrics.py \
-          "$IMAGE_TAG" \
-          "${{ inputs.framework }}" \
-          "${PLATFORM_ARCH}" \
-          "$LAYER_METRICS_FILE"
+        if [ -n "$FOUND_BUILD_LOG" ]; then
+          python3 .github/scripts/collect_layer_metrics.py \
+            "$IMAGE_TAG" \
+            "${{ inputs.framework }}" \
+            "${PLATFORM_ARCH}" \
+            "$LAYER_METRICS_FILE" \
+            "$FOUND_BUILD_LOG"
+        else
+          python3 .github/scripts/collect_layer_metrics.py \
+            "$IMAGE_TAG" \
+            "${{ inputs.framework }}" \
+            "${PLATFORM_ARCH}" \
+            "$LAYER_METRICS_FILE"
+        fi
         COLLECTION_EXIT_CODE=$?
         set -e
         
@@ -419,6 +455,71 @@ runs:
         echo "✅ Layer metrics collection completed"
         echo "=========================================="
 
+    - name: Generate BuildKit Report
+      id: buildkit-report
+      shell: bash
+      run: |
+        echo "=========================================="
+        echo "📊 GENERATING BUILDKIT STEP REPORT"
+        echo "=========================================="
+        
+        BUILD_LOG_FILE="${{ env.BUILD_LOG_FILE }}"
+        
+        echo "Build log: ${BUILD_LOG_FILE}"
+        echo ""
+        
+        if [ ! -f "$BUILD_LOG_FILE" ]; then
+          echo "⚠️  Build log not found, skipping BuildKit report"
+          exit 0
+        fi
+        
+        # Create reports directory
+        mkdir -p build-metrics/buildkit-reports
+        
+        PLATFORM_ARCH="${{ env.PLATFORM_ARCH }}"
+        REPORT_FILE="build-metrics/buildkit-reports/buildkit-report-${{ inputs.framework }}-${PLATFORM_ARCH}.txt"
+        JSON_FILE="build-metrics/buildkit-reports/buildkit-data-${{ inputs.framework }}-${PLATFORM_ARCH}.json"
+        
+        echo "🚀 Parsing BuildKit output..."
+        echo "Output report: ${REPORT_FILE}"
+        echo "Output data: ${JSON_FILE}"
+        echo ""
+        
+        # Make parser executable
+        chmod +x .github/scripts/parse_buildkit_output.py
+        
+        # Run parser
+        set +e
+        python3 .github/scripts/parse_buildkit_output.py \
+          "$BUILD_LOG_FILE" \
+          "$JSON_FILE" \
+          "$REPORT_FILE"
+        PARSER_EXIT_CODE=$?
+        set -e
+        
+        echo ""
+        echo "📊 Parser exit code: ${PARSER_EXIT_CODE}"
+        
+        if [ ${PARSER_EXIT_CODE} -eq 0 ] && [ -f "$REPORT_FILE" ]; then
+          echo ""
+          echo "✅ BuildKit report generated successfully"
+          echo "📄 Report file: $REPORT_FILE"
+          echo "📄 JSON file: $JSON_FILE"
+          echo ""
+          
+          # Display the report
+          echo "=========================================="
+          echo "📊 BUILDKIT REPORT PREVIEW"
+          echo "=========================================="
+          cat "$REPORT_FILE"
+          echo ""
+        else
+          echo "⚠️  BuildKit report generation had issues but continuing..."
+        fi
+        
+        echo "✅ BuildKit report step completed"
+        echo "=========================================="
+
     # Upload job-specific build metrics as artifact
     - name: Upload Build Metrics
       uses: actions/upload-artifact@v4
@@ -443,4 +544,13 @@ runs:
       with:
         name: build-logs-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: build-logs/*.log
+        retention-days: 7
+
+    # Upload BuildKit reports as artifact
+    - name: Upload BuildKit Reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: buildkit-reports-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: build-metrics/buildkit-reports/*
         retention-days: 7
