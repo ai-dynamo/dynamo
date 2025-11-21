@@ -17,6 +17,7 @@ import asyncio
 import copy
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
@@ -83,6 +84,7 @@ class HandlerBase:
     def __init__(self, config: RequestHandlerConfig):
         self.engine = config.engine
         self.component = config.component
+        self.config = config
         self.default_sampling_params = config.default_sampling_params
         self.publisher = config.publisher
         self.metrics_collector = config.metrics_collector
@@ -166,6 +168,30 @@ class HandlerBase:
             logging.critical("Forcing process exit for restart")
             os._exit(1)
 
+    def _get_input_param(self, request: dict):
+        """
+        Get the input parameter for the request.
+        If tokenizer is enabled (via detokenize flag in default_sampling_params),
+        allows text/messages input.
+        """
+        use_tokenizer = (
+            hasattr(self.default_sampling_params, "detokenize")
+            and self.default_sampling_params.detokenize
+        )
+
+        if use_tokenizer:
+            if "messages" in request:
+                if hasattr(self.engine.llm, "tokenizer"):
+                    return self.engine.llm.tokenizer.apply_chat_template(
+                        request["messages"], tokenize=False, add_generation_prompt=True
+                    )
+            if "prompt" in request:
+                return request["prompt"]
+            if "text" in request:
+                return request["text"]
+
+        return request.get("token_ids")
+
     async def generate_locally(
         self,
         request: dict,
@@ -194,7 +220,7 @@ class HandlerBase:
 
         else:
             # text-only flow
-            processed_input = request.get("token_ids")
+            processed_input = self._get_input_param(request)
 
         # Check if there is an error in the publisher error queue
         publishers_error = (
@@ -227,26 +253,84 @@ class HandlerBase:
             raise ValueError("Disaggregated params are required for decode mode")
 
         num_output_tokens_so_far = 0
+        previous_text = ""
 
         sampling_params = copy.deepcopy(self.default_sampling_params)
 
-        for key, value in request["sampling_options"].items():
-            if not value:
-                continue
-            if hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
+        use_tokenizer = (
+            hasattr(self.default_sampling_params, "detokenize")
+            and self.default_sampling_params.detokenize
+        )
 
-        max_tokens = request["stop_conditions"]["max_tokens"]
-        if max_tokens:
-            sampling_params.max_tokens = max_tokens
+        if use_tokenizer:
+            # Handle OpenAI-compatible request format
+            # Map common OpenAI parameters to SamplingParams
+            openai_mapping = {
+                "temperature": "temperature",
+                "top_p": "top_p",
+                "presence_penalty": "presence_penalty",
+                "frequency_penalty": "frequency_penalty",
+                "seed": "seed",
+                "top_k": "top_k",
+                "repetition_penalty": "repetition_penalty",
+                "min_p": "min_p",
+                "length_penalty": "length_penalty",
+                "use_beam_search": "use_beam_search",
+            }
 
-        ignore_eos = request["stop_conditions"].get("ignore_eos")
-        if ignore_eos:
-            sampling_params.ignore_eos = ignore_eos
+            for req_key, param_key in openai_mapping.items():
+                if req_key in request and request[req_key] is not None:
+                    if hasattr(sampling_params, param_key):
+                        setattr(sampling_params, param_key, request[req_key])
 
-        min_tokens = request["stop_conditions"].get("min_tokens")
-        if min_tokens:
-            sampling_params.min_tokens = min_tokens
+            # Handle max_tokens
+            if "max_tokens" in request:
+                sampling_params.max_tokens = request["max_tokens"]
+
+            # Handle stop
+            if "stop" in request:
+                sampling_params.stop = request["stop"]
+
+            # Handle ignore_eos (custom extension)
+            if "ignore_eos" in request:
+                sampling_params.ignore_eos = request["ignore_eos"]
+
+            # Handle min_tokens (custom extension)
+            if "min_tokens" in request:
+                sampling_params.min_tokens = request["min_tokens"]
+
+        else:
+            # Handle internal protocol request format
+            if "sampling_options" in request:
+                for key, value in request["sampling_options"].items():
+                    if not value:
+                        continue
+                    if hasattr(sampling_params, key):
+                        setattr(sampling_params, key, value)
+
+            if "stop_conditions" in request:
+                stop_conditions = request["stop_conditions"]
+                # max_tokens might be mandatory or optional depending on context,
+                # but existing code accessed it directly. We'll use .get to be safer
+                # or keep existing behavior if we are sure.
+                # Existing code: max_tokens = request["stop_conditions"]["max_tokens"]
+                # We'll use .get() and default to None if missing, unless it's critical.
+                max_tokens = stop_conditions.get("max_tokens")
+                if max_tokens:
+                    sampling_params.max_tokens = max_tokens
+
+                ignore_eos = stop_conditions.get("ignore_eos")
+                if ignore_eos:
+                    sampling_params.ignore_eos = ignore_eos
+
+                min_tokens = stop_conditions.get("min_tokens")
+                if min_tokens:
+                    sampling_params.min_tokens = min_tokens
+
+                # Handle stop sequences if they are in stop_conditions
+                stop = stop_conditions.get("stop")
+                if stop:
+                    sampling_params.stop = stop
 
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
@@ -291,70 +375,98 @@ class HandlerBase:
                         break
 
                     output = res.outputs[0]
-                    # The engine returns all tokens generated so far. We must calculate the new
-                    # tokens generated in this iteration to create the "delta".
-                    next_total_toks = len(output.token_ids)
+                    if use_tokenizer:
+                        choice_data = {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "content": output.text[len(previous_text) :],
+                            },
+                            "finish_reason": output.finish_reason,
+                        }
+                        previous_text = output.text
 
-                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-
-                    if output.finish_reason:
-                        out["finish_reason"] = output.finish_reason
-                    if output.stop_reason:
-                        out["stop_reason"] = output.stop_reason
-                    if self.disaggregation_mode == DisaggregationMode.PREFILL:
-                        # Return the disaggregated params only when operating in prefill mode.
-                        out["disaggregated_params"] = asdict(
-                            DisaggregatedParamsCodec.encode(output.disaggregated_params)
-                        )
-
-                    if out.get("finish_reason"):
-                        num_input_tokens = len(request.get("token_ids", []))
-
-                        prompt_tokens_details = None
-                        if prefill_prompt_tokens_details:
-                            prompt_tokens_details = prefill_prompt_tokens_details
-                        else:
-                            if output.request_perf_metrics is not None:
-                                kv_cache_metrics = (
-                                    output.request_perf_metrics.kv_cache_metrics
-                                )
-                                cached_tokens = min(
-                                    num_input_tokens,
-                                    kv_cache_metrics.num_reused_blocks
-                                    * self.kv_block_size,
-                                )
-                                if cached_tokens > 0:
-                                    prompt_tokens_details = {
-                                        "cached_tokens": int(cached_tokens),
-                                    }
-
-                        out["completion_usage"] = {
-                            "prompt_tokens": int(num_input_tokens),
-                            "completion_tokens": int(next_total_toks),
-                            "total_tokens": int(num_input_tokens + next_total_toks),
-                            "prompt_tokens_details": prompt_tokens_details,
+                        chunk = {
+                            "id": request_id,
+                            "created": int(time.time()),
+                            "object": "chat.completion.chunk",
+                            # TODO: Get model name from config or elsewhere
+                            "model": "unknown",
+                            "choices": [choice_data],
                         }
 
-                    if res.finished and not out.get("finish_reason"):
-                        out["finish_reason"] = "unknown"
-                        logging.warning(
-                            "Request finished with no finish reason set - this indicates a possible bug"
-                        )
+                        yield chunk
+                    else:
+                        # The engine returns all tokens generated so far. We must calculate the new
+                        # tokens generated in this iteration to create the "delta".
+                        next_total_toks = len(output.token_ids)
 
-                    # Log metrics to TensorRT-LLM MetricsCollector when request finishes
-                    if (
-                        res.finished
-                        and self.metrics_collector
-                        and hasattr(res, "metrics_dict")
-                    ):
-                        try:
-                            self.metrics_collector.log_metrics_dict(res.metrics_dict)
-                        except Exception as e:
-                            logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
+                        out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
-                    # Yield the chunk to the client and update the token count for the next iteration.
-                    yield out
-                    num_output_tokens_so_far = next_total_toks
+                        if output.finish_reason:
+                            out["finish_reason"] = output.finish_reason
+                        if output.stop_reason:
+                            out["stop_reason"] = output.stop_reason
+                        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                            # Return the disaggregated params only when operating in prefill mode.
+                            out["disaggregated_params"] = asdict(
+                                DisaggregatedParamsCodec.encode(
+                                    output.disaggregated_params
+                                )
+                            )
+
+                        if out.get("finish_reason"):
+                            num_input_tokens = len(request.get("token_ids", []))
+
+                            prompt_tokens_details = None
+                            if prefill_prompt_tokens_details:
+                                prompt_tokens_details = prefill_prompt_tokens_details
+                            else:
+                                if output.request_perf_metrics is not None:
+                                    kv_cache_metrics = (
+                                        output.request_perf_metrics.kv_cache_metrics
+                                    )
+                                    cached_tokens = min(
+                                        num_input_tokens,
+                                        kv_cache_metrics.num_reused_blocks
+                                        * self.kv_block_size,
+                                    )
+                                    if cached_tokens > 0:
+                                        prompt_tokens_details = {
+                                            "cached_tokens": int(cached_tokens),
+                                        }
+
+                            out["completion_usage"] = {
+                                "prompt_tokens": int(num_input_tokens),
+                                "completion_tokens": int(next_total_toks),
+                                "total_tokens": int(num_input_tokens + next_total_toks),
+                                "prompt_tokens_details": prompt_tokens_details,
+                            }
+
+                        if res.finished and not out.get("finish_reason"):
+                            out["finish_reason"] = "unknown"
+                            logging.warning(
+                                "Request finished with no finish reason set - this indicates a possible bug"
+                            )
+
+                        # Log metrics to TensorRT-LLM MetricsCollector when request finishes
+                        if (
+                            res.finished
+                            and self.metrics_collector
+                            and hasattr(res, "metrics_dict")
+                        ):
+                            try:
+                                self.metrics_collector.log_metrics_dict(
+                                    res.metrics_dict
+                                )
+                            except Exception as e:
+                                logging.warning(
+                                    f"Failed to log TensorRT-LLM metrics: {e}"
+                                )
+
+                        # Yield the chunk to the client and update the token count for the next iteration.
+                        yield out
+                        num_output_tokens_so_far = next_total_toks
 
         # 1. Client cancellation - don't shutdown
         except asyncio.CancelledError:
