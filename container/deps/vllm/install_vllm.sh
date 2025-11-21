@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-VLLM_REF="v0.11.0"
+VLLM_REF="v0.11.2"
 
 # Basic Configurations
 ARCH=$(uname -m)
@@ -21,15 +21,15 @@ MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 
 # VLLM and Dependency Configurations
-TORCH_BACKEND="cu128"
+TORCH_BACKEND="cu129"
 TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels
 DEEPGEMM_REF=""
-CUDA_VERSION="12.8" # For DEEPGEMM
+CUDA_VERSION="12.9" # For DEEPGEMM
 
 # These flags are applicable when installing vLLM from source code
 EDITABLE=true
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
-FLASHINF_REF="v0.3.1"
+FLASHINF_REF="v0.5.2"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
