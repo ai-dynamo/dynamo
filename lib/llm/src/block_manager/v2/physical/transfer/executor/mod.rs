@@ -17,6 +17,7 @@ use anyhow::Result;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Mutex;
 
 // Re-export the NIXL transfer builder for public use
 pub use nixl::NixlTransferBuilder;
@@ -181,8 +182,6 @@ struct TwoHopTransferParams<'a> {
     ctx: &'a TransferContext,
 }
 
-type TransferGroup = (Vec<usize>, bool);
-
 #[allow(clippy::too_many_arguments)]
 async fn handle_buffered_transfer(
     src: &PhysicalLayout,
@@ -198,75 +197,45 @@ async fn handle_buffered_transfer(
 ) -> Result<()> {
     let bounce_groups =
         &bounce_block_ids[0..std::cmp::min(src_block_ids.len(), bounce_block_ids.len())];
-    let bounce_groups = bounce_groups.split_at(bounce_groups.len() / 2);
-    let bounce_groups = [bounce_groups.0, bounce_groups.1];
+    let (bounce_group_0, bounce_group_1) = bounce_groups.split_at(bounce_groups.len() / 2);
+    let bounce_group_0 = bounce_group_0.to_vec();
+    let bounce_group_1 = bounce_group_1.to_vec();
 
-    let mut src_to_bounce: Option<TransferGroup> = None;
-    let mut bounce_to_dst: Option<TransferGroup>;
-    let mut src_iter = src_block_ids.iter();
-    let mut dst_iter = dst_block_ids.iter();
+    let src_dst_iter = Arc::new(Mutex::new(src_block_ids.iter().zip(dst_block_ids.iter())));
 
-    loop {
-        bounce_to_dst = src_to_bounce
-            .as_ref()
-            .map(|(src_ids, bounce_buffer_group)| {
-                (
-                    dst_iter
-                        .by_ref()
-                        .take(src_ids.len())
-                        .copied()
-                        .collect::<Vec<_>>(),
-                    *bounce_buffer_group,
-                )
-            });
+    let transfer_task = async move |bounce_group: &[usize]| -> Result<()> {
+        loop {
+            let (src_ids, dst_ids): (Vec<usize>, Vec<usize>);
+            {
+                let mut x = src_dst_iter.lock().await;
+                (src_ids, dst_ids) = x.by_ref().take(bounce_group.len()).unzip();
+                if src_ids.is_empty() {
+                    break;
+                }
+            }
 
-        let bounce_group = src_to_bounce
-            .map(|(_, bounce_buffer_group)| !bounce_buffer_group)
-            .unwrap_or(false);
-
-        let new_src_ids = src_iter
-            .by_ref()
-            .take(bounce_groups[bounce_group as usize].len())
-            .copied()
-            .collect::<Vec<_>>();
-
-        src_to_bounce = if new_src_ids.is_empty() {
-            None
-        } else {
-            Some((new_src_ids, bounce_group))
-        };
-
-        if src_to_bounce.is_none() && bounce_to_dst.is_none() {
-            break;
-        }
-
-        let mut futures = Vec::new();
-        if let Some(src_to_bounce) = src_to_bounce.as_ref() {
-            futures.push(execute_direct_transfer(
+            execute_two_hop_transfer_chunk(
                 src,
                 bounce_layout,
-                &src_to_bounce.0,
-                &bounce_groups[src_to_bounce.1 as usize][0..src_to_bounce.0.len()],
-                layer_range.clone(),
-                first_strategy,
-                ctx,
-            )?);
-        }
-
-        if let Some(bounce_to_dst) = bounce_to_dst.as_ref() {
-            futures.push(execute_direct_transfer(
-                bounce_layout,
                 dst,
-                &bounce_groups[bounce_to_dst.1 as usize][0..bounce_to_dst.0.len()],
-                &bounce_to_dst.0,
-                layer_range.clone(),
+                &src_ids,
+                &bounce_group[0..src_ids.len()],
+                &dst_ids,
+                first_strategy,
                 second_strategy,
+                layer_range,
                 ctx,
-            )?);
+            )
+            .await?;
         }
 
-        futures::future::try_join_all(futures).await?;
-    }
+        Ok(())
+    };
+
+    let transfer_0 = transfer_task(&bounce_group_0);
+    let transfer_1 = transfer_task(&bounce_group_1);
+
+    futures::future::try_join(transfer_0, transfer_1).await?;
 
     Ok(())
 }
