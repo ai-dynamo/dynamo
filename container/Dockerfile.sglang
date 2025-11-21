@@ -81,7 +81,6 @@ RUN apt-get update \
         # Python (using other python versions as needed)
         python${PYTHON_VERSION}-dev \
         python${PYTHON_VERSION}-venv \
-        python${PYTHON_VERSION}-distutils \
         python3-pip \
         # Build essentials
         build-essential \
