@@ -106,17 +106,20 @@ impl<'de> serde::Deserialize<'de> for BlockHash {
 
 impl BlockHash {
     /// Convert to u64, handling both signed and unsigned integers
-    fn to_u64(&self) -> u64 {
+    /// Returns None if the hash cannot be converted (e.g., invalid hex string)
+    /// This avoids silently collapsing invalid hashes to 0, which could cause collisions
+    fn to_u64(&self) -> Option<u64> {
         match self {
-            BlockHash::IntU64(n) => *n,
+            BlockHash::IntU64(n) => Some(*n),
             BlockHash::IntI64(n) => {
                 // Convert signed i64 back to unsigned u64 (two's complement)
                 // Rust's `as u64` automatically handles two's complement conversion
-                *n as u64
+                Some(*n as u64)
             }
             BlockHash::Str(s) => {
-                // Try to parse as hex string, fallback to 0
-                u64::from_str_radix(s, 16).unwrap_or(0)
+                // Try to parse as hex string, return None on failure
+                // This avoids silently mapping invalid hashes to 0, which could cause collisions
+                u64::from_str_radix(s, 16).ok()
             }
         }
     }
@@ -330,13 +333,34 @@ fn process_event(
 
             // Process each block with its corresponding token chunk
             // For batches, chain the blocks: each block's parent is the previous block in the batch
-            let mut current_parent = parent_block_hash.as_ref().map(|h| h.to_u64().to_string());
+            let mut current_parent = parent_block_hash
+                .as_ref()
+                .and_then(|h| {
+                    h.to_u64().or_else(|| {
+                        tracing::warn!(
+                            "Skipping parent block hash with unparsable string hash {:?}",
+                            h
+                        );
+                        None
+                    })
+                })
+                .map(|h| h.to_string());
 
             for (i, block_hash) in block_hashes.iter().enumerate() {
                 let block_tokens = token_chunks[i].clone();
 
+                // Skip blocks with invalid/unparsable hashes to avoid collisions
+                let Some(block_hash_u64) = block_hash.to_u64() else {
+                    tracing::warn!(
+                        "Skipping block with unparsable string hash {:?} (index {})",
+                        block_hash,
+                        i
+                    );
+                    continue;
+                };
+
                 tracker.handle_store(
-                    block_hash.to_u64().to_string(),
+                    block_hash_u64.to_string(),
                     engine_source,
                     block_tokens,
                     current_parent.clone(),
@@ -346,8 +370,8 @@ fn process_event(
                     data_parallel_rank,
                 );
 
-                // Next block's parent is this block
-                current_parent = Some(block_hash.to_u64().to_string());
+                // Next block's parent is this block (only if hash was valid)
+                current_parent = Some(block_hash_u64.to_string());
             }
         }
 
@@ -367,7 +391,15 @@ fn process_event(
             );
 
             for block_hash in block_hashes {
-                tracker.handle_remove(&block_hash.to_u64().to_string(), engine_source);
+                // Skip blocks with invalid/unparsable hashes to avoid collisions
+                let Some(block_hash_u64) = block_hash.to_u64() else {
+                    tracing::warn!(
+                        "Skipping removal of block with unparsable string hash {:?}",
+                        block_hash
+                    );
+                    continue;
+                };
+                tracker.handle_remove(&block_hash_u64.to_string(), engine_source);
             }
         }
 

@@ -368,22 +368,8 @@ impl BlockManagerBuilder {
         }
 
         if let Some((engine_ep, output_ep, engine_source)) = self.consolidator_config {
-            let consolidator_config = match engine_source {
-                EventSource::Vllm => {
-                    let output_ep = output_ep.expect("output_endpoint is required for vLLM");
-                    KvEventConsolidatorConfig::new_vllm(engine_ep, output_ep)
-                }
-                EventSource::Trtllm => {
-                    // output_endpoint is not used for TensorRT-LLM (NATS publisher doesn't need it)
-                    KvEventConsolidatorConfig::new_trtllm(engine_ep)
-                }
-                EventSource::Kvbm => {
-                    // KVBM doesn't use the consolidator, but if it did, we'd use vLLM-style config
-                    let output_ep = output_ep.expect("output_endpoint is required for KVBM");
-                    KvEventConsolidatorConfig::new_vllm(engine_ep, output_ep)
-                }
-            };
-            config_builder = config_builder.consolidator_config(consolidator_config);
+            // Pass the three values directly to match the method signature
+            config_builder = config_builder.consolidator_config(engine_ep, output_ep, engine_source);
         }
 
         let config = config_builder.build()?;
