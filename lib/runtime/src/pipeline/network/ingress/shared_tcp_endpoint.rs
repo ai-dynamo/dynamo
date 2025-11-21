@@ -82,7 +82,13 @@ impl SharedTcpServer {
             notify: Arc::new(Notify::new()),
         });
 
+        // Insert handler FIRST to ensure it's ready to receive requests
         self.handlers.insert(endpoint_path, handler);
+
+        // THEN set health status to Ready (after handler is registered and ready)
+        system_health
+            .lock()
+            .set_endpoint_health_status(&endpoint_name, crate::HealthStatus::Ready);
 
         tracing::info!(
             "Registered endpoint '{}' with shared TCP server on {}",
