@@ -204,7 +204,6 @@ runs:
         # Get accurate build timing
         BUILD_START_TIME="${{ env.BUILD_START_TIME }}"
         BUILD_END_TIME="${{ env.BUILD_END_TIME }}"
-        BUILD_LOG_FILE="${{ env.BUILD_LOG_FILE }}"
 
         # Calculate duration
         START_EPOCH=$(date -d "$BUILD_START_TIME" +%s)
@@ -228,48 +227,6 @@ runs:
           echo ""
           echo "⚠️  No image tag available"
         fi
-        
-        # Parse build log for additional metrics
-        echo ""
-        echo "📝 Analyzing build log: ${BUILD_LOG_FILE}"
-        
-        CACHED_LAYERS=0
-        TOTAL_STEPS=0
-        BUILD_WARNINGS=0
-        BUILD_ERRORS=0
-        PULL_OPERATIONS=0
-        
-        if [ -f "${BUILD_LOG_FILE}" ]; then
-          # Count cached layers
-          CACHED_LAYERS=$(grep -c "CACHED" "${BUILD_LOG_FILE}" 2>/dev/null || echo "0")
-          
-          # Count total build steps
-          TOTAL_STEPS=$(grep -c "^Step [0-9]" "${BUILD_LOG_FILE}" 2>/dev/null || echo "0")
-          
-          # Count warnings and errors
-          BUILD_WARNINGS=$(grep -ci "warning" "${BUILD_LOG_FILE}" 2>/dev/null || echo "0")
-          BUILD_ERRORS=$(grep -ci "error" "${BUILD_LOG_FILE}" 2>/dev/null || echo "0")
-          
-          # Count pull operations
-          PULL_OPERATIONS=$(grep -c "Pulling from\|Pull complete" "${BUILD_LOG_FILE}" 2>/dev/null || echo "0")
-          
-          echo "  📊 Cached layers: ${CACHED_LAYERS}"
-          echo "  📊 Total build steps: ${TOTAL_STEPS}"
-          echo "  ⚠️  Warnings: ${BUILD_WARNINGS}"
-          echo "  ❌ Errors: ${BUILD_ERRORS}"
-          echo "  📥 Pull operations: ${PULL_OPERATIONS}"
-          
-          # Calculate cache hit rate
-          if [ ${TOTAL_STEPS} -gt 0 ]; then
-            CACHE_HIT_RATE=$(awk "BEGIN {printf \"%.2f\", (${CACHED_LAYERS} / ${TOTAL_STEPS}) * 100}")
-            echo "  📈 Cache hit rate: ${CACHE_HIT_RATE}%"
-          else
-            CACHE_HIT_RATE="0"
-          fi
-        else
-          echo "  ⚠️  Build log file not found"
-          CACHE_HIT_RATE="0"
-        fi
 
         echo ""
         echo "🔍 Platform information:"
@@ -286,7 +243,7 @@ runs:
         echo ""
         echo "💾 Writing metrics to: ${METRICS_FILE}"
         
-        # Create the job metrics file with enhanced metrics
+        # Create the job metrics file
         cat > "$METRICS_FILE" << EOF
         {
           "framework": "${{ inputs.framework }}",
@@ -296,13 +253,7 @@ runs:
           "image_size_bytes": ${IMAGE_SIZE_BYTES},
           "build_start_time": "${BUILD_START_TIME}",
           "build_end_time": "${BUILD_END_TIME}",
-          "build_duration_sec": ${BUILD_DURATION_SEC},
-          "cached_layers": ${CACHED_LAYERS},
-          "total_build_steps": ${TOTAL_STEPS},
-          "cache_hit_rate_percent": ${CACHE_HIT_RATE},
-          "build_warnings": ${BUILD_WARNINGS},
-          "build_errors": ${BUILD_ERRORS},
-          "pull_operations": ${PULL_OPERATIONS}
+          "build_duration_sec": ${BUILD_DURATION_SEC}
         }
         EOF
 
@@ -312,147 +263,6 @@ runs:
 
         echo ""
         echo "✅ Metrics captured and saved successfully"
-        echo "=========================================="
-
-    - name: Collect Layer Metrics
-      id: layer-metrics
-      shell: bash
-      run: |
-        echo "=========================================="
-        echo "🔍 COLLECTING LAYER-LEVEL METRICS"
-        echo "=========================================="
-        echo "Framework: ${{ inputs.framework }}"
-        
-        IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
-        PLATFORM_ARCH="${{ env.PLATFORM_ARCH }}"
-        BUILD_LOG_FILE="${{ env.BUILD_LOG_FILE }}"
-        
-        echo "Image Tag: ${IMAGE_TAG}"
-        echo "Platform: ${PLATFORM_ARCH}"
-        echo "Build Log: ${BUILD_LOG_FILE}"
-        echo ""
-        
-        if [ -z "$IMAGE_TAG" ]; then
-          echo "⚠️  No image tag available, skipping layer metrics collection"
-          exit 0
-        fi
-        
-        # Verify image exists
-        echo "🔍 Verifying image exists..."
-        if ! docker image inspect "$IMAGE_TAG" &> /dev/null; then
-          echo "❌ Image not found: $IMAGE_TAG"
-          echo "Available images:"
-          docker images
-          exit 1
-        fi
-        echo "✅ Image verified"
-        echo ""
-        
-        # Install Python if needed (usually available in GitHub runners)
-        if ! command -v python3 &> /dev/null; then
-          echo "📦 Python3 not found, installing..."
-          sudo apt-get update && sudo apt-get install -y python3
-        else
-          echo "✅ Python3 found: $(python3 --version)"
-        fi
-        echo ""
-        
-        # Create layer metrics directory
-        mkdir -p build-metrics/layers
-        
-        # Run layer metrics collection script
-        LAYER_METRICS_FILE="build-metrics/layers/layer-metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${{ github.run_id }}-${{ job.check_run_id }}.json"
-        
-        echo "🚀 Running layer metrics collection..."
-        echo "Output file: ${LAYER_METRICS_FILE}"
-        
-        # Try to find the build log file
-        FOUND_BUILD_LOG=""
-        if [ -f "$BUILD_LOG_FILE" ]; then
-          echo "Found build log: ${BUILD_LOG_FILE}"
-          FOUND_BUILD_LOG="${BUILD_LOG_FILE}"
-        elif [ -d "build-logs" ]; then
-          # Look for framework-specific build log
-          FRAMEWORK_LOG=$(find build-logs -name "*${{ inputs.framework }}*build.log" | head -n 1)
-          if [ -n "$FRAMEWORK_LOG" ]; then
-            echo "Found framework build log: ${FRAMEWORK_LOG}"
-            FOUND_BUILD_LOG="${FRAMEWORK_LOG}"
-          else
-            # Look for any build log
-            ANY_LOG=$(find build-logs -name "*.log" | head -n 1)
-            if [ -n "$ANY_LOG" ]; then
-              echo "Found build log: ${ANY_LOG}"
-              FOUND_BUILD_LOG="${ANY_LOG}"
-            fi
-          fi
-        fi
-        
-        if [ -z "$FOUND_BUILD_LOG" ]; then
-          echo "⚠️  No build log found, cache status will be unknown"
-        fi
-        echo ""
-        
-        # Make script executable
-        chmod +x .github/scripts/collect_layer_metrics.py
-        
-        # Run with explicit error handling, passing build log if found
-        set +e
-        if [ -n "$FOUND_BUILD_LOG" ]; then
-          python3 .github/scripts/collect_layer_metrics.py \
-            "$IMAGE_TAG" \
-            "${{ inputs.framework }}" \
-            "${PLATFORM_ARCH}" \
-            "$LAYER_METRICS_FILE" \
-            "$FOUND_BUILD_LOG"
-        else
-          python3 .github/scripts/collect_layer_metrics.py \
-            "$IMAGE_TAG" \
-            "${{ inputs.framework }}" \
-            "${PLATFORM_ARCH}" \
-            "$LAYER_METRICS_FILE"
-        fi
-        COLLECTION_EXIT_CODE=$?
-        set -e
-        
-        echo ""
-        echo "📊 Collection exit code: ${COLLECTION_EXIT_CODE}"
-        
-        if [ ${COLLECTION_EXIT_CODE} -ne 0 ]; then
-          echo "⚠️  Layer metrics collection had errors but continuing..."
-        fi
-        
-        if [ -f "$LAYER_METRICS_FILE" ]; then
-          echo ""
-          echo "✅ Layer metrics collected successfully"
-          echo "📄 Layer metrics file: $LAYER_METRICS_FILE"
-          echo "📏 File size: $(du -h "$LAYER_METRICS_FILE" | cut -f1)"
-          echo ""
-          
-          # Show detailed summary
-          if command -v jq &> /dev/null; then
-            TOTAL_LAYERS=$(jq -r '.total_layers // 0' "$LAYER_METRICS_FILE")
-            TOTAL_SIZE=$(jq -r '.total_size_bytes // 0' "$LAYER_METRICS_FILE")
-            TOTAL_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B ${TOTAL_SIZE} 2>/dev/null || echo "${TOTAL_SIZE} bytes")
-            
-            echo "📊 Summary:"
-            echo "  Total layers: ${TOTAL_LAYERS}"
-            echo "  Total size: ${TOTAL_SIZE_HUMAN}"
-            echo ""
-            
-            # Show top 5 largest layers
-            echo "🔝 Top 5 largest layers:"
-            jq -r '.layers | sort_by(-.size_bytes) | .[:5] | .[] | "  Layer \(.layer_index): \(.size_human) - \(.created_by[:80])"' "$LAYER_METRICS_FILE" 2>/dev/null || echo "  Could not parse layer data"
-          else
-            echo "📊 jq not available, skipping detailed summary"
-          fi
-        else
-          echo ""
-          echo "⚠️  Layer metrics file not created: $LAYER_METRICS_FILE"
-          echo "This is not critical, continuing..."
-        fi
-        
-        echo ""
-        echo "✅ Layer metrics collection completed"
         echo "=========================================="
 
     - name: Generate BuildKit Report
@@ -526,15 +336,6 @@ runs:
       with:
         name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: build-metrics/metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
-        retention-days: 7
-
-    # Upload layer metrics as artifact
-    - name: Upload Layer Metrics
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: layer-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: build-metrics/layers/layer-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
         retention-days: 7
 
     # Upload build logs as artifact for debugging and analysis
