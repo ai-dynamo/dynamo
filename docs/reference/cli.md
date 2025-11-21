@@ -339,7 +339,6 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
     # 2. Register ourselves on the network
     #
     component = runtime.namespace("namespace").component("component")
-    await component.create_service()
     model_path = "Qwen/Qwen3-0.6B" # or "/data/models/Qwen3-0.6B"
     model_input = ModelInput.Tokens # or ModelInput.Text if engine handles pre-processing
     model_type = ModelType.Chat # or ModelType.Chat | ModelType.Completions if model can be deployed on chat and completions endpoints

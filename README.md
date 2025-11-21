@@ -30,6 +30,10 @@ High-throughput, low-latency inference framework designed for serving generative
 
 ## Latest News
 
+- [11/13] [Dynamo Office Hours Playlist](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
+- [10/16] [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/#qwen3-coder-benchmarks-with-kv-routing)
+- [10/13] [NVIDIA Blackwell Leads on New SemiAnalysis InferenceMax Benchmarks](https://developer.nvidia.com/blog/nvidia-blackwell-leads-on-new-semianalysis-inferencemax-benchmarks/)
+- [09/09] [Dynamo + NVIDIA Blackwell Ultra Sets New MLPerf Inference Benchmark Record](https://blogs.nvidia.com/blog/mlperf-inference-blackwell-ultra/)
 - [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./docs/backends/trtllm/gpt-oss.md)
 
 ## The Era of Multi-GPU, Multi-Node

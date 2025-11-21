@@ -238,11 +238,20 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, kv_block_size, dp_rank=0))]
-    fn new(component: Component, kv_block_size: usize, dp_rank: DpRank) -> PyResult<Self> {
+    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0))]
+    fn new(
+        component: Component,
+        worker_id: WorkerId,
+        kv_block_size: usize,
+        dp_rank: DpRank,
+    ) -> PyResult<Self> {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
+
+        // Note: worker_id parameter matches the Python stub (_core.pyi) signature but is not used.
+        // The actual worker_id is inferred from component's connection_id in the Rust implementation.
+        let _ = worker_id;
 
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
@@ -727,7 +736,7 @@ impl ApproxKvIndexer {
     fn new(component: Component, kv_block_size: usize, ttl_secs: f64) -> PyResult<Self> {
         let ttl = tokio::time::Duration::from_secs_f64(ttl_secs);
         let prune_config = Some(llm_rs::kv_router::approx::PruneConfig {
-            max_tree_size: 2usize.pow(14), // 2** 14 = 16384
+            max_tree_size: 2usize.pow(20), // 2 ** 20 = 1048576
             prune_target_ratio: 0.8,
         });
         let inner = Arc::new(llm_rs::kv_router::approx::ApproxKvIndexer::new(
@@ -998,13 +1007,10 @@ async fn create_kv_router_from_endpoint(
     block_size: usize,
     kv_router_config: Option<llm_rs::kv_router::KvRouterConfig>,
 ) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
-    // Get component from endpoint
-    let component = endpoint.inner.component();
-
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let kv_router = model_manager
-        .kv_chooser_for(component, block_size as u32, kv_router_config)
+        .kv_chooser_for(&endpoint.inner, block_size as u32, kv_router_config)
         .await
         .map_err(to_pyerr)?;
 

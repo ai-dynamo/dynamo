@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_runtime::{
-    component::Component,
+    component::{Client, Endpoint},
     discovery::{DiscoveryQuery, watch_and_extract_field},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
@@ -19,6 +19,7 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 pub mod approx;
 pub mod indexer;
@@ -45,6 +46,7 @@ use crate::{
             LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult, WorkerWithDpRank,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
+        sequence::SequenceError,
         subscriber::start_kv_router_background,
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -213,29 +215,32 @@ pub struct KvRouter {
     kv_router_config: KvRouterConfig,
 
     cancellation_token: tokio_util::sync::CancellationToken,
+
+    client: Client,
 }
 
 impl KvRouter {
     pub async fn new(
-        component: Component,
+        endpoint: Endpoint,
+        client: Client,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
         consumer_uuid: String,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
+        let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
-        let generate_endpoint = component.endpoint("generate");
-        let client = generate_endpoint.client().await?;
 
-        let instances_rx = client.instance_source.as_ref().clone();
+        let instance_ids_rx = client.instance_avail_watcher();
 
         // Watch for runtime config updates via discovery interface
         let discovery = component.drt().discovery();
+        let endpoint_id = endpoint.id();
         let discovery_key = DiscoveryQuery::EndpointModels {
-            namespace: component.namespace().name().to_string(),
-            component: component.name().to_string(),
-            endpoint: "generate".to_string(),
+            namespace: endpoint_id.namespace.clone(),
+            component: endpoint_id.component.clone(),
+            endpoint: endpoint_id.name.clone(),
         };
         let discovery_stream = discovery
             .list_and_watch(discovery_key, Some(cancellation_token.clone()))
@@ -249,7 +254,7 @@ impl KvRouter {
             // When overlap_score_weight is zero, we don't need to track prefixes
             Indexer::None
         } else if kv_router_config.use_kv_events {
-            let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(&component);
+            let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(component);
             Indexer::KvIndexer(KvIndexer::new(
                 cancellation_token.clone(),
                 block_size,
@@ -262,7 +267,7 @@ impl KvRouter {
                 block_size,
                 Duration::from_secs(120),
                 Some(PruneConfig {
-                    max_tree_size: 2usize.pow(14), // 2** 14 = 16384
+                    max_tree_size: 2usize.pow(20), // 2 ** 20 = 1048576
                     prune_target_ratio: 0.8,
                 }),
             ))
@@ -271,7 +276,7 @@ impl KvRouter {
         let scheduler = KvScheduler::start(
             component.clone(),
             block_size,
-            instances_rx,
+            instance_ids_rx,
             runtime_configs_rx,
             selector,
             kv_router_config.router_replica_sync,
@@ -306,7 +311,13 @@ impl KvRouter {
             block_size,
             kv_router_config,
             cancellation_token,
+            client,
         })
+    }
+
+    /// Get a reference to the client used by this KvRouter
+    pub fn client(&self) -> &Client {
+        &self.client
     }
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
@@ -385,22 +396,26 @@ impl KvRouter {
             compute_seq_hash_for_block(&block_hashes)
         });
 
-        self.scheduler
+        if let Err(e) = self
+            .scheduler
             .add_request(
-                request_id,
+                request_id.clone(),
                 maybe_seq_hashes,
                 isl_tokens,
                 overlap_blocks,
                 worker,
             )
-            .await;
+            .await
+        {
+            tracing::warn!("Failed to add request {request_id}: {e}");
+        }
     }
 
-    pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<()> {
+    pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
-    pub async fn free(&self, request_id: &str) -> Result<()> {
+    pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
     }
 
@@ -574,6 +589,24 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let (mut backend_input, context) = request.into_parts();
         backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
         backend_input.dp_rank = Some(dp_rank);
+
+        // Check if worker_id is requested in extra_fields
+        let should_populate_worker_id = backend_input
+            .extra_fields
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .any(|s| s == "worker_id");
+
+        // Get prefill worker ID if available (stored by PrefillRouter)
+        // In aggregated mode, prefill_worker_id is None, so we use decode_worker_id for both
+        let decode_worker_id = instance_id;
+        let prefill_worker_id = context
+            .get::<u64>("prefill_worker_id")
+            .ok()
+            .map(|arc| *arc)
+            .or(Some(decode_worker_id)); // Use decode_worker_id if no separate prefill worker
+
         let updated_request = context.map(|_| backend_input);
 
         let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
@@ -583,6 +616,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
+            let mut first_item = true;
 
             loop {
                 tokio::select! {
@@ -594,23 +628,44 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     }
 
                     item = response_stream.next() => {
-                        let Some(item) = item else {
+                        let Some(mut item) = item else {
                             break;
                         };
 
                         if !prefill_marked {
                             if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
-                                tracing::warn!("Failed to mark prefill completed for request {context_id}: {e:?}");
+                                tracing::warn!("Failed to mark prefill completed for request {context_id}: {e}");
                             }
                             prefill_marked = true;
                         }
-                        yield item;
+
+                        yield item.clone();
+
+                        // Inject worker_id in first item's disaggregated_params if requested
+                        if first_item && should_populate_worker_id {
+                            if let Some(ref mut data) = item.data {
+                                // Add worker_id to disaggregated_params
+                                let worker_id_json = json!({
+                                    "prefill_worker_id": prefill_worker_id,
+                                    "decode_worker_id": decode_worker_id,
+                                });
+
+                                if let Some(ref mut params) = data.disaggregated_params {
+                                    if let Some(obj) = params.as_object_mut() {
+                                        obj.insert("worker_id".to_string(), worker_id_json);
+                                    }
+                                } else {
+                                    data.disaggregated_params = Some(json!({"worker_id": worker_id_json}));
+                                }
+                            }
+                            first_item = false;
+                        }
                     }
                 }
             }
 
             if let Err(e) = chooser.free(&context_id).await {
-                tracing::warn!("Failed to free request {context_id}: {e:?}");
+                tracing::warn!("Failed to free request {context_id}: {e}");
             }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))

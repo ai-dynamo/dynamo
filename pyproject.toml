@@ -54,14 +54,14 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl<=0.7.0",
+    "nixl[cu12]<=0.7.1",
     "vllm[flashinfer]==0.10.2",
 ]
 
 sglang = [
     "uvloop",
-    "nixl<=0.7.0",
-    "sglang[all]==0.5.4.post3",
+    "nixl[cu12]<=0.7.1",
+    "sglang==0.5.4.post3",
 ]
 
 [dependency-groups]
@@ -136,7 +136,7 @@ minversion = "8.0"
 tmp_path_retention_policy = "failed"
 
 # NOTE
-# We ignore model.py explcitly here to avoid mypy errors with duplicate modules
+# We ignore model.py explicitly here to avoid mypy errors with duplicate modules
 # pytest overrides the default mypy exclude configuration and so we exclude here as well
 addopts = [
     "-ra",
@@ -175,6 +175,8 @@ filterwarnings = [
     "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
+    # pytest-benchmark automatically disables when xdist is active, ignore the warning
+    "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
 ]
 
 
@@ -182,6 +184,7 @@ filterwarnings = [
 asyncio_mode = "auto"
 markers = [
     "pre_merge: marks tests to run before merging",
+    "parallel: marks tests that can run in parallel with pytest-xdist",
     "nightly: marks tests to run nightly",
     "weekly: marks tests to run weekly",
     "gpu_1: marks tests to run on GPU",
@@ -196,6 +199,7 @@ markers = [
     "trtllm: marks tests as requiring trtllm",
     "trtllm_marker: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
+    "multimodal: marks tests as multimodal (image/video) tests",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
     "kvbm: marks tests for KV behavior and model determinism",

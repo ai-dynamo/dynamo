@@ -101,7 +101,7 @@ def extract_params(param_map) -> dict:
     ],
     ids=["no_params", "numeric_param", "mixed_params"],
 )
-def test_request_parameters(start_services, request_params):
+def test_request_parameters(file_storage_backend, start_services, request_params):
     """Test gRPC request-level parameters are echoed through tensor models.
 
     The worker acts as an identity function: echoes input tensors unchanged and

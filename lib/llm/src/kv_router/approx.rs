@@ -21,7 +21,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::hash::Hash;
 use std::sync::OnceLock;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -277,7 +277,7 @@ impl ApproxKvIndexer {
         let (_get_workers_tx, mut get_workers_rx) =
             mpsc::channel::<super::indexer::GetWorkersRequest>(16);
         let (dump_tx, mut dump_rx) = mpsc::channel::<DumpRequest>(16);
-        let (prune_tx, mut prune_rx) = watch::channel(false);
+        let (prune_tx, mut prune_rx) = mpsc::channel::<()>(1);
         let cancel_clone = token.clone();
         let task = std::thread::spawn(move || {
             // create a new tokio runtime which will only perform work on a single thread
@@ -302,6 +302,8 @@ impl ApproxKvIndexer {
                     };
 
                     tokio::select! {
+                        biased;
+
                         _ = cancel_clone.cancelled() => {
                             tracing::debug!("Approximate Indexer progress loop shutting down");
                             return;
@@ -314,6 +316,27 @@ impl ApproxKvIndexer {
                         Some(get_workers_req) = get_workers_rx.recv() => {
                             let workers = trie.get_workers();
                             let _ = get_workers_req.resp.send(workers);
+                        }
+
+                        Some(_) = prune_rx.recv() => {
+                            // The tree has exceeded the max tree size, so proceed with pruning.
+                            if let Ok(pruned) = prune_manager.prune(trie.current_size()) {
+                                pruned.iter().for_each(|p| {
+                                    event_id += 1;
+
+                                    let event = RouterEvent::new(
+                                        p.worker.worker_id,
+                                        KvCacheEvent {
+                                            event_id,
+                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                                block_hashes: vec![p.key],
+                                            }),
+                                            dp_rank: p.worker.dp_rank,
+                                        }
+                                    );
+                                    let _ = trie.apply_event(event);
+                                });
+                            }
                         }
 
                         Some(result) = route_rx.recv() => {
@@ -353,9 +376,9 @@ impl ApproxKvIndexer {
                                             current_size,
                                             prune_config.max_tree_size
                                         );
-                                        // Send a signal to the pruning watcher to schedule pruning.
-                                        if let Err(e) = prune_tx.send(true) {
-                                            tracing::error!("Failed to send prune schedule signal: {:?}", e);
+                                        // Send a signal to the pruning receiver to schedule pruning.
+                                        if let Err(mpsc::error::TrySendError::Closed(_)) = prune_tx.try_send(()) {
+                                            tracing::error!("Failed to send prune schedule signal, prune receiver is closed");
                                         }
                                     }
                                 }
@@ -370,31 +393,6 @@ impl ApproxKvIndexer {
                         Some(request) = match_rx.recv() => {
                             let scores = trie.find_matches(request.sequence, false);
                             request.resp.send(scores).unwrap();
-                        }
-
-                        Ok(_) = prune_rx.changed() => {
-                            // The tree has exceeded the max tree size, so proceed with pruning.
-                            if let Ok(pruned) = prune_manager.prune(trie.current_size()) {
-                                pruned.iter().for_each(|p| {
-                                    event_id += 1;
-
-                                    let event = RouterEvent::new(
-                                        p.worker.worker_id,
-                                        KvCacheEvent {
-                                            event_id,
-                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                                block_hashes: vec![p.key],
-                                            }),
-                                            dp_rank: p.worker.dp_rank,
-                                        }
-                                    );
-                                    let _ = trie.apply_event(event);
-                                });
-                                // Reset the pruning watcher to false to indicate that pruning is complete.
-                                if let Err(e) = prune_tx.send(true) {
-                                    tracing::error!("Failed to send prune completion signal: {:?}", e);
-                                }
-                            }
                         }
 
                         _ = expiry_fut => {

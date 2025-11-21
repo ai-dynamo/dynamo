@@ -34,7 +34,7 @@ async def distributed_runtime():
     Each test gets its own runtime in a forked process to avoid singleton conflicts.
     """
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "etcd")
+    runtime = DistributedRuntime(loop, "etcd", "nats")
     yield runtime
     runtime.shutdown()
 
@@ -223,7 +223,6 @@ async def test_event_handler(distributed_runtime):
     namespace = "kv_test"
     component = "event"
     kv_listener = distributed_runtime.namespace(namespace).component(component)
-    await kv_listener.create_service()
 
     # publisher
     worker_id = 233
@@ -281,7 +280,6 @@ async def test_approx_kv_indexer(distributed_runtime):
     namespace = "kv_test"
     component = "approx_kv"
     kv_listener = distributed_runtime.namespace(namespace).component(component)
-    await kv_listener.create_service()
 
     indexer = ApproxKvIndexer(kv_listener, kv_block_size, 30.0)
 

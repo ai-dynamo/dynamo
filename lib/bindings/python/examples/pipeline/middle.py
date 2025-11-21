@@ -44,7 +44,6 @@ async def worker(runtime: DistributedRuntime):
 
     # create endpoint service for middle component
     component = runtime.namespace("examples/pipeline").component("middle")
-    await component.create_service()
 
     endpoint = component.endpoint("generate")
     await endpoint.serve_endpoint(RequestHandler(backend).generate)

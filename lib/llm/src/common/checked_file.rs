@@ -82,10 +82,6 @@ impl CheckedFile {
         }
     }
 
-    pub fn is_nats_url(&self) -> bool {
-        matches!(self.path.as_ref(), Either::Right(u) if u.scheme() == "nats")
-    }
-
     pub fn checksum(&self) -> &Checksum {
         &self.checksum
     }

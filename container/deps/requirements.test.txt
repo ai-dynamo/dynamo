@@ -28,6 +28,7 @@ pytest-forked
 pytest-md-report
 pytest-mypy
 pytest-timeout
+pytest-xdist
 # Triton client to Dynamo gRPC server
 tritonclient[grpc]
 # add types library stub for PyYAML

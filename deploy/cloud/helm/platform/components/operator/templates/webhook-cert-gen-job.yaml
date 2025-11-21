@@ -1,0 +1,289 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- if and .Values.webhook.enabled (not .Values.webhook.certManager.enabled) (not .Values.webhook.certificateSecret.external) }}
+---
+# ServiceAccount for certificate generation job
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-gen
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+---
+# Role to create/update the certificate secret
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-gen
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["create", "update", "patch", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-gen
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-gen
+subjects:
+- kind: ServiceAccount
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-gen
+  namespace: {{ .Release.Namespace }}
+---
+# Job to generate certificates and create secret
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-gen-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-4"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      name: {{ include "dynamo-operator.fullname" . }}-webhook-cert-gen
+      labels:
+        app.kubernetes.io/component: webhook
+        app.kubernetes.io/created-by: dynamo-operator
+        app.kubernetes.io/part-of: dynamo-operator
+      {{- include "dynamo-operator.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "dynamo-operator.fullname" . }}-webhook-cert-gen
+      restartPolicy: OnFailure
+      containers:
+      - name: cert-generator
+        image: {{ .Values.webhook.certGenerator.image.repository }}:{{ .Values.webhook.certGenerator.image.tag }}
+        imagePullPolicy: {{ .Values.webhook.certGenerator.image.pullPolicy }}
+        env:
+        - name: OPENSSL_CONF
+          value: /tmp/openssl.cnf
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+
+          echo "🔐 Generating webhook certificates..."
+
+          # Create OpenSSL config without FIPS
+          cat > /tmp/openssl.cnf <<'OPENSSLEOF'
+          openssl_conf = openssl_init
+
+          [openssl_init]
+          providers = provider_sect
+
+          [provider_sect]
+          default = default_sect
+
+          [default_sect]
+          activate = 1
+          OPENSSLEOF
+
+          # Configuration
+          SERVICE_NAME="{{ include "dynamo-operator.fullname" . }}-webhook-service"
+          NAMESPACE="{{ .Release.Namespace }}"
+          SECRET_NAME="{{ .Values.webhook.certificateSecret.name }}"
+          CERT_VALIDITY_DAYS="{{ .Values.webhook.certificateValidity }}"
+
+          # Check if valid certificates already exist
+          echo "🔍 Checking if valid certificates already exist..."
+          NEED_NEW_CERTS=false
+
+          if kubectl get secret "${SECRET_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+            echo "Secret exists, checking certificate validity..."
+
+            # Extract and verify the certificate
+            mkdir -p /tmp/verify
+            kubectl get secret "${SECRET_NAME}" -n "${NAMESPACE}" -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/verify/tls.crt
+            kubectl get secret "${SECRET_NAME}" -n "${NAMESPACE}" -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/verify/ca.crt
+
+            # Check if certificate is valid for at least 30 more days
+            if openssl x509 -checkend 2592000 -noout -in /tmp/verify/tls.crt 2>/dev/null; then
+              echo "✅ Certificate is valid for at least 30 more days"
+
+              # Verify SANs match the service name
+              CERT_SANS=$(openssl x509 -in /tmp/verify/tls.crt -noout -text 2>/dev/null | grep -A1 "Subject Alternative Name" | tail -1)
+              if echo "$CERT_SANS" | grep -q "${SERVICE_NAME}.${NAMESPACE}.svc"; then
+                echo "✅ Certificate has correct SANs"
+                echo "🎉 Existing certificates are valid, skipping generation"
+              else
+                echo "⚠️  Certificate SANs don't match, need to regenerate"
+                NEED_NEW_CERTS=true
+              fi
+            else
+              echo "⚠️  Certificate expires soon or is invalid, need to regenerate"
+              NEED_NEW_CERTS=true
+            fi
+
+            rm -rf /tmp/verify
+          else
+            echo "Secret doesn't exist, need to generate certificates"
+            NEED_NEW_CERTS=true
+          fi
+
+          # Only generate certificates if needed
+          if [ "$NEED_NEW_CERTS" = false ]; then
+            echo "✅ Using existing valid certificates"
+            exit 0
+          fi
+
+          echo "🔐 Generating new webhook certificates..."
+
+          # Create working directory
+          mkdir -p /tmp/certs
+          cd /tmp/certs
+
+          echo "📝 Generating CA key and certificate..."
+          # Generate CA key (4096-bit RSA)
+          openssl genrsa -out ca.key 4096
+
+          # Generate self-signed CA certificate
+          cat > ca.cnf <<EOF
+          [req]
+          prompt = no
+          distinguished_name = dn
+          x509_extensions = v3_ca
+
+          [dn]
+          CN = Dynamo Webhook CA
+          O = NVIDIA
+
+          [v3_ca]
+          basicConstraints = critical,CA:TRUE
+          keyUsage = critical,digitalSignature,keyCertSign,cRLSign
+          subjectKeyIdentifier = hash
+          EOF
+
+          openssl req -x509 -new -nodes \
+            -key ca.key \
+            -sha256 \
+            -days ${CERT_VALIDITY_DAYS} \
+            -out ca.crt \
+            -config ca.cnf
+
+          echo "📝 Generating server key and certificate..."
+          # Generate server key (4096-bit RSA)
+          openssl genrsa -out tls.key 4096
+
+          # Generate server certificate signing request with SANs
+          cat > server.cnf <<EOF
+          [req]
+          prompt = no
+          distinguished_name = dn
+          req_extensions = v3_req
+
+          [dn]
+          CN = ${SERVICE_NAME}
+          O = NVIDIA
+
+          [v3_req]
+          basicConstraints = CA:FALSE
+          keyUsage = critical,digitalSignature,keyEncipherment
+          extendedKeyUsage = serverAuth
+          subjectAltName = @alt_names
+
+          [alt_names]
+          DNS.1 = ${SERVICE_NAME}
+          DNS.2 = ${SERVICE_NAME}.${NAMESPACE}
+          DNS.3 = ${SERVICE_NAME}.${NAMESPACE}.svc
+          DNS.4 = ${SERVICE_NAME}.${NAMESPACE}.svc.{{ .Values.kubernetesClusterDomain }}
+          EOF
+
+          openssl req -new -key tls.key -out server.csr -config server.cnf
+
+          # Sign server certificate with CA
+          openssl x509 -req \
+            -in server.csr \
+            -CA ca.crt \
+            -CAkey ca.key \
+            -CAcreateserial \
+            -out tls.crt \
+            -days ${CERT_VALIDITY_DAYS} \
+            -extensions v3_req \
+            -extfile server.cnf
+
+          echo "✅ Certificates generated successfully!"
+
+          echo "📦 Creating Kubernetes secret..."
+          # Check if secret exists
+          if kubectl get secret ${SECRET_NAME} -n ${NAMESPACE} >/dev/null 2>&1; then
+            echo "Secret exists, updating..."
+            kubectl create secret generic ${SECRET_NAME} \
+              --from-file=tls.crt=tls.crt \
+              --from-file=tls.key=tls.key \
+              --from-file=ca.crt=ca.crt \
+              --dry-run=client -o yaml | \
+              kubectl apply -f -
+          else
+            echo "Creating new secret..."
+            kubectl create secret generic ${SECRET_NAME} \
+              --from-file=tls.crt=tls.crt \
+              --from-file=tls.key=tls.key \
+              --from-file=ca.crt=ca.crt \
+              -n ${NAMESPACE}
+          fi
+
+          echo "✅ Secret '${SECRET_NAME}' created successfully!"
+          echo "🎉 Webhook certificate generation complete!"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: false
+          runAsNonRoot: true
+          runAsUser: 1001
+{{- end }}
+
