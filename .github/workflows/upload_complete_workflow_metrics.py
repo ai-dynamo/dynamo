@@ -67,12 +67,6 @@ FIELD_BUILD_END_TIME = "ts_build_end_time"
 FIELD_BUILD_TARGET = "s_build_target"
 FIELD_BUILD_FRAMEWORK = "s_build_framework"
 FIELD_BUILD_SIZE_BYTES = "l_build_size_bytes"
-FIELD_CACHED_LAYERS = "l_cached_layers"
-FIELD_TOTAL_BUILD_STEPS = "l_total_build_steps"
-FIELD_CACHE_HIT_RATE_PERCENT = "l_cache_hit_rate_percent"
-FIELD_BUILD_WARNINGS = "l_build_warnings"
-FIELD_BUILD_ERRORS = "l_build_errors"
-FIELD_PULL_OPERATIONS = "l_pull_operations"
 
 # Test Info
 FIELD_FRAMEWORK = "s_framework"
@@ -83,17 +77,6 @@ FIELD_TEST_CLASSNAME = (
 )
 FIELD_TEST_DURATION = "l_test_duration_ms"
 FIELD_TEST_STATUS = "s_test_status"  # Test status (passed, failed, error, skipped)
-
-# Layer-specific fields (for LAYER_INDEX)
-FIELD_LAYER_INDEX = "l_layer_index"
-FIELD_LAYER_ID = "s_layer_id"
-FIELD_LAYER_SIZE_BYTES = "l_layer_size_bytes"
-FIELD_LAYER_SIZE_HUMAN = "s_layer_size_human"
-FIELD_LAYER_CREATED_BY = "s_layer_created_by"
-FIELD_LAYER_CACHE_STATUS = "s_layer_cache_status"
-FIELD_LAYER_COMMENT = "s_layer_comment"
-FIELD_TOTAL_LAYERS = "l_total_layers"
-FIELD_IMAGE_TAG = "s_image_tag"
 
 # BuildKit step-specific fields (for BUILDKIT_STEP_INDEX)
 FIELD_BUILDKIT_STEP_NUMBER = "l_buildkit_step_number"
@@ -311,7 +294,6 @@ class WorkflowMetricsUploader:
         self.workflow_index = os.getenv("WORKFLOW_INDEX", "")
         self.jobs_index = os.getenv("JOB_INDEX", "")
         self.steps_index = os.getenv("STEPS_INDEX", "")
-        self.layer_index = os.getenv("LAYER_INDEX", "")
         self.buildkit_step_index = os.getenv("BUILDKIT_STEP_INDEX", "")
 
         # Validate that database URLs are provided
@@ -672,8 +654,6 @@ class WorkflowMetricsUploader:
             self._upload_container_metrics(job_data)
             # Also upload test metrics if available for this framework job
             self._upload_test_metrics(job_data)
-            # Also upload layer metrics if available
-            self._upload_layer_metrics(job_data)
             # Also upload BuildKit step metrics if available
             self._upload_buildkit_step_metrics(job_data)
 
@@ -829,18 +809,6 @@ class WorkflowMetricsUploader:
         container_data[FIELD_BUILD_DURATION_SEC] = build_metrics.get(
             "build_duration_sec", 0
         )
-
-        # Build efficiency metrics
-        container_data[FIELD_CACHED_LAYERS] = build_metrics.get("cached_layers", 0)
-        container_data[FIELD_TOTAL_BUILD_STEPS] = build_metrics.get(
-            "total_build_steps", 0
-        )
-        container_data[FIELD_CACHE_HIT_RATE_PERCENT] = float(
-            build_metrics.get("cache_hit_rate_percent", 0)
-        )
-        container_data[FIELD_BUILD_WARNINGS] = build_metrics.get("build_warnings", 0)
-        container_data[FIELD_BUILD_ERRORS] = build_metrics.get("build_errors", 0)
-        container_data[FIELD_PULL_OPERATIONS] = build_metrics.get("pull_operations", 0)
 
         # Add @timestamp for time-series data
         container_data["@timestamp"] = build_metrics.get(
@@ -1076,151 +1044,6 @@ class WorkflowMetricsUploader:
                 print(f"❌ Failed to process metadata file {metadata_file}: {e}")
 
         print(f"📊 Processed {total_tests_processed} individual tests total")
-        print("   " + "=" * 50)
-
-    def _upload_layer_metrics(self, job_data: Dict[str, Any]) -> None:
-        """Upload layer-level metrics for Docker images"""
-        layer_index = self.layer_index
-        if not layer_index:
-            print("⚠️  LAYER_INDEX not configured, skipping layer metrics upload")
-            return
-
-        job_name = job_data.get("name", "")
-        job_id = str(job_data["id"])
-
-        print(f"🐳 Looking for layer metrics for job '{job_name}'")
-
-        # Determine framework and architecture from job name
-        framework = None
-        job_name_lower = job_name.lower()
-        if "vllm" in job_name_lower:
-            framework = "vllm"
-        elif "sglang" in job_name_lower:
-            framework = "sglang"
-        elif "trtllm" in job_name_lower:
-            framework = "trtllm"
-
-        if not framework:
-            print(f"⚠️  Could not determine framework from job name: {job_name}")
-            return
-
-        # Determine platform architecture
-        platform_arch = "amd64"  # default
-        if "(amd64)" in job_name_lower or "amd64" in job_name_lower:
-            platform_arch = "amd64"
-        elif "(arm64)" in job_name_lower or "arm64" in job_name_lower:
-            platform_arch = "arm64"
-
-        print(f"📦 Job framework: {framework}, platform_arch: {platform_arch}")
-
-        # Look for layer metrics directory
-        layer_metrics_dir = "layer-metrics"
-        if not os.path.exists(layer_metrics_dir):
-            print(f"⚠️  Layer metrics directory not found: {layer_metrics_dir}")
-            return
-
-        # Look for layer metrics files matching this framework and architecture
-        layer_files = glob.glob(
-            f"{layer_metrics_dir}/layer-metrics-{framework}-{platform_arch}-*.json"
-        )
-
-        if not layer_files:
-            print(
-                f"⚠️  No layer metrics files found for framework '{framework}' with arch '{platform_arch}'"
-            )
-            return
-
-        print(f"📄 Found {len(layer_files)} layer metrics file(s)")
-
-        total_layers_processed = 0
-
-        # Process each layer metrics file
-        for layer_file in layer_files:
-            try:
-                with open(layer_file, "r") as f:
-                    layer_data = json.load(f)
-
-                image_tag = layer_data.get("image_tag", "unknown")
-                total_layers = layer_data.get("total_layers", 0)
-                layers = layer_data.get("layers", [])
-
-                print(f"📋 Processing layer metrics for image: {image_tag}")
-                print(f"   Total layers: {total_layers}")
-
-                # Upload each layer as a separate document
-                for layer in layers:
-                    layer_metric = {}
-
-                    # Generate unique ID for this layer
-                    layer_idx = layer.get("layer_index", 0)
-                    layer_metric[
-                        FIELD_ID
-                    ] = f"github-layer-{job_id}-{framework}-{layer_idx}"
-
-                    # Job and Step context
-                    layer_metric[FIELD_JOB_ID] = job_id
-                    layer_metric[FIELD_JOB_NAME] = job_name
-                    
-                    # Find the "Build Container" step ID
-                    build_step_id = None
-                    steps = job_data.get("steps", [])
-                    for step in steps:
-                        if (
-                            "build" in step.get("name", "").lower()
-                            and "container" in step.get("name", "").lower()
-                        ):
-                            build_step_id = f"{job_id}_{step.get('number', 1)}"
-                            break
-                    layer_metric[FIELD_STEP_ID] = build_step_id or f"{job_id}_build"
-
-                    # Framework and platform
-                    layer_metric[FIELD_BUILD_FRAMEWORK] = framework
-                    layer_metric[FIELD_IMAGE_TAG] = image_tag
-
-                    # Layer-specific fields
-                    layer_metric[FIELD_LAYER_INDEX] = layer.get("layer_index", 0)
-                    layer_metric[FIELD_LAYER_ID] = layer.get("layer_id", "")[:100]  # Truncate if too long
-                    layer_metric[FIELD_LAYER_SIZE_BYTES] = layer.get("size_bytes", 0)
-                    layer_metric[FIELD_LAYER_SIZE_HUMAN] = layer.get("size_human", "0B")
-                    
-                    # Truncate created_by command to prevent excessively long strings
-                    created_by = layer.get("created_by", "")
-                    if len(created_by) > 1000:
-                        created_by = created_by[:997] + "..."
-                    layer_metric[FIELD_LAYER_CREATED_BY] = created_by
-                    
-                    layer_metric[FIELD_LAYER_CACHE_STATUS] = layer.get(
-                        "cache_status", "unknown"
-                    )
-                    layer_metric[FIELD_LAYER_COMMENT] = layer.get("comment", "")
-                    layer_metric[FIELD_TOTAL_LAYERS] = total_layers
-
-                    # Add timestamp
-                    job_completed_at = job_data.get("completed_at")
-                    if job_completed_at:
-                        layer_metric["@timestamp"] = job_completed_at
-                    else:
-                        layer_metric["@timestamp"] = datetime.now(
-                            timezone.utc
-                        ).isoformat()
-
-                    # Add common context fields
-                    self.add_common_context_fields(layer_metric)
-
-                    # Upload layer metric
-                    try:
-                        self.post_to_db(layer_index, layer_metric)
-                        print(
-                            f"✅ Uploaded layer {layer_idx}: {layer.get('size_human', '0B')}"
-                        )
-                        total_layers_processed += 1
-                    except Exception as e:
-                        print(f"❌ Failed to upload layer {layer_idx}: {e}")
-
-            except Exception as e:
-                print(f"❌ Failed to process layer metrics file {layer_file}: {e}")
-
-        print(f"📊 Processed {total_layers_processed} individual layers total")
         print("   " + "=" * 50)
 
     def _upload_buildkit_step_metrics(self, job_data: Dict[str, Any]) -> None:
