@@ -723,33 +723,57 @@ impl KvIndexer {
     }
 }
 
-/// Bindings for the approximate KV indexer. We need to exactly match the regular KV Indexer
-/// interface, so that the router can switch between the two.
+/// Bindings for the approximate KV indexer. This is a wrapper around KvIndexer
+/// that uses TTL-based expiration and pruning instead of receiving KV events from workers.
 #[pyclass]
 pub(crate) struct ApproxKvIndexer {
-    inner: Arc<llm_rs::kv_router::approx::ApproxKvIndexer>,
+    inner: Arc<llm_rs::kv_router::indexer::KvIndexer>,
 }
 
 #[pymethods]
 impl ApproxKvIndexer {
     #[new]
-    fn new(component: Component, kv_block_size: usize, ttl_secs: f64) -> PyResult<Self> {
-        let ttl = tokio::time::Duration::from_secs_f64(ttl_secs);
-        let prune_config = Some(llm_rs::kv_router::approx::PruneConfig {
-            max_tree_size: 2usize.pow(20), // 2 ** 20 = 1048576
-            prune_target_ratio: 0.8,
-        });
-        let inner = Arc::new(llm_rs::kv_router::approx::ApproxKvIndexer::new(
-            component.inner.drt().runtime().child_token(),
-            kv_block_size as u32,
-            ttl,
-            prune_config,
-        ));
-        Ok(Self { inner })
+    #[pyo3(signature = (component, kv_block_size, router_ttl_secs=120.0, router_max_tree_size=1024, router_prune_target_ratio=0.8))]
+    fn new(
+        component: Component,
+        kv_block_size: usize,
+        router_ttl_secs: f64,
+        router_max_tree_size: usize,
+        router_prune_target_ratio: f64,
+    ) -> PyResult<Self> {
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        runtime.block_on(async {
+            let cancellation_token = component.inner.drt().runtime().child_token();
+            let kv_indexer_metrics =
+                llm_rs::kv_router::indexer::KvIndexerMetrics::from_component(&component.inner);
+
+            // Build PruneConfig with the provided parameters
+            let prune_config = llm_rs::kv_router::approx::PruneConfig {
+                ttl: std::time::Duration::from_secs_f64(router_ttl_secs),
+                max_tree_size: router_max_tree_size,
+                prune_target_ratio: router_prune_target_ratio,
+            };
+
+            // Create KvIndexer with pruning enabled, but DO NOT subscribe to events
+            let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
+                llm_rs::kv_router::indexer::KvIndexer::new_with_frequency(
+                    cancellation_token.clone(),
+                    None, // expiration_duration - not used with prune_config
+                    kv_block_size as u32,
+                    kv_indexer_metrics,
+                    Some(prune_config),
+                )
+                .into();
+
+            // Note: We deliberately do NOT call start_kv_router_background here
+            // because ApproxKvIndexer doesn't use KV events from workers
+
+            Ok(Self { inner })
+        })
     }
 
-    fn block_size(&self) -> u32 {
-        self.inner.block_size()
+    fn block_size(&self) -> usize {
+        self.inner.block_size() as usize
     }
 
     fn find_matches_for_request<'p>(
