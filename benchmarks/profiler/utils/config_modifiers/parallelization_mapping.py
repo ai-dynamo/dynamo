@@ -60,12 +60,14 @@ class ParallelizationMapping:
 
     def get_expert_split(self) -> int:
         """
-        Get the effective expert split size (expert parallelism, not tensor parallelism).
-        Only DEP splits experts across GPUs. TEP and TP don't split experts (returns 1).
+        Get the effective expert split size.
+        Both TEP and DEP split experts, TP doesn't (returns 1).
         """
+        if self.tep is not None:
+            return self.tep
         if self.dep is not None:
             return self.dep
-        return 1  # TP and TEP don't use expert parallelism
+        return 1  # TP has expert split of 1
 
     def get_attn_dp_size(self) -> int:
         """
