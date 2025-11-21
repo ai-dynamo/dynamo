@@ -175,6 +175,8 @@ filterwarnings = [
     "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
+    # pytest-benchmark automatically disables when xdist is active, ignore the warning
+    "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
 ]
 
 
@@ -182,6 +184,7 @@ filterwarnings = [
 asyncio_mode = "auto"
 markers = [
     "pre_merge: marks tests to run before merging",
+    "parallel: marks tests that can run in parallel with pytest-xdist",
     "nightly: marks tests to run nightly",
     "weekly: marks tests to run weekly",
     "gpu_1: marks tests to run on GPU",
