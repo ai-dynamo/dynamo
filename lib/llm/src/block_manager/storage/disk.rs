@@ -350,6 +350,13 @@ impl DiskStorage {
             StorageError::AllocationFailed(format!("Failed to allocate temp file: {}", e))
         })?;
 
+        tracing::info!(
+            "DiskStorage created: fd={}, file={}, size={} bytes",
+            raw_fd,
+            file_name,
+            size
+        );
+
         Ok(Self {
             fd: raw_fd as u64,
             file_name,
@@ -372,9 +379,21 @@ impl DiskStorage {
             return Ok(());
         }
 
+        tracing::info!(
+            "Unlinking temp file (fd={}, file={}). File will be deleted when fd closes.",
+            self.fd,
+            self.file_name
+        );
+
         self.unlinked = true;
 
         unlink(self.file_name.as_str()).map_err(|e| {
+            tracing::error!(
+                "Failed to unlink temp file: fd={}, file={}, error={}",
+                self.fd,
+                self.file_name,
+                e
+            );
             StorageError::AllocationFailed(format!("Failed to unlink temp file: {}", e))
         })
     }
@@ -386,8 +405,22 @@ impl DiskStorage {
 
 impl Drop for DiskStorage {
     fn drop(&mut self) {
+        tracing::warn!(
+            "DiskStorage being dropped: fd={}, file={}, size={} bytes, already_unlinked={}",
+            self.fd,
+            self.file_name,
+            self.size,
+            self.unlinked
+        );
+
         self.handles.release();
         let _ = self.unlink();
+
+        tracing::info!(
+            "DiskStorage dropped and cleaned up: fd={}, file={}",
+            self.fd,
+            self.file_name
+        );
     }
 }
 
