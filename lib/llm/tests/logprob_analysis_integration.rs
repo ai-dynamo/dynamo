@@ -404,6 +404,7 @@ fn create_response_with_linear_probs(
         system_fingerprint: None,
         object: "chat.completion.chunk".to_string(),
         usage: None,
+        nvext: None,
     }
 }
 
@@ -484,5 +485,6 @@ fn create_multi_choice_response(
         system_fingerprint: None,
         object: "chat.completion.chunk".to_string(),
         usage: None,
+        nvext: None,
     }
 }

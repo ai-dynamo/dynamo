@@ -4,11 +4,13 @@
 import asyncio
 import logging
 import os
+import tempfile
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
 
 from vllm.inputs import TokensPrompt
+from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
@@ -29,7 +31,9 @@ logger = logging.getLogger(__name__)
 
 
 def build_sampling_params(
-    request: Dict[str, Any], default_sampling_params: Dict[str, Any]
+    request: Dict[str, Any],
+    default_sampling_params: Dict[str, Any],
+    model_max_len: int | None = None,
 ) -> SamplingParams:
     """
     Build SamplingParams from a PreprocessedRequest.
@@ -57,6 +61,15 @@ def build_sampling_params(
                 continue
             setattr(sampling_params, key, value)
 
+    # If max_tokens wasn't provided (None or missing), compute a dynamic default
+    provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
+    token_ids = request.get("token_ids", [])
+    input_length = len(token_ids)
+    if model_max_len is not None and (provided_max_tokens is None):
+        # Ensure at least 1 token generation by default when possible
+        dynamic_default = max(1, model_max_len - input_length)
+        sampling_params.max_tokens = dynamic_default
+
     return sampling_params
 
 
@@ -65,7 +78,14 @@ class BaseWorkerHandler(ABC):
     Request handler for the generate and clear_kv_blocks endpoints.
     """
 
-    def __init__(self, runtime, component, engine, default_sampling_params):
+    def __init__(
+        self,
+        runtime,
+        component,
+        engine,
+        default_sampling_params,
+        model_max_len: int | None = None,
+    ):
         self.runtime = runtime
         self.component = component
         self.engine_client = engine
@@ -73,6 +93,8 @@ class BaseWorkerHandler(ABC):
         self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
         self.image_loader = ImageLoader()
+        self.temp_dirs: list[tempfile.TemporaryDirectory] = []
+        self.model_max_len = model_max_len
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -115,9 +137,18 @@ class BaseWorkerHandler(ABC):
         except Exception as e:
             yield {"status": "error", "message": str(e)}
 
+    def add_temp_dir(self, temp_dir: tempfile.TemporaryDirectory) -> None:
+        """Add a temporary directory to be cleaned up later."""
+        if temp_dir is not None:
+            self.temp_dirs.append(temp_dir)
+
     def cleanup(self):
-        """Override in subclasses if cleanup is needed."""
-        pass
+        """Clean up resources including temporary directories."""
+        for temp_dir in self.temp_dirs:
+            try:
+                temp_dir.cleanup()
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp directory: {e}")
 
     async def _extract_multimodal_data(
         self, request: Dict[str, Any]
@@ -163,6 +194,28 @@ class BaseWorkerHandler(ABC):
 
         return vllm_mm_data if vllm_mm_data else None
 
+    @staticmethod
+    def _build_completion_usage(request_output: RequestOutput) -> Dict[str, Any]:
+        return {
+            "prompt_tokens": (
+                len(request_output.prompt_token_ids)
+                if request_output.prompt_token_ids
+                else None
+            ),
+            "completion_tokens": len(request_output.outputs[0].token_ids),
+            "total_tokens": (
+                len(request_output.prompt_token_ids)
+                + len(request_output.outputs[0].token_ids)
+                if request_output.prompt_token_ids
+                else None
+            ),
+            "prompt_tokens_details": (
+                {"cached_tokens": request_output.num_cached_tokens}
+                if request_output.num_cached_tokens
+                else None
+            ),
+        }
+
     async def generate_tokens(
         self, prompt, sampling_params, request_id, data_parallel_rank=None
     ):
@@ -188,6 +241,11 @@ class BaseWorkerHandler(ABC):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res
+                        )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
                     yield out
@@ -212,8 +270,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         component,
         engine,
         default_sampling_params,
+        model_max_len: int | None = None,
     ):
-        super().__init__(runtime, component, engine, default_sampling_params)
+        super().__init__(
+            runtime, component, engine, default_sampling_params, model_max_len
+        )
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
@@ -228,20 +289,28 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         # Build sampling params from request
-        sampling_params = build_sampling_params(request, self.default_sampling_params)
+        sampling_params = build_sampling_params(
+            request, self.default_sampling_params, self.model_max_len
+        )
 
-        # Extract disaggregated_params from request (set by prefill router in Rust frontend)
-        disaggregated_params = request.get("disaggregated_params")
-        if disaggregated_params:
-            # Prefill was performed - use the disaggregated params
-            if sampling_params.extra_args is None:
-                sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = disaggregated_params.get(
+        prefill_result = request.get("prefill_result")
+        if prefill_result and isinstance(prefill_result, dict):
+            kv_params = prefill_result.get("disaggregated_params", {}).get(
                 "kv_transfer_params"
             )
+        else:
+            kv_params = None
+
+        if kv_params is not None:
+            if sampling_params.extra_args is None:
+                sampling_params.extra_args = {}
+            sampling_params.extra_args["kv_transfer_params"] = kv_params
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"
             )
+        prefill_prompt_tokens_details = (
+            prefill_result.get("prompt_tokens_details") if prefill_result else None
+        )
 
         dp_rank = request.get("dp_rank", None)
 
@@ -250,6 +319,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for tok in self.generate_tokens(
                     prompt, sampling_params, request_id, data_parallel_rank=dp_rank
                 ):
+                    if prefill_result is not None and "completion_usage" in tok:
+                        tok["completion_usage"][
+                            "prompt_tokens_details"
+                        ] = prefill_prompt_tokens_details
                     yield tok
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
@@ -259,8 +332,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
-    def __init__(self, runtime, component, engine, default_sampling_params):
-        super().__init__(runtime, component, engine, default_sampling_params)
+    def __init__(
+        self,
+        runtime,
+        component,
+        engine,
+        default_sampling_params,
+        model_max_len: int | None = None,
+    ):
+        super().__init__(
+            runtime, component, engine, default_sampling_params, model_max_len
+        )
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation with decode phase
@@ -276,7 +358,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         )
 
         # Build sampling params from request using shared utility
-        sampling_params = build_sampling_params(request, self.default_sampling_params)
+        sampling_params = build_sampling_params(
+            request, self.default_sampling_params, self.model_max_len
+        )
 
         # Configure for prefill-only mode with remote decode
         if sampling_params.extra_args is None:
@@ -313,6 +397,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                             {"kv_transfer_params": res.kv_transfer_params}
                             if res.kv_transfer_params
                             else None
+                        ),
+                        "completion_usage": BaseWorkerHandler._build_completion_usage(
+                            request_output=res
                         ),
                     }
 

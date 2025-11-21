@@ -37,7 +37,7 @@ spec:
             - --served-model-name
             - Qwen/Qwen3-0.6B
             - --extra-engine-args
-            - ./recipes/qwen3/trtllm/prefill.yaml
+            - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
             - --disaggregation-mode
             - prefill
     TRTLLMDecodeWorker:
@@ -63,6 +63,6 @@ spec:
             - --served-model-name
             - Qwen/Qwen3-0.6B
             - --extra-engine-args
-            - ./recipes/qwen3/trtllm/decode.yaml
+            - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
             - --disaggregation-mode
             - decode

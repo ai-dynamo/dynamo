@@ -18,7 +18,7 @@ use std::{collections::HashMap, pin::Pin};
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures::StreamExt;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event};
 use parking_lot::Mutex;
 
 use crate::storage::key_value_store::KeyValue;
@@ -370,13 +370,8 @@ impl KeyValueBucket for Directory {
                     }
 
                     // Canonicalize paths to handle symlinks (e.g., /var -> /private/var on macOS)
-                    let canonical_item_path = match item_path.canonicalize() {
-                        Ok(p) => p,
-                        Err(err) => {
-                            tracing::warn!(error = %err, item = %item_path.display(), "Failed to canonicalize path. Using original path.");
-                            item_path.clone()
-                        }
-                    };
+                    // The unwrap_or_else path is for Remove case.
+                    let canonical_item_path = item_path.canonicalize().unwrap_or_else(|_| item_path.clone());
 
                     let key = match canonical_item_path.strip_prefix(&root) {
                         Ok(stripped) => stripped.display().to_string().replace("_", "/"),
@@ -393,7 +388,7 @@ impl KeyValueBucket for Directory {
                     };
 
                     match event.kind {
-                        EventKind::Create(_) | EventKind::Modify(_) => {
+                        EventKind::Create(event::CreateKind::File) | EventKind::Modify(event::ModifyKind::Data(event::DataChange::Content)) => {
                             let data: bytes::Bytes = match fs::read(&item_path) {
                                 Ok(data) => data.into(),
                                 Err(err) => {
@@ -404,11 +399,11 @@ impl KeyValueBucket for Directory {
                             let item = KeyValue::new(key, data);
                             yield WatchEvent::Put(item);
                         }
-                        EventKind::Remove(_) => {
+                        EventKind::Remove(event::RemoveKind::File) => {
                             yield WatchEvent::Delete(Key::from_raw(key));
                         }
-                        event_type => {
-                            tracing::debug!(?event_type, dir = %dir.display(), "Ignoring event type");
+                        _ => {
+                            // These happen every time the keep-alive updates last modified time
                             continue;
                         }
                     }

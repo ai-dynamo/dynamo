@@ -142,6 +142,9 @@ spec:
         {{- end }}
         {{- end }}
           - --operator-version={{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
+        {{- if .Values.webhook.enabled }}
+          - --enable-webhooks=true
+        {{- end }}
         command:
         - /manager
         env:
@@ -159,6 +162,12 @@ spec:
           initialDelaySeconds: 15
           periodSeconds: 20
         name: manager
+        {{- if .Values.webhook.enabled }}
+        ports:
+        - containerPort: 9443
+          name: webhook-server
+          protocol: TCP
+        {{- end }}
         readinessProbe:
           httpGet:
             path: /readyz
@@ -169,7 +178,20 @@ spec:
           10 }}
         securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext
           | nindent 10 }}
+        {{- if .Values.webhook.enabled }}
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: cert
+          readOnly: true
+        {{- end }}
       securityContext:
         runAsNonRoot: true
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-controller-manager
       terminationGracePeriodSeconds: 30
+      {{- if .Values.webhook.enabled }}
+      volumes:
+      - name: cert
+        secret:
+          defaultMode: 420
+          secretName: {{ .Values.webhook.certificateSecret.name }}
+      {{- end }}

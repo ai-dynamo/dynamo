@@ -28,7 +28,6 @@ async def worker(runtime: DistributedRuntime):
     endpoint_name = "generate"
 
     component = runtime.namespace(namespace_name).component(component_name)
-    await component.create_service()
 
     logger.info(f"Created service {namespace_name}/{component_name}")
 

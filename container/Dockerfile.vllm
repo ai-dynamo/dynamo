@@ -217,6 +217,8 @@ COPY --from=framework /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinar
 COPY --from=framework /usr/local/cuda/include/ /usr/local/cuda/include/
 COPY --from=framework /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 COPY --from=framework /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+COPY --from=framework /usr/local/cuda/lib64/libcublas.so* /usr/local/cuda/lib64/
+COPY --from=framework /usr/local/cuda/lib64/libcublasLt.so* /usr/local/cuda/lib64/
 
 ### COPY NATS & ETCD ###
 # Copy nats and etcd from dev image

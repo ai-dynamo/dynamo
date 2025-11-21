@@ -42,6 +42,7 @@ class Config:
     migration_limit: int = 0
     custom_jinja_template: Optional[str] = None
     store_kv: str
+    request_plane: str
 
     # mirror vLLM
     model: str
@@ -177,8 +178,16 @@ def parse_args() -> Config:
     parser.add_argument(
         "--store-kv",
         type=str,
+        choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
         help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
+    parser.add_argument(
+        "--request-plane",
+        type=str,
+        choices=["nats", "http", "tcp"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
     add_config_dump_args(parser)
 
@@ -258,6 +267,7 @@ def parse_args() -> Config:
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv
+    config.request_plane = args.request_plane
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
@@ -272,35 +282,34 @@ def parse_args() -> Config:
                 f"Please ensure the file exists and the path is correct."
             )
 
-    # Check for conflicting flags
+    normalized = [c.lower() for c in args.connector]
+
+    invalid = [c for c in normalized if c not in VALID_CONNECTORS]
+    if invalid:
+        raise ValueError(
+            f"Invalid connector(s): {', '.join(invalid)}. Valid options are: {', '.join(sorted(VALID_CONNECTORS))}"
+        )
+
+    # Check for custom kv_transfer_config
     has_kv_transfer_config = (
         hasattr(engine_args, "kv_transfer_config")
         and engine_args.kv_transfer_config is not None
     )
-    has_connector_flag = args.connector is not None
 
-    if has_kv_transfer_config and has_connector_flag:
-        raise ValueError(
-            "Cannot specify both --kv-transfer-config and --connector flags"
-        )
-
-    if has_connector_flag:
-        normalized = [c.lower() for c in args.connector]
-
-        invalid = [c for c in normalized if c not in VALID_CONNECTORS]
-        if invalid:
+    if not normalized or "none" in normalized or "null" in normalized:
+        if len(normalized) > 1:
             raise ValueError(
-                f"Invalid connector(s): {', '.join(invalid)}. Valid options are: {', '.join(sorted(VALID_CONNECTORS))}"
+                "'none' and 'null' cannot be combined with other connectors"
+            )
+        config.connector_list = []
+    else:
+        # Check for conflicting flags
+        if has_kv_transfer_config:
+            raise ValueError(
+                "Cannot specify both --kv-transfer-config and --connector flags"
             )
 
-        if "none" in normalized or "null" in normalized:
-            if len(normalized) > 1:
-                raise ValueError(
-                    "'none' and 'null' cannot be combined with other connectors"
-                )
-            config.connector_list = []
-        else:
-            config.connector_list = normalized
+        config.connector_list = normalized
 
     if config.engine_args.block_size is None:
         config.engine_args.block_size = 16
@@ -315,10 +324,16 @@ def parse_args() -> Config:
 
 def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
+    if config.is_decode_worker:
+        logger.info(
+            f"Decode worker detected (is_decode_worker={config.is_decode_worker}): "
+            f"kv_events_config disabled (decode workers don't publish KV events)"
+        )
+        return None
 
     # If prefix caching is not enabled, no events config needed
-    if not config.engine_args.enable_prefix_caching or config.is_decode_worker:
-        logger.info("No kv_events_config required")
+    if not config.engine_args.enable_prefix_caching:
+        logger.info("No kv_events_config required: prefix caching is disabled")
         return None
 
     # There is a bug with KV events publishing when LORA is enabled.
@@ -341,6 +356,12 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
 
     # If user provided their own config, use that
     if c := getattr(config.engine_args, "kv_events_config"):
+        # Warn user that enable_kv_cache_events probably should be True (user may have omitted it from JSON)
+        if not c.enable_kv_cache_events:
+            logger.warning(
+                "User provided --kv_events_config which set enable_kv_cache_events to False (default). "
+                "To publish events, explicitly set enable_kv_cache_events to True."
+            )
         logger.info(f"Using user-provided kv_events_config {c}")
         return c
 
@@ -411,7 +432,12 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
 def overwrite_args(config):
     """Set vLLM defaults for Dynamo."""
 
-    if config.has_connector("nixl"):
+    if config.has_connector("nixl") or (
+        # Check if the user provided their own kv_transfer_config
+        config.engine_args.kv_transfer_config is not None
+        # and the connector is NixlConnector
+        and config.engine_args.kv_transfer_config.kv_connector == "NixlConnector"
+    ):
         ensure_side_channel_host()
 
     defaults = {
