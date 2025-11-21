@@ -246,7 +246,8 @@ COPY --from=pytorch_base /usr/local/lib/lib* /usr/local/lib/
 COPY --from=pytorch_base /usr/local/cuda/bin/cuobjdump /usr/local/cuda/bin/cuobjdump
 COPY --from=pytorch_base /usr/local/cuda/bin/nvdisasm /usr/local/cuda/bin/nvdisasm
 
-ENV TRITON_CUPTI_PATH=/usr/local/cuda/include \
+ENV CUDA_HOME=/usr/local/cuda \
+    TRITON_CUPTI_PATH=/usr/local/cuda/include \
     TRITON_CUDACRT_PATH=/usr/local/cuda/include \
     TRITON_CUOBJDUMP_PATH=/usr/local/cuda/bin/cuobjdump \
     TRITON_NVDISASM_PATH=/usr/local/cuda/bin/nvdisasm \
