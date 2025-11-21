@@ -670,7 +670,7 @@ async def run_profile(args):
                 args.decode_interpolation_granularity,
                 ai_configurator_perf_estimator,
                 attention_dp_size,
-                tp_size=best_decode_mapping.get_tp_size()
+                tp_size=best_decode_mapping.get_tp_size(),
             )
         else:
             client = DynamoDeploymentClient(
