@@ -4309,25 +4309,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kvbm-hub"
-version = "0.6.1"
-dependencies = [
- "anyhow",
- "async-nats",
- "async-trait",
- "bincode 1.3.3",
- "dashmap 6.1.0",
- "dynamo-tokens",
- "futures",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tracing",
- "uuid 1.18.1",
-]
-
-[[package]]
 name = "kvbm-py3"
 version = "0.1.0"
 dependencies = [

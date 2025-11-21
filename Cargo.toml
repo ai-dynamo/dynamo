@@ -15,7 +15,6 @@ members = [
     "lib/bindings/python/codegen",
     "lib/engines/*",
     "lib/kvbm",
-    "lib/kvbm-hub",
     "lib/config",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
