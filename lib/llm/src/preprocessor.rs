@@ -663,7 +663,10 @@ impl OpenAIPreprocessor {
                             input_tokens: usage.prompt_tokens as usize,
                             output_tokens: usage.completion_tokens as usize,
                             chunk_tokens: 0,
-                            cached_tokens: usage.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens.map(|c| c as usize)),
+                            cached_tokens: usage
+                                .prompt_tokens_details
+                                .as_ref()
+                                .and_then(|d| d.cached_tokens.map(|c| c as usize)),
                         };
 
                         // Create annotation string

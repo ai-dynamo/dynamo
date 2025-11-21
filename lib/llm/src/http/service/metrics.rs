@@ -861,7 +861,9 @@ impl ResponseMetricCollector {
 
     /// Observe cached tokens (prefix cache hits), observing only once per request when value is available
     pub fn observe_cached_tokens(&mut self, cached_tokens: Option<usize>) {
-        if let Some(tokens) = cached_tokens && !self.cached_tokens_observed {
+        if let Some(tokens) = cached_tokens
+            && !self.cached_tokens_observed
+        {
             self.cached_tokens_observed = true;
             self.metrics
                 .cached_sequence_length
