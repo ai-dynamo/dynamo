@@ -1,12 +1,14 @@
-# Dynamo Deployment on EKS
+# Dynamo 0.6.0 Deployment on EKS
 
-This guide covers steps of creating an Amazon EKS cluster, creating a shared storage Amazon EFS and deploying Dynamo Kubernetes Platform and run inference with TRTLLM backend.
+This guide covers steps of creating an Amazon EKS cluster, creating a shared storage Amazon EFS and deploying Dynamo Kubernetes Platform and run inference with both TRTLLM and vLLM backends.
 
 [Step 1. Create EKS cluster](#step-1-create-eks-cluster)
 
 [Step 2. Install Dynamo Kubernetes Platform](#step-2-install-dynamo-kubernetes-platform)
 
-[Step 3. Deploy Dynamo Inference Graph](#step-3-deploy-dynamo-inference-graph)
+[Step 3. Deploy Dynamo Inference Graph (TRTLLM)](#step-3-deploy-dynamo-inference-graph)
+
+[Step 4. Deploy Dynamo Inference Graph (vLLM)](#step-4-deploy-dynamo-inference-graph-vllm)
 
 ### Step 1. Create EKS cluster
 
@@ -163,12 +165,12 @@ Output should be similar to
 ```
 # Example output
 NAME                                                              READY   STATUS              RESTARTS   AGE
-dynamo-platform-dynamo-operator-controller-manager-7ffdfb9npwt8   2/2     Running             0          3h3m
-dynamo-platform-etcd-0                                            1/1     Running             0          174m
-dynamo-platform-nats-0                                            2/2     Running             0          174m
+dynamo-platform-dynamo-operator-controller-manager-7ffdfb9g29vs   2/2     Running             0          11h
+dynamo-platform-etcd-0                                            1/1     Running             0          11h
+dynamo-platform-nats-0                                            2/2     Running             0          11h
 ```
 
-### Step 3. Deploy Dynamo Inference Graph
+### Step 3. Deploy Dynamo Inference Graph (TRTLLM)
 
 #### a) Build Dynamo TRTLLM runtime image
 
@@ -194,9 +196,9 @@ docker tag dynamo:latest-trtllm $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
 docker push $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
 ```
 
-#### b) Create Dynamo Inference Graph
+#### b) Create Dynamo Inference Graph (TRTLLM)
 
-Please change `<DYNAMO_TRTLLM_IMAGE>`. You can either use NGC image or built image. For this example, we'll deploy `Qwen/Qwen3-32B` in disaggregated mode with KV router. We'll create 12 prefill workers with TP1 and 1 decode worker with TP4 for a total of 16 x H200 GPUs (p5en.48xlarge). Note that this p5en.48xlarge has 16 EFA devices so each GPU is given 2 as shown below.
+Please change `<DYNAMO_TRTLLM_IMAGE>`. You can either use NGC image or built image. For this example, we'll deploy `Qwen/Qwen3-32B-FP8` in disaggregated mode with KV router. Specificaly, we'll use the [model receipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) from Dynamo repo. This creates 8 prefill workers with TP1 and 4 decode worker with TP2 for a total of 16 x H200 GPUs (p5en.48xlarge). Note that this p5en.48xlarge has 16 EFA devices so each GPU is given 2 as shown below.
 
 | Optional Environment Variable | Description |
 | :--- | :--- |
@@ -217,8 +219,8 @@ data:
   prefill.yaml: |
     build_config:
       max_batch_size: 1
-      max_num_tokens: 3500
-      max_seq_len: 3200
+      max_num_tokens: 7800
+      max_seq_len: 7800
     tensor_parallel_size: 1
     enable_attention_dp: false
     trust_remote_code: true
@@ -232,8 +234,8 @@ data:
 
     kv_cache_config:
       enable_block_reuse: false
-      free_gpu_memory_fraction: 0.8
-      dtype: auto
+      free_gpu_memory_fraction: 0.7
+      dtype: fp8
 
     cache_transceiver_config:
       backend: NIXL
@@ -249,10 +251,10 @@ metadata:
 data:
   decode.yaml: |
     build_config:
-      max_batch_size: 224
-      max_num_tokens: 224
-      max_seq_len: 3200
-    tensor_parallel_size: 4
+      max_batch_size: 128
+      max_num_tokens: 7800
+      max_seq_len: 7800
+    tensor_parallel_size: 2
     enable_attention_dp: false
     trust_remote_code: true
     backend: pytorch
@@ -261,12 +263,12 @@ data:
 
     cuda_graph_config:
       enable_padding: true
-      max_batch_size: 224
+      max_batch_size: 128
 
     kv_cache_config:
       enable_block_reuse: false
-      free_gpu_memory_fraction: 0.8
-      dtype: auto
+      free_gpu_memory_fraction: 0.7
+      dtype: fp8
 
     cache_transceiver_config:
       backend: NIXL
@@ -295,12 +297,12 @@ spec:
       dynamoNamespace: trtllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
-      replicas: 12
+      replicas: 8
       resources:
         limits:
           gpu: "1"
       sharedMemory:
-        size: 64Gi
+        size: 80Gi
       envs:
         - name: DYN_LOG
           value: DEBUG
@@ -332,7 +334,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.trtllm --model-path Qwen/Qwen3-32B --served-model-name Qwen/Qwen3-32B --extra-engine-args /engine_configs/prefill.yaml --disaggregation-mode prefill --disaggregation-strategy prefill_first --publish-events-and-metrics"
+            - "python3 -m dynamo.trtllm --model-path Qwen/Qwen3-32B-FP8 --served-model-name Qwen/Qwen3-32B-FP8 --extra-engine-args /engine_configs/prefill.yaml --disaggregation-mode prefill --disaggregation-strategy prefill_first --publish-events-and-metrics"
           resources:
             requests:
               vpc.amazonaws.com/efa: "2"
@@ -349,12 +351,12 @@ spec:
       dynamoNamespace: trtllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
-      replicas: 1
+      replicas: 4
       resources:
         limits:
-          gpu: "4"
+          gpu: "2"
       sharedMemory:
-        size: 64Gi
+        size: 80Gi
       envs:
         - name: DYN_LOG
           value: DEBUG
@@ -386,12 +388,12 @@ spec:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.trtllm --model-path Qwen/Qwen3-32B --served-model-name Qwen/Qwen3-32B --extra-engine-args /engine_configs/decode.yaml --disaggregation-mode decode --disaggregation-strategy prefill_first"
+            - "python3 -m dynamo.trtllm --model-path Qwen/Qwen3-32B-FP8 --served-model-name Qwen/Qwen3-32B-FP8 --extra-engine-args /engine_configs/decode.yaml --disaggregation-mode decode --disaggregation-strategy prefill_first"
           resources:
             requests:
-              vpc.amazonaws.com/efa: "8"
+              vpc.amazonaws.com/efa: "4"
             limits:
-              vpc.amazonaws.com/efa: "8"
+              vpc.amazonaws.com/efa: "4"
           volumeMounts:
             - name: decode-config
               mountPath: /engine_configs
@@ -401,7 +403,7 @@ spec:
               name: decode-config
 ```
 
-#### c) Deploy Dynamo Inference Graph
+#### c) Deploy Dynamo Inference Graph (TRTLLM)
 
 ```
 kubectl apply -f <DYNAMO_INFERENCE_GRAPH>.yaml -n dynamo-system
@@ -418,24 +420,22 @@ Output should be similar to
 ```
 # Example output
 NAME                                                              READY   STATUS    RESTARTS   AGE
-deepseek-r1-download-784fc5f6f7-nvqdm                             1/1     Running   0          12h
-dynamo-platform-dynamo-operator-controller-manager-7ffdfb9d5whh   2/2     Running   0          12h
-dynamo-platform-etcd-0                                            1/1     Running   0          12h
-dynamo-platform-nats-0                                            2/2     Running   0          12h
-trtllm-v1-disagg-router-frontend-84bc7ccf-tkzc6                   1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmdecodeworker-7657dc5fd5-9zc52       1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-4gjq6      1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-4vltd      1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-62nk8      1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-92rnf      1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-cdprf      1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-h8zvq      1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-hp6z8      1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-k964d      1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-lrml5      1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-npf52      1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-nzznf      1/1     Running   0          125m
-trtllm-v1-disagg-router-trtllmprefillworker-5c4f5969d8-wnmdn      1/1     Running   0          125m
+dynamo-platform-dynamo-operator-controller-manager-7ffdfb9g29vs   2/2     Running   0          11h
+dynamo-platform-etcd-0                                            1/1     Running   0          11h
+dynamo-platform-nats-0                                            2/2     Running   0          11h
+trtllm-v1-disagg-router-frontend-544c9c46bc-bzqpk                 1/1     Running   0          6m44s
+trtllm-v1-disagg-router-trtllmdecodeworker-6d77f66cd7-54hcm       1/1     Running   0          6m43s
+trtllm-v1-disagg-router-trtllmdecodeworker-6d77f66cd7-m5l6d       1/1     Running   0          6m43s
+trtllm-v1-disagg-router-trtllmdecodeworker-6d77f66cd7-tdsm5       1/1     Running   0          6m43s
+trtllm-v1-disagg-router-trtllmdecodeworker-6d77f66cd7-xqzjl       1/1     Running   0          6m43s
+trtllm-v1-disagg-router-trtllmprefillworker-798b566884-7v82r      1/1     Running   0          6m43s
+trtllm-v1-disagg-router-trtllmprefillworker-798b566884-8r8sc      1/1     Running   0          6m43s
+trtllm-v1-disagg-router-trtllmprefillworker-798b566884-c7vnm      1/1     Running   0          6m43s
+trtllm-v1-disagg-router-trtllmprefillworker-798b566884-dh795      1/1     Running   0          6m43s
+trtllm-v1-disagg-router-trtllmprefillworker-798b566884-dr8kr      1/1     Running   0          6m43s
+trtllm-v1-disagg-router-trtllmprefillworker-798b566884-fknlv      1/1     Running   0          6m43s
+trtllm-v1-disagg-router-trtllmprefillworker-798b566884-jkb8h      1/1     Running   0          6m43s
+trtllm-v1-disagg-router-trtllmprefillworker-798b566884-s5bjd      1/1     Running   0          6m43s
 ```
 
 #### d) Test the Deployment
@@ -448,7 +448,7 @@ kubectl port-forward deployment/trtllm-v1-disagg-router-frontend 8080:8000 -n dy
 curl localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen/Qwen3-32B",
+    "model": "Qwen/Qwen3-32B-FP8",
     "messages": [
     {
       "role": "user",
@@ -464,5 +464,229 @@ Output should be similar to
 
 ```
 # Example output
-{"id":"chatcmpl-f3747869-06a2-4d8e-826b-df3358040726","choices":[{"index":0,"message":{"content":"<think>Okay, let's start by developing the character's background. The user wants a detailed background, so I need to cover motivations, skills,","role":"assistant","reasoning_content":null},"finish_reason":"length"}],"created":1763501336,"model":"Qwen/Qwen3-32B","object":"chat.completion","usage":null}
+{"id":"chatcmpl-f44545f6-6b51-4a4f-8cc0-4d5cadf44899","choices":[{"index":0,"message":{"content":"<think>Okay, the user wants me to develop a detailed character background for an explorer seeking Aeloria. Let me start by understanding the query.","role":"assistant","reasoning_content":null},"finish_reason":"length"}],"created":1763753072,"model":"Qwen/Qwen3-32B-FP8","object":"chat.completion","usage":null}
+```
+
+#### e) Delete the Deployment
+
+```
+kubectl delete -f <DYNAMO_INFERENCE_GRAPH>.yaml -n dynamo-system
+```
+
+### Step 4. Deploy Dynamo Inference Graph (vLLM)
+
+#### a) Build Dynamo vLLM runtime image
+
+This step is optional. You can also use NGC image `nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0` from [here](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=0.6.0). To enable EFA, you need to build from source with latest UCX version as shown below.
+
+```
+# Clone Dynamo Repo
+git clone https://github.com/ai-dynamo/dynamo.git -b v0.6.0
+cd dynamo/container
+
+# Change UCX version to master
+vim build.sh # Change line 119 to "NIXL_UCX_REF=master"
+
+# Build image
+./build.sh --framework vllm
+
+# Create an ECR repository
+aws ecr get-login-password | docker login --username AWS --password-stdin $DOCKER_SERVER/
+aws ecr create-repository --repository-name <ECR_REPOSITORY_NAME>
+
+# Push Image
+docker tag dynamo:latest-vllm $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
+docker push $DOCKER_SERVER/<ECR_REPOSITORY_NAME>:0.6.0
+```
+
+#### b) Create Dynamo Inference Graph (vLLM)
+
+Please change `<DYNAMO_VLLM_IMAGE>`. You can either use NGC image or built image. For this example, we'll deploy `Qwen/Qwen3-32B-FP8` in disaggregated mode with KV router. Specificaly, we'll use the [model receipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) from Dynamo repo. This creates 8 prefill workers with TP1 and 4 decode worker with TP2 for a total of 16 x H200 GPUs (p5en.48xlarge). Note that this p5en.48xlarge has 16 EFA devices so each GPU is given 2 as shown below.
+
+| Optional Environment Variable | Description |
+| :--- | :--- |
+| `DYN_LOG` | Dynamo log verbose level |
+| `UCX_LOG_LEVEL` | UCX log verbose level |
+| `UCX_PROTO_INFO` | enable or disable log of UCX protocal selection, select `n` or `y` |
+| `NCCL_DEBUG` | NCCL log verbose level |
+| `NCCL_LAUNCH_MODE` | control NCCL launch mode, select `PARALLEL`, `GROUP`, or `AUTO` |
+| `NCCL_NET_SHARED_COMMS` | enable or disable sharing network resources across NCCL communications, select `0` or `1` |
+
+```
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-v1-disagg-router
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: vllm-v1-disagg-router
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: <DYNAMO_VLLM_IMAGE>
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
+    VllmDecodeWorker:
+      dynamoNamespace: vllm-v1-disagg-router
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 4
+      resources:
+        limits:
+          gpu: "2"
+      sharedMemory:
+        size: 80Gi
+      envs:
+        - name: DYN_LOG
+          value: DEBUG
+        - name: UCX_LOG_LEVEL
+          value: debug
+        - name: UCX_PROTO_INFO
+          value: "y"
+        - name: NCCL_DEBUG
+          value: WARN
+        - name: NCCL_LAUNCH_MODE
+          value: PARALLEL
+        - name: NCCL_NET_SHARED_COMMS
+          value: "0"
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /live
+              port: system
+              scheme: HTTP
+            periodSeconds: 60
+            timeoutSeconds: 600
+            failureThreshold: 600
+          image: <DYNAMO_VLLM_IMAGE>
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-32B-FP8 --served-model-name Qwen/Qwen3-32B-FP8 --tensor-parallel-size 2
+          resources:
+            requests:
+              vpc.amazonaws.com/efa: "4"
+            limits:
+              vpc.amazonaws.com/efa: "4"
+    VllmPrefillWorker:
+      dynamoNamespace: vllm-v1-disagg-router
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 8
+      resources:
+        limits:
+          gpu: "1"
+      sharedMemory:
+        size: 80Gi
+      envs:
+        - name: DYN_LOG
+          value: DEBUG
+        - name: UCX_LOG_LEVEL
+          value: debug
+        - name: UCX_PROTO_INFO
+          value: "y"
+        - name: NCCL_DEBUG
+          value: WARN
+        - name: NCCL_LAUNCH_MODE
+          value: PARALLEL
+        - name: NCCL_NET_SHARED_COMMS
+          value: "0"
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /live
+              port: system
+              scheme: HTTP
+            periodSeconds: 60
+            timeoutSeconds: 600
+            failureThreshold: 600
+          image: <DYNAMO_VLLM_IMAGE>
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-32B-FP8 --served-model-name Qwen/Qwen3-32B-FP8 --tensor-parallel-size 1 --is-prefill-worker
+          resources:
+            requests:
+              vpc.amazonaws.com/efa: "2"
+            limits:
+              vpc.amazonaws.com/efa: "2"
+```
+
+#### c) Deploy Dynamo Inference Graph (vLLM)
+
+```
+kubectl apply -f <DYNAMO_INFERENCE_GRAPH>.yaml -n dynamo-system
+```
+
+Check pods status
+
+```
+kubectl get pods -n dynamo-system
+```
+
+Output should be similar to
+
+```
+# Example output
+NAME                                                              READY   STATUS    RESTARTS   AGE
+dynamo-platform-dynamo-operator-controller-manager-7ffdfb9g29vs   2/2     Running   0          12h
+dynamo-platform-etcd-0                                            1/1     Running   0          12h
+dynamo-platform-nats-0                                            2/2     Running   0          12h
+vllm-v1-disagg-router-frontend-75bfd68ddc-2cf64                   1/1     Running   0          19m
+vllm-v1-disagg-router-vllmdecodeworker-67f64569db-46d9m           1/1     Running   0          19m
+vllm-v1-disagg-router-vllmdecodeworker-67f64569db-4pthw           1/1     Running   0          19m
+vllm-v1-disagg-router-vllmdecodeworker-67f64569db-9xjc4           1/1     Running   0          19m
+vllm-v1-disagg-router-vllmdecodeworker-67f64569db-v9xfw           1/1     Running   0          19m
+vllm-v1-disagg-router-vllmprefillworker-f44dd87b9-5rx54           1/1     Running   0          19m
+vllm-v1-disagg-router-vllmprefillworker-f44dd87b9-5vps8           1/1     Running   0          19m
+vllm-v1-disagg-router-vllmprefillworker-f44dd87b9-5x857           1/1     Running   0          19m
+vllm-v1-disagg-router-vllmprefillworker-f44dd87b9-bqdt6           1/1     Running   0          19m
+vllm-v1-disagg-router-vllmprefillworker-f44dd87b9-gds2t           1/1     Running   0          19m
+vllm-v1-disagg-router-vllmprefillworker-f44dd87b9-mpsrd           1/1     Running   0          19m
+vllm-v1-disagg-router-vllmprefillworker-f44dd87b9-v7vbh           1/1     Running   0          19m
+vllm-v1-disagg-router-vllmprefillworker-f44dd87b9-vq2hb           1/1     Running   0          19m
+```
+
+#### d) Test the Deployment
+
+```
+# Port forward
+kubectl port-forward deployment/vllm-v1-disagg-router-frontend 8080:8000 -n dynamo-system
+
+# Send a request
+curl localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-32B-FP8",
+    "messages": [
+    {
+      "role": "user",
+      "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+    }
+    ],
+    "stream": false,
+    "max_tokens": 30
+  }'
+```
+
+Output should be similar to
+
+```
+# Example output
+{"id":"chatcmpl-570e1472-a18b-4ceb-8eb6-05b9067622b6","choices":[{"index":0,"message":{"content":"<think>Okay, let's see. The user wants me to develop a character background for an explorer seeking Aeloria. The key elements to cover","role":"assistant","reasoning_content":null},"finish_reason":"length"}],"created":1763756222,"model":"Qwen/Qwen3-32B-FP8","object":"chat.completion","usage":{"prompt_tokens":196,"completion_tokens":30,"total_tokens":226}}
+```
+
+#### e) Delete the Deployment
+
+```
+kubectl delete -f <DYNAMO_INFERENCE_GRAPH>.yaml -n dynamo-system
 ```
