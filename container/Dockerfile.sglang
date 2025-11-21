@@ -152,6 +152,8 @@ RUN apt-get update \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python /usr/bin/python${PYTHON_VERSION} \
+    # Remove EXTERNALLY-MANAGED marker to allow pip installs in Docker (PEP 668)
+    && rm -f /usr/lib/python${PYTHON_VERSION}/EXTERNALLY-MANAGED \
     # Set up locale
     && locale-gen en_US.UTF-8 \
     # Cleanup
