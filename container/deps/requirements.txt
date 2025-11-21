@@ -7,7 +7,7 @@ aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@5554d2eb820
 aiofiles
 aiperf @ git+https://github.com/ai-dynamo/aiperf.git@4d3fa29403c8f75da22a14f1f7b3aeb27db9288f
 av==15.0.0
-fastapi==0.120.1
+fastapi==0.121.2
 ftfy
 genai-perf==0.0.15
 grpcio-tools==1.66.0
@@ -34,6 +34,8 @@ PyYAML
 scikit-learn
 scipy<1.14.0  # Pin scipy version for pmdarima compatibility
 sentencepiece
+# Minimum starlette version needed to address CVE-2025-62727 (DoS in Range header parsing):
+starlette>=0.49.1
 tensorboard==2.19.0
 tensorboardX==2.6.2.2
 transformers
