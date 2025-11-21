@@ -95,7 +95,7 @@ class TestProfileSlaAiconfigurator:
             ("aic_backend_version", "0.1.0"),
         ],
     )
-    async def test_aiconfiguator_no_data(self, llm_args, arg_name, bad_value):
+    async def test_aiconfigurator_no_data(self, llm_args, arg_name, bad_value):
         # Check that an appropriate error is raised when the system/model/backend
         # is not found in the aiconfigurator database.
         setattr(llm_args, arg_name, bad_value)

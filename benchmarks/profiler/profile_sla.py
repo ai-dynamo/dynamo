@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import yaml
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
 from benchmarks.profiler.utils.aiperf import (
     get_decode_itl_and_thpt_per_gpu,
@@ -54,7 +55,6 @@ from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
 
 @dataclass
@@ -126,6 +126,37 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
+def build_model_config_kwargs(
+    mapping: ParallelizationMapping, is_moe: bool, backend: str
+) -> dict:
+    """
+    Build model configuration kwargs for aiconfigurator based on parallelization mapping.
+
+    Args:
+        mapping: Parallelization mapping containing tp/tep/dep configuration
+        is_moe: Whether the model is a Mixture of Experts model
+        backend: Backend name (e.g., "sglang", "trtllm", "vllm")
+
+    Returns:
+        Dictionary of model configuration parameters for aiconfigurator
+    """
+    model_config_kwargs = {"tp_size": mapping.get_tp_size()}
+
+    # For MoE models, also pass moe_tp_size, moe_ep_size, and attention_dp_size
+    if is_moe:
+        model_config_kwargs["moe_tp_size"] = mapping.get_tp_size()
+        model_config_kwargs["moe_ep_size"] = mapping.get_expert_split()
+        model_config_kwargs["attention_dp_size"] = mapping.get_attn_dp_size()
+
+        # SGLang-specific MoE configuration
+        if backend == "sglang":
+            model_config_kwargs["enable_wideep"] = True
+            model_config_kwargs["moe_backend"] = "deepep_moe"
+            model_config_kwargs["attention_backend"] = "flashinfer"
+
+    return model_config_kwargs
+
+
 async def run_profile(args):
     # List to track all created deployment clients for cleanup in case of failure
     deployment_clients = []
@@ -140,9 +171,9 @@ async def run_profile(args):
             logger.info(
                 "MoE (Mixture of Experts) model profiling, sweeping TEP/DEP size for prefill and decode"
             )
-            assert args.backend in [
-                "sglang"
-            ], "MoE model support is only available for SGLang"
+            assert args.backend in ["sglang"], (
+                "MoE model support is only available for SGLang"
+            )
         else:
             logger.info(
                 "Dense model profiling, sweeping TP size for prefill and decode"
@@ -272,9 +303,12 @@ async def run_profile(args):
                     logger.info("Skipping deployment creation in dry run mode")
                 elif args.use_ai_configurator:
                     logger.info("Using ai-configurator to estimate prefill latency")
+                    model_config_kwargs = build_model_config_kwargs(
+                        mapping, args.model_info.is_moe, args.backend
+                    )
                     perf_dict = ai_configurator_perf_estimator.estimate_prefill_perf(
                         args.isl,
-                        tp_size=mapping.get_tp_size(),
+                        **model_config_kwargs,
                     )
                     ttft = perf_dict["context_latency"]
                     logger.info(f"Estimated prefill TTFT: {ttft:.2f}ms")
@@ -379,8 +413,11 @@ async def run_profile(args):
                 elif args.use_ai_configurator:
                     # Compute max_concurrency and max_kv_tokens to know which
                     # num_request to sweep over.
+                    model_config_kwargs = build_model_config_kwargs(
+                        mapping, args.model_info.is_moe, args.backend
+                    )
                     max_concurrency = ai_configurator_perf_estimator.get_max_batch_size(
-                        args.isl, args.osl, tp_size=mapping.get_tp_size()
+                        args.isl, args.osl, **model_config_kwargs
                     )
                     max_kv_tokens = max_concurrency * (args.isl + args.osl)
 
@@ -574,13 +611,16 @@ async def run_profile(args):
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
         elif args.use_ai_configurator:
+            model_config_kwargs = build_model_config_kwargs(
+                best_prefill_mapping, args.model_info.is_moe, args.backend
+            )
             profile_prefill_aiconfigurator(
                 work_dir,
                 best_prefill_gpus,  # num_gpus
                 sweep_max_context_length,
                 args.prefill_interpolation_granularity,
                 ai_configurator_perf_estimator,
-                tp_size=best_prefill_mapping.get_tp_size(),
+                **model_config_kwargs,
             )
         else:
             client = DynamoDeploymentClient(
@@ -659,8 +699,11 @@ async def run_profile(args):
             logger.info("Skipping deployment creation in dry run mode")
         elif args.use_ai_configurator:
             attention_dp_size = best_decode_mapping.get_attn_dp_size()
+            model_config_kwargs = build_model_config_kwargs(
+                best_decode_mapping, args.model_info.is_moe, args.backend
+            )
             max_kv_tokens = ai_configurator_perf_estimator.get_max_kv_tokens(
-                args.isl, args.osl, tp_size=best_decode_mapping.get_tp_size()
+                args.isl, args.osl, **model_config_kwargs
             )
             profile_decode_aiconfigurator(
                 work_dir,
@@ -670,7 +713,7 @@ async def run_profile(args):
                 args.decode_interpolation_granularity,
                 ai_configurator_perf_estimator,
                 attention_dp_size,
-                tp_size=best_decode_mapping.get_tp_size(),
+                **model_config_kwargs,
             )
         else:
             client = DynamoDeploymentClient(
