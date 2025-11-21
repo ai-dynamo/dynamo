@@ -987,9 +987,18 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         BUILD_START=$(date +%s)
         
         # Capture build output to log file while showing on console
+        # Use BuildKit for enhanced metadata (docker buildx or DOCKER_BUILDKIT=1)
         if [ -z "$RUN_PREFIX" ]; then
-            docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
-            BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            # Check if buildx is available
+            if docker buildx version &>/dev/null; then
+                echo "   Using BuildKit via docker buildx..."
+                docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            else
+                echo "   Using BuildKit via DOCKER_BUILDKIT=1..."
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            fi
         else
             $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
             BUILD_EXIT_CODE=$?
@@ -1042,9 +1051,18 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
         
         # Capture build output to log file while showing on console
+        # Use BuildKit for enhanced metadata (docker buildx or DOCKER_BUILDKIT=1)
         if [ -z "$RUN_PREFIX" ]; then
-            docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
-            BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            # Check if buildx is available
+            if docker buildx version &>/dev/null; then
+                echo "   Using BuildKit via docker buildx..."
+                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            else
+                echo "   Using BuildKit via DOCKER_BUILDKIT=1..."
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            fi
         else
             $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
             BUILD_EXIT_CODE=$?
@@ -1096,9 +1114,18 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         BUILD_START=$(date +%s)
         
         # Capture build output to log file while showing on console
+        # Use BuildKit for enhanced metadata (docker buildx or DOCKER_BUILDKIT=1)
         if [ -z "$RUN_PREFIX" ]; then
-            docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
-            BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            # Check if buildx is available
+            if docker buildx version &>/dev/null; then
+                echo "   Using BuildKit via docker buildx..."
+                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            else
+                echo "   Using BuildKit via DOCKER_BUILDKIT=1..."
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            fi
         else
             $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
             BUILD_EXIT_CODE=$?
@@ -1177,3 +1204,96 @@ fi
 
 
 { set +x; } 2>/dev/null
+
+# Final build summary
+echo ""
+echo "=========================================="
+echo "🎉 BUILD COMPLETED SUCCESSFULLY"
+echo "=========================================="
+echo ""
+echo "📦 Built Images:"
+if [ -n "$TAG" ]; then
+    FINAL_TAG=$(echo "$TAG" | sed 's/--tag //')
+    echo "   ${FINAL_TAG}"
+    
+    # Show image size if possible
+    if command -v docker &> /dev/null && [ -z "$RUN_PREFIX" ]; then
+        IMAGE_SIZE=$(docker image inspect "${FINAL_TAG}" --format='{{.Size}}' 2>/dev/null || echo "")
+        if [ -n "$IMAGE_SIZE" ]; then
+            IMAGE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B ${IMAGE_SIZE} 2>/dev/null || echo "${IMAGE_SIZE} bytes")
+            echo "   Size: ${IMAGE_SIZE_HUMAN}"
+        fi
+    fi
+fi
+if [ -n "$LATEST_TAG" ]; then
+    echo "   $(echo "$LATEST_TAG" | sed 's/--tag //')"
+fi
+echo ""
+
+# Show build logs location if they exist
+if [ -d "${BUILD_LOG_DIR:-}" ]; then
+    echo "📝 Build Logs:"
+    find "${BUILD_LOG_DIR}" -name "*.log" -type f 2>/dev/null | while read -r log_file; do
+        LOG_SIZE=$(du -h "${log_file}" | cut -f1)
+        LOG_LINES=$(wc -l < "${log_file}")
+        echo "   $(basename ${log_file}): ${LOG_SIZE} (${LOG_LINES} lines)"
+    done
+    echo ""
+    
+    # Generate BuildKit reports if Python is available
+    if command -v python3 &>/dev/null; then
+        BUILDKIT_PARSER="${SOURCE_DIR}/../.github/scripts/parse_buildkit_output.py"
+        if [ -f "${BUILDKIT_PARSER}" ]; then
+            echo "📊 Generating BuildKit Reports..."
+            echo ""
+            
+            # Create reports directory
+            REPORTS_DIR="${BUILD_LOG_DIR}/reports"
+            mkdir -p "${REPORTS_DIR}"
+            
+            # Process each build log
+            for log_file in $(find "${BUILD_LOG_DIR}" -name "*.log" -type f 2>/dev/null); do
+                LOG_BASENAME=$(basename "${log_file}" .log)
+                REPORT_FILE="${REPORTS_DIR}/${LOG_BASENAME}-report.txt"
+                JSON_FILE="${REPORTS_DIR}/${LOG_BASENAME}-data.json"
+                
+                echo "   Processing: $(basename ${log_file})"
+                
+                # Parse and generate report
+                if python3 "${BUILDKIT_PARSER}" "${log_file}" "${JSON_FILE}" "${REPORT_FILE}" 2>/dev/null; then
+                    echo "   ✅ Report: $(basename ${REPORT_FILE})"
+                    echo "   ✅ Data:   $(basename ${JSON_FILE})"
+                else
+                    echo "   ⚠️  Failed to generate report"
+                fi
+            done
+            
+            echo ""
+            echo "📊 Build Reports generated in: ${REPORTS_DIR}"
+            echo ""
+            
+            # Display the most relevant report (framework build if available, otherwise latest)
+            MAIN_REPORT=""
+            if [ -n "${FRAMEWORK:-}" ]; then
+                MAIN_REPORT=$(find "${REPORTS_DIR}" -name "*framework-${FRAMEWORK,,}*-report.txt" | head -n 1)
+            fi
+            if [ -z "${MAIN_REPORT}" ]; then
+                MAIN_REPORT=$(find "${REPORTS_DIR}" -name "*-report.txt" | tail -n 1)
+            fi
+            
+            if [ -n "${MAIN_REPORT}" ] && [ -f "${MAIN_REPORT}" ]; then
+                echo ""
+                cat "${MAIN_REPORT}"
+                echo ""
+            fi
+        else
+            echo "   ⚠️  BuildKit parser not found at: ${BUILDKIT_PARSER}"
+        fi
+    else
+        echo "   ⚠️  Python3 not available for BuildKit report generation"
+    fi
+fi
+
+echo "✅ All builds completed successfully!"
+echo "=========================================="
+echo ""
