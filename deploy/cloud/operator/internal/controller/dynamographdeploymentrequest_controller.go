@@ -891,66 +891,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		jobName := getProfilingJobName(dgdr)
 		outputConfigMapName := getOutputConfigMapName(dgdr)
 
-		// Parse the profiling config from JSON
-		var config map[string]interface{}
-		if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
-			return nil, false, fmt.Errorf("failed to parse profiling config: %w", err)
-		}
-
-		// Set deployment.namespace if not already set
-		deploymentVal, hasDeployment := config["deployment"]
-		var deploymentConfig map[string]interface{}
-		if !hasDeployment || deploymentVal == nil {
-			deploymentConfig = make(map[string]interface{})
-			config["deployment"] = deploymentConfig
-		} else {
-			var ok bool
-			deploymentConfig, ok = deploymentVal.(map[string]interface{})
-			if !ok {
-				return nil, false, fmt.Errorf("profilingConfig.config.deployment must be an object, got %T", deploymentVal)
-			}
-		}
-		if _, hasNamespace := deploymentConfig["namespace"]; !hasNamespace {
-			deploymentConfig["namespace"] = dgdr.Namespace
-		}
-
-		// Set deployment.model from spec.model
-		deploymentConfig["model"] = dgdr.Spec.Model
-
-		// Set deployment.dgd_image from deploymentOverrides.workersImage if provided
-		if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.WorkersImage != "" {
-			deploymentConfig["dgd_image"] = dgdr.Spec.DeploymentOverrides.WorkersImage
-		}
-
-		// Set output_dir if not already set
-		if _, hasOutputDir := config["output_dir"]; !hasOutputDir {
-			config["output_dir"] = ProfilingOutputPath
-		}
-
-		// Set engine.backend from spec.backend
-		engineVal, hasEngine := config["engine"]
-		var engineConfig map[string]interface{}
-		if !hasEngine || engineVal == nil {
-			engineConfig = make(map[string]interface{})
-			config["engine"] = engineConfig
-		} else {
-			var ok bool
-			engineConfig, ok = engineVal.(map[string]interface{})
-			if !ok {
-				return nil, false, fmt.Errorf("profilingConfig.config.engine must be an object, got %T", engineVal)
-			}
-		}
-		engineConfig["backend"] = dgdr.Spec.Backend
-
-		// If ConfigMapRef is provided, set engine.config path
-		if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
-			engineConfig["config"] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
-		}
-
-		// Serialize config to YAML for passing to profiler
-		configYAML, err := sigsyaml.Marshal(config)
+		// Parse and prepare profiling config
+		configYAML, err := r.prepareProfilingConfig(dgdr)
 		if err != nil {
-			return nil, false, fmt.Errorf("failed to marshal profiling config to YAML: %w", err)
+			return nil, false, err
 		}
 
 		// Common environment variables
@@ -1170,6 +1114,73 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	}
 
 	return nil
+}
+
+// prepareProfilingConfig parses and modifies the profiling config
+func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) ([]byte, error) {
+	// Parse the profiling config from JSON
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse profiling config: %w", err)
+	}
+
+	// Set deployment.namespace if not already set
+	deploymentVal, hasDeployment := config["deployment"]
+	var deploymentConfig map[string]interface{}
+	if !hasDeployment || deploymentVal == nil {
+		deploymentConfig = make(map[string]interface{})
+		config["deployment"] = deploymentConfig
+	} else {
+		var ok bool
+		deploymentConfig, ok = deploymentVal.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("profilingConfig.config.deployment must be an object, got %T", deploymentVal)
+		}
+	}
+	if _, hasNamespace := deploymentConfig["namespace"]; !hasNamespace {
+		deploymentConfig["namespace"] = dgdr.Namespace
+	}
+
+	// Set deployment.model from spec.model
+	deploymentConfig["model"] = dgdr.Spec.Model
+
+	// Set deployment.dgd_image from deploymentOverrides.workersImage if provided
+	if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.WorkersImage != "" {
+		deploymentConfig["dgd_image"] = dgdr.Spec.DeploymentOverrides.WorkersImage
+	}
+
+	// Set output_dir if not already set
+	if _, hasOutputDir := config["output_dir"]; !hasOutputDir {
+		config["output_dir"] = ProfilingOutputPath
+	}
+
+	// Set engine.backend from spec.backend
+	engineVal, hasEngine := config["engine"]
+	var engineConfig map[string]interface{}
+	if !hasEngine || engineVal == nil {
+		engineConfig = make(map[string]interface{})
+		config["engine"] = engineConfig
+	} else {
+		var ok bool
+		engineConfig, ok = engineVal.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("profilingConfig.config.engine must be an object, got %T", engineVal)
+		}
+	}
+	engineConfig["backend"] = dgdr.Spec.Backend
+
+	// If ConfigMapRef is provided, set engine.config path
+	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
+		engineConfig["config"] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
+	}
+
+	// Serialize config to YAML for passing to profiler
+	configYAML, err := sigsyaml.Marshal(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal profiling config to YAML: %w", err)
+	}
+
+	return configYAML, nil
 }
 
 // checkProfilingJobStatus checks if the profiling job has completed
