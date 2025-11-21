@@ -315,7 +315,7 @@ impl ModelManager {
             .get_or_create_bucket(KV_ROUTERS_ROOT_PATH, None)
             .await?;
         let router_uuid = uuid::Uuid::new_v4();
-        let router_key = Key::from_raw(format!("{}/{router_uuid}", endpoint.path()));
+        let router_key = Key::new(format!("{}/{router_uuid}", endpoint.path()));
         let json_router_config = serde_json::to_vec_pretty(&kv_router_config.unwrap_or_default())?;
         router_bucket
             .insert(&router_key, json_router_config.into(), 0)

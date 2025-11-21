@@ -2860,6 +2860,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "parking_lot",
+ "percent-encoding",
  "prometheus",
  "rand 0.9.2",
  "rayon",

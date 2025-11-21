@@ -64,7 +64,7 @@ impl EndpointConfigBuilder {
 
     pub async fn start(self) -> Result<()> {
         let (
-            mut endpoint,
+            endpoint,
             handler,
             stats_handler,
             metrics_labels,
@@ -85,19 +85,6 @@ impl EndpointConfigBuilder {
             .map(|v| v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect());
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
-
-        // Determine request plane mode
-        let request_plane_mode = endpoint.drt().request_plane();
-        if request_plane_mode.is_nats() {
-            // We only need the service if we want NATS metrics.
-            // TODO: This is called for every endpoint of a component. Ideally we only call it once
-            // on the component.
-            endpoint.component.add_stats_service().await?;
-        }
-        tracing::info!(
-            "Endpoint starting with request plane mode: {:?}",
-            request_plane_mode
-        );
 
         // Insert the stats handler. depends on NATS.
         if let Some(stats_handler) = stats_handler {
@@ -122,6 +109,9 @@ impl EndpointConfigBuilder {
         let endpoint_name = endpoint.name.clone();
         let system_health = endpoint.drt().system_health();
         let subject = endpoint.subject_to(connection_id);
+
+        let request_plane_mode = endpoint.drt().request_plane();
+        tracing::info!("Endpoint starting with request plane mode: {request_plane_mode}",);
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
