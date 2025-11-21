@@ -19,7 +19,7 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: dynamo
+      globalDynamoNamespace: true
       replicas: 1
       extraPodSpec:
         mainContainer:
@@ -39,7 +39,6 @@ spec:
       - name: dynamo-model-cache
         mountPoint: /root/.cache/huggingface
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg
       componentType: worker
       replicas: 1
       resources:
@@ -67,7 +66,6 @@ spec:
       - name: dynamo-model-cache
         mountPoint: /root/.cache/huggingface
       envFromSecret: hf-token-secret
-      dynamoNamespace: agg-qwen
       componentType: worker
       replicas: 1
       resources:
@@ -87,7 +85,6 @@ spec:
       - name: dynamo-model-cache
         mountPoint: /root/.cache/huggingface
       envFromSecret: hf-token-secret
-      dynamoNamespace: agg-qwen
       componentType: worker
       replicas: 1
       resources:
@@ -107,7 +104,6 @@ spec:
       - name: dynamo-model-cache
         mountPoint: /root/.cache/huggingface
       envFromSecret: hf-token-secret
-      dynamoNamespace: agg-qwen
       componentType: worker
       replicas: 1
       resources:
