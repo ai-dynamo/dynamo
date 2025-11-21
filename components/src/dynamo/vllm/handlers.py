@@ -211,7 +211,8 @@ class BaseWorkerHandler(ABC):
             ),
             "prompt_tokens_details": (
                 {"cached_tokens": request_output.num_cached_tokens}
-                if request_output.num_cached_tokens
+                if request_output.num_cached_tokens is not None
+                and request_output.num_cached_tokens >= 0
                 else None
             ),
         }
@@ -241,10 +242,10 @@ class BaseWorkerHandler(ABC):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res
+                        out["completion_usage"] = (
+                            BaseWorkerHandler._build_completion_usage(
+                                request_output=res
+                            )
                         )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
@@ -349,6 +350,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Prefill Request ID: {request_id}")
 
+        # Extract overlap information from router (if present)
+        overlap_blocks = request.get("estimated_prefix_hit_num_blocks", 0)
+
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
 
@@ -391,13 +395,18 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                     token_ids = res.outputs[0].token_ids if res.outputs else []
 
+                    # Build disaggregated_params with KV transfer params and router overlap
+                    disaggregated_params = {}
+                    if res.kv_transfer_params:
+                        disaggregated_params["kv_transfer_params"] = (
+                            res.kv_transfer_params
+                        )
+                    # Include router's overlap calculation for PrefillRouter
+                    disaggregated_params["overlap_blocks"] = overlap_blocks
+
                     output: Dict[str, Any] = {
                         "token_ids": list(token_ids),
-                        "disaggregated_params": (
-                            {"kv_transfer_params": res.kv_transfer_params}
-                            if res.kv_transfer_params
-                            else None
-                        ),
+                        "disaggregated_params": disaggregated_params,
                         "completion_usage": BaseWorkerHandler._build_completion_usage(
                             request_output=res
                         ),

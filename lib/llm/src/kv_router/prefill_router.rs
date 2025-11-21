@@ -57,16 +57,18 @@ pub struct PrefillRouter {
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
+    block_size: u32,
 }
 
 impl PrefillRouter {
     /// Create a disabled prefill router that will never activate (passthrough only)
-    pub fn disabled(router_mode: RouterMode, enforce_disagg: bool) -> Arc<Self> {
+    pub fn disabled(router_mode: RouterMode, enforce_disagg: bool, block_size: u32) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: OnceLock::new(),
             cancel_token: CancellationToken::new(),
             router_mode,
             enforce_disagg,
+            block_size,
         })
     }
 
@@ -86,6 +88,7 @@ impl PrefillRouter {
             cancel_token: cancel_token.clone(),
             router_mode,
             enforce_disagg,
+            block_size: kv_cache_block_size,
         });
 
         // Spawn background task to wait for activation
@@ -180,7 +183,8 @@ impl PrefillRouter {
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
+        _block_size: u32,
+    ) -> Result<(PrefillResult, Option<u64>, u32), PrefillError> {
         // Get the prefill router, error if not activated
         let Some(prefill_router) = self.prefill_router.get() else {
             return Err(PrefillError::NotActivated);
@@ -247,12 +251,22 @@ impl PrefillRouter {
                     .get("prefill_worker_id")
                     .and_then(|v| v.as_u64())
             });
+
+        // Extract overlap_blocks from the response (set by prefill worker)
+        let overlap_blocks = output
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("overlap_blocks"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
         Ok((
             PrefillResult {
                 disaggregated_params,
                 prompt_tokens_details,
             },
             prefill_worker_id,
+            overlap_blocks,
         ))
     }
 }
@@ -297,7 +311,7 @@ impl
         let prefill_request = prefill_context;
 
         // Attempt prefill
-        let prefill_result = self.call_prefill(prefill_request).await;
+        let prefill_result = self.call_prefill(prefill_request, self.block_size).await;
 
         // Abort if cancelled during prefill
         if engine_ctx.is_stopped() || engine_ctx.is_killed() {
@@ -310,8 +324,28 @@ impl
 
         // Handle prefill result
         match prefill_result {
-            Ok((prefill_result, prefill_worker_id)) => {
-                tracing::debug!("Prefill succeeded, using disaggregated params for decode");
+            Ok((mut prefill_result, prefill_worker_id, overlap_blocks)) => {
+                // Prefer vLLM's actual cached_tokens over router's estimate
+                // vLLM queries the actual KV cache on the prefill worker (ground truth)
+                // Router's overlap is just a prediction based on its global state
+                let vllm_cached_tokens = prefill_result
+                    .prompt_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens);
+                let final_cached_tokens = if let Some(vllm_value) = vllm_cached_tokens {
+                    vllm_value
+                } else {
+                    overlap_blocks * self.block_size
+                };
+
+                prefill_result.prompt_tokens_details =
+                    Some(dynamo_async_openai::types::PromptTokensDetails {
+                        cached_tokens: Some(final_cached_tokens),
+                        audio_tokens: prefill_result
+                            .prompt_tokens_details
+                            .as_ref()
+                            .and_then(|d| d.audio_tokens),
+                    });
 
                 let mut decode_req = req;
                 // Update request with prefill result
