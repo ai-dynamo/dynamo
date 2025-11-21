@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DynamoGraphDeploymentRequest for online profiling (actual deployment testing)
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: sla-online
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+
+  # ProfilingConfig maps directly to the profile_sla.py config format
+  profilingConfig:
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0"
+    config:
+      # Sweep/profiling configuration
+      sweep:
+        # Online profiling mode (real deployment testing)
+        use_ai_configurator: false
+
+      # SLA targets for profiling
+      sla:
+        isl: 3000   # Input sequence length
+        osl: 150    # Output sequence length
+        ttft: 200.0 # Time To First Token target (milliseconds)
+        itl: 20.0   # Inter-Token Latency target (milliseconds)
+
+  # Deployment overrides for the auto-created DGD
+  deploymentOverrides:
+    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0"
+
+  # Automatically create DynamoGraphDeployment after profiling
+  autoApply: true

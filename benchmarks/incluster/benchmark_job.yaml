@@ -8,7 +8,6 @@ metadata:
 spec:
   template:
     spec:
-      serviceAccountName: dynamo-sa
       imagePullSecrets:
       - name: docker-imagepullsecret
       securityContext:
@@ -18,7 +17,7 @@ spec:
       containers:
       - name: benchmark-runner
         # TODO: update to latest public image in next release
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

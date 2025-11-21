@@ -3,7 +3,7 @@
     "containerDefinitions": [
         {
             "name": "dynamo-vllm-frontend",
-            "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag",
+            "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0",
             "repositoryCredentials": {
                 "credentialsParameter": "arn:aws:secretsmanager:AWS_REGION:AWS_ID:secret:ngc_nvcr_access"
             },
@@ -23,7 +23,7 @@
                 "-c"
             ],
             "command": [
-                "cd components/backends/vllm && python -m dynamo.frontend --router-mode kv & python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager"
+                "cd examples/backends/vllm && python -m dynamo.frontend --router-mode kv & python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager"
             ],
             "environment": [
                 {

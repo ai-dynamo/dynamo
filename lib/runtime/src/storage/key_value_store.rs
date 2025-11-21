@@ -4,14 +4,16 @@
 //! Interface to a traditional key-value store such as etcd.
 //! "key_value_store" spelt out because in AI land "KV" means something else.
 
-use std::collections::HashMap;
-use std::fmt;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::HashMap, path::PathBuf};
+use std::{env, fmt};
 
 use crate::CancellationToken;
 use crate::slug::Slug;
+use crate::transports::etcd as etcd_transport;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -22,8 +24,15 @@ mod nats;
 pub use nats::NATSStore;
 mod etcd;
 pub use etcd::EtcdStore;
+mod file;
+pub use file::FileStore;
+
+const WATCH_SEND_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// A key that is safe to use directly in the KV store.
+///
+/// TODO: Need to re-think this. etcd uses slash separators, so we often use from_raw
+/// to avoid the slug. But other impl's, particularly file, need a real slug.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Key(String);
 
@@ -62,28 +71,223 @@ impl From<&Key> for String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyValue {
+    key: String,
+    value: bytes::Bytes,
+}
+
+impl KeyValue {
+    pub fn new(key: String, value: bytes::Bytes) -> Self {
+        KeyValue { key, value }
+    }
+
+    pub fn key(&self) -> String {
+        self.key.clone()
+    }
+
+    pub fn key_str(&self) -> &str {
+        &self.key
+    }
+
+    pub fn value(&self) -> &[u8] {
+        &self.value
+    }
+
+    pub fn value_str(&self) -> anyhow::Result<&str> {
+        std::str::from_utf8(self.value()).map_err(From::from)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WatchEvent {
+    Put(KeyValue),
+    Delete(Key),
+}
+
 #[async_trait]
 pub trait KeyValueStore: Send + Sync {
+    type Bucket: KeyValueBucket + Send + Sync + 'static;
+
     async fn get_or_create_bucket(
         &self,
         bucket_name: &str,
         // auto-delete items older than this
         ttl: Option<Duration>,
-    ) -> Result<Box<dyn KeyValueBucket>, StoreError>;
+    ) -> Result<Self::Bucket, StoreError>;
+
+    async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError>;
+
+    fn connection_id(&self) -> u64;
+
+    fn shutdown(&self);
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum KeyValueStoreSelect {
+    // Box it because it is significantly bigger than the other variants
+    Etcd(Box<etcd_transport::ClientOptions>),
+    File(PathBuf),
+    #[default]
+    Memory,
+    // Nats not listed because likely we want to remove that impl. It is not currently used and not well tested.
+}
+
+impl fmt::Display for KeyValueStoreSelect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeyValueStoreSelect::Etcd(opts) => {
+                let urls = opts.etcd_url.join(",");
+                write!(f, "Etcd({urls})")
+            }
+            KeyValueStoreSelect::File(path) => write!(f, "File({})", path.display()),
+            KeyValueStoreSelect::Memory => write!(f, "Memory"),
+        }
+    }
+}
+
+impl FromStr for KeyValueStoreSelect {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<KeyValueStoreSelect> {
+        match s {
+            "etcd" => Ok(Self::Etcd(Box::default())),
+            "file" => {
+                let root = env::var("DYN_FILE_KV")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| env::temp_dir().join("dynamo_store_kv"));
+                Ok(Self::File(root))
+            }
+            "mem" => Ok(Self::Memory),
+            x => anyhow::bail!("Unknown key-value store type '{x}'"),
+        }
+    }
+}
+
+impl TryFrom<String> for KeyValueStoreSelect {
+    type Error = anyhow::Error;
+
+    fn try_from(s: String) -> anyhow::Result<KeyValueStoreSelect> {
+        s.parse()
+    }
+}
+
+#[allow(clippy::large_enum_variant)]
+pub enum KeyValueStoreEnum {
+    Memory(MemoryStore),
+    Nats(NATSStore),
+    Etcd(EtcdStore),
+    File(FileStore),
+}
+
+impl KeyValueStoreEnum {
+    async fn get_or_create_bucket(
+        &self,
+        bucket_name: &str,
+        // auto-delete items older than this
+        ttl: Option<Duration>,
+    ) -> Result<Box<dyn KeyValueBucket>, StoreError> {
+        use KeyValueStoreEnum::*;
+        Ok(match self {
+            Memory(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
+            Nats(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
+            Etcd(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
+            File(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
+        })
+    }
 
     async fn get_bucket(
         &self,
         bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError>;
+    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError> {
+        use KeyValueStoreEnum::*;
+        let maybe_bucket: Option<Box<dyn KeyValueBucket>> = match self {
+            Memory(x) => x
+                .get_bucket(bucket_name)
+                .await?
+                .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
+            Nats(x) => x
+                .get_bucket(bucket_name)
+                .await?
+                .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
+            Etcd(x) => x
+                .get_bucket(bucket_name)
+                .await?
+                .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
+            File(x) => x
+                .get_bucket(bucket_name)
+                .await?
+                .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
+        };
+        Ok(maybe_bucket)
+    }
 
-    fn connection_id(&self) -> u64;
+    fn connection_id(&self) -> u64 {
+        use KeyValueStoreEnum::*;
+        match self {
+            Memory(x) => x.connection_id(),
+            Etcd(x) => x.connection_id(),
+            Nats(x) => x.connection_id(),
+            File(x) => x.connection_id(),
+        }
+    }
+
+    fn shutdown(&self) {
+        use KeyValueStoreEnum::*;
+        match self {
+            Memory(x) => x.shutdown(),
+            Etcd(x) => x.shutdown(),
+            Nats(x) => x.shutdown(),
+            File(x) => x.shutdown(),
+        }
+    }
 }
 
-pub struct KeyValueStoreManager(Box<dyn KeyValueStore>);
+#[derive(Clone)]
+pub struct KeyValueStoreManager(pub Arc<KeyValueStoreEnum>);
+
+impl Default for KeyValueStoreManager {
+    fn default() -> Self {
+        KeyValueStoreManager::memory()
+    }
+}
 
 impl KeyValueStoreManager {
-    pub fn new(s: Box<dyn KeyValueStore>) -> KeyValueStoreManager {
-        KeyValueStoreManager(s)
+    /// In-memory KeyValueStoreManager for testing
+    pub fn memory() -> Self {
+        Self::new(KeyValueStoreEnum::Memory(MemoryStore::new()))
+    }
+
+    pub fn etcd(etcd_client: crate::transports::etcd::Client) -> Self {
+        Self::new(KeyValueStoreEnum::Etcd(EtcdStore::new(etcd_client)))
+    }
+
+    pub fn file<P: Into<PathBuf>>(root: P) -> Self {
+        Self::new(KeyValueStoreEnum::File(FileStore::new(root)))
+    }
+
+    fn new(s: KeyValueStoreEnum) -> KeyValueStoreManager {
+        KeyValueStoreManager(Arc::new(s))
+    }
+
+    pub async fn get_or_create_bucket(
+        &self,
+        bucket_name: &str,
+        // auto-delete items older than this
+        ttl: Option<Duration>,
+    ) -> Result<Box<dyn KeyValueBucket>, StoreError> {
+        self.0.get_or_create_bucket(bucket_name, ttl).await
+    }
+
+    pub async fn get_bucket(
+        &self,
+        bucket_name: &str,
+    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError> {
+        self.0.get_bucket(bucket_name).await
+    }
+
+    pub fn connection_id(&self) -> u64 {
+        self.0.connection_id()
     }
 
     pub async fn load<T: for<'a> Deserialize<'a>>(
@@ -95,32 +299,29 @@ impl KeyValueStoreManager {
             // No bucket means no cards
             return Ok(None);
         };
-        match bucket.get(key).await {
-            Ok(Some(card_bytes)) => {
+        Ok(match bucket.get(key).await? {
+            Some(card_bytes) => {
                 let card: T = serde_json::from_slice(card_bytes.as_ref())?;
-                Ok(Some(card))
+                Some(card)
             }
-            Ok(None) => Ok(None),
-            Err(err) => {
-                // TODO look at what errors NATS can give us and make more specific wrappers
-                Err(StoreError::NATSError(err.to_string()))
-            }
-        }
+            None => None,
+        })
     }
 
     /// Returns a receiver that will receive all the existing keys, and
     /// then block and receive new keys as they are created.
     /// Starts a task that runs forever, watches the store.
-    pub fn watch<T: for<'a> Deserialize<'a> + Send + 'static>(
+    pub fn watch(
         self: Arc<Self>,
         bucket_name: &str,
         bucket_ttl: Option<Duration>,
+        cancel_token: CancellationToken,
     ) -> (
         tokio::task::JoinHandle<Result<(), StoreError>>,
-        tokio::sync::mpsc::UnboundedReceiver<T>,
+        tokio::sync::mpsc::Receiver<WatchEvent>,
     ) {
         let bucket_name = bucket_name.to_string();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
         let watch_task = tokio::spawn(async move {
             // Start listening for changes but don't poll this yet
             let bucket = self
@@ -130,15 +331,30 @@ impl KeyValueStoreManager {
             let mut stream = bucket.watch().await?;
 
             // Send all the existing keys
-            for (_, card_bytes) in bucket.entries().await? {
-                let card: T = serde_json::from_slice(card_bytes.as_ref())?;
-                let _ = tx.send(card);
+            for (key, bytes) in bucket.entries().await? {
+                if let Err(err) = tx
+                    .send_timeout(
+                        WatchEvent::Put(KeyValue::new(key, bytes)),
+                        WATCH_SEND_TIMEOUT,
+                    )
+                    .await
+                {
+                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding existing key to channel");
+                }
             }
 
             // Now block waiting for new entries
-            while let Some(card_bytes) = stream.next().await {
-                let card: T = serde_json::from_slice(card_bytes.as_ref())?;
-                let _ = tx.send(card);
+            loop {
+                let event = tokio::select! {
+                    _ = cancel_token.cancelled() => break,
+                    result = stream.next() => match result {
+                        Some(event) => event,
+                        None => break,
+                    }
+                };
+                if let Err(err) = tx.send_timeout(event, WATCH_SEND_TIMEOUT).await {
+                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding new key to channel");
+                }
             }
 
             Ok::<(), StoreError>(())
@@ -153,10 +369,10 @@ impl KeyValueStoreManager {
         key: &Key,
         obj: &mut T,
     ) -> anyhow::Result<StoreOutcome> {
-        let obj_json = serde_json::to_string(obj)?;
+        let obj_json = serde_json::to_vec(obj)?;
         let bucket = self.0.get_or_create_bucket(bucket_name, bucket_ttl).await?;
 
-        let outcome = bucket.insert(key, &obj_json, obj.revision()).await?;
+        let outcome = bucket.insert(key, obj_json.into(), obj.revision()).await?;
 
         match outcome {
             StoreOutcome::Created(revision) | StoreOutcome::Exists(revision) => {
@@ -165,18 +381,23 @@ impl KeyValueStoreManager {
         }
         Ok(outcome)
     }
+
+    /// Cleanup any temporary state.
+    /// TODO: Should this be async? Take &mut self?
+    pub fn shutdown(&self) {
+        self.0.shutdown()
+    }
 }
 
 /// An online storage for key-value config values.
-/// Usually backed by `nats-server`.
 #[async_trait]
-pub trait KeyValueBucket: Send {
+pub trait KeyValueBucket: Send + Sync {
     /// A bucket is a collection of key/value pairs.
     /// Insert a value into a bucket, if it doesn't exist already
     async fn insert(
         &self,
         key: &Key,
-        value: &str,
+        value: bytes::Bytes,
         revision: u64,
     ) -> Result<StoreOutcome, StoreError>;
 
@@ -191,7 +412,7 @@ pub trait KeyValueBucket: Send {
     /// such time.
     async fn watch(
         &self,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StoreError>;
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError>;
 
     async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError>;
 }
@@ -230,7 +451,10 @@ pub enum StoreError {
     #[error("Internal etcd error: {0}")]
     EtcdError(String),
 
-    #[error("Key Value Error: {0} for bucket '{1}")]
+    #[error("Internal filesystem error: {0}")]
+    FilesystemError(String),
+
+    #[error("Key Value Error: {0} for bucket '{1}'")]
     KeyValueError(String, String),
 
     #[error("Error decoding bytes: {0}")]
@@ -260,14 +484,14 @@ mod tests {
     /// clients can listen to.
     #[allow(dead_code)]
     pub struct TappableStream {
-        tx: tokio::sync::broadcast::Sender<bytes::Bytes>,
+        tx: tokio::sync::broadcast::Sender<WatchEvent>,
     }
 
     #[allow(dead_code)]
     impl TappableStream {
         async fn new<T>(stream: T, max_size: usize) -> Self
         where
-            T: futures::Stream<Item = bytes::Bytes> + Send + 'static,
+            T: futures::Stream<Item = WatchEvent> + Send + 'static,
         {
             let (tx, _) = tokio::sync::broadcast::channel(max_size);
             let tx2 = tx.clone();
@@ -280,7 +504,7 @@ mod tests {
             TappableStream { tx }
         }
 
-        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<bytes::Bytes> {
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<WatchEvent> {
             self.tx.subscribe()
         }
     }
@@ -297,8 +521,17 @@ mod tests {
         let s2 = Arc::clone(&s);
 
         let bucket = s.get_or_create_bucket(BUCKET_NAME, None).await?;
-        let res = bucket.insert(&"test1".into(), "value1", 0).await?;
+        let res = bucket.insert(&"test1".into(), "value1".into(), 0).await?;
         assert_eq!(res, StoreOutcome::Created(0));
+
+        let mut expected = Vec::with_capacity(3);
+        for i in 1..=3 {
+            let item = WatchEvent::Put(KeyValue::new(
+                format!("test{i}"),
+                format!("value{i}").into(),
+            ));
+            expected.push(item);
+        }
 
         let (got_first_tx, got_first_rx) = tokio::sync::oneshot::channel();
         let ingress = tokio::spawn(async move {
@@ -307,15 +540,16 @@ mod tests {
 
             // Put in before starting the watch-all
             let v = stream.next().await.unwrap();
-            assert_eq!(v, "value1".as_bytes());
+            assert_eq!(v, expected[0]);
 
             got_first_tx.send(()).unwrap();
 
             // Put in after
             let v = stream.next().await.unwrap();
-            assert_eq!(v, "value2".as_bytes());
+            assert_eq!(v, expected[1]);
+
             let v = stream.next().await.unwrap();
-            assert_eq!(v, "value3".as_bytes());
+            assert_eq!(v, expected[2]);
 
             Ok::<_, StoreError>(())
         });
@@ -325,18 +559,18 @@ mod tests {
         // wouldn't be testing the watch behavior.
         got_first_rx.await?;
 
-        let res = bucket.insert(&"test2".into(), "value2", 0).await?;
+        let res = bucket.insert(&"test2".into(), "value2".into(), 0).await?;
         assert_eq!(res, StoreOutcome::Created(0));
 
         // Repeat a key and revision. Ignored.
-        let res = bucket.insert(&"test2".into(), "value2", 0).await?;
+        let res = bucket.insert(&"test2".into(), "value2".into(), 0).await?;
         assert_eq!(res, StoreOutcome::Exists(0));
 
         // Increment revision
-        let res = bucket.insert(&"test2".into(), "value2", 1).await?;
+        let res = bucket.insert(&"test2".into(), "value2".into(), 1).await?;
         assert_eq!(res, StoreOutcome::Created(1));
 
-        let res = bucket.insert(&"test3".into(), "value3", 0).await?;
+        let res = bucket.insert(&"test3".into(), "value3".into(), 0).await?;
         assert_eq!(res, StoreOutcome::Created(0));
 
         // ingress exits once it has received all values
@@ -353,7 +587,7 @@ mod tests {
         let bucket: &'static _ =
             Box::leak(Box::new(s.get_or_create_bucket(BUCKET_NAME, None).await?));
 
-        let res = bucket.insert(&"test1".into(), "value1", 0).await?;
+        let res = bucket.insert(&"test1".into(), "value1".into(), 0).await?;
         assert_eq!(res, StoreOutcome::Created(0));
 
         let stream = bucket.watch().await?;
@@ -362,16 +596,18 @@ mod tests {
         let mut rx1 = tap.subscribe();
         let mut rx2 = tap.subscribe();
 
+        let item = WatchEvent::Put(KeyValue::new("test1".to_string(), "GK".into()));
+        let item_clone = item.clone();
         let handle1 = tokio::spawn(async move {
             let b = rx1.recv().await.unwrap();
-            assert_eq!(b, bytes::Bytes::from(vec![b'G', b'K']));
+            assert_eq!(b, item_clone);
         });
         let handle2 = tokio::spawn(async move {
             let b = rx2.recv().await.unwrap();
-            assert_eq!(b, bytes::Bytes::from(vec![b'G', b'K']));
+            assert_eq!(b, item);
         });
 
-        bucket.insert(&"test1".into(), "GK", 1).await?;
+        bucket.insert(&"test1".into(), "GK".into(), 1).await?;
 
         let _ = futures::join!(handle1, handle2);
         Ok(())

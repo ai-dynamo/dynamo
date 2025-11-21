@@ -153,7 +153,7 @@ def start_nats_and_etcd_default_ports():
     print(f"Using ETCD on default client port {etcd_client_port}")
 
     # Start services with default ports
-    nats_server = subprocess.Popen(["nats-server", "-js"])
+    nats_server = subprocess.Popen(["nats-server", "-js", "--trace"])
     etcd = subprocess.Popen(["etcd"])
 
     return nats_server, etcd, nats_port, etcd_client_port, nats_data_dir, etcd_data_dir
@@ -181,6 +181,8 @@ def start_nats_and_etcd_random_ports():
     etcd = subprocess.Popen(
         [
             "etcd",
+            "--logger",
+            "zap",
             "--data-dir",
             str(etcd_data_dir),
             "--listen-client-urls",
@@ -221,7 +223,11 @@ def start_nats_and_etcd_random_ports():
             msg = log.get("msg", "")
 
             # Look for the client port
-            if "serving client traffic" in msg or "serving client" in msg:
+            if (
+                "serving client traffic" in msg
+                or "serving client" in msg
+                or "serving insecure client" in msg
+            ):
                 address = log.get("address", "")
                 match = re.search(r":(\d+)$", address)
                 if match:
@@ -430,6 +436,6 @@ This is required because DistributedRuntime is a process-level singleton.
             )
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, True)
+    runtime = DistributedRuntime(loop, "mem", True)
     yield runtime
     runtime.shutdown()

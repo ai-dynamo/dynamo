@@ -152,19 +152,19 @@ The KV-aware routing arguments:
 
 ### Request Migration
 
-In a [Distributed System](#distributed-system), you can enable [request migration](../architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
+In a [Distributed System](#distributed-system), you can enable [request migration](../fault_tolerance/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
 ```bash
 dynamo-run in=dyn://... out=<engine> ... --migration-limit=3
 ```
 
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../architecture/request_migration.md) documentation for details on how this works.
+This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../fault_tolerance/request_migration.md) documentation for details on how this works.
 
 ### Request Cancellation
 
 When using the HTTP interface (`in=http`), if the HTTP request connection is dropped by the client, Dynamo automatically cancels the downstream request to the worker. This ensures that computational resources are not wasted on generating responses that are no longer needed.
 
-For detailed information about how request cancellation works across the system, see the [Request Cancellation Architecture](../architecture/request_cancellation.md) documentation.
+For detailed information about how request cancellation works across the system, see the [Request Cancellation Architecture](../fault_tolerance/request_cancellation.md) documentation.
 
 ## Development
 
@@ -293,7 +293,7 @@ The default delay is 10ms, which produces approximately 100 tokens per second.
 
 ### Other engines, multi-node, production
 
-`vllm`, `sglang` and `trtllm` production grade engines are available in `components/backends`. They run as Python components, using the Rust bindings. See the main README.
+`vllm`, `sglang` and `trtllm` production grade engines are available in `examples/backends`. They run as Python components, using the Rust bindings. See the main README.
 
 `dynamo-run` is an exploration, development and prototyping tool, as well as an example of using the Rust API. Multi-node and production setups should be using the main engine components.
 
@@ -320,7 +320,7 @@ The output looks like this:
 
 ## Writing your own engine in Python
 
-The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo. All of the main backend components in `components/backends/` work like this.
+The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo. All of the main backend components in `examples/backends/` work like this.
 
 The Python file must do three things:
 1. Decorate a function to get the runtime
@@ -396,7 +396,7 @@ Here are some example engines:
 - Chat:
     * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang_tok.py)
 
-More fully-featured Python engines are in `components/backends`.
+More fully-featured Python engines are in `examples/backends`.
 
 ## Debugging
 

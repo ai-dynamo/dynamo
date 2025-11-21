@@ -157,9 +157,9 @@ class Endpoint:
         """
         ...
 
-    async def lease_id(self) -> int:
+    def connection_id(self) -> int:
         """
-        Return primary lease id. Currently, cannot set a different lease id.
+        Opaque unique ID for this worker. May change over worker lifetime.
         """
         ...
 
@@ -217,58 +217,6 @@ class Client:
         """
         ...
 
-class DisaggregatedRouter:
-    """
-    A router that determines whether to perform prefill locally or remotely based on
-    sequence length thresholds.
-    """
-
-    def __init__(
-        self,
-        drt: DistributedRuntime,
-        model_name: str,
-        default_max_local_prefill_length: int,
-    ) -> None:
-        """
-        Create a `DisaggregatedRouter` object.
-
-        Args:
-            drt: The distributed runtime instance
-            model_name: Name of the model
-            default_max_local_prefill_length: Default maximum sequence length that can be processed locally
-        """
-        ...
-
-    def prefill_remote(self, prefill_length: int, prefix_hit_length: int) -> bool:
-        """
-        Determine if prefill should be performed remotely based on sequence lengths.
-
-        Args:
-            prefill_length: Total length of the sequence to prefill
-            prefix_hit_length: Length of the prefix that was already processed
-
-        Returns:
-            True if prefill should be performed remotely, False otherwise
-        """
-        ...
-
-    def update_value(self, max_local_prefill_length: int) -> None:
-        """
-        Update the maximum local prefill length threshold.
-
-        Args:
-            max_local_prefill_length: New maximum sequence length that can be processed locally
-        """
-        ...
-
-    def get_model_name(self) -> str:
-        """
-        Get the name of the model associated with this router.
-
-        Returns:
-            The model name as a string
-        """
-        ...
 
 def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List[int]:
     """
@@ -493,7 +441,24 @@ class ModelRuntimeConfig:
     """
     A model runtime configuration is a collection of runtime information
     """
-    ...
+
+    total_kv_blocks: int | None
+    max_num_seqs: int | None
+    max_num_batched_tokens: int | None
+    tool_call_parser: str | None
+    reasoning_parser: str | None
+    runtime_data: dict[str, Any]
+    tensor_model_config: Any | None
+
+    def __init__(self) -> None: ...
+
+    def set_engine_specific(self, key: str, value: Any) -> None:
+        """Set an engine-specific runtime configuration value"""
+        ...
+
+    def get_engine_specific(self, key: str) -> Any | None:
+        """Get an engine-specific runtime configuration value"""
+        ...
 
 class OAIChatPreprocessor:
     """
@@ -553,7 +518,8 @@ class RadixTree:
     """
     A RadixTree that tracks KV cache blocks and can find prefix matches for sequences.
 
-    NOTE: This class is not thread-safe and should only be used from a single thread in Python.
+    Thread-safe: operations route to a dedicated background thread and long calls
+    release the Python GIL.
     """
 
     def __init__(self, expiration_duration_secs: Optional[float] = None) -> None:
@@ -609,6 +575,15 @@ class RadixTree:
 
         Args:
             worker_id: ID of the worker whose blocks should be cleared
+        """
+        ...
+
+    def dump_tree_as_events(self) -> List[str]:
+        """
+        Dump the current RadixTree state as a list of JSON-serialized KV cache events.
+
+        Returns:
+            List of JSON-serialized KV cache events as strings
         """
         ...
 
@@ -846,6 +821,17 @@ class HttpService:
 
     ...
 
+class PythonAsyncEngine:
+    """
+    Bridge a Python async generator onto Dynamo's AsyncEngine interface.
+    """
+
+    def __init__(self, generator: Any, event_loop: Any) -> None:
+        """Wrap a Python generator and event loop for use with Dynamo services."""
+        ...
+
+
+
 class HttpAsyncEngine:
     """
     An async engine for a distributed Dynamo http service. This is an extension of the
@@ -854,6 +840,134 @@ class HttpAsyncEngine:
     """
 
     ...
+
+class KserveGrpcService:
+    """
+    A gRPC service implementing the KServe protocol for dynamo applications.
+    Provides model management for completions, chat completions, and tensor-based models.
+    """
+
+    def __init__(self, port: Optional[int] = None, host: Optional[str] = None) -> None:
+        """
+        Create a new KServe gRPC service.
+
+        Args:
+            port: Optional port number to bind the service to
+            host: Optional host address to bind the service to
+        """
+        ...
+
+    def add_completions_model(
+        self,
+        model: str,
+        checksum: str,
+        engine: PythonAsyncEngine,
+    ) -> None:
+        """
+        Register a completions model with the service.
+
+        Args:
+            model: The model name
+            checksum: The model checksum
+            engine: The async engine to handle requests
+        """
+        ...
+
+    def add_chat_completions_model(
+        self,
+        model: str,
+        checksum: str,
+        engine: PythonAsyncEngine,
+    ) -> None:
+        """
+        Register a chat completions model with the service.
+
+        Args:
+            model: The model name
+            checksum: The model checksum
+            engine: The async engine to handle requests
+        """
+        ...
+
+    def add_tensor_model(
+        self,
+        model: str,
+        checksum: str,
+        engine: PythonAsyncEngine,
+        runtime_config: Optional[ModelRuntimeConfig],
+    ) -> None:
+        """
+        Register a tensor-based model with the service.
+
+        Args:
+            model: The model name
+            checksum: The model checksum
+            engine: The async engine to handle requests
+        """
+        ...
+
+    def remove_completions_model(self, model: str) -> None:
+        """
+        Remove a completions model from the service.
+
+        Args:
+            model: The model name to remove
+        """
+        ...
+
+    def remove_chat_completions_model(self, model: str) -> None:
+        """
+        Remove a chat completions model from the service.
+
+        Args:
+            model: The model name to remove
+        """
+        ...
+
+    def remove_tensor_model(self, model: str) -> None:
+        """
+        Remove a tensor model from the service.
+
+        Args:
+            model: The model name to remove
+        """
+        ...
+
+    def list_chat_completions_models(self) -> List[str]:
+        """
+        List all registered chat completions models.
+
+        Returns:
+            List of model names
+        """
+        ...
+
+    def list_completions_models(self) -> List[str]:
+        """
+        List all registered completions models.
+
+        Returns:
+            List of model names
+        """
+        ...
+
+    def list_tensor_models(self) -> List[str]:
+        """
+        List all registered tensor models.
+
+        Returns:
+            List of model names
+        """
+        ...
+
+    async def run(self, token: CancellationToken) -> None:
+        """
+        Run the KServe gRPC service.
+
+        Args:
+            token: Cancellation token to stop the service
+        """
+        ...
 
 class ModelInput:
     """What type of request this model needs: Text, Tokens or Tensor"""
@@ -1411,7 +1525,9 @@ __all__ = [
     "Client",
     "Component",
     "Context",
+    "KserveGrpcService",
     "ModelDeploymentCard",
     "OAIChatPreprocessor",
+    "PythonAsyncEngine",
     "prometheus_names",
 ]

@@ -64,8 +64,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
 	SubComponentType string `json:"subComponentType,omitempty"`
 
-	// Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
+	// DynamoNamespace is deprecated and will be removed in a future version.
+	// The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
+	// +kubebuilder:validation:Optional
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
+
+	// GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
 	// Resources requested and limits for this component, including CPU, memory,
 	// GPUs/devices, and any runtime-specific resources.
@@ -82,6 +87,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// Ingress config to expose the component outside the cluster (or through a service mesh).
 	Ingress *IngressSpec `json:"ingress,omitempty"`
+
+	// ModelRef references a model that this component serves
+	// When specified, a headless service will be created for endpoint discovery
+	// +optional
+	ModelRef *ModelReference `json:"modelRef,omitempty"`
 
 	// SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).
 	SharedMemory *SharedMemorySpec `json:"sharedMemory,omitempty"`
@@ -268,4 +278,15 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
 
 func (s *DynamoComponentDeployment) GetParentGraphDeploymentNamespace() string {
 	return s.GetNamespace()
+}
+
+// ModelReference identifies a model served by this component
+type ModelReference struct {
+	// Name is the base model identifier (e.g., "llama-3-70b-instruct-v1")
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Revision is the model revision/version (optional)
+	// +optional
+	Revision string `json:"revision,omitempty"`
 }

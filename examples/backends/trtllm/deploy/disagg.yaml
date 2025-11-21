@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-disagg
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: trtllm-disagg
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
+    TRTLLMPrefillWorker:
+      dynamoNamespace: trtllm-disagg
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
+          workingDir: /workspace/
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
+            - --disaggregation-mode
+            - prefill
+    TRTLLMDecodeWorker:
+      dynamoNamespace: trtllm-disagg
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
+          workingDir: /workspace/
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
+            - --disaggregation-mode
+            - decode

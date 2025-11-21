@@ -32,15 +32,14 @@
 use std::fmt;
 
 use crate::{
-    config::HealthStatus,
-    discovery::Lease,
-    metrics::{MetricsRegistry, prometheus_names},
+    config::{HealthStatus, RequestPlaneMode},
+    metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
     service::ServiceSet,
     transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
 };
 
 use super::{
-    DistributedRuntime, Result, Runtime, error,
+    DistributedRuntime, Runtime,
     traits::*,
     transports::etcd::{COMPONENT_KEYWORD, ENDPOINT_KEYWORD},
     transports::nats::Slug,
@@ -76,21 +75,26 @@ pub use client::{Client, InstanceSource};
 /// An instance is namespace+component+endpoint+lease_id and must be unique.
 pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
-    NatsTcp(String),
+    #[serde(rename = "nats_tcp")]
+    Nats(String),
+    Http(String),
+    Tcp(String),
 }
 
 #[derive(Default)]
 pub struct RegistryInner {
-    services: HashMap<String, Service>,
-    stats_handlers: HashMap<String, Arc<parking_lot::Mutex<HashMap<String, EndpointStatsHandler>>>>,
+    pub(crate) services: HashMap<String, Service>,
+    pub(crate) stats_handlers:
+        HashMap<String, Arc<parking_lot::Mutex<HashMap<String, EndpointStatsHandler>>>>,
 }
 
 #[derive(Clone)]
 pub struct Registry {
-    inner: Arc<tokio::sync::Mutex<RegistryInner>>,
+    pub(crate) inner: Arc<tokio::sync::Mutex<RegistryInner>>,
+    is_static: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,12 +102,12 @@ pub struct Instance {
     pub component: String,
     pub endpoint: String,
     pub namespace: String,
-    pub instance_id: i64,
+    pub instance_id: u64,
     pub transport: TransportType,
 }
 
 impl Instance {
-    pub fn id(&self) -> i64 {
+    pub fn id(&self) -> u64 {
         self.instance_id
     }
     pub fn endpoint_id(&self) -> EndpointId {
@@ -170,6 +174,10 @@ pub struct Component {
     // A static component's endpoints cannot be discovered via etcd, they are
     // fixed at startup time.
     is_static: bool,
+
+    /// This hierarchy's own metrics registry
+    #[builder(default = "crate::MetricsRegistry::new()")]
+    metrics_registry: crate::MetricsRegistry,
 }
 
 impl Hash for Component {
@@ -208,17 +216,25 @@ impl RuntimeProvider for Component {
     }
 }
 
-impl MetricsRegistry for Component {
+impl MetricsHierarchy for Component {
     fn basename(&self) -> String {
         self.name.clone()
     }
 
-    fn parent_hierarchy(&self) -> Vec<String> {
-        [
-            self.namespace.parent_hierarchy(),
-            vec![self.namespace.basename()],
-        ]
-        .concat()
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        let mut parents = vec![];
+
+        // Get all ancestors of namespace (DRT, parent namespaces, etc.)
+        parents.extend(self.namespace.parent_hierarchies());
+
+        // Add namespace itself
+        parents.push(&self.namespace as &dyn MetricsHierarchy);
+
+        parents
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        &self.metrics_registry
     }
 }
 
@@ -262,32 +278,36 @@ impl Component {
             name: endpoint.into(),
             is_static: self.is_static,
             labels: Vec::new(),
+            metrics_registry: crate::MetricsRegistry::new(),
         }
     }
 
     pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
-        let client = self.drt.store();
-        let Some(bucket) = client.get_bucket(&self.instance_root()).await? else {
-            return Ok(vec![]);
+        let discovery = self.drt.discovery();
+
+        let discovery_query = crate::discovery::DiscoveryQuery::ComponentEndpoints {
+            namespace: self.namespace.name(),
+            component: self.name.clone(),
         };
-        let entries = bucket.entries().await?;
-        let mut instances = Vec::with_capacity(entries.len());
-        for (name, bytes) in entries.into_iter() {
-            let val = match serde_json::from_slice::<Instance>(&bytes) {
-                Ok(val) => val,
-                Err(err) => {
-                    anyhow::bail!("Error converting storage response to Instance: {err}. {name}",);
-                }
-            };
-            instances.push(val);
-        }
+
+        let discovery_instances = discovery.list(discovery_query).await?;
+
+        // Extract Instance from DiscoveryInstance::Endpoint wrapper
+        let mut instances: Vec<Instance> = discovery_instances
+            .into_iter()
+            .filter_map(|di| match di {
+                crate::discovery::DiscoveryInstance::Endpoint(instance) => Some(instance),
+                _ => None, // Ignore all other variants (ModelCard, etc.)
+            })
+            .collect();
+
         instances.sort();
         Ok(instances)
     }
 
     /// Scrape ServiceSet, which contains NATS stats as well as user defined stats
     /// embedded in data field of ServiceInfo.
-    pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {
+    pub async fn scrape_stats(&self, timeout: Duration) -> anyhow::Result<ServiceSet> {
         // Debug: scraping stats for component
         let service_name = self.service_name();
         let Some(service_client) = self.drt().service_client() else {
@@ -305,22 +325,13 @@ impl Component {
     /// then subsequent scrapes occur at a fixed interval of 9.8 seconds (MAX_WAIT_MS),
     /// which should be near or smaller than typical Prometheus scraping intervals to ensure
     /// metrics are fresh when Prometheus collects them.
-    pub fn start_scraping_nats_service_component_metrics(&self) -> Result<()> {
+    pub fn start_scraping_nats_service_component_metrics(&self) -> anyhow::Result<()> {
         const MAX_WAIT_MS: std::time::Duration = std::time::Duration::from_millis(9800); // Should be <= Prometheus scrape interval
 
         // If there is another component with the same service name, this will fail.
         let component_metrics = ComponentNatsServerPrometheusMetrics::new(self)?;
 
         let component_clone = self.clone();
-        let mut hierarchies = self.parent_hierarchy();
-        hierarchies.push(self.hierarchy());
-        debug_assert!(
-            hierarchies
-                .last()
-                .map(|x| x.as_str())
-                .unwrap_or_default()
-                .eq_ignore_ascii_case(&self.service_name())
-        ); // it happens that in component, hierarchy and service name are the same
 
         // Start a background task that scrapes stats every 5 seconds
         let m = component_metrics.clone();
@@ -367,7 +378,7 @@ impl Component {
     /// Returns a stream of `ServiceInfo` objects.
     /// This should be consumed by a `[tokio::time::timeout_at`] because each services
     /// will only respond once, but there is no way to know when all services have responded.
-    pub async fn stats_stream(&self) -> Result<()> {
+    pub async fn stats_stream(&self) -> anyhow::Result<()> {
         unimplemented!("collect_stats")
     }
 
@@ -377,7 +388,7 @@ impl Component {
         // Pre-check to save cost of creating the service, but don't hold the lock
         if self
             .drt
-            .component_registry
+            .component_registry()
             .inner
             .lock()
             .await
@@ -394,7 +405,7 @@ impl Component {
         let (nats_service, stats_reg) =
             service::build_nats_service(nats_client, self, description).await?;
 
-        let mut guard = self.drt.component_registry.inner.lock().await;
+        let mut guard = self.drt.component_registry().inner.lock().await;
         if !guard.services.contains_key(&service_name) {
             // Normal case
             guard.services.insert(service_name.clone(), nats_service);
@@ -409,8 +420,25 @@ impl Component {
         }
 
         // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
-        if let Err(err) = self.start_scraping_nats_service_component_metrics() {
-            tracing::debug!(service_name, error = %err, "Metrics registration failed");
+        // Only enable NATS service metrics collection when using NATS request plane mode
+        let request_plane_mode = RequestPlaneMode::get();
+        match request_plane_mode {
+            RequestPlaneMode::Nats => {
+                if let Err(err) = self.start_scraping_nats_service_component_metrics() {
+                    tracing::debug!(
+                        "Metrics registration failed for '{}': {}",
+                        self.service_name(),
+                        err
+                    );
+                }
+            }
+            _ => {
+                tracing::info!(
+                    "Skipping NATS service metrics collection for '{}' - request plane mode is '{}'",
+                    self.service_name(),
+                    request_plane_mode
+                );
+            }
         }
         Ok(())
     }
@@ -434,6 +462,9 @@ pub struct Endpoint {
 
     /// Additional labels for metrics
     labels: Vec<(String, String)>,
+
+    /// This hierarchy's own metrics registry
+    metrics_registry: crate::MetricsRegistry,
 }
 
 impl Hash for Endpoint {
@@ -466,17 +497,25 @@ impl RuntimeProvider for Endpoint {
     }
 }
 
-impl MetricsRegistry for Endpoint {
+impl MetricsHierarchy for Endpoint {
     fn basename(&self) -> String {
         self.name.clone()
     }
 
-    fn parent_hierarchy(&self) -> Vec<String> {
-        [
-            self.component.parent_hierarchy(),
-            vec![self.component.basename()],
-        ]
-        .concat()
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        let mut parents = vec![];
+
+        // Get all ancestors of component (DRT, Namespace, etc.)
+        parents.extend(self.component.parent_hierarchies());
+
+        // Add component itself
+        parents.push(&self.component as &dyn MetricsHierarchy);
+
+        parents
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        &self.metrics_registry
     }
 }
 
@@ -525,12 +564,12 @@ impl Endpoint {
     }
 
     /// The fully path of an instance in etcd
-    pub fn etcd_path_with_lease_id(&self, lease_id: i64) -> String {
+    pub fn etcd_path_with_lease_id(&self, lease_id: u64) -> String {
         format!("{INSTANCE_ROOT_PATH}/{}", self.unique_path(lease_id))
     }
 
     /// Full path of this endpoint with forward slash separators, including lease id
-    pub fn unique_path(&self, lease_id: i64) -> String {
+    pub fn unique_path(&self, lease_id: u64) -> String {
         let ns = self.component.namespace().name();
         let cp = self.component.name();
         let ep = self.name();
@@ -552,7 +591,7 @@ impl Endpoint {
         }
     }
 
-    pub fn name_with_id(&self, lease_id: i64) -> String {
+    pub fn name_with_id(&self, lease_id: u64) -> String {
         if self.is_static {
             self.name.clone()
         } else {
@@ -565,7 +604,7 @@ impl Endpoint {
     }
 
     /// Subject to an instance of the [Endpoint] with a specific lease id
-    pub fn subject_to(&self, lease_id: i64) -> String {
+    pub fn subject_to(&self, lease_id: u64) -> String {
         format!(
             "{}.{}",
             self.component.service_name(),
@@ -573,7 +612,7 @@ impl Endpoint {
         )
     }
 
-    pub async fn client(&self) -> Result<client::Client> {
+    pub async fn client(&self) -> anyhow::Result<client::Client> {
         if self.is_static {
             client::Client::new_static(self.clone()).await
         } else {
@@ -603,6 +642,10 @@ pub struct Namespace {
     /// Additional labels for metrics
     #[builder(default = "Vec::new()")]
     labels: Vec<(String, String)>,
+
+    /// This hierarchy's own metrics registry
+    #[builder(default = "crate::MetricsRegistry::new()")]
+    metrics_registry: crate::MetricsRegistry,
 }
 
 impl DistributedRuntimeProvider for Namespace {
@@ -634,7 +677,11 @@ impl std::fmt::Display for Namespace {
 }
 
 impl Namespace {
-    pub(crate) fn new(runtime: DistributedRuntime, name: String, is_static: bool) -> Result<Self> {
+    pub(crate) fn new(
+        runtime: DistributedRuntime,
+        name: String,
+        is_static: bool,
+    ) -> anyhow::Result<Self> {
         Ok(NamespaceBuilder::default()
             .runtime(Arc::new(runtime))
             .name(name)
@@ -643,7 +690,7 @@ impl Namespace {
     }
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
-    pub fn component(&self, name: impl Into<String>) -> Result<Component> {
+    pub fn component(&self, name: impl Into<String>) -> anyhow::Result<Component> {
         Ok(ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
@@ -652,7 +699,7 @@ impl Namespace {
     }
 
     /// Create a [`Namespace`] in the parent namespace
-    pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
+    pub fn namespace(&self, name: impl Into<String>) -> anyhow::Result<Namespace> {
         Ok(NamespaceBuilder::default()
             .runtime(self.runtime.clone())
             .name(name.into())

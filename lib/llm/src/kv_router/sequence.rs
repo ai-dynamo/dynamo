@@ -293,7 +293,7 @@ impl ActiveSequencesMultiWorker {
     pub fn new(
         component: Component,
         block_size: usize,
-        workers_with_configs: HashMap<i64, Option<ModelRuntimeConfig>>,
+        workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
         replica_sync: bool,
         router_uuid: String,
     ) -> Self {
@@ -557,7 +557,7 @@ impl ActiveSequencesMultiWorker {
     /// Update the set of workers, adding and removing as needed
     pub fn update_workers(
         &self,
-        new_workers_with_configs: HashMap<i64, Option<ModelRuntimeConfig>>,
+        new_workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
     ) {
         let current_workers: HashSet<WorkerWithDpRank> =
             self.senders.iter().map(|entry| *entry.key()).collect();
@@ -826,25 +826,29 @@ impl ActiveSequencesMultiWorker {
         let token_sequence_shared = token_sequence.map(Arc::new);
         let mut receivers = Vec::new();
 
-        // Iterate through overlaps to process each WorkerWithDpRank
-        for (worker, overlap) in overlaps.scores.iter() {
-            // Check if the worker has a sender
-            if let Some(sender) = self.senders.get(worker) {
-                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                receivers.push((*worker, resp_rx));
+        // Iterate through all workers, not just those with overlap
+        // This ensures we properly account for active tokens/blocks on all workers
+        for sender_entry in self.senders.iter() {
+            let worker = *sender_entry.key();
+            let sender = sender_entry.value();
 
-                if let Err(e) = sender.send(UpdateSequences::PotentialBlocksAndTokens {
-                    token_sequence: token_sequence_shared.clone(),
-                    isl,
-                    overlap: *overlap,
-                    resp_tx,
-                }) {
-                    tracing::error!(
-                        "Failed to send potential_tokens command to worker {:?}: {}",
-                        worker,
-                        e
-                    );
-                }
+            // Get overlap for this worker (defaults to 0 if not in overlaps)
+            let overlap = *overlaps.scores.get(&worker).unwrap_or(&0);
+
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            receivers.push((worker, resp_rx));
+
+            if let Err(e) = sender.send(UpdateSequences::PotentialBlocksAndTokens {
+                token_sequence: token_sequence_shared.clone(),
+                isl,
+                overlap,
+                resp_tx,
+            }) {
+                tracing::error!(
+                    "Failed to send potential_tokens command to worker {:?}: {}",
+                    worker,
+                    e
+                );
             }
         }
 

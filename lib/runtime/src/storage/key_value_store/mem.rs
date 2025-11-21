@@ -9,12 +9,17 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rand::Rng as _;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::storage::key_value_store::Key;
+use crate::storage::key_value_store::{Key, KeyValue, WatchEvent};
 
 use super::{KeyValueBucket, KeyValueStore, StoreError, StoreOutcome};
+
+#[derive(Clone, Debug)]
+enum MemoryEvent {
+    Put { key: String, value: bytes::Bytes },
+    Delete { key: String },
+}
 
 #[derive(Clone)]
 pub struct MemoryStore {
@@ -29,9 +34,9 @@ impl Default for MemoryStore {
 }
 
 struct MemoryStoreInner {
-    data: Mutex<HashMap<String, MemoryBucket>>,
-    change_sender: UnboundedSender<(String, String)>,
-    change_receiver: Mutex<UnboundedReceiver<(String, String)>>,
+    data: parking_lot::Mutex<HashMap<String, MemoryBucket>>,
+    change_sender: UnboundedSender<MemoryEvent>,
+    change_receiver: tokio::sync::Mutex<UnboundedReceiver<MemoryEvent>>,
 }
 
 pub struct MemoryBucketRef {
@@ -40,7 +45,7 @@ pub struct MemoryBucketRef {
 }
 
 struct MemoryBucket {
-    data: HashMap<String, (u64, String)>,
+    data: HashMap<String, (u64, bytes::Bytes)>,
 }
 
 impl MemoryBucket {
@@ -52,13 +57,13 @@ impl MemoryBucket {
 }
 
 impl MemoryStore {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         MemoryStore {
             inner: Arc::new(MemoryStoreInner {
-                data: Mutex::new(HashMap::new()),
+                data: parking_lot::Mutex::new(HashMap::new()),
                 change_sender: tx,
-                change_receiver: Mutex::new(rx),
+                change_receiver: tokio::sync::Mutex::new(rx),
             }),
             connection_id: rand::rng().random(),
         }
@@ -67,35 +72,34 @@ impl MemoryStore {
 
 #[async_trait]
 impl KeyValueStore for MemoryStore {
+    type Bucket = MemoryBucketRef;
+
     async fn get_or_create_bucket(
         &self,
         bucket_name: &str,
         // MemoryStore doesn't respect TTL yet
         _ttl: Option<Duration>,
-    ) -> Result<Box<dyn KeyValueBucket>, StoreError> {
-        let mut locked_data = self.inner.data.lock().await;
+    ) -> Result<Self::Bucket, StoreError> {
+        let mut locked_data = self.inner.data.lock();
         // Ensure the bucket exists
         locked_data
             .entry(bucket_name.to_string())
             .or_insert_with(MemoryBucket::new);
         // Return an object able to access it
-        Ok(Box::new(MemoryBucketRef {
+        Ok(MemoryBucketRef {
             name: bucket_name.to_string(),
             inner: self.inner.clone(),
-        }))
+        })
     }
 
     /// This operation cannot fail on MemoryStore. Always returns Ok.
-    async fn get_bucket(
-        &self,
-        bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError> {
-        let locked_data = self.inner.data.lock().await;
+    async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError> {
+        let locked_data = self.inner.data.lock();
         match locked_data.get(bucket_name) {
-            Some(_) => Ok(Some(Box::new(MemoryBucketRef {
+            Some(_) => Ok(Some(MemoryBucketRef {
                 name: bucket_name.to_string(),
                 inner: self.inner.clone(),
-            }))),
+            })),
             None => Ok(None),
         }
     }
@@ -103,6 +107,8 @@ impl KeyValueStore for MemoryStore {
     fn connection_id(&self) -> u64 {
         self.connection_id
     }
+
+    fn shutdown(&self) {}
 }
 
 #[async_trait]
@@ -110,21 +116,21 @@ impl KeyValueBucket for MemoryBucketRef {
     async fn insert(
         &self,
         key: &Key,
-        value: &str,
+        value: bytes::Bytes,
         revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
-        let mut locked_data = self.inner.data.lock().await;
+        let mut locked_data = self.inner.data.lock();
         let mut b = locked_data.get_mut(&self.name);
         let Some(bucket) = b.as_mut() else {
             return Err(StoreError::MissingBucket(self.name.to_string()));
         };
         let outcome = match bucket.data.entry(key.to_string()) {
             Entry::Vacant(e) => {
-                e.insert((revision, value.to_string()));
-                let _ = self
-                    .inner
-                    .change_sender
-                    .send((key.to_string(), value.to_string()));
+                e.insert((revision, value.clone()));
+                let _ = self.inner.change_sender.send(MemoryEvent::Put {
+                    key: key.to_string(),
+                    value,
+                });
                 StoreOutcome::Created(revision)
             }
             Entry::Occupied(mut entry) => {
@@ -132,7 +138,7 @@ impl KeyValueBucket for MemoryBucketRef {
                 if *rev == revision {
                     StoreOutcome::Exists(revision)
                 } else {
-                    entry.insert((revision, value.to_string()));
+                    entry.insert((revision, value));
                     StoreOutcome::Created(revision)
                 }
             }
@@ -141,22 +147,23 @@ impl KeyValueBucket for MemoryBucketRef {
     }
 
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
-        let locked_data = self.inner.data.lock().await;
+        let locked_data = self.inner.data.lock();
         let Some(bucket) = locked_data.get(&self.name) else {
             return Ok(None);
         };
-        Ok(bucket
-            .data
-            .get(&key.0)
-            .map(|(_, v)| bytes::Bytes::from(v.clone())))
+        Ok(bucket.data.get(&key.0).map(|(_, v)| v.clone()))
     }
 
     async fn delete(&self, key: &Key) -> Result<(), StoreError> {
-        let mut locked_data = self.inner.data.lock().await;
+        let mut locked_data = self.inner.data.lock();
         let Some(bucket) = locked_data.get_mut(&self.name) else {
             return Err(StoreError::MissingBucket(self.name.to_string()));
         };
-        bucket.data.remove(&key.0);
+        if bucket.data.remove(&key.0).is_some() {
+            let _ = self.inner.change_sender.send(MemoryEvent::Delete {
+                key: key.to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -165,21 +172,25 @@ impl KeyValueBucket for MemoryBucketRef {
     /// Caller takes the lock so only a single caller may use this at once.
     async fn watch(
         &self,
-    ) -> Result<Pin<Box<dyn futures::Stream<Item = bytes::Bytes> + Send + 'life0>>, StoreError>
-    {
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
+        // All the existing ones first
+        let mut existing_items = vec![];
+        let mut seen_keys = HashSet::new();
+        let data_lock = self.inner.data.lock();
+        let Some(bucket) = data_lock.get(&self.name) else {
+            return Err(StoreError::MissingBucket(self.name.to_string()));
+        };
+        for (key, (_rev, v)) in &bucket.data {
+            seen_keys.insert(key.clone());
+            let item = KeyValue::new(key.clone(), v.clone());
+            existing_items.push(WatchEvent::Put(item));
+        }
+        drop(data_lock);
+
         Ok(Box::pin(async_stream::stream! {
-            // All the existing ones first
-            let mut seen = HashSet::new();
-            let data_lock = self.inner.data.lock().await;
-            let Some(bucket) = data_lock.get(&self.name) else {
-                tracing::error!(bucket_name = self.name, "watch: Missing bucket");
-                return;
-            };
-            for (_rev, v) in bucket.data.values() {
-                seen.insert(v.clone());
-                yield bytes::Bytes::from(v.clone());
+            for event in existing_items {
+                yield event;
             }
-            drop(data_lock);
             // Now any new ones
             let mut rcv_lock = self.inner.change_receiver.lock().await;
             loop {
@@ -188,11 +199,15 @@ impl KeyValueBucket for MemoryBucketRef {
                         // Channel is closed, no more values coming
                         break;
                     },
-                    Some((_k, v)) => {
-                        if seen.contains(&v) {
+                    Some(MemoryEvent::Put { key, value }) => {
+                        if seen_keys.contains(&key) {
                             continue;
                         }
-                        yield bytes::Bytes::from(v.clone());
+                        let item = KeyValue::new(key, value);
+                        yield WatchEvent::Put(item);
+                    },
+                    Some(MemoryEvent::Delete { key }) => {
+                        yield WatchEvent::Delete(Key::from_raw(key));
                     }
                 }
             }
@@ -200,12 +215,12 @@ impl KeyValueBucket for MemoryBucketRef {
     }
 
     async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError> {
-        let locked_data = self.inner.data.lock().await;
+        let locked_data = self.inner.data.lock();
         match locked_data.get(&self.name) {
             Some(bucket) => Ok(bucket
                 .data
                 .iter()
-                .map(|(k, (_rev, v))| (k.to_string(), bytes::Bytes::from(v.clone())))
+                .map(|(k, (_rev, v))| (k.to_string(), v.clone()))
                 .collect()),
             None => Err(StoreError::MissingBucket(self.name.clone())),
         }

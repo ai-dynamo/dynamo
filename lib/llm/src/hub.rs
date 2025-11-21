@@ -90,13 +90,22 @@ async fn mx_download_direct(model_name: &str, ignore_weights: bool) -> anyhow::R
 // TODO: remove in the future. This is a temporary workaround to find common
 // cache directory between client and server.
 fn get_model_express_cache_dir() -> PathBuf {
+    // Check HF_HUB_CACHE environment variable
+    // reference: https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables#hfhubcache
     if let Ok(cache_path) = env::var("HF_HUB_CACHE") {
         return PathBuf::from(cache_path);
+    }
+
+    // Check HF_HOME environment variable (standard Hugging Face cache directory)
+    // reference: https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables#hfhome
+    if let Ok(hf_home) = env::var("HF_HOME") {
+        return PathBuf::from(hf_home).join("hub");
     }
 
     if let Ok(cache_path) = env::var("MODEL_EXPRESS_CACHE_PATH") {
         return PathBuf::from(cache_path);
     }
+
     let home = env::var("HOME")
         .or_else(|_| env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
@@ -119,5 +128,22 @@ mod tests {
         let cache_dir = get_model_express_cache_dir();
         assert!(!cache_dir.to_string_lossy().is_empty());
         assert!(cache_dir.is_absolute() || cache_dir.starts_with("."));
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn test_get_model_express_cache_dir_with_hf_home() {
+        // Test that HF_HOME is respected when set
+        unsafe {
+            // Clear other cache env vars to ensure HF_HOME is tested
+            env::remove_var("HF_HUB_CACHE");
+            env::remove_var("MODEL_EXPRESS_CACHE_PATH");
+            env::set_var("HF_HOME", "/custom/cache/path");
+            let cache_dir = get_model_express_cache_dir();
+            assert_eq!(cache_dir, PathBuf::from("/custom/cache/path/hub"));
+
+            // Clean up
+            env::remove_var("HF_HOME");
+        }
     }
 }

@@ -115,22 +115,14 @@ mod tests {
         }
     }
 
-    fn get_unique_barrier_id() -> String {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-        COUNTER.fetch_add(1, Ordering::Relaxed).to_string()
-    }
-
     async fn build_leader_and_workers(num_workers: usize) -> Result<(KvbmLeader, Vec<KvbmWorker>)> {
         let mut workers = Vec::new();
-        let barrier_id = get_unique_barrier_id();
 
         for i in 0..num_workers {
             let tensors: Vec<Arc<dyn TorchTensor>> =
                 vec![Arc::new(MockTensor::new(vec![2, NUM_BLOCKS, 4096]))];
 
             let config = KvbmWorkerConfig::builder()
-                .barrier_id_prefix(barrier_id.clone())
                 .num_device_blocks(NUM_BLOCKS)
                 .tensors(tensors)
                 .device_id(i)
@@ -151,7 +143,6 @@ mod tests {
         };
 
         let leader_config = KvbmLeaderConfig::builder()
-            .barrier_id_prefix(barrier_id)
             .world_size(num_workers)
             .host_blocks_config(host_blocks)
             .disk_blocks_config(disk_blocks)

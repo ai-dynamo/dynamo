@@ -6,12 +6,16 @@ members = [
     "launch/dynamo-run",
     "lib/llm",
     "lib/runtime",
+    "lib/config",
     "lib/tokens",
+    "lib/memory",
     "lib/async-openai",
     "lib/parsers",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/engines/*",
+    "lib/kvbm",
+    "lib/config",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
@@ -20,6 +24,7 @@ members = [
 default-members = [
     "lib/llm",
     "lib/runtime",
+    "lib/config",
     "lib/tokens",
     "lib/async-openai",
     "lib/parsers",
@@ -28,7 +33,7 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -39,14 +44,15 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.6.0" }
-dynamo-llm = { path = "lib/llm", version = "0.6.0" }
-dynamo-tokens = { path = "lib/tokens", version = "0.6.0" }
-dynamo-async-openai = { path = "lib/async-openai", version = "0.6.0", features = [
+dynamo-runtime = { path = "lib/runtime", version = "0.7.0" }
+dynamo-llm = { path = "lib/llm", version = "0.7.0" }
+dynamo-config = { path = "lib/config", version = "0.7.0" }
+dynamo-tokens = { path = "lib/tokens", version = "0.7.0" }
+dynamo-async-openai = { path = "lib/async-openai", version = "0.7.0", features = [
     "byot",
     "rustls",
 ] }
-dynamo-parsers = { path = "lib/parsers", version = "0.6.0" }
+dynamo-parsers = { path = "lib/parsers", version = "0.7.0" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -63,6 +69,8 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
+cudarc = { version = "0.17.1", features = ["cuda-12020"] }
+dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
@@ -89,6 +97,7 @@ reqwest = { version = "0.12.22", default-features = false, features = [
     "stream",
     "rustls-tls",
 ] }
+rmp-serde = { version = "1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 strum = { version = "0.27", features = ["derive"] }
@@ -119,7 +128,7 @@ insta.opt-level = 3
 
 [profile.dev]
 # release level optimizations otherwise everything feels slow
-opt-level = 3
+# opt-level = 3
 
 [profile.release]
 # These make the build much slower but shrink the binary, and could help performance

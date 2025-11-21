@@ -35,7 +35,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use dynamo_runtime::{
     component::Component,
-    metrics::{MetricsRegistry, prometheus_names::kvrouter},
+    metrics::{MetricsHierarchy, prometheus_names::kvrouter},
 };
 use prometheus::{IntCounterVec, Opts};
 use serde::{Deserialize, Serialize};
@@ -168,7 +168,7 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
 }
 
 /// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RouterEvent {
     /// The ID of the worker emitting the event.
     worker_id: WorkerId,
@@ -354,9 +354,10 @@ impl RadixTree {
                     None => {
                         tracing::warn!(
                             worker_id = worker.worker_id.to_string(),
-                            dp_rank = ?worker.dp_rank,
+                            dp_rank = worker.dp_rank,
                             id,
                             parent_hash = ?op.parent_hash,
+                            num_blocks = op.blocks.len(),
                             "Failed to find parent block; skipping store operation"
                         );
                         return Err(KvCacheEventError::ParentBlockNotFound);
@@ -412,8 +413,10 @@ impl RadixTree {
                         Some(entry) => entry.clone(),
                         None => {
                             tracing::warn!(
-                                worker_id = worker_id.to_string(),
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
                                 id,
+                                block_hash = ?block,
                                 "Failed to find block to remove; skipping remove operation"
                             );
                             return Err(KvCacheEventError::BlockNotFound);
@@ -589,7 +592,7 @@ impl KvIndexerMetrics {
     /// KV_INDEXER_METRICS to avoid duplicate registration issues.
     pub fn from_component(component: &Component) -> Arc<Self> {
         KV_INDEXER_METRICS.get_or_init(|| {
-            match component.create_intcountervec(
+            match component.metrics().create_intcountervec(
                 kvrouter::KV_CACHE_EVENTS_APPLIED,
                 "Total number of KV cache events applied to index",
                 &["event_type", "status"],

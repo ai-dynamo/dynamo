@@ -3,7 +3,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.6.0"
+version = "0.7.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -13,7 +13,7 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==0.6.0",
+    "ai-dynamo-runtime==0.7.0",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
     "kubernetes>=32.0.1,<33.0.0",
@@ -24,6 +24,7 @@ dependencies = [
     "typer",
     "click<8.2.0",
     "setuptools",
+    "prometheus_client>=0.23.1,<1.0",
 ]
 
 classifiers = [
@@ -53,14 +54,14 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl<=0.6.0",
+    "nixl[cu12]<=0.7.1",
     "vllm[flashinfer]==0.10.2",
 ]
 
 sglang = [
     "uvloop",
-    "nixl<=0.6.0",
-    "sglang[all]==0.5.3.post2",
+    "nixl[cu12]<=0.7.1",
+    "sglang==0.5.4.post3",
 ]
 
 [dependency-groups]
@@ -78,6 +79,7 @@ docs = [
     "sphinx-book-theme>=1.1",
     "sphinxcontrib-mermaid>=1.0",
     "sphinxcontrib-bibtex>=2.6",
+    "sphinx-reredirects>=1.0.0",
     # Markdown and notebook support
     "myst-parser>=4.0",
     "myst-nb>=1.2",
@@ -145,12 +147,15 @@ addopts = [
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
+    "--ignore-glob=*kvbm/python/kvbm*",
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
     "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
     "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
-    "--ignore-glob=components/backends/sglang/slurm_jobs/*",
+    "--ignore-glob=components/src/dynamo/vllm/multimodal_utils/*",
+    "--ignore-glob=components/src/dynamo/vllm/multimodal_handlers/*",
+    "--ignore-glob=examples/backends/sglang/slurm_jobs/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
@@ -194,7 +199,10 @@ markers = [
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
     "kvbm: marks tests for KV behavior and model determinism",
-    "model: model id used by a test or parameter"
+    "model: model id used by a test or parameter",
+    "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
+    "k8s: marks tests as requiring Kubernetes",
+    "fault_tolerance: marks tests as fault tolerance tests"
 ]
 
 # Linting/formatting

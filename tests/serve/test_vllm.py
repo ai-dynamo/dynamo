@@ -7,7 +7,11 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from tests.serve.common import params_with_model_mark, run_serve_deployment
+from tests.serve.common import (
+    WORKSPACE_DIR,
+    params_with_model_mark,
+    run_serve_deployment,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
@@ -26,7 +30,9 @@ class VLLMConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["VLLM:EngineCore"])
 
 
-vllm_dir = os.environ.get("VLLM_DIR", "/workspace/components/backends/vllm")
+vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
+    WORKSPACE_DIR, "examples/backends/vllm"
+)
 
 # vLLM test configurations
 vllm_configs = {
@@ -39,7 +45,31 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            metric_payload_default(min_num_requests=6),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+        ],
+    ),
+    "agg-request-plane-tcp": VLLMConfig(
+        name="agg-request-plane-tcp",
+        directory=vllm_dir,
+        script_name="agg_request_planes.sh",
+        marks=[pytest.mark.gpu_1],
+        model="Qwen/Qwen3-0.6B",
+        script_args=["--tcp"],
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
+    "agg-request-plane-http": VLLMConfig(
+        name="agg-request-plane-http",
+        directory=vllm_dir,
+        script_name="agg_request_planes.sh",
+        marks=[pytest.mark.gpu_1],
+        model="Qwen/Qwen3-0.6B",
+        script_args=["--http"],
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
         ],
     ),
     "agg-router": VLLMConfig(
@@ -51,7 +81,7 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(
                 expected_log=[
-                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+\)",
+                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+(?:, [^)]*)?\)",
                     r"Event processor for worker_id \d+ processing event: Stored\(",
                     r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
@@ -94,14 +124,14 @@ vllm_configs = {
         ],
         timeout=700,
         request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
+            chat_payload_default(expected_response=["joke"]),
+            completion_payload_default(expected_response=["joke"]),
         ],
     ),
-    "multimodal_agg_llava": VLLMConfig(
-        name="multimodal_agg_llava",
-        directory="/workspace/examples/multimodal",
-        script_name="agg.sh",
+    "multimodal_agg_llava_epd": VLLMConfig(
+        name="multimodal_agg_llava_epd",
+        directory=vllm_dir,
+        script_name="agg_multimodal_epd.sh",
         marks=[pytest.mark.gpu_2],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
@@ -122,10 +152,10 @@ vllm_configs = {
             )
         ],
     ),
-    "multimodal_agg_qwen": VLLMConfig(
-        name="multimodal_agg_qwen",
-        directory="/workspace/examples/multimodal",
-        script_name="agg.sh",
+    "multimodal_agg_qwen_epd": VLLMConfig(
+        name="multimodal_agg_qwen_epd",
+        directory=vllm_dir,
+        script_name="agg_multimodal_epd.sh",
         marks=[pytest.mark.gpu_2],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
@@ -147,9 +177,50 @@ vllm_configs = {
             )
         ],
     ),
+    "multimodal_agg_qwen": VLLMConfig(
+        name="multimodal_agg_qwen",
+        directory=vllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[pytest.mark.gpu_2],
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
+        delayed_start=0,
+        timeout=360,
+        request_payloads=[
+            # HTTP URL test
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["bus"],
+            ),
+            # Base64 data URL test (1x1 PNG inline, avoids network fetch)
+            chat_payload(
+                [
+                    {"type": "text", "text": "What do you see in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNoAAAAggCBd81ytgAAAABJRU5ErkJggg=="
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=[],  # Just validate no error
+            ),
+        ],
+    ),
+    # TODO: Update this test case when we have video multimodal support in vllm official components
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
-        directory="/workspace/examples/multimodal",
+        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="video_agg.sh",
         marks=[pytest.mark.gpu_2],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
@@ -176,7 +247,7 @@ vllm_configs = {
     # TODO: Enable this test case when we have 4 GPUs runners.
     # "multimodal_disagg": VLLMConfig(
     #     name="multimodal_disagg",
-    #     directory="/workspace/examples/multimodal",
+    #     directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
     #     script_name="disagg.sh",
     #     marks=[pytest.mark.gpu_4, pytest.mark.vllm],
     #     model="llava-hf/llava-1.5-7b-hf",

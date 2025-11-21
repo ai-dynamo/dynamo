@@ -34,9 +34,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | SGLang | Notes |
 |---------|--------|-------|
-| [**Disaggregated Serving**](../../architecture/disagg_serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
-| [**KV-Aware Routing**](../../architecture/kv_cache_routing.md) | ✅ |  |
+| [**Disaggregated Serving**](../../design_docs/disagg_serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
+| [**KV-Aware Routing**](../../router/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../planner/sla_planner.md) | ✅ |  |
 | [**Multimodal EPD Disaggregation**](multimodal_epd.md) | ✅ |  |
 | [**KVBM**](../../kvbm/kvbm_architecture.md) | ❌ | Planned |
@@ -55,7 +55,7 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 | Argument | Description | Default | SGLang Equivalent |
 |----------|-------------|---------|-------------------|
 | `--endpoint` | Dynamo endpoint in `dyn://namespace.component.endpoint` format | Auto-generated based on mode | N/A |
-| `--migration-limit` | Max times a request can migrate between workers for fault tolerance. See [Request Migration Architecture](../../../docs/architecture/request_migration.md). | `0` (disabled) | N/A |
+| `--migration-limit` | Max times a request can migrate between workers for fault tolerance. See [Request Migration Architecture](../../fault_tolerance/request_migration.md). | `0` (disabled) | N/A |
 | `--dyn-tool-call-parser` | Tool call parser for structured outputs (takes precedence over `--tool-call-parser`) | `None` | `--tool-call-parser` |
 | `--dyn-reasoning-parser` | Reasoning parser for CoT models (takes precedence over `--reasoning-parser`) | `None` | `--reasoning-parser` |
 | `--use-sglang-tokenizer` | Use SGLang's tokenizer instead of Dynamo's | `False` | N/A |
@@ -68,6 +68,22 @@ Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine argu
 
 > [!NOTE]
 > When using `--use-sglang-tokenizer`, only `v1/chat/completions` is available through Dynamo's frontend.
+
+### Request Cancellation
+
+When a user cancels a request (e.g., by disconnecting from the frontend), the request is automatically cancelled across all workers, freeing compute resources for other requests.
+
+#### Cancellation Support Matrix
+
+| | Prefill | Decode |
+|-|---------|--------|
+| **Aggregated** | ✅ | ✅ |
+| **Disaggregated** | ⚠️ | ✅ |
+
+> [!WARNING]
+> ⚠️ SGLang backend currently does not support cancellation during remote prefill phase in disaggregated mode.
+
+For more details, see the [Request Cancellation Architecture](../../fault_tolerance/request_cancellation.md) documentation.
 
 ## Installation
 
@@ -119,11 +135,9 @@ We are in the process of shipping pre-built docker containers that contain insta
 
 ```bash
 cd $DYNAMO_ROOT
-docker build \
-  -f container/Dockerfile.sglang-wideep \
-  -t dynamo-sglang \
-  --no-cache \
-  .
+./container/build.sh \
+  --framework SGLANG \
+  --tag dynamo-sglang:latest \
 ```
 
 And then run it using
@@ -166,14 +180,14 @@ docker compose -f deploy/docker-compose.yml up -d
 ### Aggregated Serving
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/agg.sh
 ```
 
 ### Aggregated Serving with KV Routing
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/agg_router.sh
 ```
 
@@ -182,7 +196,7 @@ cd $DYNAMO_HOME/components/backends/sglang
 Here's an example that uses the [Qwen/Qwen3-Embedding-4B](https://huggingface.co/Qwen/Qwen3-Embedding-4B) model.
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/agg_embed.sh
 ```
 
@@ -206,14 +220,14 @@ See [SGLang Disaggregation](sglang-disaggregation.md) to learn more about how sg
 
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/disagg.sh
 ```
 
 ### Disaggregated Serving with KV Aware Prefill Routing
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/disagg_router.sh
 ```
 
@@ -223,7 +237,7 @@ You can use this configuration to test out disaggregated serving with dp attenti
 
 ```bash
 # note this will require 4 GPUs
-cd $DYNAMO_HOME/components/backends/sglang
+cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/disagg_dp_attn.sh
 ```
 
@@ -269,7 +283,7 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 We currently provide deployment examples for Kubernetes and SLURM.
 
 ## Kubernetes
-- **[Deploying Dynamo with SGLang on Kubernetes](../../../components/backends/sglang/deploy/README.md)**
+- **[Deploying Dynamo with SGLang on Kubernetes](../../../examples/backends/sglang/deploy/README.md)**
 
 ## SLURM
-- **[Deploying Dynamo with SGLang on SLURM](../../../components/backends/sglang/slurm_jobs/README.md)**
+- **[Deploying Dynamo with SGLang on SLURM](../../../examples/backends/sglang/slurm_jobs/README.md)**

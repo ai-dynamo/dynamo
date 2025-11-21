@@ -81,29 +81,52 @@ jobs:
         #!/bin/bash -e
         declare -A ci_variables
 
+        ci_variables["ENABLE_BUILD"]="true"
+        ci_variables["ENABLE_PREMERGE"]="true"
+        ci_variables["ENABLE_E2E_TEST"]="true"
+
+        # Override to false if validation workflow is running
         if [[ "${{ vars.ALLOW_GITLAB_TEST_SKIP }}" == "1" && "${{ steps.check_workflow.outputs.skip_ci }}" == "true" ]]; then
-          echo "Github Workflow has run and RUN_PRE_MERGE_TESTS variable value is False"
-          ci_variables["RUN_PRE_MERGE_TESTS"]="false"
+          echo "Github Workflow has run and ENABLE_PREMERGE variable value is False"
+          ci_variables["ENABLE_PREMERGE"]="false"
         fi
 
+        # Build space-separated FRAMEWORKS variable
+        frameworks=""
         if [ "${{ steps.src_changes.outputs.vllm }}" == "true" ]; then
-          ci_variables["RUN_VLLM"]="true"
+          frameworks+="vllm "
         fi
 
         if [ "${{ steps.src_changes.outputs.trtllm }}" == "true" ]; then
-          ci_variables["RUN_TRTLLM"]="true"
+          frameworks+="trtllm "
         fi
 
         if [ "${{ steps.src_changes.outputs.sglang }}" == "true" ]; then
-          ci_variables["RUN_SGLANG"]="true"
+          frameworks+="sglang "
         fi
 
-        ci_args=""
+        # Trim trailing space and set FRAMEWORKS variable if any frameworks detected
+        frameworks=$(echo "$frameworks" | xargs)
+        if [ -n "$frameworks" ]; then
+          ci_variables["FRAMEWORKS"]="$frameworks"
+        fi
+
+        # Set BUILD_ARCHS to empty string to build both amd64 and arm64
+        ci_variables["BUILD_ARCHS"]=""
+
+        # Set additional pipeline variables
+        ci_variables["ENABLE_PUBLISH_WHEELS"]="false"
+        ci_variables["ENABLE_JET_BENCHMARKS"]="false"
+        ci_variables["ENABLE_SECURITY_SCAN"]="false"
+        ci_variables["RELEASE_BUILD"]="false"
+
+        ci_args=()
         for key in "${!ci_variables[@]}"; do
-          ci_args+="--form variables[$key]=${ci_variables[$key]} "
+          value="${ci_variables[$key]}"
+          ci_args+=(--form "variables[$key]=${value}")
         done
 
-        echo "Running Pipeline with Variables: $ci_args"
+        echo "Running Pipeline with Variables: ${ci_args[*]}"
 
         if [ "${{ github.event_name }}" = "pull_request" ]; then
           REF="${{ github.event.pull_request.head.ref }}"
@@ -114,5 +137,5 @@ jobs:
           --request POST \
           --form token=${{ secrets.PIPELINE_TOKEN }} \
           --form ref=${REF} \
-          $ci_args \
+          "${ci_args[@]}" \
           "${{ secrets.PIPELINE_URL }}"

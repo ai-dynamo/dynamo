@@ -67,6 +67,7 @@ pub async fn run(
             engine: inner_engine,
             mut model,
             is_static,
+            is_prefill,
         } => {
             // Pre-processing is done ingress-side, so it should be already done.
             let frontend = SegmentSource::<
@@ -83,8 +84,11 @@ pub async fn run(
             let ingress = Ingress::for_pipeline(pipeline)?;
 
             if !is_static {
-                // Default to supporting both Chat and Completions endpoints
-                let model_type = ModelType::Chat | ModelType::Completions;
+                let model_type = if is_prefill {
+                    ModelType::Prefill
+                } else {
+                    ModelType::Chat | ModelType::Completions
+                };
                 model
                     .attach(&endpoint, model_type, ModelInput::Tokens)
                     .await?;

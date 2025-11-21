@@ -38,6 +38,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/discovery"
 	"github.com/imdario/mergo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
@@ -106,10 +107,6 @@ func (s ServiceConfig) GetNamespace() *string {
 	return &s.Config.Dynamo.Namespace
 }
 
-func GetDefaultDynamoNamespace(dynamoDeployment *v1alpha1.DynamoGraphDeployment) string {
-	return fmt.Sprintf("dynamo-%s", dynamoDeployment.Name)
-}
-
 func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeploymentConfig, error) {
 	var config DynDeploymentConfig
 	err := json.Unmarshal(jsonContent, &config)
@@ -119,34 +116,34 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
-	graphDynamoNamespace, err := getDynamoNamespace(parentDynamoGraphDeployment)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get the graph dynamo namespace: %w", err)
-	}
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
+		dynamoNamespace := getDynamoNamespace(parentDynamoGraphDeployment, component)
 		deployment := &v1alpha1.DynamoComponentDeployment{}
 		deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
 		deployment.Name = GetDynamoComponentName(parentDynamoGraphDeployment, componentName)
 		deployment.Spec.BackendFramework = parentDynamoGraphDeployment.Spec.BackendFramework
 		deployment.Namespace = parentDynamoGraphDeployment.Namespace
 		deployment.Spec.ServiceName = componentName
-		deployment.Spec.DynamoNamespace = &graphDynamoNamespace
+		deployment.Spec.DynamoNamespace = &dynamoNamespace
 		labels := make(map[string]string)
 		// add the labels in the spec in order to label all sub-resources
 		deployment.Spec.Labels = labels
 		// and add the labels to the deployment itself
 		deployment.Labels = labels
 		labels[commonconsts.KubeLabelDynamoComponent] = componentName
-		labels[commonconsts.KubeLabelDynamoNamespace] = graphDynamoNamespace
+		labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 		labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDynamoGraphDeployment.Name
 
 		// Propagate metrics annotation from parent deployment if present
 		if parentDynamoGraphDeployment.Annotations != nil {
+			if deployment.Spec.Annotations == nil {
+				deployment.Spec.Annotations = make(map[string]string)
+			}
 			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationEnableMetrics]; exists {
-				if deployment.Spec.Annotations == nil {
-					deployment.Spec.Annotations = make(map[string]string)
-				}
 				deployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics] = val
+			}
+			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
+				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = val
 			}
 		}
 
@@ -187,22 +184,11 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 	return deployments, nil
 }
 
-func getDynamoNamespace(parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment) (string, error) {
-	graphDynamoNamespace := ""
-	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
-		dynamoNamespace := ""
-		if component.DynamoNamespace != nil && *component.DynamoNamespace != "" {
-			dynamoNamespace = *component.DynamoNamespace
-		}
-		if graphDynamoNamespace != "" && graphDynamoNamespace != dynamoNamespace {
-			return "", fmt.Errorf("namespace mismatch for component %s: graph uses namespace %s but component specifies %s", componentName, graphDynamoNamespace, dynamoNamespace)
-		}
-		graphDynamoNamespace = dynamoNamespace
+func getDynamoNamespace(object metav1.Object, service *v1alpha1.DynamoComponentDeploymentSharedSpec) string {
+	if service.GlobalDynamoNamespace {
+		return commonconsts.GlobalDynamoNamespace
 	}
-	if graphDynamoNamespace == "" {
-		graphDynamoNamespace = GetDefaultDynamoNamespace(parentDynamoGraphDeployment)
-	}
-	return graphDynamoNamespace, nil
+	return fmt.Sprintf("%s-%s", object.GetNamespace(), object.GetName())
 }
 
 // updateDynDeploymentConfig updates the runtime config object for the given dynamoDeploymentComponent
@@ -410,25 +396,49 @@ func getCliqueStartupDependencies(
 	return nil
 }
 
-func GenerateComponentService(ctx context.Context, componentName, componentNamespace string) (*corev1.Service, error) {
+func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec, componentName string, isK8sDiscoveryEnabled bool) (*corev1.Service, error) {
+	if component.DynamoNamespace == nil {
+		return nil, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", componentName)
+	}
+	componentName = GetDynamoComponentName(dynamoDeployment, componentName)
+
+	var servicePort corev1.ServicePort
+	if component.ComponentType == commonconsts.ComponentTypeFrontend {
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.DynamoServicePortName,
+			Port:       commonconsts.DynamoServicePort,
+			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	} else {
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.DynamoSystemPortName,
+			Port:       commonconsts.DynamoSystemPort,
+			TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	}
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      componentName,
-			Namespace: componentNamespace,
+			Namespace: dynamoDeployment.Namespace,
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
-				commonconsts.KubeLabelDynamoSelector: componentName,
+				commonconsts.KubeLabelDynamoComponentType: component.ComponentType,
+				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace,
 			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       commonconsts.DynamoServicePortName,
-					Port:       commonconsts.DynamoServicePort,
-					TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
+			Ports: []corev1.ServicePort{servicePort},
 		},
+	}
+	if isK8sDiscoveryEnabled {
+		service.Labels = map[string]string{
+			commonconsts.KubeLabelDynamoDiscoveryBackend: "kubernetes",
+		}
+		// Discovery is enabled for non frontend components
+		if component.ComponentType != commonconsts.ComponentTypeFrontend {
+			service.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+		}
 	}
 	return service, nil
 }
@@ -616,6 +626,7 @@ type MultinodeDeployer interface {
 	GetLeaderHostname(serviceName string) string
 	GetHostNames(serviceName string, numberOfNodes int32) []string
 	GetNodeRank() (string, bool) // returns (rank, needsShellInterpretation)
+	NeedsDNSWait() bool          // returns true if DNS wait is needed to launch multinode components
 }
 
 // BackendFactory creates backend instances based on the framework type
@@ -649,7 +660,9 @@ func MultinodeDeployerFactory(multinodeDeploymentType commonconsts.MultinodeDepl
 
 // isWorkerComponent checks if a component is a worker that needs backend framework detection
 func isWorkerComponent(componentType string) bool {
-	return componentType == commonconsts.ComponentTypeWorker
+	return componentType == commonconsts.ComponentTypeWorker ||
+		componentType == commonconsts.ComponentTypePrefill ||
+		componentType == commonconsts.ComponentTypeDecode
 }
 
 // addStandardEnvVars adds the standard environment variables that are common to both Grove and Controller
@@ -685,6 +698,25 @@ func addStandardEnvVars(container *corev1.Container, controllerConfig controller
 	container.Env = MergeEnvs(standardEnvVars, container.Env)
 }
 
+// applyDefaultSecurityContext sets secure defaults for pod security context.
+// Currently only sets fsGroup to solve volume permission issues.
+// Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
+// with images that may expect to run as root.
+// User-provided security context values (via extraPodSpec) will override these defaults.
+func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
+	// Initialize SecurityContext if not present
+	if podSpec.SecurityContext == nil {
+		podSpec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+
+	// Only set fsGroup by default
+	// This fixes volume permission issues without forcing a specific UID/GID
+	// which maintains compatibility with both root and non-root images
+	if podSpec.SecurityContext.FSGroup == nil {
+		podSpec.SecurityContext.FSGroup = ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup))
+	}
+}
+
 // GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
 // Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS)
 // Deployment-specific environment merging should be handled by the caller
@@ -703,7 +735,7 @@ func GenerateBasePodSpec(
 	serviceName string,
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
-	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes)
+	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controllerConfig.GetDiscoveryBackend(component.Annotations))
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
@@ -757,6 +789,14 @@ func GenerateBasePodSpec(
 			container.Resources.Limits = corev1.ResourceList{}
 		}
 		maps.Copy(container.Resources.Limits, overrideResources.Limits)
+	}
+
+	// Claims
+	if overrideResources != nil && len(overrideResources.Claims) > 0 {
+		if container.Resources.Claims == nil {
+			container.Resources.Claims = []corev1.ResourceClaim{}
+		}
+		container.Resources.Claims = append(container.Resources.Claims, overrideResources.Claims...)
 	}
 
 	shouldDisableImagePullSecret := component.Annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
@@ -836,6 +876,11 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("failed to get base podspec: %w", err)
 	}
 
+	// Check if user provided their own security context before merging
+	userProvidedSecurityContext := component.ExtraPodSpec != nil &&
+		component.ExtraPodSpec.PodSpec != nil &&
+		component.ExtraPodSpec.PodSpec.SecurityContext != nil
+
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
 		// merge extraPodSpec PodSpec with base podspec
 		err := mergo.Merge(&podSpec, component.ExtraPodSpec.PodSpec.DeepCopy(), mergo.WithOverride)
@@ -843,9 +888,22 @@ func GenerateBasePodSpec(
 			return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 		}
 	}
+
+	// Apply default security context ONLY if user didn't provide any security context
+	// If user provides ANY securityContext (even partial), they get full control with no defaults injected
+	// This allows users to intentionally set fields to nil (e.g., to run as root)
+	if !userProvidedSecurityContext {
+		applyDefaultSecurityContext(&podSpec)
+	}
+
+	if controllerConfig.IsK8sDiscoveryEnabled(component.Annotations) {
+		podSpec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(parentGraphDeploymentName)
+	}
+
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
+
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
 	return controller_common.CanonicalizePodSpec(&podSpec), nil
 }
@@ -861,11 +919,13 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32) ComponentContext {
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend string) ComponentContext {
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
+		ComponentType:                  component.ComponentType,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
+		DiscoveryBackend:               discoveryBackend,
 	}
 	if component.DynamoNamespace != nil {
 		componentContext.DynamoNamespace = *component.DynamoNamespace
@@ -924,17 +984,23 @@ func GenerateGrovePodCliqueSet(
 		}
 	}
 
-	dynamoNamespace, err := getDynamoNamespace(dynamoDeployment)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get the graph dynamo namespace: %w", err)
-	}
+	discoveryBackend := controllerConfig.GetDiscoveryBackend(dynamoDeployment.Annotations)
+
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
+		dynamoNamespace := getDynamoNamespace(dynamoDeployment, component)
 		component.DynamoNamespace = &dynamoNamespace
 		// Determine backend framework using hybrid approach
 		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
 		if err != nil {
 			return nil, fmt.Errorf("failed to determine backend framework for service %s: %w", serviceName, err)
+		}
+
+		if discoveryBackend != "" {
+			if component.Annotations == nil {
+				component.Annotations = make(map[string]string)
+			}
+			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = discoveryBackend
 		}
 
 		numberOfNodes := component.GetNumberOfNodes()
@@ -1017,6 +1083,8 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dyn
 	if component.SubComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoSubComponentType] = component.SubComponentType
 	}
+	// Add base model label if modelRef is specified
+	AddBaseModelLabel(labels, component.ModelRef)
 	setMetricsLabels(labels, dynamoDeployment)
 	if component.Labels != nil {
 		err := mergo.Merge(&labels, component.Labels, mergo.WithOverride)

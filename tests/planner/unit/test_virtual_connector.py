@@ -31,7 +31,7 @@ def get_runtime():
     except Exception:
         # If no existing runtime, create a new one
         loop = asyncio.get_running_loop()
-        _runtime_instance = DistributedRuntime(loop, False)
+        _runtime_instance = DistributedRuntime(loop, "etcd", False)
 
     return _runtime_instance
 

@@ -418,7 +418,7 @@ def process_test_directory(test_dir, sla):
     }
 
 
-def main(logs_dir, tablefmt, log_paths=None, sla=None):
+def main(logs_dir, tablefmt, log_paths=None, sla=None, print_output=True):
     """Main entry point for parsing legacy client results.
 
     Args:
@@ -426,6 +426,7 @@ def main(logs_dir, tablefmt, log_paths=None, sla=None):
         tablefmt: Table format for output (e.g., "fancy_grid")
         log_paths: Optional list of specific log paths to process
         sla: Optional SLA threshold for latency violations
+        print_output: If True, print tables and summaries. If False, only return results.
     """
     results = []
 
@@ -542,19 +543,21 @@ def main(logs_dir, tablefmt, log_paths=None, sla=None):
                 ]
             rows.append(row)
 
-        print(f"\nTest Group: {test_prefix}")
-        print(
-            tabulate(
-                rows,
-                headers,
-                tablefmt=tablefmt,
-                floatfmt=".2f",
-                missingval="N/A",
-                numalign="right",
-                stralign="center",
+        if print_output:
+            logging.info(f"\nTest Group: {test_prefix}")
+            logging.info(
+                "\n"
+                + tabulate(
+                    rows,
+                    headers,
+                    tablefmt=tablefmt,
+                    floatfmt=".2f",
+                    missingval="N/A",
+                    numalign="right",
+                    stralign="center",
+                )
             )
-        )
-        print("\n" + "=" * 80)
+            logging.info("\n" + "=" * 80)
 
 
 if __name__ == "__main__":

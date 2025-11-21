@@ -126,8 +126,28 @@ pub fn parse_tool_calls_deepseek_v3_1(
         return Ok((vec![], Some(String::new())));
     }
 
-    let tool_call_start_tokens = &config.tool_call_start_tokens;
-    let tool_call_end_tokens = &config.tool_call_end_tokens;
+    // For DeepSeek_v3_1, we consider the tool call block to be
+    // <｜tool▁calls▁begin｜>...<｜tool▁calls▁end｜> and only start parsing
+    // if seeing <｜tool▁calls▁begin｜>, even though the individual calls are
+    // parsed by <｜tool▁call▁begin｜>...<｜tool▁call▁end｜>.
+    // This is because if we start parsing by considering all call(s) tokens,
+    // we are not properly grouping the tool calls and results in groups:
+    // 1. <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>...<｜tool▁call▁end｜>
+    // 2. <｜tool▁calls▁end｜>
+    // where 2. will not be recognized as part of the tool call block due
+    // to missing start token and will not be consumed.
+    let has_end_token = config
+        .tool_call_end_tokens
+        .iter()
+        .any(|token| !token.is_empty() && trimmed.contains(token));
+    if !has_end_token {
+        return Ok((vec![], Some(trimmed.to_string())));
+    }
+
+    let mut tool_call_start_tokens = config.tool_call_start_tokens.clone();
+    tool_call_start_tokens.extend(vec!["<｜tool▁call▁begin｜>".to_string()]);
+    let mut tool_call_end_tokens = config.tool_call_end_tokens.clone();
+    tool_call_end_tokens.extend(vec!["<｜tool▁call▁end｜>".to_string()]);
     let separator_tokens = &config.tool_call_separator_tokens;
 
     // Early exit if no tokens configured
@@ -166,7 +186,7 @@ pub fn parse_tool_calls_deepseek_v3_1(
     };
 
     // Extract individual tool call blocks
-    let blocks = extract_tool_call_blocks(trimmed, tool_call_start_tokens, tool_call_end_tokens);
+    let blocks = extract_tool_call_blocks(trimmed, &tool_call_start_tokens, &tool_call_end_tokens);
 
     if blocks.is_empty() {
         // Found start token but no valid blocks
@@ -398,7 +418,7 @@ mod detect_parser_tests {
         let text = r#"<｜tool▁call▁begin｜>get_current_weather宽带}"#;
         let config = ToolCallConfig::deepseek_v3_1().json;
         let result = detect_tool_call_start_deepseek_v3_1(text, &config);
-        assert!(result);
+        assert!(!result);
     }
 
     #[test]

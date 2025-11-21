@@ -119,6 +119,17 @@ The following failure types are defined in `scenarios.py`:
 | `sglang_prefill_scheduler`    | Terminate SGLang prefill scheduler process.        | `SIGKILL` to `sglang::scheduler`| sglang only         |
 | `sglang_prefill_detokenizer`  | Terminate SGLang prefill detokenizer process.      | `SIGKILL` to `sglang::detokenizer`| sglang only         |
 
+#### Token Overflow Tests
+
+In addition to process and pod failures, the suite includes tests for **token overflow**, where the model receives an input prompt larger than its configured `max_seq_len`. These tests are crucial for verifying that the system can gracefully reject invalid requests without crashing.
+
+- **Failure Injection**: Unlike other tests, this failure is injected from the **client side**. The `aiperf` client is configured to send a batch of requests with oversized token lengths.
+- **Two-Phase Execution**: These tests run in two distinct phases, creating separate log directories for each:
+  1.  **`overflow` Phase**: Sends oversized requests. The expected outcome is a high rate of failed requests (rejections) as the server correctly identifies and blocks them.
+  2.  **`recovery` Phase**: Immediately after the overflow phase, sends valid, normal-sized requests. The expected outcome is a high success rate, confirming that the system has recovered and remains operational.
+
+The combined results of these two phases demonstrate both the system's ability to reject invalid inputs and its stability after handling them.
+
 #### Example Scenario Breakdown
 
 **Scenario**: `sglang-agg-tp-2-dp-1-decode_worker`
@@ -130,10 +141,16 @@ The following failure types are defined in `scenarios.py`:
 
 #### Example Scenario Execution:
 
-Run all deployments and failure scenarios
+Run standard deployments and failure scenarios (excludes custom builds by default):
 
 ```bash
 pytest tests/fault_tolerance/deploy/test_deployment.py -s -v --namespace ${NAMESPACE}
+```
+
+To include all scenarios including custom builds (e.g., MoE models):
+
+```bash
+pytest tests/fault_tolerance/deploy/test_deployment.py -s -v --namespace ${NAMESPACE} --include-custom-build
 ```
 
 ### Test Results Directory
@@ -392,7 +409,6 @@ graph LR
     style DecodePool stroke:#000,stroke-width:2px
 ```
 
-
 #### Summary:
 
 
@@ -480,9 +496,53 @@ Then run the development container mounting the workspace and your kube config.
 
 ### Run the tests
 
+#### Default: Run Standard Tests Only
+
+By default, tests requiring custom builds (e.g., MoE models) are **automatically excluded**:
+
 ```bash
-pytest tests/fault_tolerance/deploy/test_deployment.py -s -v --namespace ${NAMESPACE} --image ${IMAGE}
+# Standard tests only
+pytest tests/fault_tolerance/deploy/test_deployment.py -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${IMAGE}
 ```
+
+#### Include Custom Build Tests
+
+To run ALL tests including those requiring custom builds (e.g., MoE models):
+
+```bash
+pytest tests/fault_tolerance/deploy/test_deployment.py -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${IMAGE} \
+  --include-custom-build
+```
+
+#### Run Only Custom Build Tests
+
+To run ONLY tests that require custom builds:
+
+```bash
+pytest tests/fault_tolerance/deploy/test_deployment.py -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${IMAGE} \
+  -m "custom_build"
+```
+
+#### List Available Tests
+
+```bash
+# See which tests will run by default (excludes custom_build)
+pytest tests/fault_tolerance/deploy/test_deployment.py --collect-only -q
+
+# See which tests are excluded
+pytest tests/fault_tolerance/deploy/test_deployment.py --collect-only -m "custom_build" -q
+```
+
+> **Note:** Tests requiring custom builds are marked with `@pytest.mark.custom_build` and include:
+> - MoE (Mixture-of-Experts) models like DeepSeek-V2-Lite
+> - Tests requiring special Docker image configurations
+> - Any scenario with `requires_custom_build=True` in scenarios.py
 
 
 ### Note on Running with Additional Credentials
@@ -596,3 +656,5 @@ Test Group: vllm-agg-tp-1-dp-2
 ╘═══════════════════╧═══════════╧═══════════╧══════════╧═══════════╧══════════╧═══════════╧═══════════╧════════════╛
 
 ```
+
+

@@ -1,0 +1,70 @@
+name: Nightly CI
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # Every day at 12:00 AM PST (08:00 UTC)
+  workflow_dispatch:
+
+jobs:
+  vllm:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    name: vllm (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Build vLLM Docker Image
+        id: build-vllm
+        uses: ./.github/actions/docker-build
+        with:
+          framework: vllm
+          target: runtime
+          platform: linux/${{ matrix.platform.arch }}
+          base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
+          cuda_version: ${{ matrix.platform.arch == 'arm64' && '129' || '' }}
+          torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: nightly-vllm-${{ matrix.platform.arch }}
+      - name: Tag and Push vLLM Nightly Image
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-vllm.outputs.image_tag }}
+          # Tag the image nightly
+          push_tag: ai-dynamo/dynamo:nightly-vllm-${{ matrix.platform.arch }}
+          aws_push: 'false'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Run unit tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-vllm-${{ matrix.platform.arch }}
+          pytest_marks: "vllm and unit"
+          framework: "vllm"
+          test_type: "unit"
+          platform_arch: ${{ matrix.platform.arch }}
+      - name: Run e2e tests
+        if: ${{ matrix.platform.arch != 'arm64' }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: nightly-vllm-${{ matrix.platform.arch }}
+          pytest_marks: "nightly and vllm and gpu_1"
+          framework: "vllm"
+          test_type: "e2e"
+          platform_arch: ${{ matrix.platform.arch }}

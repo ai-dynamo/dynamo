@@ -15,8 +15,7 @@ use tokio::time::{Duration, sleep};
 
 #[tokio::test]
 async fn test_backend_with_metrics() -> Result<()> {
-    // Set environment variables for dynamic port allocation
-    env::set_var("DYN_SYSTEM_ENABLED", "true");
+    // Set environment variable for dynamic port allocation (0 = auto-assign)
     env::set_var("DYN_SYSTEM_PORT", "0");
 
     // Generate a random endpoint name to avoid collisions
@@ -38,9 +37,7 @@ async fn test_backend_with_metrics() -> Result<()> {
             info.port()
         }
         None => {
-            panic!(
-                "System status server not started - check DYN_SYSTEM_ENABLED environment variable"
-            );
+            panic!("System status server not started - check DYN_SYSTEM_PORT environment variable");
         }
     };
 

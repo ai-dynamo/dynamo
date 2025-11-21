@@ -28,10 +28,16 @@ limitations under the License.
 
 Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API group.
 
+This package defines the DynamoGraphDeploymentRequest (DGDR) custom resource, which provides
+a high-level, SLA-driven interface for deploying machine learning models on Dynamo.
+
+Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API group.
+
 ### Resource Types
 - [DynamoComponentDeployment](#dynamocomponentdeployment)
 - [DynamoGraphDeployment](#dynamographdeployment)
 - [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
+- [DynamoModel](#dynamomodel)
 
 
 
@@ -62,7 +68,8 @@ _Appears in:_
 
 
 
-ConfigMapKeySelector selects a key from a ConfigMap.
+ConfigMapKeySelector selects a specific key from a ConfigMap.
+Used to reference external configuration data stored in ConfigMaps.
 
 
 
@@ -71,15 +78,16 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name of the ConfigMap. |  | Required: {} <br /> |
-| `key` _string_ | Key in the ConfigMap to select. | disagg.yaml |  |
+| `name` _string_ | Name of the ConfigMap containing the desired data. |  | Required: \{\} <br /> |
+| `key` _string_ | Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml". | disagg.yaml |  |
 
 
 #### DeploymentOverridesSpec
 
 
 
-DeploymentOverridesSpec defines metadata overrides for the auto-created DGD.
+DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.
+When autoApply is enabled, these overrides are applied to the generated DGD resource.
 
 
 
@@ -88,17 +96,19 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name is the name for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR name. |  | Optional: {} <br /> |
-| `namespace` _string_ | Namespace is the namespace for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR namespace. |  | Optional: {} <br /> |
-| `labels` _object (keys:string, values:string)_ | Labels are additional labels to add to the DynamoGraphDeployment.<br />These are merged with auto-generated labels. |  | Optional: {} <br /> |
-| `annotations` _object (keys:string, values:string)_ | Annotations are additional annotations to add to the DynamoGraphDeployment. |  | Optional: {} <br /> |
+| `name` _string_ | Name is the desired name for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR name. |  | Optional: \{\} <br /> |
+| `namespace` _string_ | Namespace is the desired namespace for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR namespace. |  | Optional: \{\} <br /> |
+| `labels` _object (keys:string, values:string)_ | Labels are additional labels to add to the DynamoGraphDeployment metadata.<br />These are merged with auto-generated labels from the profiling process. |  | Optional: \{\} <br /> |
+| `annotations` _object (keys:string, values:string)_ | Annotations are additional annotations to add to the DynamoGraphDeployment metadata. |  | Optional: \{\} <br /> |
+| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1" |  | Optional: \{\} <br /> |
 
 
 #### DeploymentStatus
 
 
 
-DeploymentStatus tracks the auto-created DGD status.
+DeploymentStatus tracks the state of an auto-created DynamoGraphDeployment.
+This status is populated when autoApply is enabled and a DGD is created.
 
 
 
@@ -109,8 +119,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the name of the created DynamoGraphDeployment. |  |  |
 | `namespace` _string_ | Namespace is the namespace of the created DynamoGraphDeployment. |  |  |
-| `state` _string_ | State is the current state of the DynamoGraphDeployment.<br />This is mirrored from the DGD's status.state field. |  |  |
-| `created` _boolean_ | Created indicates whether the DGD has been created.<br />Used to prevent recreation if DGD is deleted by user. |  |  |
+| `state` _string_ | State is the current state of the DynamoGraphDeployment.<br />This value is mirrored from the DGD's status.state field. |  |  |
+| `created` _boolean_ | Created indicates whether the DGD has been successfully created.<br />Used to prevent recreation if the DGD is manually deleted by users. |  |  |
 
 
 #### DynamoComponentDeployment
@@ -150,13 +160,15 @@ _Appears in:_
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `dynamoNamespace` _string_ | Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive) |  |  |
+| `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
+| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Autoscaling config for this component (replica range, target utilization, etc.). |  |  |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
+| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  |  |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
 | `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
@@ -185,13 +197,15 @@ _Appears in:_
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `dynamoNamespace` _string_ | Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive) |  |  |
+| `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
+| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Autoscaling config for this component (replica range, target utilization, etc.). |  |  |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
+| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  |  |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
 | `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
@@ -228,6 +242,17 @@ DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests
 It serves as the primary interface for users to request model deployments with
 specific performance and resource constraints, enabling SLA-driven deployments.
 
+Lifecycle:
+ 1. Initial → Pending: Validates spec and prepares for profiling
+ 2. Pending → Profiling: Creates and runs profiling job (online or AIC)
+ 3. Profiling → Ready/Deploying: Generates DGD spec after profiling completes
+ 4. Deploying → Ready: When autoApply=true, monitors DGD until Ready
+ 5. Ready: Terminal state when DGD is operational or spec is available
+ 6. DeploymentDeleted: Terminal state when auto-created DGD is manually deleted
+
+The spec becomes immutable once profiling starts. Users must delete and recreate
+the DGDR to modify configuration after this point.
+
 
 
 
@@ -245,9 +270,9 @@ specific performance and resource constraints, enabling SLA-driven deployments.
 
 
 
-DynamoGraphDeploymentRequestSpec defines the desired state of DynamoGraphDeploymentRequest.
-This CRD serves as the primary interface for users to request model deployments
-with specific performance and resource constraints for SLA-driven deployments.
+DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
+This CRD serves as the primary interface for users to request model deployments with
+specific performance constraints and resource requirements, enabling SLA-driven deployments.
 
 
 
@@ -256,21 +281,20 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `modelName` _string_ | ModelName specifies the model to deploy (e.g., "meta/llama3-70b"). |  | Required: {} <br /> |
-| `backend` _string_ | Backend specifies the backend framework to use. | trtllm | Enum: [vllm sglang trtllm] <br /> |
-| `sla` _[SLASpec](#slaspec)_ | SLA defines the Service Level Agreement profiling targets. |  | Required: {} <br /> |
-| `gpu` _[GPUSpec](#gpuspec)_ | GPU defines optional GPU type specification. |  | Optional: {} <br /> |
-| `online` _boolean_ | Online indicates whether to use online profiler (true) or AI Configurator (false).<br />When true, uses real deployment for profiling (2-4 hours).<br />When false, uses AI Configurator for fast profiling (20-30 seconds). | false |  |
-| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated in status. | false |  |
-| `deploymentOverrides` _[DeploymentOverridesSpec](#deploymentoverridesspec)_ | DeploymentOverrides allows overriding metadata for the auto-created DGD.<br />Only used when AutoApply is true. |  | Optional: {} <br /> |
-| `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides configuration for the profiling job.<br />Can be used for both online and offline (AIC) profiling. |  | Optional: {} <br /> |
+| `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />This is a high-level identifier for easy reference in kubectl output and logs.<br />The controller automatically sets this value in profilingConfig.config.deployment.model. |  | Required: \{\} <br /> |
+| `backend` _string_ | Backend specifies the inference backend to use.<br />The controller automatically sets this value in profilingConfig.config.engine.backend. |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
+| `enableGpuDiscovery` _boolean_ | EnableGpuDiscovery controls whether the profiler should automatically discover GPU<br />resources from the Kubernetes cluster nodes. When enabled, the profiler will override<br />any manually specified hardware configuration (min_num_gpus_per_engine, max_num_gpus_per_engine,<br />num_gpus_per_node) with values detected from the cluster.<br />Requires cluster-wide node access permissions - only available with cluster-scoped operators. | false | Optional: \{\} <br /> |
+| `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides the complete configuration for the profiling job.<br />This configuration is passed directly to the profiler.<br />The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).<br />Note: deployment.model and engine.backend are automatically set from the high-level<br />modelName and backend fields and should not be specified in this config. |  | Required: \{\} <br /> |
+| `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated and stored in status.<br />Users can then manually create a DGD using the generated spec. | false |  |
+| `deploymentOverrides` _[DeploymentOverridesSpec](#deploymentoverridesspec)_ | DeploymentOverrides allows customizing metadata for the auto-created DGD.<br />Only applicable when AutoApply is true. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRequestStatus
 
 
 
-DynamoGraphDeploymentRequestStatus defines the observed state of DynamoGraphDeploymentRequest.
+DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
+The controller updates this status as the DGDR progresses through its lifecycle.
 
 
 
@@ -279,12 +303,13 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `state` _string_ | State is a high-level textual status of the deployment request lifecycle.<br />Possible values: "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed" |  |  |
-| `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability. |  |  |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />The slice is merged by type on patch updates. |  |  |
-| `profilingResults` _string_ | ProfilingResults contains references to the profiling data and results. |  | Optional: {} <br /> |
-| `generatedDeployment` _[RawExtension](#rawextension)_ | GeneratedDeployment contains the full generated DynamoGraphDeployment (including metadata)<br />based on profiling results. This can be used to create a DynamoGraphDeployment resource.<br />Stored as RawExtension to preserve all fields including metadata. |  | EmbeddedResource: {} <br />Optional: {} <br /> |
-| `deployment` _[DeploymentStatus](#deploymentstatus)_ | Deployment tracks the auto-created DGD if AutoApply is true. |  | Optional: {} <br /> |
+| `state` _string_ | State is a high-level textual status of the deployment request lifecycle.<br />Possible values: "", "Pending", "Profiling", "Deploying", "Ready", "DeploymentDeleted", "Failed"<br />Empty string ("") represents the initial state before initialization. |  |  |
+| `backend` _string_ | Backend is extracted from profilingConfig.config.engine.backend for display purposes.<br />This field is populated by the controller and shown in kubectl output. |  | Optional: \{\} <br /> |
+| `observedGeneration` _integer_ | ObservedGeneration reflects the generation of the most recently observed spec.<br />Used to detect spec changes and enforce immutability after profiling starts. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady.<br />Conditions are merged by type on patch updates. |  |  |
+| `profilingResults` _string_ | ProfilingResults contains a reference to the ConfigMap holding profiling data.<br />Format: "configmap/<name>" |  | Optional: \{\} <br /> |
+| `generatedDeployment` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | GeneratedDeployment contains the full generated DynamoGraphDeployment specification<br />including metadata, based on profiling results. Users can extract this to create<br />a DGD manually, or it's used automatically when autoApply is true.<br />Stored as RawExtension to preserve all fields including metadata. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
+| `deployment` _[DeploymentStatus](#deploymentstatus)_ | Deployment tracks the auto-created DGD when AutoApply is true.<br />Contains name, namespace, state, and creation status of the managed DGD. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentSpec
@@ -300,9 +325,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `pvcs` _[PVC](#pvc) array_ | PVCs defines a list of persistent volume claims that can be referenced by components.<br />Each PVC must have a unique name that can be referenced in component specifications. |  | Optional: {} <br /> |
-| `services` _object (keys:string, values:[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec))_ | Services are the services to deploy as part of this deployment. |  | Optional: {} <br /> |
-| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: {} <br /> |
+| `pvcs` _[PVC](#pvc) array_ | PVCs defines a list of persistent volume claims that can be referenced by components.<br />Each PVC must have a unique name that can be referenced in component specifications. |  | MaxItems: 100 <br />Optional: \{\} <br /> |
+| `services` _object (keys:string, values:[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec))_ | Services are the services to deploy as part of this deployment. |  | MaxProperties: 25 <br />Optional: \{\} <br /> |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 
 
@@ -323,22 +348,79 @@ _Appears in:_
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
 
 
-#### GPUSpec
+#### DynamoModel
 
 
 
-GPUSpec defines optional GPU type specification.
+DynamoModel is the Schema for the dynamo models API
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `DynamoModel` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoModelSpec](#dynamomodelspec)_ |  |  |  |
+| `status` _[DynamoModelStatus](#dynamomodelstatus)_ |  |  |  |
+
+
+#### DynamoModelSpec
+
+
+
+DynamoModelSpec defines the desired state of DynamoModel
 
 
 
 _Appears in:_
-- [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
+- [DynamoModel](#dynamomodel)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `type` _string_ | Type specifies the GPU type (e.g., "h200", "h100", "a100"). |  | Optional: {} <br /> |
-| `minNumGPUsPerEngine` _integer_ | MinNumGPUsPerEngine specifies the minimum number of GPUs per engine for profiling. | 1 | Minimum: 1 <br />Optional: {} <br /> |
-| `maxNumGPUsPerEngine` _integer_ | MaxNumGPUsPerEngine specifies the maximum number of GPUs per engine for profiling. | 8 | Minimum: 1 <br />Optional: {} <br /> |
+| `modelName` _string_ | ModelName is the full model identifier (e.g., "meta-llama/Llama-3.3-70B-Instruct-lora") |  | Required: \{\} <br /> |
+| `baseModelName` _string_ | BaseModelName is the base model identifier that matches the service label<br />This is used to discover endpoints via headless services |  | Required: \{\} <br /> |
+| `modelType` _string_ | ModelType specifies the type of model (e.g., "base", "lora", "adapter") | base | Enum: [base lora adapter] <br /> |
+| `source` _[ModelSource](#modelsource)_ | Source specifies the model source location (only applicable for lora model type) |  |  |
+
+
+#### DynamoModelStatus
+
+
+
+DynamoModelStatus defines the observed state of DynamoModel
+
+
+
+_Appears in:_
+- [DynamoModel](#dynamomodel)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  |  |
+| `readyEndpoints` _integer_ | ReadyEndpoints is the count of endpoints that are ready |  |  |
+| `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  |  |
+
+
+#### EndpointInfo
+
+
+
+EndpointInfo represents a single endpoint (pod) serving the model
+
+
+
+_Appears in:_
+- [DynamoModelStatus](#dynamomodelstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `address` _string_ | Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090") |  |  |
+| `podName` _string_ | PodName is the name of the pod serving this endpoint |  |  |
+| `ready` _boolean_ | Ready indicates whether the endpoint is ready to serve traffic<br />For LoRA models: true if the POST /loras request succeeded with a 2xx status code<br />For base models: always false (no probing performed) |  |  |
 
 
 #### IngressSpec
@@ -383,6 +465,40 @@ _Appears in:_
 | `secretName` _string_ | SecretName is the name of a Kubernetes Secret containing the TLS certificate and key. |  |  |
 
 
+#### ModelReference
+
+
+
+ModelReference identifies a model served by this component
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the base model identifier (e.g., "llama-3-70b-instruct-v1") |  | Required: \{\} <br /> |
+| `revision` _string_ | Revision is the model revision/version (optional) |  |  |
+
+
+#### ModelSource
+
+
+
+ModelSource defines the source location of a model
+
+
+
+_Appears in:_
+- [DynamoModelSpec](#dynamomodelspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `uri` _string_ | URI is the model source URI<br />Supported formats:<br />- S3: s3://bucket/path/to/model<br />- HuggingFace: hf://org/model@revision_sha |  | Required: \{\} <br /> |
+
+
 #### MultinodeSpec
 
 
@@ -414,9 +530,9 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `create` _boolean_ | Create indicates to create a new PVC |  |  |
-| `name` _string_ | Name is the name of the PVC |  | Required: {} <br /> |
+| `name` _string_ | Name is the name of the PVC |  | Required: \{\} <br /> |
 | `storageClass` _string_ | StorageClass to be used for PVC creation. Required when create is true. |  |  |
-| `size` _[Quantity](#quantity)_ | Size of the volume in Gi, used during PVC creation. Required when create is true. |  |  |
+| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | Size of the volume in Gi, used during PVC creation. Required when create is true. |  |  |
 | `volumeAccessMode` _[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core)_ | VolumeAccessMode is the volume access mode of the PVC. Required when create is true. |  |  |
 
 
@@ -424,7 +540,9 @@ _Appears in:_
 
 
 
-ProfilingConfigSpec defines the profiling configuration.
+ProfilingConfigSpec defines configuration for the profiling process.
+This structure maps directly to the profile_sla.py config format.
+See benchmarks/profiler/utils/profiler_argparse.py for the complete schema.
 
 
 
@@ -433,26 +551,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is a reference to a ConfigMap containing the profiling configuration.<br />The ConfigMap should contain a key (default: "disagg.yaml") with the configuration file.<br />Can be used for both online and offline (AIC) profiling. |  | Optional: {} <br /> |
-
-
-#### SLASpec
-
-
-
-SLASpec defines the Service Level Agreement profiling targets.
-
-
-
-_Appears in:_
-- [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `itl` _integer_ | ITL is the target Inter-Token Latency in milliseconds. |  | Required: {} <br /> |
-| `ttft` _integer_ | TTFT is the target Time To First Token in milliseconds. |  | Required: {} <br /> |
-| `isl` _integer_ | ISL is the Input Sequence Length for profiling. |  | Minimum: 1 <br />Required: {} <br /> |
-| `osl` _integer_ | OSL is the Output Sequence Length for profiling. |  | Minimum: 1 <br />Required: {} <br /> |
+| `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Optional: \{\} <br />Type: object <br /> |
+| `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment<br />base config file (disagg.yaml). This is separate from the profiling config above.<br />The path to this config will be set as engine.config in the profiling config. |  | Optional: \{\} <br /> |
+| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1" |  | Required: \{\} <br /> |
 
 
 #### SharedMemorySpec
@@ -470,7 +571,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `disabled` _boolean_ |  |  |  |
-| `size` _[Quantity](#quantity)_ |  |  |  |
+| `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ |  |  |  |
 
 
 #### VolumeMount
@@ -487,7 +588,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name references a PVC name defined in the top-level PVCs map |  | Required: {} <br /> |
+| `name` _string_ | Name references a PVC name defined in the top-level PVCs map |  | Required: \{\} <br /> |
 | `mountPoint` _string_ | MountPoint specifies where to mount the volume.<br />If useAsCompilationCache is true and mountPoint is not specified,<br />a backend-specific default will be used. |  |  |
 | `useAsCompilationCache` _boolean_ | UseAsCompilationCache indicates this volume should be used as a compilation cache.<br />When true, backend-specific environment variables will be set and default mount points may be used. | false |  |
 
@@ -497,6 +598,8 @@ _Appears in:_
 The Dynamo operator automatically applies default values to various fields when they are not explicitly specified in your deployments. These defaults include:
 
 - **Health Probes**: Startup, liveness, and readiness probes are configured differently for frontend, worker, and planner components. For example, worker components receive a startup probe with a 2-hour timeout (720 failures × 10 seconds) to accommodate long model loading times.
+
+- **Security Context**: All components receive `fsGroup: 1000` by default to ensure proper file permissions for mounted volumes. This can be overridden via the `extraPodSpec.securityContext` field.
 
 - **Shared Memory**: All components receive an 8Gi shared memory volume mounted at `/dev/shm` by default (can be disabled or resized via the `sharedMemory` field).
 
@@ -514,6 +617,50 @@ All components receive the following pod-level defaults unless overridden:
 
 - **`terminationGracePeriodSeconds`**: `60` seconds
 - **`restartPolicy`**: `Always`
+
+## Security Context
+
+The operator automatically applies default security context settings to all components to ensure proper file permissions, particularly for mounted volumes:
+
+- **`fsGroup`**: `1000` - Sets the group ownership of mounted volumes and any files created in those volumes
+
+This default ensures that non-root containers can write to mounted volumes (like model caches or persistent storage) without permission issues. The `fsGroup` setting is particularly important for:
+- Model downloads and caching
+- Compilation cache directories
+- Persistent volume claims (PVCs)
+- SSH key generation in multinode deployments
+
+### Overriding Security Context
+
+To override the default security context, specify your own `securityContext` in the `extraPodSpec` of your component:
+
+```yaml
+services:
+  YourWorker:
+    extraPodSpec:
+      securityContext:
+        fsGroup: 2000  # Custom group ID
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+```
+
+**Important**: When you provide *any* `securityContext` object in `extraPodSpec`, the operator will not inject any defaults. This gives you complete control over the security context, including the ability to run as root (by omitting `runAsNonRoot` or setting it to `false`).
+
+### OpenShift and Security Context Constraints
+
+In OpenShift environments with Security Context Constraints (SCCs), you may need to omit explicit UID/GID values to allow OpenShift's admission controllers to assign them dynamically:
+
+```yaml
+services:
+  YourWorker:
+    extraPodSpec:
+      securityContext:
+        # Omit fsGroup to let OpenShift assign it based on SCC
+        # OpenShift will inject the appropriate UID range
+```
+
+Alternatively, if you want to keep the default `fsGroup: 1000` behavior and are certain your cluster allows it, you don't need to specify anything - the operator defaults will work.
 
 ## Shared Memory Configuration
 
@@ -588,7 +735,16 @@ For larger models (typically >70B parameters) or slower storage systems, you may
 For multinode deployments, the operator modifies probes based on the backend framework and node role:
 
 #### VLLM Backend
+
+The operator automatically selects between two deployment modes based on parallelism configuration:
+
+**Ray-Based Mode** (when `world_size > GPUs_per_node`):
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
+- **Leader nodes**: All probes remain active
+
+**Data Parallel Mode** (when `world_size × data_parallel_size > GPUs_per_node`):
+- **Worker nodes**: All probes (liveness, readiness, startup) are removed
+- **Leader nodes**: All probes remain active
 
 #### SGLang Backend
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
@@ -620,9 +776,9 @@ The operator automatically injects environment variables based on component type
 
 ### Worker Components
 
-- **`DYN_SYSTEM_ENABLED`**: `true`
+- **`DYN_SYSTEM_PORT`**: `9090` (automatically enables the system metrics server)
 - **`DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS`**: `["generate"]`
-- **`DYN_SYSTEM_PORT`**: `9090`
+- **`DYN_SYSTEM_ENABLED`**: `true` (needed for runtime images 0.6.1 and older)
 
 ### Planner Components
 
@@ -686,7 +842,8 @@ Default container ports are configured based on component type:
 ## Backend-Specific Configurations
 
 ### VLLM
-- **Ray Head Port**: 6379 (for multinode deployments)
+- **Ray Head Port**: 6379 (for Ray-based multinode deployments)
+- **Data Parallel RPC Port**: 13445 (for data parallel multinode deployments)
 
 ### SGLang
 - **Distribution Init Port**: 29500 (for multinode deployments)
@@ -699,7 +856,7 @@ Default container ports are configured based on component type:
 
 For users who want to understand the implementation details or contribute to the operator, the default values described in this document are set in the following source files:
 
-- **Health Probes & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, environment variables, shared memory, and pod configurations
+- **Health Probes, Security Context & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, security context, environment variables, shared memory, and pod configurations
 - **Component-Specific Defaults**:
   - [`internal/dynamo/component_frontend.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_frontend.go)
   - [`internal/dynamo/component_worker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_worker.go)
@@ -715,5 +872,6 @@ For users who want to understand the implementation details or contribute to the
 
 - All these defaults can be overridden by explicitly specifying values in your DynamoComponentDeployment or DynamoGraphDeployment resources
 - User-specified probes (via `livenessProbe`, `readinessProbe`, or `startupProbe` fields) take precedence over operator defaults
+- For security context, if you provide *any* `securityContext` in `extraPodSpec`, no defaults will be injected, giving you full control
 - For multinode deployments, some defaults are modified or removed as described above to accommodate distributed execution patterns
 - The `extraPodSpec.mainContainer` field can be used to override probe configurations set by the operator

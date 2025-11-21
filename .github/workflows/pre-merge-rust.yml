@@ -44,6 +44,8 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
+      with:
+        lfs: true
     - name: Set up system dependencies
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
@@ -94,6 +96,8 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
+      with:
+        lfs: true
     - name: Set up system dependencies
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)

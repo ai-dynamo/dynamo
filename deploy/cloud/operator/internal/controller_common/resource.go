@@ -468,6 +468,12 @@ func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequiremen
 			currentResources.Requests[corev1.ResourceName(k)] = q
 		}
 	}
+	if resources.Claims != nil {
+		if currentResources.Claims == nil {
+			currentResources.Claims = make([]corev1.ResourceClaim, 0)
+		}
+		currentResources.Claims = append(currentResources.Claims, resources.Claims...)
+	}
 	return currentResources, nil
 }
 

@@ -60,6 +60,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/etcd"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/modelendpoint"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secrets"
@@ -140,8 +142,11 @@ func main() {
 	var mpiRunSecretName string
 	var mpiRunSecretNamespace string
 	var plannerClusterRoleName string
-	var profilerImage string
 	var dgdrProfilingClusterRoleName string
+	var namespaceScopeLeaseDuration time.Duration
+	var namespaceScopeLeaseRenewInterval time.Duration
+	var operatorVersion string
+	var discoveryBackend string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -182,10 +187,16 @@ func main() {
 		"Namespace where the MPI SSH secret is located (required)")
 	flag.StringVar(&plannerClusterRoleName, "planner-cluster-role-name", "",
 		"Name of the ClusterRole for planner (cluster-wide mode only)")
-	flag.StringVar(&profilerImage, "profiler-image", "",
-		"Container image to use for profiling jobs (both online and offline/AIC) (for DynamoGraphDeploymentRequest)")
 	flag.StringVar(&dgdrProfilingClusterRoleName, "dgdr-profiling-cluster-role-name", "",
 		"Name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)")
+	flag.DurationVar(&namespaceScopeLeaseDuration, "namespace-scope-lease-duration", 30*time.Second,
+		"Duration of namespace scope marker lease before expiration (namespace-restricted mode only)")
+	flag.DurationVar(&namespaceScopeLeaseRenewInterval, "namespace-scope-lease-renew-interval", 10*time.Second,
+		"Interval for renewing namespace scope marker lease (namespace-restricted mode only)")
+	flag.StringVar(&operatorVersion, "operator-version", "unknown",
+		"Version of the operator (used in lease holder identity)")
+	flag.StringVar(&discoveryBackend, "discovery-backend", "",
+		"Discovery backend to use: empty string (default, uses ETCD) or 'kubernetes' (uses Kubernetes API)")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -195,6 +206,17 @@ func main() {
 	if restrictedNamespace == "" && plannerClusterRoleName == "" {
 		setupLog.Error(nil, "planner-cluster-role-name is required in cluster-wide mode")
 		os.Exit(1)
+	}
+
+	// Validate discoverBackend value
+	if discoveryBackend != "" && discoveryBackend != "kubernetes" {
+		setupLog.Error(nil, "invalid discover-backend value, must be empty string or 'kubernetes'", "value", discoveryBackend)
+		os.Exit(1)
+	}
+	if discoveryBackend != "" {
+		setupLog.Info("Discovery backend configured", "backend", discoveryBackend)
+	} else {
+		setupLog.Info("Discovery backend configured", "backend", "etcd (default)")
 	}
 
 	// Validate modelExpressURL if provided
@@ -245,6 +267,7 @@ func main() {
 			PlannerClusterRoleName:       plannerClusterRoleName,
 			DGDRProfilingClusterRoleName: dgdrProfilingClusterRoleName,
 		},
+		DiscoveryBackend: discoveryBackend,
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
@@ -298,6 +321,9 @@ func main() {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
 		}
+		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
+	} else {
+		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
 	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
@@ -305,18 +331,101 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize namespace scope mechanism
+	var leaseManager *namespace_scope.LeaseManager
+	var leaseWatcher *namespace_scope.LeaseWatcher
+
+	if restrictedNamespace != "" {
+		// Namespace-restricted mode: Create and maintain namespace scope marker lease
+		setupLog.Info("Creating namespace scope marker lease manager",
+			"namespace", restrictedNamespace,
+			"leaseDuration", namespaceScopeLeaseDuration,
+			"renewInterval", namespaceScopeLeaseRenewInterval)
+
+		leaseManager, err = namespace_scope.NewLeaseManager(
+			mgr.GetConfig(),
+			restrictedNamespace,
+			operatorVersion,
+			namespaceScopeLeaseDuration,
+			namespaceScopeLeaseRenewInterval,
+		)
+		if err != nil {
+			setupLog.Error(err, "unable to create namespace scope marker lease manager")
+			os.Exit(1)
+		}
+
+		// Start the lease manager
+		if err = leaseManager.Start(mainCtx); err != nil {
+			setupLog.Error(err, "unable to start namespace scope marker lease manager")
+			os.Exit(1)
+		}
+
+		// Monitor for fatal lease errors
+		// If lease renewal fails repeatedly, we must exit to prevent split-brain
+		go func() {
+			select {
+			case err := <-leaseManager.Errors():
+				setupLog.Error(err, "FATAL: Lease manager encountered unrecoverable error, shutting down to prevent split-brain")
+				os.Exit(1)
+			case <-mainCtx.Done():
+				// Normal shutdown, error channel monitoring no longer needed
+				return
+			}
+		}()
+
+		// Ensure lease is released on shutdown
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := leaseManager.Stop(shutdownCtx); err != nil {
+				setupLog.Error(err, "failed to stop lease manager cleanly")
+			}
+		}()
+
+		setupLog.Info("Namespace scope marker lease manager started successfully")
+	} else {
+		// Cluster-wide mode: Watch for namespace scope marker leases
+		setupLog.Info("Setting up namespace scope marker lease watcher for cluster-wide mode")
+
+		leaseWatcher, err = namespace_scope.NewLeaseWatcher(mgr.GetConfig())
+		if err != nil {
+			setupLog.Error(err, "unable to create namespace scope marker lease watcher")
+			os.Exit(1)
+		}
+
+		// Start the lease watcher
+		if err = leaseWatcher.Start(mainCtx); err != nil {
+			setupLog.Error(err, "unable to start namespace scope marker lease watcher")
+			os.Exit(1)
+		}
+
+		setupLog.Info("Namespace scope marker lease watcher started successfully")
+	}
+
+	// Pass leaseWatcher to controller config for namespace exclusion filtering
+	ctrlConfig.ExcludedNamespaces = leaseWatcher
+
 	// Detect orchestrators availability using discovery client
 	setupLog.Info("Detecting Grove availability...")
 	groveEnabled := commonController.DetectGroveAvailability(mainCtx, mgr)
 	ctrlConfig.Grove.Enabled = groveEnabled
 	setupLog.Info("Detecting LWS availability...")
 	lwsEnabled := commonController.DetectLWSAvailability(mainCtx, mgr)
-	ctrlConfig.LWS.Enabled = lwsEnabled
-
+	setupLog.Info("Detecting Volcano availability...")
+	volcanoEnabled := commonController.DetectVolcanoAvailability(mainCtx, mgr)
+	// LWS for multinode deployment usage depends on both LWS and Volcano availability
+	ctrlConfig.LWS.Enabled = lwsEnabled && volcanoEnabled
 	// Detect Kai-scheduler availability using discovery client
 	setupLog.Info("Detecting Kai-scheduler availability...")
 	kaiSchedulerEnabled := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
 	ctrlConfig.KaiScheduler.Enabled = kaiSchedulerEnabled
+
+	setupLog.Info("Detected orchestrators availability",
+		"grove", groveEnabled,
+		"lws", lwsEnabled,
+		"volcano", volcanoEnabled,
+		"kai-scheduler", kaiSchedulerEnabled,
+	)
 
 	// Create etcd client
 	cli, err := clientv3.New(clientv3.Config{
@@ -458,13 +567,21 @@ func main() {
 	}
 
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
-		Client:        mgr.GetClient(),
-		Recorder:      mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
-		ProfilerImage: profilerImage,
-		Config:        ctrlConfig,
-		RBACManager:   rbacManager,
+		Client:      mgr.GetClient(),
+		Recorder:    mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		Config:      ctrlConfig,
+		RBACManager: rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeploymentRequest")
+		os.Exit(1)
+	}
+
+	if err = (&controller.DynamoModelReconciler{
+		Client:         mgr.GetClient(),
+		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
+		EndpointClient: modelendpoint.NewClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoModel")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder

@@ -9,19 +9,20 @@ use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Component, InstanceSource},
+    discovery::{DiscoveryQuery, watch_and_extract_field},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
     },
-    prelude::*,
     protocols::annotated::Annotated,
-    utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction},
+    traits::DistributedRuntimeProvider,
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
 pub mod approx;
 pub mod indexer;
+pub mod prefill_router;
 pub mod protocols;
 pub mod publisher;
 pub mod recorder;
@@ -29,6 +30,8 @@ pub mod scheduler;
 pub mod scoring;
 pub mod sequence;
 pub mod subscriber;
+
+pub use prefill_router::PrefillRouter;
 
 use crate::{
     kv_router::{
@@ -44,7 +47,7 @@ use crate::{
         subscriber::start_kv_router_background,
     },
     local_model::runtime_config::ModelRuntimeConfig,
-    model_card::{self, ModelDeploymentCard},
+    model_card::ModelDeploymentCard,
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
 };
@@ -67,8 +70,6 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for radix tree snapshot storage
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
-pub const ROUTER_SNAPSHOT_LOCK: &str = "router-snapshot-lock";
-pub const ROUTER_CLEANUP_LOCK: &str = "router-cleanup-lock";
 
 /// A trait that users can implement to define custom selection logic
 pub trait WorkerSelector {
@@ -221,13 +222,7 @@ impl KvRouter {
         consumer_uuid: String,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
-
-        let cancellation_token = component
-            .drt()
-            .primary_lease()
-            .expect("Cannot KV route static workers")
-            .primary_token();
-
+        let cancellation_token = component.drt().primary_token();
         let generate_endpoint = component.endpoint("generate");
         let client = generate_endpoint.client().await?;
 
@@ -238,22 +233,20 @@ impl KvRouter {
             }
         };
 
-        // Create runtime config watcher using the generic etcd watcher
-        // TODO: Migrate to discovery_client() once it exposes kv_get_and_watch_prefix functionality
-        let etcd_client = component
-            .drt()
-            .etcd_client()
-            .expect("Cannot KV route without etcd client");
-
-        let runtime_configs_watcher = watch_prefix_with_extraction(
-            etcd_client,
-            model_card::ROOT_PATH,
-            key_extractors::lease_id,
-            |card: ModelDeploymentCard| Some(card.runtime_config),
-            cancellation_token.clone(),
-        )
-        .await?;
-        let runtime_configs_rx = runtime_configs_watcher.receiver();
+        // Watch for runtime config updates via discovery interface
+        let discovery = component.drt().discovery();
+        let discovery_key = DiscoveryQuery::EndpointModels {
+            namespace: component.namespace().name().to_string(),
+            component: component.name().to_string(),
+            endpoint: "generate".to_string(),
+        };
+        let discovery_stream = discovery
+            .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+            .await?;
+        let runtime_configs_rx =
+            watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
+                card.runtime_config
+            });
 
         let indexer = if kv_router_config.overlap_score_weight == 0.0 {
             // When overlap_score_weight is zero, we don't need to track prefixes

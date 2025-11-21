@@ -85,12 +85,12 @@ class VllmPrefillHealthCheckPayload(HealthCheckPayload):
     """
     vLLM-specific health check payload for prefill workers in disaggregated mode.
 
-    The prefill handler expects a different structure with 'request_id' and 'sampling_params'.
+    The prefill handler expects PreprocessedRequest format with sampling_options and stop_conditions.
     """
 
     def __init__(self, engine_client=None):
         """
-        Initialize vLLM prefill health check payload with proper structure.
+        Initialize vLLM prefill health check payload with proper PreprocessedRequest structure.
 
         Args:
             engine_client: Optional vLLM AsyncLLM engine client to extract BOS token from.
@@ -98,25 +98,21 @@ class VllmPrefillHealthCheckPayload(HealthCheckPayload):
         """
         bos_token_id = _get_bos_token_id_from_engine(engine_client)
 
-        # Prefill handler expects request_id, token_ids, and sampling_params
-        # The sampling_params are converted via msgspec in the handler
+        # Prefill handler expects PreprocessedRequest format: token_ids, sampling_options, stop_conditions
+        # The handler will override max_tokens/min_tokens to 1 and add do_remote_decode
         self.default_payload = {
-            "request_id": "health_check",
             "token_ids": [bos_token_id],
-            "sampling_params": {
-                "max_tokens": 1,
-                "min_tokens": 1,
+            "sampling_options": {
                 "temperature": 0.0,
                 "top_p": 1.0,
                 "top_k": -1,
-                "detokenize": False,
+            },
+            "stop_conditions": {
+                "stop": None,
+                "stop_token_ids": None,
                 "include_stop_str_in_output": False,
                 "ignore_eos": False,
-                "extra_args": {
-                    "kv_transfer_params": {
-                        "do_remote_decode": True,
-                    }
-                },
+                "min_tokens": 0,
             },
         }
         super().__init__()

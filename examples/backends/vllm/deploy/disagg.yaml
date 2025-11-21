@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: vllm-disagg
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+    VllmDecodeWorker:
+      dynamoNamespace: vllm-disagg
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+          workingDir: /workspace/examples/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --is-decode-worker
+    VllmPrefillWorker:
+      dynamoNamespace: vllm-disagg
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0
+          workingDir: /workspace/examples/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --is-prefill-worker

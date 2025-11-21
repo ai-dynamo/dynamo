@@ -42,7 +42,7 @@ pub struct PotentialLoad {
 
 #[derive(Debug, thiserror::Error)]
 pub enum KvSchedulerError {
-    #[error("no endpoints aviailable to route work")]
+    #[error("no endpoints available to route work")]
     NoEndpoints,
 
     #[error("all workers busy")]

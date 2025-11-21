@@ -7,23 +7,19 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use uuid::Uuid;
 
-use crate::kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash,
-};
 use crate::tokens::blocks::UniqueBlock;
 use crate::tokens::{BlockHash, SequenceHash, Token};
 
 pub type NumBlocks = usize;
 
 /// Represents different block movement operations in the cache
-/// For Use and Promote variants, parent hash is the second field
+/// For Use and Promote variants, block hashes are included for KV event publishing
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MoveBlock {
-    Use(Vec<UniqueBlock>),
+    Use(Vec<UniqueBlock>, Vec<BlockHash>),
     Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
-    Promote(Uuid, SequenceHash, Option<u64>),
+    Promote(Uuid, SequenceHash, Option<u64>, BlockHash),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,7 +46,7 @@ pub struct PrefillCost {
 impl PrefillCost {
     pub fn predict_prefill_compute(&self, new_tokens: Option<usize>) -> f64 {
         let tokens = new_tokens.unwrap_or(self.new_tokens);
-        1.25e-6 * (tokens as f64).powi(2) + 7.41e-2 * (tokens as f64) + 2.62e1
+        4.209989e-07 * (tokens as f64).powi(2) + 1.518344e-02 * (tokens as f64) + 1.650142e+01
     }
 }
 
@@ -59,6 +55,18 @@ impl PrefillCost {
 pub struct OutputSignal {
     pub uuid: Uuid,
     pub completed: bool,
+}
+
+/// Worker type for disaggregated serving configurations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum WorkerType {
+    /// Standard aggregated worker handling both prefill and decode
+    #[default]
+    Aggregated,
+    /// Dedicated prefill worker in disaggregated mode
+    Prefill,
+    /// Dedicated decode worker in disaggregated mode
+    Decode,
 }
 
 /// Configuration arguments for MockVllmEngine
@@ -97,6 +105,10 @@ pub struct MockEngineArgs {
     /// Optional startup time in seconds to simulate engine initialization delay
     #[builder(default = "None")]
     pub startup_time: Option<f64>,
+
+    /// Worker type for disaggregated serving (Aggregated, Prefill, or Decode)
+    #[builder(default = "WorkerType::Aggregated")]
+    pub worker_type: WorkerType,
 }
 
 impl Default for MockEngineArgs {
@@ -132,6 +144,8 @@ impl MockEngineArgs {
             "speedup_ratio",
             "dp_size",
             "startup_time",
+            "is_prefill",
+            "is_decode",
         ]
         .iter()
         .cloned()
@@ -213,53 +227,32 @@ impl MockEngineArgs {
             builder = builder.startup_time(Some(num));
         }
 
+        // Parse worker type from is_prefill and is_decode flags
+        let is_prefill = extra_args
+            .get("is_prefill")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let is_decode = extra_args
+            .get("is_decode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Determine worker type based on flags
+        let worker_type = match (is_prefill, is_decode) {
+            (false, false) => WorkerType::Aggregated,
+            (true, false) => WorkerType::Prefill,
+            (false, true) => WorkerType::Decode,
+            (true, true) => panic!(
+                "Invalid worker configuration: is_prefill and is_decode cannot both be true. \
+                 Worker must be either Aggregated (both false), Prefill (is_prefill=true), or Decode (is_decode=true)."
+            ),
+        };
+        builder = builder.worker_type(worker_type);
+
         // Build the MockEngineArgs with either defaults or overridden values
         builder
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build MockEngineArgs: {}", e))
-    }
-}
-
-/// Converts a MoveBlockResponse from the mocker backend into a KvCacheEventData.
-///
-/// This function assumes that the stored sequence hashes in the response always
-/// correspond to the tail part of the local hashes array. This is the expected
-/// behavior of KV block storage, where blocks are stored sequentially and the
-/// response contains the most recent blocks that were stored.
-///
-/// # Panics
-/// Panics if the number of blocks in the Store response exceeds the length
-/// of local_hashes.
-pub fn block_response_to_kv_event(
-    response: MoveBlockResponse,
-    local_hashes: &[BlockHash],
-) -> KvCacheEventData {
-    match response {
-        MoveBlockResponse::Store(full_blocks, parent_hash) => {
-            let num_blocks = full_blocks.len();
-            let local_hashes_slice = &local_hashes[local_hashes
-                .len()
-                .checked_sub(num_blocks)
-                .expect("local hashes fewer than block response signal")..];
-
-            KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
-                blocks: full_blocks
-                    .into_iter()
-                    .zip(local_hashes_slice.iter())
-                    .map(|(global_hash, local_hash)| KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(global_hash),
-                        tokens_hash: LocalBlockHash(*local_hash),
-                    })
-                    .collect(),
-            })
-        }
-        MoveBlockResponse::Remove(full_blocks) => KvCacheEventData::Removed(KvCacheRemoveData {
-            block_hashes: full_blocks
-                .into_iter()
-                .map(ExternalSequenceBlockHash)
-                .collect(),
-        }),
     }
 }
 

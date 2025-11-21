@@ -72,21 +72,24 @@ pub struct RouterConfig {
     router_mode: RouterMode,
     kv_router_config: KvRouterConfig,
     busy_threshold: Option<f64>,
+    enforce_disagg: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, busy_threshold=None))]
+    #[pyo3(signature = (mode, config=None, busy_threshold=None, enforce_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
         busy_threshold: Option<f64>,
+        enforce_disagg: bool,
     ) -> Self {
         Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
             busy_threshold,
+            enforce_disagg,
         }
     }
 }
@@ -97,6 +100,7 @@ impl From<RouterConfig> for RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
             busy_threshold: rc.busy_threshold,
+            enforce_disagg: rc.enforce_disagg,
         }
     }
 }
@@ -120,13 +124,14 @@ pub(crate) struct EntrypointArgs {
     namespace: Option<String>,
     custom_backend_metrics_endpoint: Option<String>,
     custom_backend_metrics_polling_interval: Option<f64>,
+    is_prefill: bool,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None, is_prefill=false))]
     pub fn new(
         engine_type: EngineType,
         model_path: Option<PathBuf>,
@@ -144,6 +149,7 @@ impl EntrypointArgs {
         namespace: Option<String>,
         custom_backend_metrics_endpoint: Option<String>,
         custom_backend_metrics_polling_interval: Option<f64>,
+        is_prefill: bool,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -170,6 +176,7 @@ impl EntrypointArgs {
             namespace,
             custom_backend_metrics_endpoint,
             custom_backend_metrics_polling_interval,
+            is_prefill,
         })
     }
 }
@@ -277,6 +284,7 @@ async fn select_engine(
                 engine,
                 model: Box::new(local_model),
                 is_static: false,
+                is_prefill: args.is_prefill,
             }
         }
     };
@@ -295,7 +303,7 @@ pub fn run_input<'p>(
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         dynamo_llm::entrypoint::input::run_input(
-            either::Either::Right(distributed_runtime.inner.clone()),
+            distributed_runtime.inner.clone(),
             input_enum,
             engine_config.inner,
         )

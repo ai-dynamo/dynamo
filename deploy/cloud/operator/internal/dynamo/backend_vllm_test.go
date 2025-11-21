@@ -61,7 +61,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			component:           &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer:   &LWSMultinodeDeployer{},
 			initialContainer:    &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "8"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("4")}}},
-			expectedArgs:        []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
+			expectedArgs:        []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
 			expectProbesRemoved: true,
 		},
 		{
@@ -155,7 +155,7 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			role:              RoleLeader,
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8", dataParallelSizeFlag)}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("4")}}},
-			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-address $(LWS_LEADER_ADDRESS) --data-parallel-size-local 4 --data-parallel-rpc-port 13445 --data-parallel-start-rank 0 --data-parallel-size 8"},
+			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-address $LWS_LEADER_ADDRESS --data-parallel-size-local 4 --data-parallel-rpc-port 13445 --data-parallel-start-rank 0 --data-parallel-size 8"},
 			description:       "LWS shell commands should use LWS variables",
 		},
 		{
@@ -303,7 +303,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			name:              "leader prepends ray start --head",
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8")}}},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8")}}},
 			expectedArgs:      []string{fmt.Sprintf("ray start --head --port=%s && python3 -m dynamo.vllm %s 16", VLLMPort, tensorParallelSizeFlag)},
 		},
 		{
@@ -346,7 +346,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			role:              RoleWorker,
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("8")}}},
-			expectedArgs:      []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
+			expectedArgs:      []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
 		},
 		{
 			name:              "main role does not modify args",

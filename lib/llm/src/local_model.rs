@@ -3,21 +3,18 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
+use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
-use dynamo_runtime::storage::key_value_store::Key;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::{
-    component::Endpoint,
-    storage::key_value_store::{EtcdStore, KeyValueStore, KeyValueStoreManager},
-};
 
 use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::MockEngineArgs;
-use crate::model_card::{self, ModelDeploymentCard};
+use crate::model_card::ModelDeploymentCard;
 use crate::model_type::{ModelInput, ModelType};
+use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
@@ -56,6 +53,8 @@ pub struct LocalModelBuilder {
     namespace: Option<String>,
     custom_backend_metrics_endpoint: Option<String>,
     custom_backend_metrics_polling_interval: Option<f64>,
+    media_decoder: Option<MediaDecoder>,
+    media_fetcher: Option<MediaFetcher>,
 }
 
 impl Default for LocalModelBuilder {
@@ -81,6 +80,8 @@ impl Default for LocalModelBuilder {
             namespace: Default::default(),
             custom_backend_metrics_endpoint: Default::default(),
             custom_backend_metrics_polling_interval: Default::default(),
+            media_decoder: Default::default(),
+            media_fetcher: Default::default(),
         }
     }
 }
@@ -188,6 +189,16 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn media_decoder(&mut self, media_decoder: Option<MediaDecoder>) -> &mut Self {
+        self.media_decoder = media_decoder;
+        self
+    }
+
+    pub fn media_fetcher(&mut self, media_fetcher: Option<MediaFetcher>) -> &mut Self {
+        self.media_fetcher = media_fetcher;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -223,6 +234,8 @@ impl LocalModelBuilder {
             self.runtime_config.max_num_batched_tokens =
                 mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
             self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
+            self.media_decoder = Some(MediaDecoder::default());
+            self.media_fetcher = Some(MediaFetcher::default());
         }
 
         // frontend and echo engine don't need a path.
@@ -234,6 +247,8 @@ impl LocalModelBuilder {
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
             card.runtime_config = self.runtime_config.clone();
+            card.media_decoder = self.media_decoder.clone();
+            card.media_fetcher = self.media_fetcher.clone();
 
             return Ok(LocalModel {
                 card,
@@ -284,6 +299,8 @@ impl LocalModelBuilder {
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
         card.runtime_config = self.runtime_config.clone();
+        card.media_decoder = self.media_decoder.clone();
+        card.media_fetcher = self.media_fetcher.clone();
 
         Ok(LocalModel {
             card,
@@ -414,22 +431,19 @@ impl LocalModel {
         model_type: ModelType,
         model_input: ModelInput,
     ) -> anyhow::Result<()> {
-        // A static component doesn't have an etcd_client because it doesn't need to register
-        let Some(etcd_client) = endpoint.drt().etcd_client() else {
-            anyhow::bail!("Cannot attach to static endpoint");
-        };
         self.card.model_type = model_type;
         self.card.model_input = model_input;
 
-        // Publish the Model Deployment Card to KV store
-        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStore::new(etcd_client.clone()));
-        let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
-        let lease_id = endpoint.drt().primary_lease().map(|l| l.id()).unwrap_or(0);
-        let key = Key::from_raw(endpoint.unique_path(lease_id));
+        // Register the Model Deployment Card via discovery interface
+        let discovery = endpoint.drt().discovery();
+        let spec = DiscoverySpec::from_model(
+            endpoint.component().namespace().name().to_string(),
+            endpoint.component().name().to_string(),
+            endpoint.name().to_string(),
+            &self.card,
+        )?;
+        let _instance = discovery.register(spec).await?;
 
-        let _outcome = card_store
-            .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
-            .await?;
         Ok(())
     }
 }

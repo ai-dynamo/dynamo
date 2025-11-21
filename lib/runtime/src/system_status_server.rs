@@ -3,7 +3,7 @@
 
 use crate::config::HealthStatus;
 use crate::logging::make_request_span;
-use crate::metrics::MetricsRegistry;
+use crate::metrics::MetricsHierarchy;
 use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
 use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
@@ -56,17 +56,32 @@ impl Clone for SystemStatusServerInfo {
 pub struct SystemStatusState {
     // global drt registry is for printing out the entire Prometheus format output
     root_drt: Arc<crate::DistributedRuntime>,
+    // Discovery metadata (only for Kubernetes backend)
+    discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
 }
 
 impl SystemStatusState {
     /// Create new system status server state with the provided distributed runtime
-    pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
-        Ok(Self { root_drt: drt })
+    pub fn new(
+        drt: Arc<crate::DistributedRuntime>,
+        discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            root_drt: drt,
+            discovery_metadata,
+        })
     }
 
     /// Get a reference to the distributed runtime
     pub fn drt(&self) -> &crate::DistributedRuntime {
         &self.root_drt
+    }
+
+    /// Get a reference to the discovery metadata if available
+    pub fn discovery_metadata(
+        &self,
+    ) -> Option<&Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>> {
+        self.discovery_metadata.as_ref()
     }
 }
 
@@ -76,18 +91,19 @@ pub async fn spawn_system_status_server(
     port: u16,
     cancel_token: CancellationToken,
     drt: Arc<crate::DistributedRuntime>,
+    discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     // Create system status server state with the provided distributed runtime
-    let server_state = Arc::new(SystemStatusState::new(drt)?);
+    let server_state = Arc::new(SystemStatusState::new(drt, discovery_metadata)?);
     let health_path = server_state
         .drt()
-        .system_health
+        .system_health()
         .lock()
         .health_path()
         .to_string();
     let live_path = server_state
         .drt()
-        .system_health
+        .system_health()
         .lock()
         .live_path()
         .to_string();
@@ -112,6 +128,13 @@ pub async fn spawn_system_status_server(
             get({
                 let state = Arc::clone(&server_state);
                 move || metrics_handler(state)
+            }),
+        )
+        .route(
+            "/metadata",
+            get({
+                let state = Arc::clone(&server_state);
+                move || metadata_handler(state)
             }),
         )
         .fallback(|| async {
@@ -158,9 +181,11 @@ pub async fn spawn_system_status_server(
 #[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Get basic health status
-    let system_health = state.drt().system_health.lock();
-    let (healthy, endpoints) = system_health.get_health_status();
-    let uptime = Some(system_health.uptime());
+    let system_health = state.drt().system_health();
+    let system_health_lock = system_health.lock();
+    let (healthy, endpoints) = system_health_lock.get_health_status();
+    let uptime = Some(system_health_lock.uptime());
+    drop(system_health_lock);
 
     let healthy_string = if healthy { "ready" } else { "notready" };
     let status_code = if healthy {
@@ -184,29 +209,14 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 #[tracing::instrument(skip_all, level = "trace")]
 async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
-    state.drt().system_health.lock().update_uptime_gauge();
+    state.drt().system_health().lock().update_uptime_gauge();
 
-    // Execute all the callbacks for all registered hierarchies
-    let all_hierarchies: Vec<String> = {
-        let registries = state.drt().hierarchy_to_metricsregistry.read().unwrap();
-        registries.keys().cloned().collect()
-    };
-
-    for hierarchy in &all_hierarchies {
-        let callback_results = state.drt().execute_prometheus_update_callbacks(hierarchy);
-        for result in callback_results {
-            if let Err(e) = result {
-                tracing::error!(
-                    "Error executing metrics callback for hierarchy '{}': {}",
-                    hierarchy,
-                    e
-                );
-            }
-        }
-    }
-
-    // Get all metrics from DistributedRuntime (top-level)
-    let mut response = match state.drt().prometheus_expfmt() {
+    // Get all metrics from DistributedRuntime
+    // Note: In the new hierarchy-based architecture, metrics are automatically registered
+    // at all parent levels, so DRT's metrics include all metrics from children
+    // (Namespace, Component, Endpoint). The prometheus_expfmt() method also executes
+    // all update callbacks and expfmt callbacks before returning the metrics.
+    let response = match state.drt().metrics().prometheus_expfmt() {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Failed to get metrics from registry: {}", e);
@@ -217,26 +227,43 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
         }
     };
 
-    // Collect and append Prometheus exposition text from all hierarchies
-    for hierarchy in &all_hierarchies {
-        let expfmt = {
-            let registries = state.drt().hierarchy_to_metricsregistry.read().unwrap();
-            if let Some(entry) = registries.get(hierarchy) {
-                entry.execute_prometheus_expfmt_callbacks()
-            } else {
-                String::new()
-            }
-        };
+    (StatusCode::OK, response)
+}
 
-        if !expfmt.is_empty() {
-            if !response.ends_with('\n') {
-                response.push('\n');
-            }
-            response.push_str(&expfmt);
+/// Metadata handler
+#[tracing::instrument(skip_all, level = "trace")]
+async fn metadata_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+    // Check if discovery metadata is available
+    let metadata = match state.discovery_metadata() {
+        Some(metadata) => metadata,
+        None => {
+            tracing::debug!("Metadata endpoint called but no discovery metadata available");
+            return (
+                StatusCode::NOT_FOUND,
+                "Discovery metadata not available".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    // Read the metadata
+    let metadata_guard = metadata.read().await;
+
+    // Serialize to JSON
+    match serde_json::to_string(&*metadata_guard) {
+        Ok(json) => {
+            tracing::trace!("Returning metadata: {} bytes", json.len());
+            (StatusCode::OK, json).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to serialize metadata: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to serialize metadata".to_string(),
+            )
+                .into_response()
         }
     }
-
-    (StatusCode::OK, response)
 }
 
 // Regular tests: cargo test system_status_server --lib
@@ -281,7 +308,7 @@ mod tests {
 mod integration_tests {
     use super::*;
     use crate::distributed::distributed_test_utils::create_test_drt_async;
-    use crate::metrics::MetricsRegistry;
+    use crate::metrics::MetricsHierarchy;
     use anyhow::Result;
     use rstest::rstest;
     use std::sync::Arc;
@@ -290,17 +317,17 @@ mod integration_tests {
     #[tokio::test]
     async fn test_uptime_from_system_health() {
         // Test that uptime is available from SystemHealth
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
             let drt = create_test_drt_async().await;
 
             // Get uptime from SystemHealth
-            let uptime = drt.system_health.lock().uptime();
+            let uptime = drt.system_health().lock().uptime();
             // Uptime should exist (even if close to zero)
             assert!(uptime.as_nanos() > 0 || uptime.is_zero());
 
             // Sleep briefly and check uptime increases
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let uptime_after = drt.system_health.lock().uptime();
+            let uptime_after = drt.system_health().lock().uptime();
             assert!(uptime_after > uptime);
         })
         .await;
@@ -309,13 +336,13 @@ mod integration_tests {
     #[tokio::test]
     async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
             let drt = create_test_drt_async().await;
-            // SystemStatusState is already created in distributed.rs when DYN_SYSTEM_ENABLED=false
+            // SystemStatusState is already created in distributed.rs
             // so we don't need to create it again here
 
             // The uptime_seconds metric should already be registered and available
-            let response = drt.prometheus_expfmt().unwrap();
+            let response = drt.metrics().prometheus_expfmt().unwrap();
             println!("Full metrics response:\n{}", response);
 
             // Filter out NATS client metrics for comparison
@@ -347,23 +374,23 @@ mod integration_tests {
     #[tokio::test]
     async fn test_uptime_gauge_updates() {
         // Test that the uptime gauge is properly updated and increases over time
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
             let drt = create_test_drt_async().await;
 
             // Get initial uptime
-            let initial_uptime = drt.system_health.lock().uptime();
+            let initial_uptime = drt.system_health().lock().uptime();
 
             // Update the gauge with initial value
-            drt.system_health.lock().update_uptime_gauge();
+            drt.system_health().lock().update_uptime_gauge();
 
             // Sleep for 100ms
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
             // Get uptime after sleep
-            let uptime_after_sleep = drt.system_health.lock().uptime();
+            let uptime_after_sleep = drt.system_health().lock().uptime();
 
             // Update the gauge again
-            drt.system_health.lock().update_uptime_gauge();
+            drt.system_health().lock().update_uptime_gauge();
 
             // Verify uptime increased by at least 100ms
             let elapsed = uptime_after_sleep - initial_uptime;
@@ -379,17 +406,17 @@ mod integration_tests {
     #[tokio::test]
     async fn test_http_requests_fail_when_system_disabled() {
         // Test that system status server is not running when disabled
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
             let drt = create_test_drt_async().await;
 
             // Verify that system status server info is None when disabled
             let system_info = drt.system_status_server_info();
             assert!(
                 system_info.is_none(),
-                "System status server should not be running when DYN_SYSTEM_ENABLED=false"
+                "System status server should not be running when disabled"
             );
 
-            println!("✓ System status server correctly disabled when DYN_SYSTEM_ENABLED=false");
+            println!("✓ System status server correctly disabled when not enabled");
         })
         .await;
     }
@@ -433,7 +460,6 @@ mod integration_tests {
         #[allow(clippy::redundant_closure_call)]
         temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 (
                     "DYN_SYSTEM_STARTING_HEALTH_STATUS",
@@ -516,7 +542,6 @@ mod integration_tests {
         #[allow(clippy::redundant_closure_call)]
         let _ = temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready")),
                 ("DYN_LOGGING_JSONL", Some("1")),
@@ -571,7 +596,6 @@ mod integration_tests {
         const ENDPOINT_HEALTH_CONFIG: &str = "[\"generate\"]";
         temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
                 ("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Some(ENDPOINT_HEALTH_CONFIG)),
@@ -585,8 +609,7 @@ mod integration_tests {
                 // Ensure system status server was spawned by DRT
                 assert!(
                     system_info_opt.is_some(),
-                    "System status server was not spawned by DRT. Expected DRT to spawn server when DYN_SYSTEM_ENABLED=true, but system_status_server_info() returned None. Environment: DYN_SYSTEM_ENABLED={:?}, DYN_SYSTEM_PORT={:?}",
-                    std::env::var("DYN_SYSTEM_ENABLED"),
+                    "System status server was not spawned by DRT. Expected DRT to spawn server when DYN_SYSTEM_PORT is set to a positive value, but system_status_server_info() returned None. Environment: DYN_SYSTEM_PORT={:?}",
                     std::env::var("DYN_SYSTEM_PORT")
                 );
 
@@ -617,8 +640,8 @@ mod integration_tests {
                 struct TestHandler;
 
                 #[async_trait]
-                impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for TestHandler {
-                    async fn generate(&self, input: SingleIn<String>) -> crate::Result<ManyOut<Annotated<String>>> {
+                impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, anyhow::Error> for TestHandler {
+                    async fn generate(&self, input: SingleIn<String>) -> anyhow::Result<ManyOut<Annotated<String>>> {
                         let (data, ctx) = input.into_parts();
                         let response = Annotated::from_data(format!("You responded: {}", data));
                         Ok(crate::pipeline::ResponseStream::new(
@@ -681,7 +704,6 @@ mod integration_tests {
         // use reqwest for HTTP requests
         temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready")),
             ],
@@ -734,7 +756,6 @@ mod integration_tests {
 
         temp_env::async_with_vars(
             [
-                ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
                 (
@@ -768,17 +789,16 @@ mod integration_tests {
 
                 // Register the endpoint and its health check payload
                 {
-                    let system_health = drt.system_health.lock();
-                    system_health.register_health_check_target(
+                    let system_health = drt.system_health();
+                    let system_health_lock = system_health.lock();
+                    system_health_lock.register_health_check_target(
                         endpoint,
                         crate::component::Instance {
                             component: "test_component".to_string(),
                             endpoint: "health".to_string(),
                             namespace: "test_namespace".to_string(),
                             instance_id: 1,
-                            transport: crate::component::TransportType::NatsTcp(
-                                endpoint.to_string(),
-                            ),
+                            transport: crate::component::TransportType::Nats(endpoint.to_string()),
                         },
                         health_check_payload.clone(),
                     );
@@ -795,7 +815,7 @@ mod integration_tests {
                 );
 
                 // Set endpoint to healthy state
-                drt.system_health
+                drt.system_health()
                     .lock()
                     .set_endpoint_health_status(endpoint, HealthStatus::Ready);
 
@@ -812,7 +832,7 @@ mod integration_tests {
 
                 // Verify the endpoint status in SystemHealth directly
                 let endpoint_status = drt
-                    .system_health
+                    .system_health()
                     .lock()
                     .get_endpoint_health_status(endpoint);
                 assert_eq!(

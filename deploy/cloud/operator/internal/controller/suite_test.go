@@ -33,6 +33,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 
@@ -108,6 +109,8 @@ var _ = BeforeSuite(func() {
 	err = networkingv1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 	err = appsv1.AddToScheme(scheme)
+	Expect(err).NotTo(HaveOccurred())
+	err = discoveryv1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 	err = monitoringv1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())

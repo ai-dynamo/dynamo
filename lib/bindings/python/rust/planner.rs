@@ -479,7 +479,7 @@ impl InnerClient {
     /// Wait for a new scaling decision. Use `get` when this returns to fetch the values.
     async fn wait(&self) -> anyhow::Result<()> {
         let watcher = self.etcd_client.kv_watch_prefix(&self.key).await?;
-        let (_prefix, _watcher, mut receiver) = watcher.dissolve();
+        let (_prefix, mut receiver) = watcher.dissolve();
         tokio::select! {
             _ = receiver.recv() => {
                 Ok(())

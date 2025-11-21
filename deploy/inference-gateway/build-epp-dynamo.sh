@@ -69,8 +69,8 @@ if [[ ! -f "${DYNAMO_LIB_DIR}/libdynamo_llm_capi.a" ]]; then
     exit 1
 fi
 
-if [[ ! -f "${GAIE_DIR}/Dockerfile.epp" ]]; then
-    echo "Docker.epp file copy failed!"
+if [[ ! -f "${GAIE_DIR}/Dockerfile.dynamo" ]]; then
+    echo "Docker.dynamo file copy failed!"
     exit 1
 fi
 

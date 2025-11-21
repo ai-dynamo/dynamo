@@ -1,35 +1,90 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub use crate::component::Component;
-use crate::storage::key_value_store::{EtcdStore, KeyValueStore, MemoryStore};
+use crate::component::Component;
+use crate::pipeline::PipelineError;
+use crate::storage::key_value_store::{
+    EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, KeyValueStoreSelect,
+    MemoryStore,
+};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
-    ErrorContext, PrometheusUpdateCallback,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
-    discovery::DiscoveryClient,
-    metrics::MetricsRegistry,
+    discovery::Discovery,
+    metrics::PrometheusUpdateCallback,
+    metrics::{MetricsHierarchy, MetricsRegistry},
     service::ServiceClient,
     transports::{etcd, nats, tcp},
 };
+use crate::{discovery, system_status_server, transports};
 
 use super::utils::GracefulShutdownTracker;
-use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
-use std::sync::OnceLock;
+use crate::SystemHealth;
+use crate::runtime::Runtime;
 
+use async_once_cell::OnceCell;
+use std::sync::{Arc, OnceLock, Weak};
+
+use anyhow::Result;
 use derive_getters::Dissolve;
 use figment::error;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-impl MetricsRegistry for DistributedRuntime {
+/// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
+/// communication protocols and transports.
+#[derive(Clone)]
+pub struct DistributedRuntime {
+    // local runtime
+    runtime: Runtime,
+
+    // Unified transport manager
+    etcd_client: Option<transports::etcd::Client>,
+    nats_client: Option<transports::nats::Client>,
+    store: KeyValueStoreManager,
+    tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    network_manager: Arc<OnceCell<Arc<crate::pipeline::network::manager::NetworkManager>>>,
+    system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
+
+    // Service discovery client
+    discovery_client: Arc<dyn discovery::Discovery>,
+
+    // Discovery metadata (only used for Kubernetes backend)
+    // Shared with system status server to expose via /metadata endpoint
+    discovery_metadata: Option<Arc<tokio::sync::RwLock<discovery::DiscoveryMetadata>>>,
+
+    // local registry for components
+    // the registry allows us to use share runtime resources across instances of the same component object.
+    // take for example two instances of a client to the same remote component. The registry allows us to use
+    // a single endpoint watcher for both clients, this keeps the number background tasking watching specific
+    // paths in etcd to a minimum.
+    component_registry: component::Registry,
+
+    // Will only have static components that are not discoverable via etcd, they must be know at
+    // startup. Will not start etcd.
+    is_static: bool,
+
+    instance_sources: Arc<tokio::sync::Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
+
+    // Health Status
+    system_health: Arc<parking_lot::Mutex<SystemHealth>>,
+
+    // This hierarchy's own metrics registry
+    metrics_registry: MetricsRegistry,
+}
+
+impl MetricsHierarchy for DistributedRuntime {
     fn basename(&self) -> String {
         "".to_string() // drt has no basename. Basename only begins with the Namespace.
     }
 
-    fn parent_hierarchy(&self) -> Vec<String> {
-        vec![] // drt is the root, so no parent hierarchy
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        vec![] // drt is the root, so no parent hierarchies
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        &self.metrics_registry
     }
 }
 
@@ -41,18 +96,23 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let (etcd_config, nats_config, is_static) = config.dissolve();
+        let (selected_kv_store, nats_config, is_static) = config.dissolve();
 
         let runtime_clone = runtime.clone();
 
-        let (etcd_client, store) = if is_static {
-            let store: Arc<dyn KeyValueStore> = Arc::new(MemoryStore::new());
-            (None, store)
-        } else {
-            let etcd_client = etcd::Client::new(etcd_config.clone(), runtime_clone).await?;
-            let store: Arc<dyn KeyValueStore> = Arc::new(EtcdStore::new(etcd_client.clone()));
-
-            (Some(etcd_client), store)
+        let (etcd_client, store) = match (is_static, selected_kv_store) {
+            (false, KeyValueStoreSelect::Etcd(etcd_config)) => {
+                let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
+                    // The returned error doesn't show because of a dropped runtime error, so
+                    // log it first.
+                    tracing::error!(%err, "Could not connect to etcd. Pass `--store-kv ..` to use a different backend or start etcd."))?;
+                let store = KeyValueStoreManager::etcd(etcd_client.clone());
+                (Some(etcd_client), store)
+            }
+            (false, KeyValueStoreSelect::File(root)) => (None, KeyValueStoreManager::file(root)),
+            (true, _) | (false, KeyValueStoreSelect::Memory) => {
+                (None, KeyValueStoreManager::memory())
+            }
         };
 
         let nats_client = Some(nats_config.clone().connect().await?);
@@ -79,20 +139,53 @@ impl DistributedRuntime {
 
         let nats_client_for_metrics = nats_client.clone();
 
+        // Initialize discovery client based on backend configuration
+        let discovery_backend =
+            std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "kv_store".to_string());
+
+        let (discovery_client, discovery_metadata) = match discovery_backend.as_str() {
+            "kubernetes" => {
+                tracing::info!("Initializing Kubernetes discovery backend");
+                let metadata = Arc::new(tokio::sync::RwLock::new(
+                    crate::discovery::DiscoveryMetadata::new(),
+                ));
+                let client = crate::discovery::KubeDiscoveryClient::new(
+                    metadata.clone(),
+                    runtime.primary_token(),
+                )
+                .await
+                .inspect_err(
+                    |err| tracing::error!(%err, "Failed to initialize Kubernetes discovery client"),
+                )?;
+                (Arc::new(client) as Arc<dyn Discovery>, Some(metadata))
+            }
+            _ => {
+                tracing::info!("Initializing KV store discovery backend");
+                use crate::discovery::KVStoreDiscovery;
+                (
+                    Arc::new(KVStoreDiscovery::new(
+                        store.clone(),
+                        runtime.primary_token(),
+                    )) as Arc<dyn Discovery>,
+                    None,
+                )
+            }
+        };
+
         let distributed_runtime = Self {
             runtime,
             etcd_client,
             store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            network_manager: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
-            component_registry: component::Registry::new(),
+            discovery_client,
+            discovery_metadata,
+            component_registry: component::Registry::new_with_static(is_static),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
-            hierarchy_to_metricsregistry: Arc::new(std::sync::RwLock::new(HashMap::<
-                String,
-                crate::MetricsRegistryEntry,
-            >::new())),
+            metrics_registry: crate::MetricsRegistry::new(),
             system_health,
         };
 
@@ -101,9 +194,7 @@ impl DistributedRuntime {
                 &distributed_runtime,
                 nats_client_for_metrics.client().clone(),
             )?;
-            let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
-            drt_hierarchies.push(distributed_runtime.hierarchy());
-            // Register a callback to update NATS client metrics
+            // Register a callback to update NATS client metrics on the DRT's metrics registry
             let nats_client_callback = Arc::new({
                 let nats_client_clone = nats_client_metrics.clone();
                 move || {
@@ -112,7 +203,8 @@ impl DistributedRuntime {
                 }
             });
             distributed_runtime
-                .register_prometheus_update_callback(drt_hierarchies, nats_client_callback);
+                .metrics_registry
+                .add_update_callback(nats_client_callback);
         }
 
         // Initialize the uptime gauge in SystemHealth
@@ -125,7 +217,7 @@ impl DistributedRuntime {
         if let Some(cancel_token) = cancel_token {
             // System server is enabled - start both the state and HTTP server
             let host = config.system_host.clone();
-            let port = config.system_port;
+            let port = config.system_port as u16;
 
             // Start system status server (it creates SystemStatusState internally)
             match crate::system_status_server::spawn_system_status_server(
@@ -133,6 +225,7 @@ impl DistributedRuntime {
                 port,
                 cancel_token,
                 Arc::new(distributed_runtime.clone()),
+                distributed_runtime.discovery_metadata.clone(),
             )
             .await
             {
@@ -210,14 +303,24 @@ impl DistributedRuntime {
         self.runtime.primary_token()
     }
 
-    /// The etcd lease all our components will be attached to.
-    /// Not available for static workers.
-    pub fn primary_lease(&self) -> Option<etcd::Lease> {
-        self.etcd_client.as_ref().map(|c| c.primary_lease())
+    // TODO: Don't hand out pointers, instead have methods to use the registry in friendly ways
+    // (without being aware of async locks and so on)
+    pub fn component_registry(&self) -> &component::Registry {
+        &self.component_registry
+    }
+
+    // TODO: Don't hand out pointers, instead provide system health related services.
+    pub fn system_health(&self) -> Arc<parking_lot::Mutex<SystemHealth>> {
+        self.system_health.clone()
+    }
+
+    pub fn connection_id(&self) -> u64 {
+        self.discovery_client.instance_id()
     }
 
     pub fn shutdown(&self) {
         self.runtime.shutdown();
+        self.store.shutdown();
     }
 
     /// Create a [`Namespace`]
@@ -225,25 +328,9 @@ impl DistributedRuntime {
         Namespace::new(self.clone(), name.into(), self.is_static)
     }
 
-    // /// Create a [`Component`]
-    // pub fn component(
-    //     &self,
-    //     name: impl Into<String>,
-    //     namespace: impl Into<String>,
-    // ) -> Result<Component> {
-    //     Ok(ComponentBuilder::from_runtime(self.clone())
-    //         .name(name.into())
-    //         .namespace(namespace.into())
-    //         .build()?)
-    // }
-
-    pub(crate) fn discovery_client(&self, namespace: impl Into<String>) -> DiscoveryClient {
-        DiscoveryClient::new(
-            namespace.into(),
-            self.etcd_client
-                .clone()
-                .expect("Attempt to get discovery_client on static DistributedRuntime"),
-        )
+    /// Returns the discovery interface for service registration and discovery
+    pub fn discovery(&self) -> Arc<dyn Discovery> {
+        self.discovery_client.clone()
     }
 
     pub(crate) fn service_client(&self) -> Option<ServiceClient> {
@@ -256,10 +343,76 @@ impl DistributedRuntime {
             .get_or_try_init(async move {
                 let options = tcp::server::ServerOptions::default();
                 let server = tcp::server::TcpStreamServer::new(options).await?;
-                OK(server)
+                Ok::<_, PipelineError>(server)
             })
             .await?
             .clone())
+    }
+
+    /// Get the network manager (lazy initialization)
+    ///
+    /// The network manager consolidates all network configuration and provides
+    /// unified access to request plane servers and clients.
+    pub async fn network_manager(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::manager::NetworkManager>> {
+        use crate::pipeline::network::manager::NetworkManager;
+
+        let manager = self
+            .network_manager
+            .get_or_try_init(async {
+                // Get NATS client if available
+                let nats_client = self.nats_client().map(|c| c.client().clone());
+
+                // NetworkManager handles all config reading and mode selection
+                anyhow::Ok(NetworkManager::new(
+                    self.child_token(),
+                    nats_client,
+                    self.component_registry.clone(),
+                ))
+            })
+            .await?;
+
+        Ok(manager.clone())
+    }
+
+    /// Get the request plane server (convenience method)
+    ///
+    /// This is a shortcut for `network_manager().await?.server().await`.
+    pub async fn request_plane_server(
+        &self,
+    ) -> Result<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>>
+    {
+        let manager = self.network_manager().await?;
+        manager.server().await
+    }
+
+    /// DEPRECATED: Use network_manager().server() instead
+    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
+    pub async fn http_server(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>> {
+        // For backward compatibility, try to downcast
+        let _server = self.request_plane_server().await?;
+        // This will only work if we're actually in HTTP mode
+        // For now, just return an error suggesting the new API
+        anyhow::bail!(
+            "http_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
+        )
+    }
+
+    /// DEPRECATED: Use network_manager().server() instead
+    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
+    pub async fn shared_tcp_server(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer>> {
+        // For backward compatibility, try to downcast
+        let _server = self.request_plane_server().await?;
+        // This will only work if we're actually in TCP mode
+        // For now, just return an error suggesting the new API
+        anyhow::bail!(
+            "shared_tcp_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
+        )
     }
 
     pub fn nats_client(&self) -> Option<&nats::Client> {
@@ -274,14 +427,17 @@ impl DistributedRuntime {
     }
 
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
+    //
+    // Try to use `store()` instead of this. Only use this if you have not been able to migrate
+    // yet, or if you require etcd-specific features like distributed locking (rare).
     pub fn etcd_client(&self) -> Option<etcd::Client> {
         self.etcd_client.clone()
     }
 
     /// An interface to store things. Will eventually replace `etcd_client`.
     /// Currently does key-value, but will grow to include whatever we need to store.
-    pub fn store(&self) -> Arc<dyn KeyValueStore> {
-        self.store.clone()
+    pub fn store(&self) -> &KeyValueStoreManager {
+        &self.store
     }
 
     pub fn child_token(&self) -> CancellationToken {
@@ -295,83 +451,11 @@ impl DistributedRuntime {
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
     }
-
-    /// Add a Prometheus metric to a specific hierarchy's registry. Note that it is possible
-    /// to register the same metric name multiple times, as long as the labels are different.
-    pub fn add_prometheus_metric(
-        &self,
-        hierarchy: &str,
-        prometheus_metric: Box<dyn prometheus::core::Collector>,
-    ) -> anyhow::Result<()> {
-        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
-        let entry = registries.entry(hierarchy.to_string()).or_default();
-
-        // Try to register the metric
-        entry
-            .prometheus_registry
-            .register(prometheus_metric)
-            .map_err(|e| e.into())
-    }
-
-    /// Add a Prometheus update callback to the given hierarchies
-    /// TODO: rename this to register_callback, once we move the the MetricsRegistry trait
-    ///       out of the runtime, and make it into a composed module.
-    pub fn register_prometheus_update_callback(
-        &self,
-        hierarchies: Vec<String>,
-        callback: PrometheusUpdateCallback,
-    ) {
-        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
-        for hierarchy in &hierarchies {
-            registries
-                .entry(hierarchy.clone())
-                .or_default()
-                .add_prometheus_update_callback(callback.clone());
-        }
-    }
-
-    /// Execute all Prometheus update callbacks for a given hierarchy and return their results
-    pub fn execute_prometheus_update_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
-        // Clone callbacks while holding read lock (fast operation)
-        let callbacks = {
-            let registries = self.hierarchy_to_metricsregistry.read().unwrap();
-            registries
-                .get(hierarchy)
-                .map(|entry| entry.prometheus_update_callbacks.clone())
-        }; // Read lock released here
-
-        // Execute callbacks without holding the lock
-        match callbacks {
-            Some(callbacks) => callbacks.iter().map(|callback| callback()).collect(),
-            None => Vec::new(),
-        }
-    }
-
-    /// Add a Prometheus exposition text callback that returns Prometheus text for the given hierarchies
-    pub fn register_prometheus_expfmt_callback(
-        &self,
-        hierarchies: Vec<String>,
-        callback: crate::PrometheusExpositionFormatCallback,
-    ) {
-        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
-        for hierarchy in &hierarchies {
-            registries
-                .entry(hierarchy.clone())
-                .or_default()
-                .add_prometheus_expfmt_callback(callback.clone());
-        }
-    }
-
-    /// Get all registered hierarchy keys. Private because it is only used for testing.
-    fn get_registered_hierarchies(&self) -> Vec<String> {
-        let registries = self.hierarchy_to_metricsregistry.read().unwrap();
-        registries.keys().cloned().collect()
-    }
 }
 
 #[derive(Dissolve)]
 pub struct DistributedConfig {
-    pub etcd_config: etcd::ClientOptions,
+    pub store_backend: KeyValueStoreSelect,
     pub nats_config: nats::ClientOptions,
     pub is_static: bool,
 }
@@ -379,22 +463,22 @@ pub struct DistributedConfig {
 impl DistributedConfig {
     pub fn from_settings(is_static: bool) -> DistributedConfig {
         DistributedConfig {
-            etcd_config: etcd::ClientOptions::default(),
+            store_backend: KeyValueStoreSelect::Etcd(Box::default()),
             nats_config: nats::ClientOptions::default(),
             is_static,
         }
     }
 
     pub fn for_cli() -> DistributedConfig {
-        let mut config = DistributedConfig {
-            etcd_config: etcd::ClientOptions::default(),
+        let etcd_config = etcd::ClientOptions {
+            attach_lease: false,
+            ..Default::default()
+        };
+        DistributedConfig {
+            store_backend: KeyValueStoreSelect::Etcd(Box::new(etcd_config)),
             nats_config: nats::ClientOptions::default(),
             is_static: false,
-        };
-
-        config.etcd_config.attach_lease = false;
-
-        config
+        }
     }
 }
 
@@ -421,7 +505,7 @@ mod tests {
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_disabled() {
         // Test uptime with system status server disabled
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", None::<&str>)], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 
@@ -447,7 +531,7 @@ mod tests {
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_enabled() {
         // Test uptime with system status server enabled
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("true"))], async {
+        temp_env::async_with_vars([("DYN_SYSTEM_PORT", Some("8081"))], async {
             // Start a DRT
             let drt = create_test_drt_async().await;
 

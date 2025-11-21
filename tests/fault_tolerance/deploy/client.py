@@ -180,10 +180,81 @@ def wait_for_model_availability(
             logger.info(f"Waiting {wait_time}s before retry...")
             time.sleep(wait_time)
 
-    logger.warning(
-        "Could not confirm model availability after all attempts, proceeding anyway..."
-    )
+    logger.warning("Could not confirm model availability after all attempts")
     return False
+
+
+def validate_aiperf_results(
+    json_path: Path,
+    requests_per_client: int,
+    attempt: int,
+    logger: logging.Logger,
+    attempt_dir: Path,
+    pod_name: str,
+    port: int,
+) -> bool:
+    """
+    Validate AI-Perf results from JSON output.
+
+    Args:
+        json_path: Path to the AI-Perf JSON output file
+        requests_per_client: Expected number of requests
+        attempt: Current attempt number (0-based)
+        logger: Logger instance
+        attempt_dir: Directory containing attempt results
+        pod_name: Pod name for logging
+        port: Port number for logging
+
+    Returns:
+        True if the attempt was successful, False if it should be retried
+    """
+    if not json_path.exists():
+        # No JSON output, but aiperf returned 0 - might be okay
+        logger.info(f"Attempt {attempt + 1} completed (return code 0, no JSON output)")
+        log_summary_metrics(attempt_dir, logger, pod_name, port)
+        return True
+
+    try:
+        with open(json_path, "r") as f:
+            aiperf_data = json.load(f)
+
+        # Check for errors in the output
+        error_count = 0
+        if "records" in aiperf_data and "error_request_count" in aiperf_data["records"]:
+            error_count = int(
+                aiperf_data["records"]["error_request_count"].get("avg", 0)
+            )
+
+        # Also check error_summary
+        if "error_summary" in aiperf_data:
+            error_summary_count = sum(
+                err.get("count", 0) for err in aiperf_data["error_summary"]
+            )
+            error_count = max(error_count, error_summary_count)
+
+        # Consider it a failure if most requests failed (> 90%)
+        failure_threshold = requests_per_client * 0.9
+        if error_count >= failure_threshold:
+            logger.warning(
+                f"Attempt {attempt + 1} had {error_count}/{requests_per_client} failed requests - retrying"
+            )
+            return False  # Not successful, continue retrying
+        else:
+            successful_count = requests_per_client - error_count
+            logger.info(
+                f"Attempt {attempt + 1} succeeded with {successful_count}/{requests_per_client} successful requests"
+            )
+            log_summary_metrics(attempt_dir, logger, pod_name, port)
+            return True  # Successful
+
+    except Exception as e:
+        logger.warning(f"Could not parse AI-Perf output to check for failures: {e}")
+        # Assume success if we can't parse the output but aiperf returned 0
+        logger.info(
+            f"Attempt {attempt + 1} completed (return code 0, could not verify success)"
+        )
+        log_summary_metrics(attempt_dir, logger, pod_name, port)
+        return True  # Assume success
 
 
 def run_aiperf(
@@ -275,7 +346,10 @@ def run_aiperf(
     logger.info(f"Using model name: {model}")
 
     # Wait for model to be available
-    wait_for_model_availability(url, endpoint, model, logger)
+    model_ready = wait_for_model_availability(url, endpoint, model, logger)
+    if not model_ready:
+        logger.warning("Model not ready, but proceeding with AI-Perf test anyway")
+        # This might result in all requests failing, but the retry logic will handle it
 
     logger.info(f"Command: {' '.join(cmd)}")
 
@@ -325,12 +399,19 @@ def run_aiperf(
             )
 
             if result.returncode == 0:
-                logger.info(
-                    f"Attempt {attempt + 1} succeeded with all {requests_per_client} requests"
+                # AI-Perf returns 0 even if all requests failed, so we need to check the output
+                json_path = attempt_dir / "profile_export_aiperf.json"
+                success = validate_aiperf_results(
+                    json_path=json_path,
+                    requests_per_client=requests_per_client,
+                    attempt=attempt,
+                    logger=logger,
+                    attempt_dir=attempt_dir,
+                    pod_name=pod_name,
+                    port=port,
                 )
-                log_summary_metrics(attempt_dir, logger, pod_name, port)
-                success = True
-                break  # Success - we're done!
+                if success:
+                    break  # Success - exit the retry loop
             else:
                 logger.warning(
                     f"Attempt {attempt + 1} failed with return code {result.returncode}"
@@ -464,12 +545,7 @@ def client(
         client_output_dir.mkdir(parents=True, exist_ok=True)
 
         # Add a startup delay for early clients to give model time to load
-        if index < 5:
-            wait_time = 30 - (index * 5)  # 30, 25, 20, 15, 10 seconds
-            logger.info(
-                f"Client {index} waiting {wait_time}s for model registration..."
-            )
-            time.sleep(wait_time)
+        time.sleep(15)
 
         # Select frontend pod and setup port forwarding
         pod_name, port, selected_pod = get_frontend_port(

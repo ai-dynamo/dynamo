@@ -134,7 +134,7 @@ dynamo-build:
 
 dynamo-base-docker:
     ARG IMAGE=dynamo-base-docker
-    ARG DOCKER_SERVER=my-registry
+    ARG DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo
     ARG IMAGE_TAG=latest
 
     FROM ubuntu:24.04
@@ -175,7 +175,7 @@ all-test:
     BUILD ./deploy/cloud/operator+test
 
 all-docker:
-    ARG DOCKER_SERVER=my-registry
+    ARG DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo
     ARG IMAGE_TAG=latest
     BUILD ./deploy/cloud/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 
@@ -189,6 +189,6 @@ all:
 
 # For testing
 custom:
-    ARG DOCKER_SERVER=my-registry
+    ARG DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo
     ARG IMAGE_TAG=latest
     BUILD +all-test

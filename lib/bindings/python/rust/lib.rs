@@ -2,19 +2,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::local_model::LocalModel;
+use dynamo_runtime::distributed::DistributedConfig;
+use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyStopAsyncIteration;
+use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
 use rand::seq::IteratorRandom as _;
 use rs::pipeline::network::Ingress;
+use std::ffi::CString;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::time::Duration;
-use std::{fmt::Display, sync::Arc};
+use std::{
+    fmt::Display,
+    sync::{Arc, Weak},
+};
 use tokio::sync::Mutex;
 use tracing::Instrument;
 
@@ -32,6 +39,7 @@ use dynamo_llm::{self as llm_rs};
 use dynamo_llm::{entrypoint::RouterConfig, kv_router::KvRouterConfig};
 
 use crate::llm::local_model::ModelRuntimeConfig;
+use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 
 #[pyclass(eq, eq_int)]
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +62,7 @@ impl From<RouterMode> for RsRouterMode {
 mod context;
 mod engine;
 mod http;
+mod kserve_grpc;
 mod llm;
 mod parsers;
 mod planner;
@@ -118,6 +127,15 @@ fn create_request_context(
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
+    if rs::config::env_is_truthy("OTEL_EXPORT_ENABLED") {
+        eprintln!(
+            "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
+        );
+    } else {
+        rs::logging::init();
+    }
+
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
@@ -132,7 +150,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Endpoint>()?;
     m.add_class::<Client>()?;
     m.add_class::<AsyncResponseStream>()?;
-    m.add_class::<llm::disagg_router::DisaggregatedRouter>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
@@ -142,6 +159,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
+    m.add_class::<llm::preprocessor::MediaDecoder>()?;
+    m.add_class::<llm::preprocessor::MediaFetcher>()?;
     m.add_class::<llm::backend::Backend>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
     m.add_class::<llm::kv::KvIndexer>()?;
@@ -164,6 +183,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
+    m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<planner::VirtualConnectorCoordinator>()?;
     m.add_class::<planner::VirtualConnectorClient>()?;
@@ -176,9 +196,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
     prometheus_metrics::add_to_module(&prometheus_metrics)?;
     m.add_submodule(&prometheus_metrics)?;
-
-    #[cfg(feature = "block-manager")]
-    llm::block_manager::add_to_module(m)?;
 
     Ok(())
 }
@@ -200,7 +217,7 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
 /// This is the main way you create a Dynamo worker / backend.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -216,6 +233,8 @@ fn register_llm<'p>(
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
+    media_decoder: Option<MediaDecoder>,
+    media_fetcher: Option<MediaFetcher>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill {
@@ -288,7 +307,9 @@ fn register_llm<'p>(
             .migration_limit(Some(migration_limit))
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
-            .custom_template_path(custom_template_path_owned);
+            .custom_template_path(custom_template_path_owned)
+            .media_decoder(media_decoder.map(|m| m.inner))
+            .media_fetcher(media_fetcher.map(|m| m.inner));
         // Load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
         // Advertise ourself on etcd so ingress can find us
@@ -411,23 +432,36 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    fn new(event_loop: PyObject, is_static: bool) -> PyResult<Self> {
-        let worker = rs::Worker::from_settings().map_err(to_pyerr)?;
-        INIT.get_or_try_init(|| {
-            let primary = worker.tokio_runtime()?;
-            pyo3_async_runtimes::tokio::init_with_runtime(primary)
-                .map_err(|e| rs::error!("failed to initialize pyo3 static runtime: {:?}", e))?;
-            rs::OK(())
-        })
-        .map_err(to_pyerr)?;
+    fn new(event_loop: PyObject, store_kv: String, is_static: bool) -> PyResult<Self> {
+        let selected_kv_store: KeyValueStoreSelect = store_kv.parse().map_err(to_pyerr)?;
 
-        let runtime = worker.runtime().clone();
+        // Try to get existing runtime first, create new Worker only if needed
+        // This allows multiple DistributedRuntime instances to share the same tokio runtime
+        let runtime = rs::Worker::runtime_from_existing()
+            .or_else(|_| -> anyhow::Result<rs::Runtime> {
+                // No existing Worker, create new one
+                let worker = rs::Worker::from_settings()?;
+
+                // Initialize pyo3 bridge (only happens once per process)
+                INIT.get_or_try_init(|| -> anyhow::Result<()> {
+                    let primary = worker.tokio_runtime()?;
+                    pyo3_async_runtimes::tokio::init_with_runtime(primary).map_err(|e| {
+                        anyhow::anyhow!("failed to initialize pyo3 static runtime: {:?}", e)
+                    })?;
+                    Ok(())
+                })?;
+
+                Ok(worker.runtime().clone())
+            })
+            .map_err(to_pyerr)?;
 
         // Initialize logging in context where tokio runtime is available
         // otel exporter requires it
-        runtime.secondary().block_on(async {
-            rs::logging::init();
-        });
+        if rs::config::env_is_truthy("OTEL_EXPORT_ENABLED") {
+            runtime.secondary().block_on(async {
+                rs::logging::init();
+            });
+        }
 
         let inner =
             if is_static {
@@ -435,9 +469,14 @@ impl DistributedRuntime {
                     rs::DistributedRuntime::from_settings_without_discovery(runtime),
                 )
             } else {
+                let config = DistributedConfig {
+                    store_backend: selected_kv_store,
+                    is_static: false,
+                    nats_config: dynamo_runtime::transports::nats::ClientOptions::default(),
+                };
                 runtime
                     .secondary()
-                    .block_on(rs::DistributedRuntime::from_settings(runtime))
+                    .block_on(rs::DistributedRuntime::new(runtime, config))
             };
         let inner = inner.map_err(to_pyerr)?;
 
@@ -599,7 +638,7 @@ impl DistributedRuntime {
     }
 
     fn shutdown(&self) {
-        self.inner.runtime().shutdown();
+        self.inner.shutdown();
     }
 
     fn event_loop(&self) -> PyObject {
@@ -609,6 +648,21 @@ impl DistributedRuntime {
     fn child_token(&self) -> CancellationToken {
         let inner = self.inner.runtime().child_token();
         CancellationToken { inner }
+    }
+
+    // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
+    // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
+    // TODO: Create a separate crate "dynamo-python" so that all binding crates can import
+    // from it and share the same crate path. This will allow PyO3 to automatically
+    // recognize that both bindings use the same PyClass.
+    #[pyo3(name = "to_capsule")]
+    fn to_capsule<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
+        let arc: Arc<rs::DistributedRuntime> = Arc::new(self.inner.clone());
+        let weak: Weak<rs::DistributedRuntime> = Arc::downgrade(&arc);
+
+        let name = CString::new("dynamo.runtime.weak").expect("valid capsule name");
+
+        PyCapsule::new(py, weak, Some(name))
     }
 }
 
@@ -754,12 +808,9 @@ impl Endpoint {
         })
     }
 
-    fn lease_id(&self) -> i64 {
-        self.inner
-            .drt()
-            .primary_lease()
-            .map(|l| l.id())
-            .unwrap_or(0)
+    // Opaque unique ID for this worker. May change over worker lifetime.
+    fn connection_id(&self) -> u64 {
+        self.inner.drt().connection_id()
     }
 
     /// Get a RuntimeMetrics helper for creating Prometheus metrics
@@ -790,7 +841,7 @@ impl Namespace {
 impl Client {
     /// Get list of current instances.
     /// Replaces endpoint_ids.
-    fn instance_ids(&self) -> Vec<i64> {
+    fn instance_ids(&self) -> Vec<u64> {
         self.router.client.instance_ids()
     }
 
@@ -802,7 +853,7 @@ impl Client {
             inner
                 .wait_for_instances()
                 .await
-                .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<i64>>())
+                .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<u64>>())
                 .map_err(to_pyerr)
         })
     }
@@ -903,7 +954,7 @@ impl Client {
         &self,
         py: Python<'p>,
         request: PyObject,
-        instance_id: i64,
+        instance_id: u64,
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {

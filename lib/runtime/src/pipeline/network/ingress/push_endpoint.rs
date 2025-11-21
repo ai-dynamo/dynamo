@@ -39,7 +39,7 @@ impl PushEndpoint {
         namespace: String,
         component_name: String,
         endpoint_name: String,
-        instance_id: i64,
+        instance_id: u64,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
         let mut endpoint = endpoint;

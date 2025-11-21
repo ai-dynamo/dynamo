@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::Result;
+use anyhow::Result;
 use derive_builder::Builder;
 use figment::{
     Figment,
@@ -9,13 +9,14 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::OnceLock;
 use validator::Validate;
 
 /// Default system host for health and metrics endpoints
 const DEFAULT_SYSTEM_HOST: &str = "0.0.0.0";
 
-/// Default system port for health and metrics endpoints
-const DEFAULT_SYSTEM_PORT: u16 = 9090;
+/// Default system port for health and metrics endpoints (-1 = disabled)
+const DEFAULT_SYSTEM_PORT: i16 = -1;
 
 /// Default health endpoint paths
 const DEFAULT_SYSTEM_HEALTH_PATH: &str = "/health";
@@ -94,14 +95,19 @@ pub struct RuntimeConfig {
     pub system_host: String,
 
     /// System status server port for health and metrics endpoints
-    /// If set to 0, the system will assign a random available port
+    /// Set to -1 to disable the system status server (default)
+    /// Set to a positive port number (e.g. 8081) to enable it
     /// Set this at runtime with environment variable DYN_SYSTEM_PORT
     #[builder(default = "DEFAULT_SYSTEM_PORT")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
-    pub system_port: u16,
+    pub system_port: i16,
 
-    /// Health and metrics System status server enabled
-    /// Set this at runtime with environment variable DYN_SYSTEM_ENABLED
+    /// Health and metrics System status server enabled (DEPRECATED)
+    /// This field is deprecated. Use system_port instead (set to positive value to enable)
+    /// Environment variable DYN_SYSTEM_ENABLED is deprecated
+    #[deprecated(
+        note = "Use system_port instead. Set DYN_SYSTEM_PORT to enable the system metrics server."
+    )]
     #[builder(default = "false")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub system_enabled: bool,
@@ -181,7 +187,6 @@ impl fmt::Display for RuntimeConfig {
         write!(f, "max_blocking_threads={}, ", self.max_blocking_threads)?;
         write!(f, "system_host={}, ", self.system_host)?;
         write!(f, "system_port={}, ", self.system_port)?;
-        write!(f, "system_enabled={}", self.system_enabled)?;
         write!(
             f,
             "use_endpoint_health_status={:?}",
@@ -304,12 +309,20 @@ impl RuntimeConfig {
     ///
     /// Environment variables are prefixed with `DYN_RUNTIME_` and `DYN_SYSTEM`
     pub fn from_settings() -> Result<RuntimeConfig> {
-        // Check for deprecated environment variable
+        // Check for deprecated environment variables
         if std::env::var("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS").is_ok() {
             tracing::warn!(
                 "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS is deprecated and no longer used. \
                 System health is now determined by endpoints that register with health check payloads. \
                 Please update your configuration to register health check payloads directly on endpoints."
+            );
+        }
+
+        if std::env::var("DYN_SYSTEM_ENABLED").is_ok() {
+            tracing::warn!(
+                "DYN_SYSTEM_ENABLED is deprecated. \
+                System metrics server is now controlled solely by DYN_SYSTEM_PORT. \
+                Set DYN_SYSTEM_PORT to a positive value to enable the server, or set to -1 to disable (default)."
             );
         }
 
@@ -319,9 +332,11 @@ impl RuntimeConfig {
     }
 
     /// Check if System server should be enabled
-    /// System server is disabled by default, but can be enabled by setting DYN_SYSTEM_ENABLED to true
+    /// System server is enabled when DYN_SYSTEM_PORT is set to a positive value
+    /// Negative values disable the server
+    /// TODO: Support port = 0 to bind to a random available port
     pub fn system_server_enabled(&self) -> bool {
-        self.system_enabled
+        self.system_port > 0
     }
 
     pub fn single_threaded() -> Self {
@@ -330,6 +345,7 @@ impl RuntimeConfig {
             max_blocking_threads: 1,
             system_host: DEFAULT_SYSTEM_HOST.to_string(),
             system_port: DEFAULT_SYSTEM_PORT,
+            #[allow(deprecated)]
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
             use_endpoint_health_status: vec![],
@@ -365,6 +381,7 @@ impl Default for RuntimeConfig {
             max_blocking_threads: num_cores,
             system_host: DEFAULT_SYSTEM_HOST.to_string(),
             system_port: DEFAULT_SYSTEM_PORT,
+            #[allow(deprecated)]
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
             use_endpoint_health_status: vec![],
@@ -395,6 +412,19 @@ impl RuntimeConfigBuilder {
 /// as a boolean value.
 pub fn is_truthy(val: &str) -> bool {
     matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes")
+}
+
+pub fn parse_bool(val: &str) -> anyhow::Result<bool> {
+    if is_truthy(val) {
+        Ok(true)
+    } else if is_falsey(val) {
+        Ok(false)
+    } else {
+        anyhow::bail!(
+            "Invalid boolean value: '{}'. Expected one of: true/false, 1/0, on/off, yes/no",
+            val
+        )
+    }
 }
 
 /// Check if a string is falsey
@@ -437,6 +467,75 @@ pub fn disable_ansi_logging() -> bool {
 /// Set the `DYN_LOG_USE_LOCAL_TZ` environment variable to a [`is_truthy`] value
 pub fn use_local_timezone() -> bool {
     env_is_truthy("DYN_LOG_USE_LOCAL_TZ")
+}
+
+/// Request plane transport mode configuration
+///
+/// This determines how requests are distributed from routers to workers:
+/// - `Nats`: Use NATS for request distribution (default, legacy)
+/// - `Http`: Use HTTP/2 for request distribution
+/// - `Tcp`: Use raw TCP for request distribution with msgpack support
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RequestPlaneMode {
+    /// Use NATS for request plane (default for backward compatibility)
+    Nats,
+    /// Use HTTP/2 for request plane
+    Http,
+    /// Use raw TCP for request plane with msgpack support
+    Tcp,
+}
+
+impl Default for RequestPlaneMode {
+    fn default() -> Self {
+        Self::Nats
+    }
+}
+
+impl fmt::Display for RequestPlaneMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Nats => write!(f, "nats"),
+            Self::Http => write!(f, "http"),
+            Self::Tcp => write!(f, "tcp"),
+        }
+    }
+}
+
+impl std::str::FromStr for RequestPlaneMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "nats" => Ok(Self::Nats),
+            "http" => Ok(Self::Http),
+            "tcp" => Ok(Self::Tcp),
+            _ => Err(anyhow::anyhow!(
+                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'http', 'tcp'",
+                s
+            )),
+        }
+    }
+}
+
+/// Global cached request plane mode
+static REQUEST_PLANE_MODE: OnceLock<RequestPlaneMode> = OnceLock::new();
+
+impl RequestPlaneMode {
+    /// The cached request plane mode, initialized from `DYN_REQUEST_PLANE` environment variable
+    /// or defaulting to NATS if not set or invalid.
+    pub fn get() -> Self {
+        *REQUEST_PLANE_MODE.get_or_init(Self::from_env)
+    }
+
+    /// Get the request plane mode from environment variable (uncached)
+    /// Reads from `DYN_REQUEST_PLANE` environment variable.
+    pub fn from_env() -> Self {
+        std::env::var("DYN_REQUEST_PLANE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -522,35 +621,29 @@ mod tests {
     }
 
     #[test]
-    fn test_system_server_enabled_by_default() {
-        temp_env::with_vars(vec![("DYN_SYSTEM_ENABLED", None::<&str>)], || {
+    fn test_system_server_disabled_by_default() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_PORT", None::<&str>)], || {
             let config = RuntimeConfig::from_settings().unwrap();
             assert!(!config.system_server_enabled());
+            assert_eq!(config.system_port, -1);
         });
     }
 
     #[test]
-    fn test_system_server_disabled_explicitly() {
-        temp_env::with_vars(vec![("DYN_SYSTEM_ENABLED", Some("false"))], || {
+    fn test_system_server_disabled_with_negative_port() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_PORT", Some("-1"))], || {
             let config = RuntimeConfig::from_settings().unwrap();
             assert!(!config.system_server_enabled());
+            assert_eq!(config.system_port, -1);
         });
     }
 
     #[test]
-    fn test_system_server_enabled_explicitly() {
-        temp_env::with_vars(vec![("DYN_SYSTEM_ENABLED", Some("true"))], || {
+    fn test_system_server_enabled_with_port() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_PORT", Some("9527"))], || {
             let config = RuntimeConfig::from_settings().unwrap();
             assert!(config.system_server_enabled());
-        });
-    }
-
-    #[test]
-    fn test_system_server_enabled_by_port() {
-        temp_env::with_vars(vec![("DYN_SYSTEM_PORT", Some("8080"))], || {
-            let config = RuntimeConfig::from_settings().unwrap();
-            assert!(!config.system_server_enabled());
-            assert_eq!(config.system_port, 8080);
+            assert_eq!(config.system_port, 9527);
         });
     }
 
@@ -647,5 +740,63 @@ mod tests {
             assert!(!env_is_truthy("TEST_MISSING"));
             assert!(!env_is_falsey("TEST_MISSING"));
         });
+    }
+
+    #[test]
+    fn test_request_plane_mode_from_str() {
+        assert_eq!(
+            "nats".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Nats
+        );
+        assert_eq!(
+            "http".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Http
+        );
+        assert_eq!(
+            "tcp".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Tcp
+        );
+        assert_eq!(
+            "NATS".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Nats
+        );
+        assert_eq!(
+            "HTTP".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Http
+        );
+        assert_eq!(
+            "TCP".parse::<RequestPlaneMode>().unwrap(),
+            RequestPlaneMode::Tcp
+        );
+        assert!("invalid".parse::<RequestPlaneMode>().is_err());
+    }
+
+    #[test]
+    fn test_request_plane_mode_display() {
+        assert_eq!(RequestPlaneMode::Nats.to_string(), "nats");
+        assert_eq!(RequestPlaneMode::Http.to_string(), "http");
+        assert_eq!(RequestPlaneMode::Tcp.to_string(), "tcp");
+    }
+
+    #[test]
+    fn test_request_plane_mode_default() {
+        assert_eq!(RequestPlaneMode::default(), RequestPlaneMode::Nats);
+    }
+
+    #[test]
+    fn test_request_plane_mode_get_cached() {
+        // Test that get() returns a consistent value
+        let mode1 = RequestPlaneMode::get();
+        let mode2 = RequestPlaneMode::get();
+        assert_eq!(mode1, mode2, "Cached mode should be consistent");
+
+        // Verify it's one of the valid modes
+        assert!(
+            matches!(
+                mode1,
+                RequestPlaneMode::Nats | RequestPlaneMode::Http | RequestPlaneMode::Tcp
+            ),
+            "Mode should be a valid variant"
+        );
     }
 }

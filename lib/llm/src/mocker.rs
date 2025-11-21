@@ -5,5 +5,6 @@ pub mod engine;
 pub mod evictor;
 pub mod kv_manager;
 pub mod protocols;
+pub mod running_mean;
 pub mod scheduler;
 pub mod sequence;

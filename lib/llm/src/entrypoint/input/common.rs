@@ -7,10 +7,10 @@ use crate::{
     backend::{Backend, ExecutionContext},
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
-    entrypoint::{self, EngineConfig},
-    kv_router::{KvPushRouter, KvRouter},
+    entrypoint::{self, EngineConfig, RouterConfig},
+    kv_router::{KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
-    model_card::{self, ModelDeploymentCard},
+    model_card::ModelDeploymentCard,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
@@ -24,9 +24,8 @@ use crate::{
 };
 
 use dynamo_runtime::{
-    DistributedRuntime, Runtime,
+    DistributedRuntime,
     component::Client,
-    distributed::DistributedConfig,
     engine::{AsyncEngineStream, Data},
     pipeline::{
         Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
@@ -55,32 +54,27 @@ impl PreparedEngine {
 
 /// Turns an EngineConfig into an OpenAI chat-completions and completions supported StreamingEngine.
 pub async fn prepare_engine(
-    runtime: Runtime,
+    distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
         EngineConfig::Dynamic(local_model) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-
-            let Some(etcd_client) = distributed_runtime.etcd_client() else {
-                anyhow::bail!("Cannot be both static mode and run with dynamic discovery.");
-            };
             let model_manager = Arc::new(ModelManager::new());
             let watch_obj = Arc::new(ModelWatcher::new(
-                distributed_runtime,
+                distributed_runtime.clone(),
                 model_manager.clone(),
-                dynamo_runtime::pipeline::RouterMode::RoundRobin,
-                None,
-                None,
+                RouterConfig::default(),
             ));
-            let models_watcher = etcd_client
-                .kv_get_and_watch_prefix(model_card::ROOT_PATH)
+            let discovery = distributed_runtime.discovery();
+            let discovery_stream = discovery
+                .list_and_watch(
+                    dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+                    Some(distributed_runtime.primary_token().clone()),
+                )
                 .await?;
-            let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-
             let inner_watch_obj = watch_obj.clone();
             let _watcher_task = tokio::spawn(async move {
-                inner_watch_obj.watch(receiver, None).await;
+                inner_watch_obj.watch(discovery_stream, None).await;
             });
             tracing::info!("Waiting for remote model..");
 
@@ -100,15 +94,9 @@ pub async fn prepare_engine(
             })
         }
         EngineConfig::StaticRemote(local_model) => {
-            // For now we only do ModelType.Backend
-            // For batch/text we only do Chat Completions
-
             // The card should have been loaded at 'build' phase earlier
             let card = local_model.card();
             let router_mode = local_model.router_config().router_mode;
-
-            let dst_config = DistributedConfig::from_settings(true);
-            let distributed_runtime = DistributedRuntime::new(runtime, dst_config).await?;
 
             let endpoint_id = local_model.endpoint_id();
             let component = distributed_runtime
@@ -122,7 +110,6 @@ pub async fn prepare_engine(
                 Some(
                     model_manager
                         .kv_chooser_for(
-                            local_model.display_name(),
                             &component,
                             card.kv_cache_block_size,
                             Some(local_model.router_config().kv_router_config),
@@ -144,6 +131,8 @@ pub async fn prepare_engine(
                 None,
                 kv_chooser.clone(),
                 hf_tokenizer,
+                None,  // No prefill chooser in static mode
+                false, // No enforce_disagg in static mode
             )
             .await?;
 
@@ -225,6 +214,7 @@ where
         .link(frontend)?)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn build_routed_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
@@ -232,6 +222,8 @@ pub async fn build_routed_pipeline<Req, Resp>(
     busy_threshold: Option<f64>,
     chooser: Option<Arc<KvRouter>>,
     hf_tokenizer: tokenizers::Tokenizer,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
+    enforce_disagg: bool,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -254,10 +246,13 @@ where
         chooser,
         preprocessor,
         hf_tokenizer,
+        prefill_chooser,
+        enforce_disagg,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
@@ -266,6 +261,8 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     chooser: Option<Arc<KvRouter>>,
     preprocessor: Arc<OpenAIPreprocessor>,
     hf_tokenizer: tokenizers::Tokenizer,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
+    enforce_disagg: bool,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -298,6 +295,7 @@ where
             worker_monitor,
         )
         .await?;
+
     let service_backend = match router_mode {
         RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
             ServiceBackend::from_engine(Arc::new(router))
@@ -311,14 +309,23 @@ where
         }
     };
 
+    // Use the provided prefill chooser, or create a disabled one if not provided
+    let prefill_chooser =
+        prefill_chooser.unwrap_or_else(|| PrefillRouter::disabled(router_mode, enforce_disagg));
+    let prefill_op = prefill_chooser.into_operator();
+
+    // Link with prefill chooser including backward edge for response flow
     let engine = frontend
         .link(preprocessor_op.forward_edge())?
         .link(backend.forward_edge())?
         .link(migration.forward_edge())?
+        .link(prefill_op.forward_edge())?
         .link(service_backend)?
+        .link(prefill_op.backward_edge())?
         .link(migration.backward_edge())?
         .link(backend.backward_edge())?
         .link(preprocessor_op.backward_edge())?
         .link(frontend)?;
+
     Ok(engine)
 }

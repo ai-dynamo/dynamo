@@ -49,7 +49,7 @@ huggingface-cli download openai/gpt-oss-120b --exclude "original/*" --exclude "m
 
 Set the container image:
 ```bash
-export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
 ```
 
 Launch the Dynamo TensorRT-LLM container with the necessary configurations:
@@ -90,14 +90,14 @@ The deployment uses configuration files and command-line arguments to control be
 
 #### Configuration Files
 
-**Prefill Configuration (`engine_configs/gpt_oss/prefill.yaml`)**:
+**Prefill Configuration (`examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml`)**:
 - `enable_attention_dp: false` - Attention data parallelism disabled for prefill
 - `enable_chunked_prefill: true` - Enables efficient chunked prefill processing
 - `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE layers
 - `cache_transceiver_config.backend: ucx` - Uses UCX for efficient KV cache transfer
 - `cuda_graph_config.max_batch_size: 32` - Maximum batch size for CUDA graphs
 
-**Decode Configuration (`engine_configs/gpt_oss/decode.yaml`)**:
+**Decode Configuration (`examples/backends/trtllm/engine_configs/gpt-oss-120b/decode.yaml`)**:
 - `enable_attention_dp: true` - Attention data parallelism enabled for decode
 - `disable_overlap_scheduler: false` - Enables overlapping for decode efficiency
 - `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE layers
@@ -128,7 +128,7 @@ You can use the provided launch script or run the components manually:
 #### Option A: Using the Launch Script
 
 ```bash
-cd /workspace/components/backends/trtllm
+cd /workspace/examples/backends/trtllm
 ./launch/gpt_oss_disagg.sh
 ```
 
@@ -136,8 +136,6 @@ cd /workspace/components/backends/trtllm
 
 1. **Start frontend**:
 ```bash
-cd /workspace/dynamo/components/backends/trtllm
-
 # Start frontend with round-robin routing
 python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
 ```
@@ -147,11 +145,10 @@ python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --model-path /model \
   --served-model-name openai/gpt-oss-120b \
-  --extra-engine-args engine_configs/gpt_oss/prefill.yaml \
+  --extra-engine-args examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml \
   --dyn-reasoning-parser gpt_oss \
   --dyn-tool-call-parser harmony \
   --disaggregation-mode prefill \
-  --disaggregation-strategy prefill_first \
   --max-num-tokens 20000 \
   --max-batch-size 32 \
   --free-gpu-memory-fraction 0.9 \
@@ -164,11 +161,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
 CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --model-path /model \
   --served-model-name openai/gpt-oss-120b \
-  --extra-engine-args engine_configs/gpt_oss/decode.yaml \
+  --extra-engine-args examples/backends/trtllm/engine_configs/gpt-oss-120b/decode.yaml \
   --dyn-reasoning-parser gpt_oss \
   --dyn-tool-call-parser harmony \
   --disaggregation-mode decode \
-  --disaggregation-strategy prefill_first \
   --max-num-tokens 16384 \
   --free-gpu-memory-fraction 0.9 \
   --tensor-parallel-size 4 \
@@ -187,7 +183,7 @@ Make sure that both of the endpoints are available before sending an inference r
 {
   "endpoints": [
     "dyn://dynamo.tensorrt_llm.generate",
-    "dyn://dynamo.tensorrt_llm_next.generate"
+    "dyn://dynamo.prefill.generate"
   ],
   "status": "healthy"
 }

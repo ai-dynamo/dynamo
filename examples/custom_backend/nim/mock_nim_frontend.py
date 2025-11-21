@@ -123,7 +123,7 @@ async def async_main():
 
     # Create DistributedRuntime - similar to frontend/main.py line 246
     is_static = True  # Use static mode (no etcd)
-    runtime = DistributedRuntime(loop, is_static)  # type: ignore[call-arg]
+    runtime = DistributedRuntime(loop, "mem", is_static)  # type: ignore[call-arg]
 
     # Setup signal handlers for graceful shutdown
     def signal_handler():

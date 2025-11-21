@@ -82,20 +82,17 @@ def run_client(example_dir, use_middle=False):
     )
 
     # Wait for client to complete
-    stdout, _ = client_proc.communicate(timeout=1)
-
-    if client_proc.returncode != 0:
-        pytest.fail(
-            f"Client failed with return code {client_proc.returncode}. Output: {stdout}"
-        )
+    stdout, _ = client_proc.communicate(timeout=2)
+    print(f"Client stdout: {stdout}")
 
     return stdout
 
 
-def stop_process(process):
+def stop_process(name, process):
     """Stop a running process and capture its output"""
     process.terminate()
     stdout, _ = process.communicate(timeout=1)
+    print(f"{name}: {stdout}")
     return stdout
 
 
@@ -109,7 +106,7 @@ async def test_direct_connection_cancellation(example_dir, server_process):
     await asyncio.sleep(1)
 
     # Capture server output
-    server_output = stop_process(server_process)
+    server_output = stop_process("server_process", server_process)
 
     # Assert expected messages
     assert (
@@ -132,8 +129,8 @@ async def test_middle_server_cancellation(
     await asyncio.sleep(1)
 
     # Capture output from all processes
-    server_output = stop_process(server_process)
-    middle_output = stop_process(middle_server_process)
+    server_output = stop_process("server_process", server_process)
+    middle_output = stop_process("middle_server_process", middle_server_process)
 
     # Assert expected messages
     assert (

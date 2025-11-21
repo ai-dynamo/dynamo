@@ -22,7 +22,7 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Support matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/reference/support-matrix.md)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/2486)** | **[Support matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/reference/support-matrix.md)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
 
 # NVIDIA Dynamo
 
@@ -56,9 +56,9 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 
 | Feature                                                                                           | vLLM | SGLang | TensorRT-LLM |
 | ------------------------------------------------------------------------------------------------- | ---- | ------ | ------------ |
-| [**Disaggregated Serving**](/docs/architecture/disagg_serving.md)                                 | ✅   | ✅     | ✅           |
-| [**Conditional Disaggregation**](/docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧   | 🚧     | 🚧           |
-| [**KV-Aware Routing**](/docs/architecture/kv_cache_routing.md)                                    | ✅   | ✅     | ✅           |
+| [**Disaggregated Serving**](/docs/design_docs/disagg_serving.md)                                 | ✅   | ✅     | ✅           |
+| [**Conditional Disaggregation**](/docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧   | 🚧     | 🚧           |
+| [**KV-Aware Routing**](/docs/router/kv_cache_routing.md)                                    | ✅   | ✅     | ✅           |
 | [**Load Based Planner**](docs/planner/load_planner.md)                                      | 🚧   | 🚧     | 🚧           |
 | [**SLA-Based Planner**](docs/planner/sla_planner.md)                                        | ✅   | ✅     | ✅           |
 | [**KVBM**](docs/kvbm/kvbm_architecture.md)                                               | ✅   | 🚧     | ✅           |
@@ -101,9 +101,8 @@ To coordinate across a data center, Dynamo relies on etcd and NATS. To run Dynam
 
 To quickly setup etcd & NATS, you can also run:
 
-```
+```bash
 # At the root of the repository:
-# Edit deploy/docker-compose.yml to comment out "runtime: nvidia" of the dcgm-exporter service if the nvidia container runtime isn't deployed or to be used.
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
@@ -171,7 +170,7 @@ Rerun with `curl -N` and change `stream` in the request to `true` to get the res
 ### Deploying Dynamo
 
 - Follow the [Quickstart Guide](docs/kubernetes/README.md) to deploy on Kubernetes.
-- Check out [Backends](components/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
+- Check out [Backends](examples/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
 - Run some [Examples](examples) to learn about building components in Dynamo and exploring various integrations.
 
 ### Benchmarking Dynamo
@@ -179,7 +178,7 @@ Rerun with `curl -N` and change `stream` in the request to `true` to get the res
 Dynamo provides comprehensive benchmarking tools to evaluate and optimize your deployments:
 
 - **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies (aggregated vs. disaggregated vs. vanilla vLLM) using AIPerf
-- **[Pre-Deployment Profiling](docs/benchmarks/pre_deployment_profiling.md)** – Optimize configurations before deployment to meet SLA requirements
+- **[SLA-Driven Dynamo Deployments](docs/planner/sla_planner_quickstart.md)** – Optimize your deployment to meet SLA requirements
 
 # Engines
 

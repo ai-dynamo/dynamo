@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Base stage - Common setup for all stages
-FROM golang:1.24 AS base
+ARG DOCKER_PROXY
+ARG BASE_IMAGE="golang"
+ARG BASE_IMAGE_TAG="1.24"
+FROM ${DOCKER_PROXY}${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
 # Docker buildx automatically provides these
 ARG TARGETOS=linux

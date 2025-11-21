@@ -20,7 +20,7 @@
 //! and release builds. In development, the default is [DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG] and
 //! in release, the default is [DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE].
 
-use super::{CancellationToken, Result, Runtime, RuntimeConfig, error};
+use super::{CancellationToken, Runtime, RuntimeConfig};
 
 use futures::Future;
 use once_cell::sync::OnceCell;
@@ -30,7 +30,7 @@ use tokio::{signal, task::JoinHandle};
 
 static RT: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
 static RTHANDLE: OnceCell<tokio::runtime::Handle> = OnceCell::new();
-static INIT: OnceCell<Mutex<Option<tokio::task::JoinHandle<Result<()>>>>> = OnceCell::new();
+static INIT: OnceCell<Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>> = OnceCell::new();
 
 const SHUTDOWN_MESSAGE: &str =
     "Application received shutdown signal; attempting to gracefully shutdown";
@@ -54,30 +54,30 @@ pub struct Worker {
 
 impl Worker {
     /// Create a new [`Worker`] instance from [`RuntimeConfig`] settings which is sourced from the environment
-    pub fn from_settings() -> Result<Worker> {
+    pub fn from_settings() -> anyhow::Result<Worker> {
         let config = RuntimeConfig::from_settings()?;
         Worker::from_config(config)
     }
 
     /// Create a new [`Worker`] instance from a provided [`RuntimeConfig`]
-    pub fn from_config(config: RuntimeConfig) -> Result<Worker> {
+    pub fn from_config(config: RuntimeConfig) -> anyhow::Result<Worker> {
         // if the runtime is already initialized, return an error
         if RT.get().is_some() || RTHANDLE.get().is_some() {
-            return Err(error!("Worker already initialized"));
+            return Err(anyhow::anyhow!("Worker already initialized"));
         }
 
         // create a new runtime and insert it into the OnceCell
         // there is still a potential race-condition here, two threads cou have passed the first check
         // but only one will succeed in inserting the runtime
         let rt = RT.try_insert(config.create_runtime()?).map_err(|_| {
-            error!("Failed to create worker; Only a single Worker should ever be created")
+            anyhow::anyhow!("Failed to create worker; Only a single Worker should ever be created")
         })?;
 
         let runtime = Runtime::from_handle(rt.handle().clone())?;
         Ok(Worker { runtime, config })
     }
 
-    pub fn runtime_from_existing() -> Result<Runtime> {
+    pub fn runtime_from_existing() -> anyhow::Result<Runtime> {
         if let Some(rt) = RT.get() {
             Ok(Runtime::from_handle(rt.handle().clone())?)
         } else if let Some(rt) = RTHANDLE.get() {
@@ -87,18 +87,19 @@ impl Worker {
         }
     }
 
-    pub fn tokio_runtime(&self) -> Result<&'static tokio::runtime::Runtime> {
-        RT.get().ok_or_else(|| error!("Worker not initialized"))
+    pub fn tokio_runtime(&self) -> anyhow::Result<&'static tokio::runtime::Runtime> {
+        RT.get()
+            .ok_or_else(|| anyhow::anyhow!("Worker not initialized"))
     }
 
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
     }
 
-    pub fn execute<F, Fut>(self, f: F) -> Result<()>
+    pub fn execute<F, Fut>(self, f: F) -> anyhow::Result<()>
     where
         F: FnOnce(Runtime) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
     {
         let runtime = self.runtime.clone();
         runtime.secondary().block_on(self.execute_internal(f))??;
@@ -106,10 +107,10 @@ impl Worker {
         Ok(())
     }
 
-    pub async fn execute_async<F, Fut>(self, f: F) -> Result<()>
+    pub async fn execute_async<F, Fut>(self, f: F) -> anyhow::Result<()>
     where
         F: FnOnce(Runtime) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
     {
         let runtime = self.runtime.clone();
         let task = self.execute_internal(f);
@@ -120,10 +121,10 @@ impl Worker {
 
     /// Executes the provided application/closure on the [`Runtime`].
     /// This is designed to be called once from main and will block the calling thread until the application completes.
-    fn execute_internal<F, Fut>(self, f: F) -> JoinHandle<Result<()>>
+    fn execute_internal<F, Fut>(self, f: F) -> JoinHandle<anyhow::Result<()>>
     where
         F: FnOnce(Runtime) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
     {
         let runtime = self.runtime.clone();
         let primary = runtime.primary();
@@ -142,13 +143,13 @@ impl Worker {
 
         INIT.set(Mutex::new(Some(secondary.spawn(async move {
             // start signal handler
-            tokio::spawn(signal_handler(runtime.cancellation_token.clone()));
+            tokio::spawn(signal_handler(runtime.primary_token().clone()));
 
             let cancel_token = runtime.child_token();
             let (mut app_tx, app_rx) = tokio::sync::oneshot::channel::<()>();
 
             // spawn a task to run the application
-            let task: JoinHandle<Result<()>> = primary.spawn(async move {
+            let task: JoinHandle<anyhow::Result<()>> = primary.spawn(async move {
                 let _rx = app_rx;
                 f(runtime).await
             });
@@ -195,9 +196,9 @@ impl Worker {
             .expect("Application initialized; but another thread is awaiting it; Worker.execute() can only be called once")
     }
 
-    pub fn from_current() -> Result<Worker> {
+    pub fn from_current() -> anyhow::Result<Worker> {
         if RT.get().is_some() || RTHANDLE.get().is_some() {
-            return Err(error!("Worker already initialized"));
+            return Err(anyhow::anyhow!("Worker already initialized"));
         }
         let runtime = Runtime::from_current()?;
         let config = RuntimeConfig::from_settings()?;
@@ -206,7 +207,7 @@ impl Worker {
 }
 
 /// Catch signals and trigger a shutdown
-async fn signal_handler(cancel_token: CancellationToken) -> Result<()> {
+async fn signal_handler(cancel_token: CancellationToken) -> anyhow::Result<()> {
     let ctrl_c = async {
         signal::ctrl_c().await?;
         anyhow::Ok(())

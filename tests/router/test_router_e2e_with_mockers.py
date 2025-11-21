@@ -226,7 +226,7 @@ def get_runtime():
             # No running loop, create a new one (sync context)
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-        _runtime_instance = DistributedRuntime(loop, False)
+        _runtime_instance = DistributedRuntime(loop, "etcd", False)
 
     return _runtime_instance
 
@@ -1034,7 +1034,7 @@ def test_indexers_sync(request, runtime_services, predownload_tokenizers):
 
             # Wait for a second before creating the second router
             logger.info("Waiting for 1 second before creating second router")
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
 
             # Launch second router - will automatically sync with the first router's state
             logger.info("Creating second KV router")
