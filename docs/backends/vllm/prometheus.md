@@ -11,15 +11,19 @@ When running vLLM through Dynamo, vLLM engine metrics are automatically passed t
 
 **For the complete and authoritative list of all vLLM metrics**, always refer to the [official vLLM Metrics Design documentation](https://docs.vllm.ai/en/latest/design/metrics.html).
 
+**For LMCache metrics and integration**, see the [LMCache Integration Guide](LMCache_Integration.md).
+
 **For Dynamo runtime metrics**, see the [Dynamo Metrics Guide](../../observability/metrics.md).
 
 **For visualization setup instructions**, see the [Prometheus and Grafana Setup Guide](../../observability/prometheus-grafana.md).
 
-## Environment Variables
+## Environment Variables and Flags
 
-| Variable | Description | Default | Example |
-|----------|-------------|---------|---------|
-| `DYN_SYSTEM_PORT` | System metrics/health port | `-1` (disabled) | `8081` |
+| Variable/Flag | Description | Default | Example |
+|---------------|-------------|---------|---------|
+| `DYN_SYSTEM_PORT` | System metrics/health port. Required to expose `/metrics` endpoint. | `-1` (disabled) | `8081` |
+| `--connector` | KV connector to use. Use `lmcache` to enable LMCache metrics. | `nixl` | `--connector lmcache` |
+| `ENABLE_LMCACHE` | Sets Dynamo's recommended LMCache defaults (optional). | Not set | `ENABLE_LMCACHE=1` |
 
 ## Getting Started Quickly
 
@@ -103,12 +107,46 @@ The official vLLM documentation includes complete metric definitions with:
 
 For the complete and authoritative list of all vLLM metrics, see the [official vLLM Metrics Design documentation](https://docs.vllm.ai/en/latest/design/metrics.html).
 
+## LMCache Metrics
+
+When LMCache is enabled with `--connector lmcache` and `DYN_SYSTEM_PORT` is set, LMCache metrics (prefixed with `lmcache:`) are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
+
+### Minimum Requirements
+
+To access LMCache metrics, both of these are required:
+1. `--connector lmcache` - Enables LMCache in vLLM
+2. `DYN_SYSTEM_PORT=8081` - Enables Dynamo's metrics HTTP endpoint
+
+**Minimal example:**
+```bash
+DYN_SYSTEM_PORT=8081 \
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector lmcache
+```
+
+**Recommended (with Dynamo defaults):**
+```bash
+DYN_SYSTEM_PORT=8081 ENABLE_LMCACHE=1 \
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector lmcache
+```
+
+### Viewing LMCache Metrics
+
+```bash
+# View all LMCache metrics
+curl -s localhost:8081/metrics | grep "^lmcache:"
+```
+
+**For complete LMCache configuration and metric details**, see:
+- [LMCache Integration Guide](LMCache_Integration.md) - Setup and configuration
+- [LMCache Observability Documentation](https://docs.lmcache.ai/production/observability/vllm_endpoint.html) - Complete metrics reference
+
 ## Implementation Details
 
 - vLLM v1 uses multiprocess metrics collection via `prometheus_client.multiprocess`
 - `PROMETHEUS_MULTIPROC_DIR`: vLLM sets this environment variable to a temporary directory where multiprocess metrics are stored as memory-mapped files. Each worker process writes its metrics to separate files in this directory, which are aggregated when `/metrics` is scraped.
-- Metrics are filtered by the `vllm:` prefix before being exposed
-- The integration uses Dynamo's `register_engine_metrics_callback()` function
+- Dynamo uses `MultiProcessCollector` to aggregate metrics from all worker processes
+- Metrics are filtered by the `vllm:` and `lmcache:` prefixes before being exposed (when LMCache is enabled)
+- The integration uses Dynamo's `register_engine_metrics_callback()` function with the global `REGISTRY`
 - Metrics appear after vLLM engine initialization completes
 - vLLM v1 metrics are different from v0 - see the [official documentation](https://docs.vllm.ai/en/latest/design/metrics.html) for migration details
 

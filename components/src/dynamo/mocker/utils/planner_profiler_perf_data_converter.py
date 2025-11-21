@@ -31,6 +31,7 @@ and might leads to slightly higher latency.
 import argparse
 import logging
 import os
+from pathlib import Path
 
 import numpy as np
 
@@ -50,8 +51,16 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="")
     args = parser.parse_args()
 
+    # Convert to absolute paths to handle relative directories properly
+    args.profile_results_dir = str(Path(args.profile_results_dir).resolve())
+
     if not args.output_dir:
         args.output_dir = args.profile_results_dir
+    else:
+        args.output_dir = str(Path(args.output_dir).resolve())
+
+    # Create output directory if it doesn't exist
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     logger.info(
         f"Converting profile results from {args.profile_results_dir} to {args.output_dir}..."

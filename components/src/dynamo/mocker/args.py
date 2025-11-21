@@ -38,6 +38,9 @@ def create_temp_engine_args_file(args) -> Path:
         "speedup_ratio": getattr(args, "speedup_ratio", None),
         "dp_size": getattr(args, "dp_size", None),
         "startup_time": getattr(args, "startup_time", None),
+        "planner_profile_data": str(getattr(args, "planner_profile_data", None))
+        if getattr(args, "planner_profile_data", None)
+        else None,
         "is_prefill": getattr(args, "is_prefill_worker", None),
         "is_decode": getattr(args, "is_decode_worker", None),
     }
@@ -174,6 +177,12 @@ def parse_args():
         type=float,
         default=None,
         help="Simulated engine startup time in seconds (default: None)",
+    )
+    parser.add_argument(
+        "--planner-profile-data",
+        type=Path,
+        default=None,
+        help="Path to JSON configmap or NPZ file containing performance profiling data from planner_profiler_perf_data_converter.py (default: None, uses hardcoded polynomials)",
     )
     parser.add_argument(
         "--num-workers",

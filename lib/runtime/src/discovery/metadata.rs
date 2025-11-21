@@ -60,6 +60,34 @@ impl DiscoveryMetadata {
         }
     }
 
+    /// Unregister an endpoint instance
+    pub fn unregister_endpoint(&mut self, instance: &DiscoveryInstance) -> Result<()> {
+        if let DiscoveryInstance::Endpoint(inst) = instance {
+            let key = make_endpoint_key(&inst.namespace, &inst.component, &inst.endpoint);
+            self.endpoints.remove(&key);
+            Ok(())
+        } else {
+            anyhow::bail!("Cannot unregister non-endpoint instance as endpoint")
+        }
+    }
+
+    /// Unregister a model card instance
+    pub fn unregister_model_card(&mut self, instance: &DiscoveryInstance) -> Result<()> {
+        if let DiscoveryInstance::Model {
+            namespace,
+            component,
+            endpoint,
+            ..
+        } = instance
+        {
+            let key = make_endpoint_key(namespace, component, endpoint);
+            self.model_cards.remove(&key);
+            Ok(())
+        } else {
+            anyhow::bail!("Cannot unregister non-model-card instance as model card")
+        }
+    }
+
     /// Get all registered endpoints
     pub fn get_all_endpoints(&self) -> Vec<DiscoveryInstance> {
         self.endpoints.values().cloned().collect()

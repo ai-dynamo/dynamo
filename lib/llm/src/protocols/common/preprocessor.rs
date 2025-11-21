@@ -11,6 +11,15 @@ use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PrefillResult {
+    /// Disaggregated execution parameters
+    pub disaggregated_params: serde_json::Value,
+    /// Prompt token details produced during prefill
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<dynamo_async_openai::types::PromptTokensDetails>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
     #[cfg(feature = "media-nixl")]
@@ -73,10 +82,10 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     pub router_config_override: Option<RouterConfigOverride>,
 
-    /// Disaggregated execution parameters (for prefill/decode separation)
+    /// Structured prefill result
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disaggregated_params: Option<serde_json::Value>,
+    pub prefill_result: Option<PrefillResult>,
 
     /// Data parallel rank for the request (used with data parallelism)
     #[builder(default)]
@@ -87,6 +96,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Extra fields requested to be included in the response's nvext
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_fields: Option<Vec<String>>,
 }
 
 impl PreprocessedRequest {

@@ -237,9 +237,10 @@ impl OpenAIPreprocessor {
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         builder.estimated_prefix_hit_num_blocks(None);
-        // Extract backend_instance_id from nvext if present
+        // Extract backend_instance_id and extra_fields from nvext if present
         if let Some(nvext) = request.nvext() {
             builder.backend_instance_id(nvext.backend_instance_id);
+            builder.extra_fields(nvext.extra_fields.clone());
         }
 
         Ok(builder)
@@ -360,6 +361,14 @@ impl OpenAIPreprocessor {
 
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
+
+            // Preserve original messages in extra_args for multimodal workers that need them
+            // (e.g., TRT-LLM multimodal processor needs raw messages for proper tokenization)
+            let messages_json = serde_json::to_value(&messages)?;
+            let extra_args = serde_json::json!({
+                "messages": messages_json
+            });
+            builder.extra_args(Some(extra_args));
         }
 
         Ok(())
@@ -676,13 +685,14 @@ impl OpenAIPreprocessor {
                         let annotated_usage = Annotated::<Resp> {
                             id: None,
                             data: Some(usage_chunk),
-                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
+                            event: None,
                             comment: None,
                         };
 
                         tracing::trace!(
                             request_id = inner.context.id(),
-                            "Sending final usage chunk for OpenAI compliance"
+                            "Sending final usage chunk for OpenAI compliance, annotated_usage: {:?}",
+                            annotated_usage
                         );
 
                         Some((annotated_usage, inner))
@@ -867,7 +877,7 @@ impl
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
 
-        // Build audit handle (None if DYN_AUDIT_ENABLED=0)
+        // Build audit handle (None if no DYN_AUDIT_SINKS)
         let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);
 
         if let Some(ref mut h) = audit_handle {

@@ -13,7 +13,6 @@ use crate::{
     discovery::Discovery,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
-    service::ServiceClient,
     transports::{etcd, nats, tcp},
 };
 use crate::{discovery, system_status_server, transports};
@@ -43,8 +42,6 @@ pub struct DistributedRuntime {
     // local runtime
     runtime: Runtime,
 
-    // Unified transport manager
-    etcd_client: Option<transports::etcd::Client>,
     nats_client: Option<transports::nats::Client>,
     store: KeyValueStoreManager,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
@@ -101,20 +98,22 @@ impl DistributedRuntime {
 
         let runtime_clone = runtime.clone();
 
-        let (etcd_client, store) = match selected_kv_store {
+        let store = match selected_kv_store {
             KeyValueStoreSelect::Etcd(etcd_config) => {
                 let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
                     // The returned error doesn't show because of a dropped runtime error, so
                     // log it first.
                     tracing::error!(%err, "Could not connect to etcd. Pass `--store-kv ..` to use a different backend or start etcd."))?;
-                let store = KeyValueStoreManager::etcd(etcd_client.clone());
-                (Some(etcd_client), store)
+                KeyValueStoreManager::etcd(etcd_client)
             }
-            KeyValueStoreSelect::File(root) => (None, KeyValueStoreManager::file(root)),
-            KeyValueStoreSelect::Memory => (None, KeyValueStoreManager::memory()),
+            KeyValueStoreSelect::File(root) => KeyValueStoreManager::file(root),
+            KeyValueStoreSelect::Memory => KeyValueStoreManager::memory(),
         };
 
-        let nats_client = Some(nats_config.clone().connect().await?);
+        let nats_client = match nats_config {
+            Some(nc) => Some(nc.connect().await?),
+            None => None,
+        };
 
         // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
@@ -135,8 +134,6 @@ impl DistributedRuntime {
             health_endpoint_path,
             live_endpoint_path,
         )));
-
-        let nats_client_for_metrics = nats_client.clone();
 
         // Initialize discovery client based on backend configuration
         let discovery_backend =
@@ -171,9 +168,10 @@ impl DistributedRuntime {
             }
         };
 
+        let nats_client_for_metrics = nats_client.clone();
+
         let distributed_runtime = Self {
             runtime,
-            etcd_client,
             store,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
@@ -326,10 +324,6 @@ impl DistributedRuntime {
         self.discovery_client.clone()
     }
 
-    pub(crate) fn service_client(&self) -> Option<ServiceClient> {
-        self.nats_client().map(|nc| ServiceClient::new(nc.clone()))
-    }
-
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
         Ok(self
             .tcp_server
@@ -381,35 +375,7 @@ impl DistributedRuntime {
         manager.server().await
     }
 
-    /// DEPRECATED: Use network_manager().server() instead
-    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
-    pub async fn http_server(
-        &self,
-    ) -> Result<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>> {
-        // For backward compatibility, try to downcast
-        let _server = self.request_plane_server().await?;
-        // This will only work if we're actually in HTTP mode
-        // For now, just return an error suggesting the new API
-        anyhow::bail!(
-            "http_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
-        )
-    }
-
-    /// DEPRECATED: Use network_manager().server() instead
-    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
-    pub async fn shared_tcp_server(
-        &self,
-    ) -> Result<Arc<crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer>> {
-        // For backward compatibility, try to downcast
-        let _server = self.request_plane_server().await?;
-        // This will only work if we're actually in TCP mode
-        // For now, just return an error suggesting the new API
-        anyhow::bail!(
-            "shared_tcp_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
-        )
-    }
-
-    pub fn nats_client(&self) -> Option<&nats::Client> {
+    pub(crate) fn nats_client(&self) -> Option<&nats::Client> {
         self.nats_client.as_ref()
     }
 
@@ -420,15 +386,7 @@ impl DistributedRuntime {
         self.system_status_server.get().cloned()
     }
 
-    // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
-    //
-    // Try to use `store()` instead of this. Only use this if you have not been able to migrate
-    // yet, or if you require etcd-specific features like distributed locking (rare).
-    pub fn etcd_client(&self) -> Option<etcd::Client> {
-        self.etcd_client.clone()
-    }
-
-    /// An interface to store things. Will eventually replace `etcd_client`.
+    /// An interface to store things outside of the process. Usually backed by something like etcd.
     /// Currently does key-value, but will grow to include whatever we need to store.
     pub fn store(&self) -> &KeyValueStoreManager {
         &self.store
@@ -455,16 +413,21 @@ impl DistributedRuntime {
 #[derive(Dissolve)]
 pub struct DistributedConfig {
     pub store_backend: KeyValueStoreSelect,
-    pub nats_config: nats::ClientOptions,
+    pub nats_config: Option<nats::ClientOptions>,
     pub request_plane: RequestPlaneMode,
 }
 
 impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
+        let request_plane = RequestPlaneMode::from_env();
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::default()),
-            nats_config: nats::ClientOptions::default(),
-            request_plane: RequestPlaneMode::from_env(),
+            nats_config: if request_plane.is_nats() {
+                Some(nats::ClientOptions::default())
+            } else {
+                None
+            },
+            request_plane,
         }
     }
 
@@ -473,10 +436,15 @@ impl DistributedConfig {
             attach_lease: false,
             ..Default::default()
         };
+        let request_plane = RequestPlaneMode::from_env();
         DistributedConfig {
             store_backend: KeyValueStoreSelect::Etcd(Box::new(etcd_config)),
-            nats_config: nats::ClientOptions::default(),
-            request_plane: RequestPlaneMode::from_env(),
+            nats_config: if request_plane.is_nats() {
+                Some(nats::ClientOptions::default())
+            } else {
+                None
+            },
+            request_plane,
         }
     }
 }
@@ -538,6 +506,10 @@ impl RequestPlaneMode {
             .and_then(|s| s.parse().ok())
             .unwrap_or_default()
     }
+
+    pub fn is_nats(&self) -> bool {
+        matches!(self, RequestPlaneMode::Nats)
+    }
 }
 
 pub mod distributed_test_utils {
@@ -553,7 +525,7 @@ pub mod distributed_test_utils {
         let rt = crate::Runtime::from_current().unwrap();
         let config = super::DistributedConfig {
             store_backend: KeyValueStoreSelect::Memory,
-            nats_config: nats::ClientOptions::default(),
+            nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
         };
         super::DistributedRuntime::new(rt, config).await.unwrap()

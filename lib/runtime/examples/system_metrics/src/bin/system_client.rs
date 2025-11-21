@@ -6,7 +6,7 @@ use system_metrics::{DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE};
 
 use dynamo_runtime::{
     DistributedRuntime, Runtime, Worker, logging, pipeline::PushRouter,
-    protocols::annotated::Annotated, utils::Duration,
+    protocols::annotated::Annotated,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -32,9 +32,6 @@ async fn app(runtime: Runtime) -> anyhow::Result<()> {
     while let Some(resp) = stream.next().await {
         println!("{:?}", resp);
     }
-
-    let service_set = component.scrape_stats(Duration::from_millis(100)).await?;
-    println!("{:?}", service_set);
 
     runtime.shutdown();
 

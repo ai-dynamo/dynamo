@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+                         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                    @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+               @@@@@@@@@@@@@@@     @@@@@@@@@@@@@@@@@@@@@@@@@
+            @@@@@@@@@@   @@@@@@@@@@    @@@@@@@@@@@@@@@@@@@@@
+         @@@@@@@@     @@@@@@@@@@@@@@@@   @@@@@@@@@@@@@@@@@@@
+       @@@@@@@    @@@@@@@@      @@@@@@@    @@@@@@@@@@@@@@@@@
+     @@@@@@@@   @@@@@@@  @@@@      @@@@@@    @@@@@@@@@@@@@@@
+     @@@@@@@   @@@@@@    @@@@@@   @@@@@@@   @@@@@@@@@@@@@@@@
+      @@@@@@@  @@@@@@    @@@@@@@@@@@@@@    @@@@@@@@@@@@@@@@@
+       @@@@@@   @@@@@@   @@@@@@@@@@@@    @@@@@@@@@@@@@@@@@@@
+        @@@@@@@  @@@@@@@ @@@@@@@@@@   @@@@@@@@@      @@@@@@@
+          @@@@@@   @@@@@@@@@@@@@    @@@@@@@@         @@@@@@@
+            @@@@@@    @@@@     @@@@@@@@@@          @@@@@@@@@
+              @@@@@@@    @@@@@@@@@@@@@        @@@@@@@@@@@@@@
+                @@@@@@@@@@@@@@@@@        @@@@@@@@@@@@@@@@@@@
+                    @@@@@@       @@@@@@@@@@@@@@@@@@@@@@@@@@@
+                         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+ @@@@@@@@@     @@@@      @@@@ @@@@  @@@@@@@@       @@@@       @@@@@
+@@@@@@@@@@@@@  @@@@@    @@@@@ @@@@@ @@@@@@@@@@@@@  @@@@@     @@@@@@@
+@@@@@@@@@@@@@@ @@@@@@  @@@@@  @@@@@ @@@@@@@@@@@@@@ @@@@@    @@@@@@@@@
+@@@@@    @@@@@@@@@@@@  @@@@@  @@@@@ @@@@@    @@@@@ @@@@@   @@@@@ @@@@@
+@@@@@     @@@@@ @@@@@@@@@@@   @@@@@ @@@@@    @@@@@ @@@@@  @@@@@  @@@@@@
+@@@@@     @@@@@  @@@@@@@@@@   @@@@@ @@@@@   @@@@@@ @@@@@  @@@@@@@@@@@@@
+@@@@@     @@@@@  @@@@@@@@@    @@@@@ @@@@@@@@@@@@@@ @@@@@ @@@@@@@@@@@@@@@
+@@@@@     @@@@@   @@@@@@@     @@@@@ @@@@@@@@@@@@@  @@@@@@@@@@@     @@@@@@
+ @@@       @@@      @@@@       @@@   @@@@@@@        @@   @@@         @@@  ®
+
+Dynamo: A Datacenter Scale Distributed Inference Serving Framework
+
+This is a framework-less image designed to deploy and run CPU-bound Frontend
+components without requiring CUDA or backend engine dependencies (vllm/sglang).
+
+The frontend container includes:
+- HTTP API service
+- Preprocessor
+- Router
+- Endpoint Picker (EPP) for Gateway API Inference Extension
+
+Benefits:
+- Minimal dependencies for purely CPU-based processes
+- Fast deployment for integration testing on GPU-constrained clusters
+- Can spin up frontend with mock workers for rapid testing
+
+Quick Start:
+
+Start mocker with custom configuration:
+> python -m dynamo.mocker \
+  --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+  --num-gpu-blocks-override 8192 \
+  --block-size 16 \
+  --speedup-ratio 10.0 \
+  --max-num-seqs 512 \
+  --num-workers 4 \
+  --enable-prefix-caching
+
+Start frontend server:
+> python -m dynamo.frontend --http-port 8000
+
+

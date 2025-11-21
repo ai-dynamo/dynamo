@@ -470,6 +470,13 @@ impl JailedStream {
                 if let Some(chat_response) = response.data.as_ref() {
                     let mut all_emissions = Vec::new();
 
+                    if chat_response.choices.is_empty() {
+                        // No choices processed (e.g., usage-only chunk)
+                        // Pass through as-is to preserve usage and other metadata
+                        yield response;
+                        continue;
+                    }
+
                     // Process each choice independently using the new architecture
                     for choice in &chat_response.choices {
                         if let Some(ref content) = choice.delta.content {
@@ -582,6 +589,7 @@ impl JailedStream {
                     usage: None,
                     service_tier: None,
                     system_fingerprint: None,
+                    nvext: None,
                 };
 
                 let final_metadata = (last_annotated_id, last_annotated_event, last_annotated_comment);

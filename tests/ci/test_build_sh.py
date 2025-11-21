@@ -283,6 +283,7 @@ class TestBuildShTRTLLMBuild:
         assert "Intent to Download TRTLLM: false" in stdout
         assert "Intent to Install TRTLLM: false" in stdout
         assert "Intent to Build TRTLLM: true" in stdout
+        assert "TRTLLM pip wheel output directory is: /tmp/trtllm_wheel/"
 
     def test_build_with_git_url_and_wheel_dir(self, build_script_path, temp_wheel_dir):
         """Test build with --tensorrtllm-git-url and --tensorrtllm-pip-wheel-dir"""
