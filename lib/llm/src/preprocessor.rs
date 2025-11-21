@@ -856,7 +856,7 @@ impl
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
 
-        // Build audit handle (None if DYN_AUDIT_ENABLED=0)
+        // Build audit handle (None if no DYN_AUDIT_SINKS)
         let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);
 
         if let Some(ref mut h) = audit_handle {
