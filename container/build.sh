@@ -416,25 +416,65 @@ get_options() {
 
 show_image_options() {
     echo ""
-    echo "Building Dynamo Image: '${TAG}'"
+    echo "=========================================="
+    echo "🐳 DOCKER BUILD CONFIGURATION"
+    echo "=========================================="
     echo ""
+    echo "📦 Image Configuration:"
+    echo "   Tag: '${TAG}'"
     echo "   Base: '${BASE_IMAGE}'"
-    echo "   Base_Image_Tag: '${BASE_IMAGE_TAG}'"
-    if [[ $FRAMEWORK == "TRTLLM" ]]; then
-        echo "   Tensorrtllm_Pip_Wheel: '${PRINT_TRTLLM_WHEEL_FILE}'"
-    fi
-    echo "   Build Context: '${BUILD_CONTEXT}'"
-    echo "   Build Arguments: '${BUILD_ARGS}'"
+    echo "   Base Image Tag: '${BASE_IMAGE_TAG}'"
     echo "   Framework: '${FRAMEWORK}'"
-    if [ "$USE_SCCACHE" = true ]; then
-        echo "   sccache: Enabled"
-        echo "   sccache Bucket: '${SCCACHE_BUCKET}'"
-        echo "   sccache Region: '${SCCACHE_REGION}'"
-
-        if [ -n "$SCCACHE_S3_KEY_PREFIX" ]; then
-            echo "   sccache S3 Key Prefix: '${SCCACHE_S3_KEY_PREFIX}'"
-        fi
+    echo "   Platform: '${PLATFORM}'"
+    echo "   Target: '${TARGET_STR}'"
+    echo ""
+    
+    if [[ $FRAMEWORK == "TRTLLM" ]]; then
+        echo "🔧 TensorRT-LLM Configuration:"
+        echo "   Pip Wheel: '${PRINT_TRTLLM_WHEEL_FILE}'"
+        echo "   Intention: '${TRTLLM_INTENTION}'"
+        echo ""
     fi
+    
+    echo "📂 Build Configuration:"
+    echo "   Build Context: '${BUILD_CONTEXT}'"
+    echo "   Dockerfile: '${DOCKERFILE}'"
+    echo "   Architecture: '${ARCH}'"
+    echo ""
+    
+    if [ "$USE_SCCACHE" = true ]; then
+        echo "⚡ sccache Configuration:"
+        echo "   Status: Enabled"
+        echo "   Bucket: '${SCCACHE_BUCKET}'"
+        echo "   Region: '${SCCACHE_REGION}'"
+        if [ -n "$SCCACHE_S3_KEY_PREFIX" ]; then
+            echo "   S3 Key Prefix: '${SCCACHE_S3_KEY_PREFIX}'"
+        fi
+        echo ""
+    else
+        echo "⚡ sccache: Disabled"
+        echo ""
+    fi
+    
+    if [ -n "$NO_CACHE" ]; then
+        echo "🔄 Cache: Disabled (--no-cache)"
+        echo ""
+    fi
+    
+    if [ -n "$CACHE_FROM" ]; then
+        echo "📥 Cache From: '${CACHE_FROM}'"
+        echo ""
+    fi
+    
+    if [ -n "$CACHE_TO" ]; then
+        echo "📤 Cache To: '${CACHE_TO}'"
+        echo ""
+    fi
+    
+    echo "🔨 Build Arguments:"
+    echo "${BUILD_ARGS}" | tr ' ' '\n' | grep -v '^$' | sed 's/^/   /'
+    echo ""
+    echo "=========================================="
     echo ""
 }
 
@@ -482,55 +522,86 @@ error() {
     exit 1
 }
 
+echo "=========================================="
+echo "🚀 DYNAMO BUILD SCRIPT STARTING"
+echo "=========================================="
+echo "Script: $0"
+echo "Arguments: $@"
+echo "Working Directory: $(pwd)"
+echo "User: $(whoami)"
+echo "Date: $(date)"
+echo "=========================================="
+echo ""
+
 get_options "$@"
 
+echo "✅ Command line arguments parsed"
+echo ""
+
 # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
+echo "🔍 Detecting architecture from platform..."
 ARCH="amd64"
 if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     ARCH="arm64"
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
+    echo "   Detected: arm64 (aarch64)"
+else
+    echo "   Detected: amd64"
 fi
+echo ""
 
 # Set the commit sha in the container so we can inspect what build this relates to
+echo "📝 Setting build metadata..."
 DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA:-$(git rev-parse HEAD)}
 BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
+echo "   Commit SHA: ${DYNAMO_COMMIT_SHA}"
+echo ""
 
 # Special handling for vLLM on ARM64 - set required defaults if not already specified by user
 if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+    echo "🔧 Applying vLLM ARM64-specific configuration..."
+    
     # Set base image tag to CUDA 12.9 if using the default value (user didn't override)
     if [ "$BASE_IMAGE_TAG" == "$VLLM_BASE_IMAGE_TAG" ]; then
         BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
-        echo "INFO: Automatically setting base-image-tag to $BASE_IMAGE_TAG for vLLM ARM64"
+        echo "   ✓ Base image tag: $BASE_IMAGE_TAG"
     fi
 
     # Add required build args if not already present
     if [[ "$BUILD_ARGS" != *"RUNTIME_IMAGE_TAG"* ]]; then
         BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 "
-        echo "INFO: Automatically setting RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 for vLLM ARM64"
+        echo "   ✓ Runtime image tag: 12.9.0-runtime-ubuntu24.04"
     fi
 
     if [[ "$BUILD_ARGS" != *"CUDA_VERSION"* ]]; then
         BUILD_ARGS+=" --build-arg CUDA_VERSION=129 "
-        echo "INFO: Automatically setting CUDA_VERSION=129 for vLLM ARM64"
+        echo "   ✓ CUDA version: 129"
     fi
 
     if [[ "$BUILD_ARGS" != *"TORCH_BACKEND"* ]]; then
         BUILD_ARGS+=" --build-arg TORCH_BACKEND=cu129 "
-        echo "INFO: Automatically setting TORCH_BACKEND=cu129 for vLLM ARM64"
+        echo "   ✓ Torch backend: cu129"
     fi
-
+    
+    echo ""
 fi
 
 # Update DOCKERFILE if framework is VLLM
+echo "📄 Selecting Dockerfile for framework: ${FRAMEWORK}"
 if [[ $FRAMEWORK == "VLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
+    echo "   Using: Dockerfile.vllm"
 elif [[ $FRAMEWORK == "TRTLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm
+    echo "   Using: Dockerfile.trtllm"
 elif [[ $FRAMEWORK == "NONE" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile
+    echo "   Using: Dockerfile (base)"
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
+    echo "   Using: Dockerfile.sglang"
 fi
+echo ""
 
 # Add NIXL_REF as a build argument
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
@@ -721,48 +792,69 @@ function determine_user_intention_trtllm() {
 
 
 if [[ $FRAMEWORK == "TRTLLM" ]]; then
-    echo -e "Determining the user's TRTLLM installation intent..."
+    echo "=========================================="
+    echo "🔧 TRTLLM CONFIGURATION"
+    echo "=========================================="
+    echo "Determining the user's TRTLLM installation intent..."
+    echo ""
     determine_user_intention_trtllm   # From this point forward, can assume correct TRTLLM flags
+    echo ""
 
     if [[ "$TRTLLM_INTENTION" == "download" ]]; then
+        echo "📥 TRTLLM: Download mode"
         TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL:-$DEFAULT_TENSORRTLLM_INDEX_URL}
         TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL:-$DEFAULT_TENSORRTLLM_PIP_WHEEL}
         BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
         BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
         BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
+        
+        echo "   Index URL: ${TENSORRTLLM_INDEX_URL}"
+        echo "   Pip Wheel: ${TENSORRTLLM_PIP_WHEEL}"
 
         # Create a dummy directory to satisfy the build context requirement
         # There is no way to conditionally copy the build context in dockerfile.
         mkdir -p /tmp/dummy_dir
         BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/dummy_dir"
         PRINT_TRTLLM_WHEEL_FILE=${TENSORRTLLM_PIP_WHEEL}
+        echo "   ✓ Dummy wheel context created"
     elif [[ "$TRTLLM_INTENTION" == "install" ]]; then
-        echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
+        echo "📦 TRTLLM: Install from wheel mode"
+        echo "   Wheel directory: ${TENSORRTLLM_PIP_WHEEL_DIR}"
+        echo "   Checking for TensorRT-LLM wheel..."
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}"; then
-            echo "ERROR: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}"
-            echo "      If this is not intended you can try building from source with the following variables set instead:"
             echo ""
-            echo "      --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM --tensorrtllm-commit $TRTLLM_COMMIT"
+            echo "❌ ERROR: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}"
+            echo "   If this is not intended you can try building from source with:"
+            echo "   --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM --tensorrtllm-commit $TRTLLM_COMMIT"
             exit 1
         fi
-        echo "Installing TensorRT-LLM from local wheel directory"
+        echo "   ✓ Wheel found"
         BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
         BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
         PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
+        echo "   Using: $(basename ${PRINT_TRTLLM_WHEEL_FILE})"
     elif [[ "$TRTLLM_INTENTION" == "build" ]]; then
+        echo "🔨 TRTLLM: Build from source mode"
         TENSORRTLLM_PIP_WHEEL_DIR=${TENSORRTLLM_PIP_WHEEL_DIR:=$DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR}
-        echo "TRTLLM pip wheel output directory is: ${TENSORRTLLM_PIP_WHEEL_DIR}"
+        echo "   Output directory: ${TENSORRTLLM_PIP_WHEEL_DIR}"
+        echo "   Commit: ${TRTLLM_COMMIT}"
+        echo "   Architecture: ${ARCH}"
         if [ "$DRY_RUN" != "true" ]; then
             GIT_URL_ARG=""
             if [ -n "${TRTLLM_GIT_URL}" ]; then
                 GIT_URL_ARG="-u ${TRTLLM_GIT_URL}"
+                echo "   Git URL: ${TRTLLM_GIT_URL}"
             fi
+            echo ""
+            echo "   🚀 Starting TensorRT-LLM wheel build..."
             if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
                 error "ERROR: Failed to build TensorRT-LLM wheel"
             fi
+            echo "   ✅ Wheel build completed"
             BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
             BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
             PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
+            echo "   Built: $(basename ${PRINT_TRTLLM_WHEEL_FILE})"
         fi
     else
         echo 'No intention was set. This error should have been detected in "determine_user_intention_trtllm()". Exiting...'
@@ -791,14 +883,15 @@ fi
 # ENABLE_KVBM: Used in base Dockerfile for block-manager feature.
 #              Declared but not currently used in Dockerfile.{vllm,trtllm}.
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
-    echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
+    echo "🔧 Forcing KVBM enabled for ${FRAMEWORK} framework"
     ENABLE_KVBM=true
 fi
 
 if [  ! -z ${ENABLE_KVBM} ]; then
-    echo "Enabling the KVBM in the dynamo image"
+    echo "   ✓ KVBM enabled in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
+echo ""
 
 # NIXL_UCX_REF: Used in base Dockerfile only.
 #               Passed to framework Dockerfile.{vllm,sglang,...} where it's NOT used.
@@ -811,20 +904,27 @@ if [ -n "${MAX_JOBS}" ]; then
     BUILD_ARGS+=" --build-arg MAX_JOBS=${MAX_JOBS} "
 fi
 if [[ $FRAMEWORK == "SGLANG" ]]; then
-    echo "Forcing Python version to 3.10 for sglang image build"
+    echo "🐍 Forcing Python version to 3.10 for sglang image build"
     BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.10"
+    echo ""
 fi
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
+    echo "⚡ Configuring sccache build arguments..."
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
     BUILD_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET}"
     BUILD_ARGS+=" --build-arg SCCACHE_REGION=${SCCACHE_REGION}"
     BUILD_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"
     BUILD_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
+    echo "   ✓ sccache arguments added"
+    echo ""
 fi
 if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
     # Add arguments required for sglang blackwell build
+    echo "🔧 Configuring SGLang for Grace Blackwell (ARM64)..."
     BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=true --build-arg BUILD_TYPE=blackwell_aarch64"
+    echo "   ✓ Grace Blackwell arguments added"
+    echo ""
 fi
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
 if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
@@ -844,19 +944,196 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
     if [[ $FRAMEWORK != "NONE" ]]; then
         # Define base image tag before using it
         DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+        
         # Start base image build
-        echo "======================================"
-        echo "Starting Build 1: Base Image"
-        echo "======================================"
-        $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        echo "=========================================="
+        echo "🏗️  BUILD STEP 1: BASE IMAGE"
+        echo "=========================================="
+        echo "Building base image: ${DYNAMO_BASE_IMAGE}"
+        echo "Dockerfile: ${SOURCE_DIR}/Dockerfile"
+        echo "Target: dev"
+        echo ""
+        
+        # Create build log directory if it doesn't exist
+        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+        mkdir -p "${BUILD_LOG_DIR}"
+        BASE_BUILD_LOG="${BUILD_LOG_DIR}/base-image-build.log"
+        echo "📝 Capturing build output to: ${BASE_BUILD_LOG}"
+        echo ""
+        
+        BUILD_START=$(date +%s)
+        
+        # Capture build output to log file while showing on console
+        # Use BuildKit for enhanced metadata (docker buildx or DOCKER_BUILDKIT=1)
+        if [ -z "$RUN_PREFIX" ]; then
+            # Check if buildx is available
+            if docker buildx version &>/dev/null; then
+                echo "   Using BuildKit via docker buildx..."
+                docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            else
+                echo "   Using BuildKit via DOCKER_BUILDKIT=1..."
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            fi
+        else
+            $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+            BUILD_EXIT_CODE=$?
+        fi
+        
+        BUILD_END=$(date +%s)
+        BUILD_DURATION=$((BUILD_END - BUILD_START))
+        
+        if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+            echo ""
+            echo "❌ Base image build FAILED with exit code ${BUILD_EXIT_CODE}"
+            echo "   Build log saved to: ${BASE_BUILD_LOG}"
+            exit ${BUILD_EXIT_CODE}
+        fi
+        
+        echo ""
+        echo "✅ Base image build completed in ${BUILD_DURATION} seconds"
+        
+        # Extract layer statistics from build log
+        if [ -f "${BASE_BUILD_LOG}" ]; then
+            CACHED_LAYERS=$(grep -c "CACHED" "${BASE_BUILD_LOG}" 2>/dev/null || echo "0")
+            TOTAL_STEPS=$(grep -c "^Step [0-9]" "${BASE_BUILD_LOG}" 2>/dev/null || echo "0")
+            echo "📊 Build statistics:"
+            echo "   Total steps: ${TOTAL_STEPS}"
+            echo "   Cached layers: ${CACHED_LAYERS}"
+            if [ ${TOTAL_STEPS} -gt 0 ]; then
+                CACHE_RATE=$(awk "BEGIN {printf \"%.1f\", (${CACHED_LAYERS} / ${TOTAL_STEPS}) * 100}")
+                echo "   Cache hit rate: ${CACHE_RATE}%"
+            fi
+        fi
+        echo ""
+        
         # Start framework build
-        echo "======================================"
-        echo "Starting Build 2: Framework Image"
-        echo "======================================"
+        echo "=========================================="
+        echo "🏗️  BUILD STEP 2: FRAMEWORK IMAGE"
+        echo "=========================================="
+        echo "Building framework image for: ${FRAMEWORK}"
+        echo "Dockerfile: ${DOCKERFILE}"
+        echo "Target: ${TARGET_STR}"
+        echo "Base image: ${DYNAMO_BASE_IMAGE}"
+        echo ""
+        
+        # Determine framework build log name
+        FRAMEWORK_BUILD_LOG="${BUILD_LOG_DIR}/framework-${FRAMEWORK,,}-build.log"
+        echo "📝 Capturing build output to: ${FRAMEWORK_BUILD_LOG}"
+        echo ""
+        
+        BUILD_START=$(date +%s)
+        
         BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        
+        # Capture build output to log file while showing on console
+        # Use BuildKit for enhanced metadata (docker buildx or DOCKER_BUILDKIT=1)
+        if [ -z "$RUN_PREFIX" ]; then
+            # Check if buildx is available
+            if docker buildx version &>/dev/null; then
+                echo "   Using BuildKit via docker buildx..."
+                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            else
+                echo "   Using BuildKit via DOCKER_BUILDKIT=1..."
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${FRAMEWORK_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            fi
+        else
+            $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+            BUILD_EXIT_CODE=$?
+        fi
+        
+        BUILD_END=$(date +%s)
+        BUILD_DURATION=$((BUILD_END - BUILD_START))
+        
+        if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+            echo ""
+            echo "❌ Framework image build FAILED with exit code ${BUILD_EXIT_CODE}"
+            echo "   Build log saved to: ${FRAMEWORK_BUILD_LOG}"
+            exit ${BUILD_EXIT_CODE}
+        fi
+        
+        echo ""
+        echo "✅ Framework image build completed in ${BUILD_DURATION} seconds"
+        
+        # Extract layer statistics from build log
+        if [ -f "${FRAMEWORK_BUILD_LOG}" ]; then
+            CACHED_LAYERS=$(grep -c "CACHED" "${FRAMEWORK_BUILD_LOG}" 2>/dev/null || echo "0")
+            TOTAL_STEPS=$(grep -c "^Step [0-9]" "${FRAMEWORK_BUILD_LOG}" 2>/dev/null || echo "0")
+            PULL_COMPLETE=$(grep -c "Pull complete" "${FRAMEWORK_BUILD_LOG}" 2>/dev/null || echo "0")
+            echo "📊 Build statistics:"
+            echo "   Total steps: ${TOTAL_STEPS}"
+            echo "   Cached layers: ${CACHED_LAYERS}"
+            echo "   Layers pulled: ${PULL_COMPLETE}"
+            if [ ${TOTAL_STEPS} -gt 0 ]; then
+                CACHE_RATE=$(awk "BEGIN {printf \"%.1f\", (${CACHED_LAYERS} / ${TOTAL_STEPS}) * 100}")
+                echo "   Cache hit rate: ${CACHE_RATE}%"
+            fi
+        fi
+        echo ""
     else
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        echo "=========================================="
+        echo "🏗️  SINGLE-STAGE BUILD"
+        echo "=========================================="
+        echo "Building image (no framework)..."
+        echo "Dockerfile: ${DOCKERFILE}"
+        echo ""
+        
+        # Create build log directory if it doesn't exist
+        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+        mkdir -p "${BUILD_LOG_DIR}"
+        SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
+        echo "📝 Capturing build output to: ${SINGLE_BUILD_LOG}"
+        echo ""
+        
+        BUILD_START=$(date +%s)
+        
+        # Capture build output to log file while showing on console
+        # Use BuildKit for enhanced metadata (docker buildx or DOCKER_BUILDKIT=1)
+        if [ -z "$RUN_PREFIX" ]; then
+            # Check if buildx is available
+            if docker buildx version &>/dev/null; then
+                echo "   Using BuildKit via docker buildx..."
+                docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            else
+                echo "   Using BuildKit via DOCKER_BUILDKIT=1..."
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            fi
+        else
+            $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+            BUILD_EXIT_CODE=$?
+        fi
+        
+        BUILD_END=$(date +%s)
+        BUILD_DURATION=$((BUILD_END - BUILD_START))
+        
+        if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+            echo ""
+            echo "❌ Image build FAILED with exit code ${BUILD_EXIT_CODE}"
+            echo "   Build log saved to: ${SINGLE_BUILD_LOG}"
+            exit ${BUILD_EXIT_CODE}
+        fi
+        
+        echo ""
+        echo "✅ Image build completed in ${BUILD_DURATION} seconds"
+        
+        # Extract layer statistics from build log
+        if [ -f "${SINGLE_BUILD_LOG}" ]; then
+            CACHED_LAYERS=$(grep -c "CACHED" "${SINGLE_BUILD_LOG}" 2>/dev/null || echo "0")
+            TOTAL_STEPS=$(grep -c "^Step [0-9]" "${SINGLE_BUILD_LOG}" 2>/dev/null || echo "0")
+            echo "📊 Build statistics:"
+            echo "   Total steps: ${TOTAL_STEPS}"
+            echo "   Cached layers: ${CACHED_LAYERS}"
+            if [ ${TOTAL_STEPS} -gt 0 ]; then
+                CACHE_RATE=$(awk "BEGIN {printf \"%.1f\", (${CACHED_LAYERS} / ${TOTAL_STEPS}) * 100}")
+                echo "   Cache hit rate: ${CACHE_RATE}%"
+            fi
+        fi
+        echo ""
     fi
 fi
 
@@ -904,3 +1181,130 @@ fi
 
 
 { set +x; } 2>/dev/null
+
+# Final build summary
+echo ""
+echo "=========================================="
+echo "🎉 BUILD COMPLETED SUCCESSFULLY"
+echo "=========================================="
+echo ""
+echo "📦 Built Images:"
+if [ -n "$TAG" ]; then
+    FINAL_TAG=$(echo "$TAG" | sed 's/--tag //')
+    echo "   ${FINAL_TAG}"
+    
+    # Show image size if possible
+    if command -v docker &> /dev/null && [ -z "$RUN_PREFIX" ]; then
+        IMAGE_SIZE=$(docker image inspect "${FINAL_TAG}" --format='{{.Size}}' 2>/dev/null || echo "")
+        if [ -n "$IMAGE_SIZE" ]; then
+            IMAGE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B ${IMAGE_SIZE} 2>/dev/null || echo "${IMAGE_SIZE} bytes")
+            echo "   Size: ${IMAGE_SIZE_HUMAN}"
+        fi
+    fi
+fi
+if [ -n "$LATEST_TAG" ]; then
+    echo "   $(echo "$LATEST_TAG" | sed 's/--tag //')"
+fi
+echo ""
+
+# Show build logs location if they exist
+if [ -d "${BUILD_LOG_DIR:-}" ]; then
+    echo "📝 Build Logs:"
+    find "${BUILD_LOG_DIR}" -name "*.log" -type f 2>/dev/null | while read -r log_file; do
+        LOG_SIZE=$(du -h "${log_file}" | cut -f1)
+        LOG_LINES=$(wc -l < "${log_file}")
+        echo "   $(basename ${log_file}): ${LOG_SIZE} (${LOG_LINES} lines)"
+    done
+    echo ""
+    
+    # Generate BuildKit reports if Python is available
+    if command -v python3 &>/dev/null; then
+        BUILDKIT_PARSER="${SOURCE_DIR}/../.github/scripts/parse_buildkit_output.py"
+        if [ -f "${BUILDKIT_PARSER}" ]; then
+            echo "📊 Generating BuildKit Reports..."
+            echo ""
+            
+            # Create reports directory
+            REPORTS_DIR="${BUILD_LOG_DIR}/reports"
+            mkdir -p "${REPORTS_DIR}"
+            
+            # Process each build log
+            for log_file in $(find "${BUILD_LOG_DIR}" -name "*.log" -type f 2>/dev/null); do
+                LOG_BASENAME=$(basename "${log_file}" .log)
+                REPORT_FILE="${REPORTS_DIR}/${LOG_BASENAME}-report.txt"
+                JSON_FILE="${REPORTS_DIR}/${LOG_BASENAME}-data.json"
+                
+                # Determine image name from log file name
+                IMAGE_NAME="Unknown"
+                if [[ "$LOG_BASENAME" == *"base-image"* ]]; then
+                    IMAGE_NAME="Base Image (dynamo-base)"
+                elif [[ "$LOG_BASENAME" == *"framework"* ]]; then
+                    # Extract framework name from filename
+                    if [[ "$LOG_BASENAME" =~ framework-([a-z]+)-build ]]; then
+                        FRAMEWORK_NAME="${BASH_REMATCH[1]}"
+                        IMAGE_NAME="Framework Image (${FRAMEWORK_NAME})"
+                    else
+                        IMAGE_NAME="Framework Image"
+                    fi
+                elif [[ "$LOG_BASENAME" == *"single-stage"* ]]; then
+                    IMAGE_NAME="Single-Stage Image"
+                fi
+                
+                echo "   Processing: $(basename ${log_file}) → ${IMAGE_NAME}"
+                
+                # Parse and generate report with image name
+                if python3 "${BUILDKIT_PARSER}" "${log_file}" "${JSON_FILE}" "${REPORT_FILE}" "${IMAGE_NAME}" 2>/dev/null; then
+                    echo "   ✅ Report: $(basename ${REPORT_FILE})"
+                    echo "   ✅ Data:   $(basename ${JSON_FILE})"
+                else
+                    echo "   ⚠️  Failed to generate report"
+                fi
+            done
+            
+            echo ""
+            echo "📊 Build Reports generated in: ${REPORTS_DIR}"
+            echo ""
+            
+            # Display all reports in order (base image first, then framework)
+            echo ""
+            echo "╔════════════════════════════════════════════════════════════════════════════════╗"
+            echo "║                          📊 BUILD REPORTS SUMMARY                              ║"
+            echo "╚════════════════════════════════════════════════════════════════════════════════╝"
+            echo ""
+            
+            # Show base image report first if it exists
+            BASE_REPORT=$(find "${REPORTS_DIR}" -name "*base-image*-report.txt" | head -n 1)
+            if [ -n "${BASE_REPORT}" ] && [ -f "${BASE_REPORT}" ]; then
+                cat "${BASE_REPORT}"
+                echo ""
+                echo "────────────────────────────────────────────────────────────────────────────────"
+                echo ""
+            fi
+            
+            # Show framework report if it exists
+            if [ -n "${FRAMEWORK:-}" ]; then
+                FRAMEWORK_REPORT=$(find "${REPORTS_DIR}" -name "*framework-${FRAMEWORK,,}*-report.txt" | head -n 1)
+                if [ -n "${FRAMEWORK_REPORT}" ] && [ -f "${FRAMEWORK_REPORT}" ]; then
+                    cat "${FRAMEWORK_REPORT}"
+                    echo ""
+                fi
+            else
+                # If no specific framework, show any other reports
+                for report in $(find "${REPORTS_DIR}" -name "*-report.txt" ! -name "*base-image*" 2>/dev/null); do
+                    if [ -f "${report}" ]; then
+                        cat "${report}"
+                        echo ""
+                    fi
+                done
+            fi
+        else
+            echo "   ⚠️  BuildKit parser not found at: ${BUILDKIT_PARSER}"
+        fi
+    else
+        echo "   ⚠️  Python3 not available for BuildKit report generation"
+    fi
+fi
+
+echo "✅ All builds completed successfully!"
+echo "=========================================="
+echo ""

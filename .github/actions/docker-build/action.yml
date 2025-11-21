@@ -62,6 +62,8 @@ runs:
       uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
       with:
         driver: docker
+        # Enable BuildKit for enhanced metadata
+        buildkitd-flags: --debug
     - name: Login to ECR
       shell: bash
       env:
@@ -89,33 +91,72 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
       run: |
+        echo "=========================================="
+        echo "🚀 DOCKER BUILD - STARTING"
+        echo "=========================================="
+        
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
           IMAGE_TAG="${{ inputs.image_tag }}"
         else
           IMAGE_TAG="${{ inputs.framework }}:latest"
         fi
+        
+        echo "📦 Image Tag: ${IMAGE_TAG}"
+        echo "🔧 Framework: ${{ inputs.framework }}"
+        echo "🎯 Target: ${{ inputs.target }}"
+        echo "💻 Platform: ${{ inputs.platform }}"
+        echo "🔐 Using sccache: ${{ inputs.sccache_s3_bucket != '' && 'true' || 'false' }}"
 
         BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        echo "🕐 Build started at: ${BUILD_START_TIME}"
+        BUILD_START_EPOCH=$(date +%s)
+        echo "🕐 Build started at: ${BUILD_START_TIME} (epoch: ${BUILD_START_EPOCH})"
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
+        echo "BUILD_START_EPOCH=${BUILD_START_EPOCH}" >> $GITHUB_ENV
 
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+        
+        # Create build logs directory
+        mkdir -p build-logs
+        BUILD_LOG_FILE="build-logs/build-${{ inputs.framework }}-$(echo '${{ inputs.platform }}' | sed 's/linux\///').log"
+        echo "BUILD_LOG_FILE=${BUILD_LOG_FILE}" >> $GITHUB_ENV
+        echo "📝 Build log will be saved to: ${BUILD_LOG_FILE}"
+        
         # Collect optional overrides provided by the workflow
         EXTRA_ARGS=""
         if [ -n "${{ inputs.base_image_tag }}" ]; then
           EXTRA_ARGS+=" --base-image-tag ${{ inputs.base_image_tag }}"
+          echo "🔧 Base Image Tag Override: ${{ inputs.base_image_tag }}"
         fi
         if [ -n "${{ inputs.runtime_image_tag }}" ]; then
           EXTRA_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${{ inputs.runtime_image_tag }}"
+          echo "🔧 Runtime Image Tag Override: ${{ inputs.runtime_image_tag }}"
         fi
         if [ -n "${{ inputs.cuda_version }}" ]; then
           EXTRA_ARGS+=" --build-arg CUDA_VERSION=${{ inputs.cuda_version }}"
+          echo "🔧 CUDA Version Override: ${{ inputs.cuda_version }}"
         fi
         if [ -n "${{ inputs.torch_backend }}" ]; then
           EXTRA_ARGS+=" --build-arg TORCH_BACKEND=${{ inputs.torch_backend }}"
+          echo "🔧 Torch Backend Override: ${{ inputs.torch_backend }}"
         fi
+        
+        echo ""
+        echo "📋 Build command:"
+        echo "  ./container/build.sh --tag \"${IMAGE_TAG}\" \\"
+        echo "    --target ${{ inputs.target }} \\"
+        echo "    --vllm-max-jobs 10 \\"
+        echo "    --framework ${{ inputs.framework }} \\"
+        echo "    --platform ${{ inputs.platform }} \\"
+        echo "    --use-sccache \\"
+        echo "    --sccache-bucket \"${SCCACHE_S3_BUCKET}\" \\"
+        echo "    --sccache-region \"${AWS_DEFAULT_REGION}\" ${EXTRA_ARGS}"
+        echo ""
+        echo "=========================================="
+        echo "🏗️  EXECUTING BUILD"
+        echo "=========================================="
 
+        # Execute build and capture output (show on console AND save to file)
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
@@ -123,17 +164,39 @@ runs:
           --platform ${{ inputs.platform }} \
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
-          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS
-
+          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
+        
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        echo "🕐 Build ended at: ${BUILD_END_TIME}"
+        BUILD_END_EPOCH=$(date +%s)
+        BUILD_DURATION=$((BUILD_END_EPOCH - BUILD_START_EPOCH))
+        
+        echo ""
+        echo "=========================================="
+        echo "✅ BUILD COMPLETED"
+        echo "=========================================="
+        echo "🕐 Build ended at: ${BUILD_END_TIME} (epoch: ${BUILD_END_EPOCH})"
+        echo "⏱️  Total build duration: ${BUILD_DURATION} seconds"
+        echo "📝 Build log saved to: ${BUILD_LOG_FILE}"
+        echo "📊 Build log size: $(wc -l < "${BUILD_LOG_FILE}") lines, $(du -h "${BUILD_LOG_FILE}" | cut -f1)"
+        echo "🎯 Exit code: ${BUILD_EXIT_CODE}"
+        
         echo "BUILD_END_TIME=${BUILD_END_TIME}" >> $GITHUB_ENV
+        echo "BUILD_END_EPOCH=${BUILD_END_EPOCH}" >> $GITHUB_ENV
+        
+        # Exit with the build's exit code
+        exit ${BUILD_EXIT_CODE}
 
     - name: Capture Build Metrics
       id: metrics
       shell: bash
       run: |
-        echo "📊 Capturing build metrics for ${{ inputs.framework }}..."
+        echo "=========================================="
+        echo "📊 CAPTURING BUILD METRICS"
+        echo "=========================================="
+        echo "Framework: ${{ inputs.framework }}"
+        echo "Platform: ${{ inputs.platform }}"
 
         # Create metrics directory
         mkdir -p build-metrics
@@ -147,6 +210,7 @@ runs:
         END_EPOCH=$(date -d "$BUILD_END_TIME" +%s)
         BUILD_DURATION_SEC=$((END_EPOCH - START_EPOCH))
 
+        echo ""
         echo "🕐 Build timing:"
         echo "  Start: ${BUILD_START_TIME}"
         echo "  End: ${BUILD_END_TIME}"
@@ -156,27 +220,30 @@ runs:
         IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
         if [ -n "$IMAGE_TAG" ]; then
           IMAGE_SIZE_BYTES=$(docker image inspect "$IMAGE_TAG" --format='{{.Size}}' 2>/dev/null || echo "0")
-          echo "📦 Image size: ${IMAGE_SIZE_BYTES} bytes"
+          echo ""
+          echo "📦 Image size: ${IMAGE_SIZE_BYTES} bytes ($(numfmt --to=iec-i --suffix=B ${IMAGE_SIZE_BYTES} 2>/dev/null || echo 'N/A'))"
         else
           IMAGE_SIZE_BYTES=0
+          echo ""
           echo "⚠️  No image tag available"
         fi
 
-        echo "📊 Final metrics captured"
-
-        # Create consolidated metrics JSON file
-        echo "🔍 Debug: inputs.platform = '${{ inputs.platform }}'"
+        echo ""
+        echo "🔍 Platform information:"
         PLATFORM_ARCH=$(echo "${{ inputs.platform }}" | sed 's/linux\///')
-        echo "🔍 Debug: PLATFORM_ARCH = '${PLATFORM_ARCH}'"
+        echo "  Architecture: ${PLATFORM_ARCH}"
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
         JOB_KEY="${{ inputs.framework }}-${PLATFORM_ARCH}"
-        echo "🔍 Debug: JOB_KEY = '${JOB_KEY}'"
+        echo "  Job Key: ${JOB_KEY}"
 
         # Create job-specific metrics file
         mkdir -p build-metrics
         METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${{ github.run_id }}-${{ job.check_run_id }}.json"
 
-        # Create the job metrics file directly
+        echo ""
+        echo "💾 Writing metrics to: ${METRICS_FILE}"
+        
+        # Create the job metrics file
         cat > "$METRICS_FILE" << EOF
         {
           "framework": "${{ inputs.framework }}",
@@ -190,10 +257,88 @@ runs:
         }
         EOF
 
-        echo "📁 Created build metrics file for ${JOB_KEY}:"
+        echo ""
+        echo "📄 Metrics file contents:"
         cat "$METRICS_FILE"
 
-        # Metrics captured and saved to JSON file
+        echo ""
+        echo "✅ Metrics captured and saved successfully"
+        echo "=========================================="
+
+    - name: Generate BuildKit Report
+      id: buildkit-report
+      shell: bash
+      run: |
+        echo "=========================================="
+        echo "📊 GENERATING BUILDKIT STEP REPORT"
+        echo "=========================================="
+        
+        BUILD_LOG_FILE="${{ env.BUILD_LOG_FILE }}"
+        
+        echo "Build log: ${BUILD_LOG_FILE}"
+        echo ""
+        
+        if [ ! -f "$BUILD_LOG_FILE" ]; then
+          echo "⚠️  Build log not found, skipping BuildKit report"
+          exit 0
+        fi
+        
+        # Create reports directory
+        mkdir -p build-metrics/buildkit-reports
+        
+        PLATFORM_ARCH="${{ env.PLATFORM_ARCH }}"
+        REPORT_FILE="build-metrics/buildkit-reports/buildkit-report-${{ inputs.framework }}-${PLATFORM_ARCH}.txt"
+        JSON_FILE="build-metrics/buildkit-reports/buildkit-data-${{ inputs.framework }}-${PLATFORM_ARCH}.json"
+        
+        # Determine image name from build context
+        IMAGE_NAME="${{ inputs.framework }} (${{ inputs.target }})"
+        if [ "${{ inputs.target }}" == "runtime" ]; then
+          IMAGE_NAME="${{ inputs.framework }} Runtime Image"
+        elif [ "${{ inputs.target }}" == "dev" ]; then
+          IMAGE_NAME="${{ inputs.framework }} Development Image"
+        fi
+        
+        echo "🚀 Parsing BuildKit output..."
+        echo "Image: ${IMAGE_NAME}"
+        echo "Output report: ${REPORT_FILE}"
+        echo "Output data: ${JSON_FILE}"
+        echo ""
+        
+        # Make parser executable
+        chmod +x .github/scripts/parse_buildkit_output.py
+        
+        # Run parser with image name
+        set +e
+        python3 .github/scripts/parse_buildkit_output.py \
+          "$BUILD_LOG_FILE" \
+          "$JSON_FILE" \
+          "$REPORT_FILE" \
+          "$IMAGE_NAME"
+        PARSER_EXIT_CODE=$?
+        set -e
+        
+        echo ""
+        echo "📊 Parser exit code: ${PARSER_EXIT_CODE}"
+        
+        if [ ${PARSER_EXIT_CODE} -eq 0 ] && [ -f "$REPORT_FILE" ]; then
+          echo ""
+          echo "✅ BuildKit report generated successfully"
+          echo "📄 Report file: $REPORT_FILE"
+          echo "📄 JSON file: $JSON_FILE"
+          echo ""
+          
+          # Display the report
+          echo "=========================================="
+          echo "📊 BUILDKIT REPORT PREVIEW"
+          echo "=========================================="
+          cat "$REPORT_FILE"
+          echo ""
+        else
+          echo "⚠️  BuildKit report generation had issues but continuing..."
+        fi
+        
+        echo "✅ BuildKit report step completed"
+        echo "=========================================="
 
     # Upload job-specific build metrics as artifact
     - name: Upload Build Metrics
@@ -201,4 +346,22 @@ runs:
       with:
         name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: build-metrics/metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
+        retention-days: 7
+
+    # Upload build logs as artifact for debugging and analysis
+    - name: Upload Build Logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: build-logs-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: build-logs/*.log
+        retention-days: 7
+
+    # Upload BuildKit reports as artifact
+    - name: Upload BuildKit Reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: buildkit-reports-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: build-metrics/buildkit-reports/*
         retention-days: 7
