@@ -400,6 +400,7 @@ impl KeyValueStoreManager {
 pub trait KeyValueBucket: Send + Sync {
     /// A bucket is a collection of key/value pairs.
     /// Insert a value into a bucket, if it doesn't exist already
+    /// The Key should be the name of the item, not including the bucket name.
     async fn insert(
         &self,
         key: &Key,
@@ -408,9 +409,11 @@ pub trait KeyValueBucket: Send + Sync {
     ) -> Result<StoreOutcome, StoreError>;
 
     /// Fetch an item from the key-value storage
+    /// The Key should be the name of the item, not including the bucket name.
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError>;
 
     /// Delete an item from the bucket
+    /// The Key should be the name of the item, not including the bucket name.
     async fn delete(&self, key: &Key) -> Result<(), StoreError>;
 
     /// A stream of items inserted into the bucket.
@@ -420,6 +423,9 @@ pub trait KeyValueBucket: Send + Sync {
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError>;
 
+    /// The entries in this bucket.
+    /// The Key includes the full path including the bucket name.
+    /// That means you cannot directory get a Key from `entries` and pass it to `get` or `delete`.
     async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError>;
 }
 
