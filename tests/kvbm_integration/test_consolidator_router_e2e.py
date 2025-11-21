@@ -63,7 +63,10 @@ def create_trtllm_config(test_directory: Path) -> Path:
         "cuda_graph_config": None,
         "kv_cache_config": {
             "enable_partial_reuse": False,
-            "free_gpu_memory_fraction": 0.02,
+            "free_gpu_memory_fraction": 0.01,
+        },
+        "build_config": {
+            "max_seq_len": 4096,
         },
         "kv_connector_config": {
             "connector_module": "kvbm.trtllm_integration.connector",
@@ -665,6 +668,9 @@ class TestConsolidatorRouterE2E:
                 ]
             else:  # trtllm
                 # Create TensorRT-LLM config file with KVBM connector
+                # Use small GPU cache (0.01 = 1% of GPU memory) to force evictions
+                # This ensures blocks will be evicted from GPU while still in KVBM
+                # Small enough to trigger evictions but large enough to handle sequence requirements
                 config_path = create_trtllm_config(test_directory)
                 worker_command = [
                     "python",
@@ -733,17 +739,25 @@ class TestConsolidatorRouterE2E:
 
                 # Phase 1: Send requests to fill GPU cache
                 logger.info("Phase 1: Filling GPU cache with diverse prompts")
-                for i in range(25):  # Send enough requests to trigger GPU eviction
+                num_requests = 100
+                for i in range(num_requests):
                     prompt = f"Tell me a unique story about topic {i}. Make it very long and detailed with many paragraphs."
                     response = tester.send_chat_request(
                         messages=[{"role": "user", "content": prompt}],
                         max_tokens=100,  # Increase tokens to use more blocks per request
                     )
                     assert "content" in response["choices"][0]["message"]
-                    logger.info(f"Request {i+1}/25 completed")
+                    logger.info(f"Request {i+1}/{num_requests} completed")
 
-                # Wait for evictions to settle
-                time.sleep(5)
+                # Wait for requests to complete and blocks to be freed
+                # With GUARANTEED_NO_EVICT, blocks are freed when requests complete (not evicted)
+                # We need to wait long enough for requests to finish and blocks to be freed
+                # For vLLM with FIFO, evictions happen immediately when cache fills.
+                wait_time = 5 if engine == "trtllm" else 5
+                logger.info(
+                    f"Waiting {wait_time}s for requests to complete and blocks to be freed..."
+                )
+                time.sleep(wait_time)
 
                 # Phase 2: Analyze consolidator logs
                 logger.info("Phase 2: Analyzing consolidator deduplication behavior")
