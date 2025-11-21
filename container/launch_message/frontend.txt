@@ -50,7 +50,7 @@ The frontend container includes:
 - HTTP API service
 - Preprocessor
 - Router
-- Endpont Picker (EPP) for Gateway API Inference Extension
+- Endpoint Picker (EPP) for Gateway API Inference Extension
 
 Benefits:
 - Minimal dependencies for purely CPU-based processes
