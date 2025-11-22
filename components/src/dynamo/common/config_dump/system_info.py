@@ -101,40 +101,75 @@ def get_gpu_info() -> Optional[Dict[str, Any]]:
 
     Returns:
         Dictionary containing GPU details if available, None otherwise.
-        Attempts to use nvidia-smi via subprocess.
+        Attempts to use nvidia-smi via subprocess with XML output format.
 
     Note:
         This is a best-effort function and returns None if GPU info cannot be obtained.
     """
     try:
         import subprocess
+        import xml.etree.ElementTree as ET
 
         result = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=name,driver_version,memory.total",
-                "--format=csv,noheader",
+                "-q",
+                "-x",
             ],
             capture_output=True,
             text=True,
             timeout=5,
         )
         if result.returncode == 0:
-            gpu_lines = result.stdout.strip().split("\n")
+            root = ET.fromstring(result.stdout)
+
+            # Get driver version from root level
+            driver_version_elem = root.find("driver_version")
+            driver_version = (
+                driver_version_elem.text
+                if driver_version_elem is not None
+                else "unknown"
+            )
+
             gpus = []
-            for line in gpu_lines:
-                if line:
-                    parts = [p.strip() for p in line.split(",")]
-                    if len(parts) >= 3:
-                        gpus.append(
-                            {
-                                "name": parts[0],
-                                "driver_version": parts[1],
-                                "memory_total": parts[2],
-                            }
-                        )
+
+            # Parse each GPU element
+            for gpu_elem in root.findall("gpu"):
+                gpu_info = {}
+
+                # Extract product name
+                product_name = gpu_elem.find("product_name")
+                if product_name is not None:
+                    gpu_info["name"] = product_name.text
+
+                # Extract driver version
+                gpu_info["driver_version"] = driver_version
+
+                # Extract memory total
+                fb_memory = gpu_elem.find("fb_memory_usage/total")
+                if fb_memory is not None:
+                    gpu_info["memory_total"] = fb_memory.text
+
+                # Extract board part number
+                board_part = gpu_elem.find("board_part_number")
+                if board_part is not None:
+                    gpu_info["board_part_number"] = board_part.text
+
+                # Extract GPU part number
+                gpu_part = gpu_elem.find("gpu_part_number")
+                if gpu_part is not None:
+                    gpu_info["gpu_part_number"] = gpu_part.text
+
+                if gpu_info:
+                    gpus.append(gpu_info)
+
             return {"gpus": gpus, "count": len(gpus)} if gpus else None
-    except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
+    except (
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+        ET.ParseError,
+        Exception,
+    ) as e:
         logger.debug(f"Failed to get GPU info: {e}")
 
     return None

@@ -21,6 +21,20 @@ DEFAULT_ENV_PREFIXES = [
     "UCX_",  # UCX
     "NIXL_",  # NIXL
     "OMPI_",  # OpenMPI
+    "LLM_",  # Misc trtllm variables
+    "TLLM_",
+    "TRT_LLM_",
+    "TRTLLM_",
+    "NVIDIA_",
+    "NSYS_",
+    "GENERATE_CU_",
+    "OVERRIDE_",
+    "TOKENIZERS_",
+    "DISABLE_TORCH_",
+    "PYTORCH_",
+    "ENABLE_PERFECT_ROUTER",
+    "FLA_",
+    "NEMOTRON_",
 ]
 
 # Sensitive variable patterns to redact (case-insensitive)
