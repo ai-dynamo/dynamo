@@ -37,11 +37,12 @@ trap cleanup EXIT INT TERM
 
 
 # run ingress with KV router mode for disaggregated setup
-python3 -m dynamo.frontend --router-mode kv --http-port=8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python3 -m dynamo.frontend --router-mode kv &
 DYNAMO_PID=$!
 
 # run prefill worker with metrics on port 8081
-DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
@@ -71,7 +72,7 @@ echo "Waiting for prefill worker to initialize..."
 sleep 5
 
 # run decode worker with metrics on port 8082 (foreground)
-DYN_SYSTEM_PORT=8082 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \

@@ -1,0 +1,859 @@
+Cursor Rules for Dynamo Project
+https://github.com/keivenchang/dynamo-utils/blob/main/.cursorrules
+
+=============================================================================
+TABLE OF CONTENTS
+=============================================================================
+1. AI PERSONALITY AND DOCUMENTATION GUIDELINES
+  1.1 AI Personality
+  1.2 Documentation Guidelines
+  1.3 Forbidden Jargon
+
+2. BEST PRACTICES
+  2.1 Security
+  2.2 Performance and Optimization
+  2.3 UNIX Command Execution and Workflow
+    2.3.1 Command Chaining
+    2.3.2 Long-Running Programs
+  2.4 Environment Awareness and Setup
+    2.4.1 Virtualenv Activation (Host Machine Only)
+    2.4.2 Docker Environment
+
+3. PROJECT OVERVIEW
+  3.1 Project Structure
+  3.2 Quick Start Commands (Inside Dev Container)
+    3.2.1 Build and Compile (_/compile.sh)
+    3.2.2 Start Backend and Frontend (_/inference.sh)
+    3.2.3 Test the Deployment
+  3.3 Key Components
+  3.4 External Dependencies (Docker only)
+  3.5 Deployment Modes
+    3.5.1 Aggregated vs Disaggregated
+    3.5.2 Backend E2E Tests
+    3.5.3 Metrics Server Configuration
+
+4. UNIVERSAL CODE STYLE
+  4.1 Emojis
+  4.2 License Headers
+  4.3 General Rules
+  4.4 Rust Development
+    4.4.1 Code Style
+    4.4.2 File Organization
+    4.4.3 Build Commands
+    4.4.4 Type Inference for Examples
+    4.4.5 Type Inference for lib/bindings/python
+    4.4.6 Testing
+    4.4.7 Error Handling
+    4.4.8 Mutability Patterns
+    4.4.9 Lock Management
+    4.4.10 Dependency Management
+    4.4.11 Python Bindings and Wheel Creation
+  4.5 Python Development
+    4.5.1 Code Style
+    4.5.2 File Organization
+    4.5.3 Error Handling
+    4.5.4 Testing
+  4.6 JavaScript/TypeScript
+  4.7 Common Code Patterns
+    4.7.1 Terminal Width Detection
+
+5. UNIX/SHELL COMMANDS
+  5.1 General Rules
+  5.2 File Operations
+  5.3 Permissions
+  5.4 Piping and Filtering
+  5.5 Path Display
+  5.6 Pre-commit
+
+6. GIT WORKFLOW
+  6.1 Review Before Git Operations
+  6.2 Merge Conflicts
+  6.3 Commit Process
+  6.4 Commit Message Format
+  6.5 Git Integration (for parsing commit messages)
+
+7. COMMUNICATION TEMPLATES
+  7.1 Slack RFR Template
+    7.1.1 GitHub to Slack Login Mappings
+  7.2 GitHub PR Description Template
+
+8. DOCUMENTATION BUILD AND CI CHECKS
+  8.1 Sphinx Documentation
+    8.1.1 Overview
+    8.1.2 Build Documentation
+    8.1.3 Dependencies
+    8.1.4 Smart Hyperlink Conversion
+    8.1.5 Adding New Files
+    8.1.6 Toctree Structure
+    8.1.7 Build Warnings
+    8.1.8 Checking Documentation Build
+    8.1.9 Exclusions
+  8.2 Pre-Merge CI Checks
+    8.2.1 Rust Format Check
+    8.2.2 Rust Clippy Checks
+    8.2.3 Rust Tests
+    8.2.4 Pre-commit Hooks
+    8.2.5 Copyright Headers
+    8.2.6 Cargo Deny (License Checks)
+    8.2.7 Quick Pre-Commit Checklist
+
+9. CODE REVIEW GUIDELINES
+
+
+=============================================================================
+1. AI PERSONALITY AND DOCUMENTATION GUIDELINES
+=============================================================================
+
+## 1.1 AI Personality
+- Be direct, matter-of-fact, and honest about technical challenges
+- Don't be overly agreeable or sycophantic
+- Suggest alternatives when current approach has issues
+- Ask clarifying questions when requirements are unclear
+- CRITICAL: When debugging or fixing code, FIRST check what exists in main branch
+  - Remove any extra tests/code that weren't in main or explicitly requested
+  - Don't waste time debugging things that shouldn't exist
+  - Only work on what was explicitly asked for
+
+## 1.2 Documentation Guidelines
+Always add comments for:
+- Complex algorithms
+- Business logic
+- API endpoints
+- Configuration options
+- Non-obvious code decisions
+
+Explain "why" not "what"
+- Bad: "Loop through items" (obvious)
+- Good: "Process items in batches to avoid memory issues"
+
+## 1.3 Forbidden Jargon
+DO NOT use these BS words in docs/comments:
+- intuitive, comprehensive, optimal, seamless
+- next-generation, holistic, cutting-edge
+
+=============================================================================
+2. BEST PRACTICES
+=============================================================================
+
+## 2.1 Security
+- Never commit API keys or secrets
+- Use environment variables for config
+- Validate all user inputs
+- Use parameterized queries for databases
+- Follow principle of least privilege
+
+## 2.2 Performance and Optimization
+- Profile before optimizing
+- Use appropriate data structures
+- Consider memory allocation patterns
+- Use async/await for I/O
+- Cache expensive computations
+- Monitor resource usage in production
+
+## 2.3 UNIX Command Execution and Workflow
+
+### 2.3.1 Command Chaining
+- Chain multiple commands in one go whenever possible using && or ;
+- Use parentheses for grouping: (a && b); (c || d)
+- Examples:
+  - cd dir && command
+  - cmd1; cmd2; cmd3
+  - (cd dir1 && cargo fmt); (cd dir2 && cargo fmt)
+- Reduces latency and improves efficiency
+
+### 2.3.2 Long-Running Programs
+- For long-running programs (vllm, sglang, trtllm), use tee to log output to a file and background it
+- Do NOT filter output - errors must be visible in the log file
+- Format: program args 2>&1 | tee /tmp/program.N.log &
+- Example: vllm serve 2>&1 | tee /tmp/vllm.1.log &
+- Use sequential numbering: .1, .2, .3, etc for multiple runs
+- This allows monitoring while keeping the terminal responsive
+
+## 2.4 Environment Awareness and Setup
+
+### 2.4.1 Virtualenv Activation (Host Machine Only)
+- At the start of each context, check if on host machine (not in Docker)
+- If on host: source ~/nvidia/venv/bin/activate
+- This ensures pre-commit and other Python tools are available
+- Detection: Check if running in container by looking for /.dockerenv or checking hostname
+
+### 2.4.2 Docker Environment
+- Multi-stage builds for smaller images
+- Set appropriate user permissions
+- Use .dockerignore
+- Pin dependency versions
+- DO NOT use BS jargon: intuitive, comprehensive, optimal, seamless, next-generation, holistic, cutting-edge
+
+#### 2.2.1 Example Dockerfile
+```
+FROM rust:1.70 as builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release
+
+FROM debian:bullseye-slim
+COPY --from=builder /app/target/release/app /usr/local/bin/
+CMD ["app"]
+```
+
+=============================================================================
+3. PROJECT OVERVIEW
+=============================================================================
+
+## 3.1 Project Structure
+- Rust-based and Python-based project with Python bindings and web components
+- Build tools: cargo (Rust), uv (Python packages), maturin (Python bindings), Docker (containers)
+
+## 3.2 Quick Start Commands (Inside Dev Container)
+
+### 3.2.1 Build and Compile (_/compile.sh)
+This is a shortcut that runs:
+1. cargo update (sync Cargo.lock)
+2. cargo build --locked --features dynamo-llm/block-manager --workspace
+3. cd lib/bindings/python && maturin develop --uv
+4. uv pip install -e . (editable install)
+
+```bash
+_/compile.sh              # Development mode (default)
+_/compile.sh --release    # Release mode (optimized)
+_/compile.sh --clean      # Clean and rebuild
+_/compile.sh --rust-only  # Build only Rust
+_/compile.sh --dryrun     # Show what would be executed
+```
+
+### 3.2.2 Start Backend and Frontend (_/inference.sh)
+This is a shortcut that runs:
+1. Kills existing processes (multiprocess, temp python3, framework-specific)
+3. Validates model availability
+4. Starts backend: DYN_SYSTEM_PORT=8081 python -m dynamo.<framework> --model <model> [options]
+5. Starts frontend: python -m dynamo.frontend --http-port 8000
+
+```bash
+_/inference.sh                                    # Auto-detect framework
+_/inference.sh --framework vllm --model qwen      # Specific framework
+_/inference.sh --disagg --framework trtllm        # Disaggregated mode (multi-GPU)
+_/inference.sh --dryrun                           # Show what would be executed
+```
+
+#### Safe Process Killing Pattern
+CRITICAL: Use these patterns to kill Dynamo processes without killing the Docker container:
+
+**SAFE patterns (use these):**
+```bash
+# Using pgrep and xargs (recommended)
+pgrep -f "python3?.*-m dynamo\.(vllm|frontend|sglang|trtllm)" | xargs -r kill
+
+# More specific patterns
+pgrep -f "python3.*-m dynamo\." | xargs -r kill
+pgrep -f "python.*-m dynamo\." | xargs -r kill
+
+# Alternative using ps
+ps aux | grep -E "python3?.*-m dynamo\." | grep -v grep | awk '{print $2}' | xargs -r kill
+```
+
+**DANGEROUS patterns (DO NOT use - kills container):**
+```bash
+pkill -f "python.*dynamo"  # Too broad, kills container
+pkill python               # Kills all Python including container init
+pkill -f python3           # Can kill container processes
+```
+
+Why the safe pattern works:
+- Specifically matches `-m dynamo.` module invocations
+- Uses pgrep to find PIDs first, then pipes to kill for control
+- The `-r` flag in xargs prevents errors if no processes found
+- Won't match the Docker container's main Python process
+
+### 3.2.3 Test the Deployment
+```bash
+# List available models
+curl http://localhost:8000/v1/models | jq
+
+# Make a chat completion request
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "Qwen/Qwen3-0.6B",
+  "messages": [
+    {"role": "user", "content": "Hello!"}
+  ],
+  "max_tokens": 100
+}' | jq
+```
+
+## 3.3 Key Components
+- Rust runtime and core libraries
+- Python bindings via maturin (lib/bindings/python)
+- Web components and interfaces
+- Frontend: lib/llm/src/http/* and lib/llm/src/http/service/metrics.rs
+- Backend: components/backends/* and lib/runtime/src/system_status_server.rs
+
+## 3.4 External Dependencies (Docker only)
+- tensorrt_llm: bin/ext/tensorrt_llm/*
+- vllm: bin/ext/vllm/*
+- sglang: bin/ext/sglang/*
+
+## 3.5 Deployment Modes
+
+### 3.5.1 Aggregated vs Disaggregated
+- Aggregated: Single GPU, all components on one device
+  - Requires: DYN_SYSTEM_PORT=8081
+- Disaggregated: Multi-GPU, prefill/decode separation
+  - Requires 2+ GPUs
+  - Use aggregated mode for single GPU testing
+
+### 3.5.2 Backend E2E Tests
+```
+Individual backend tests (aggregated with metrics):
+pytest tests/serve/test_vllm.py::test_serve_deployment -k "aggregated" -v --tb=short
+pytest tests/serve/test_sglang.py::test_sglang_deployment -k "aggregated" -v --tb=short
+pytest tests/serve/test_trtllm.py::test_deployment -k "aggregated" -v --tb=short
+
+All backends (aggregated):
+pytest tests/serve/ -k "aggregated" -v --tb=short
+
+Filtered output (recommended):
+pytest tests/serve/ -k "aggregated" -v --tb=short | grep -v "running 0 tests" | grep -v "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" | grep -v "tower_http::trace::on_failure:"
+
+All serve tests (requires GPU):
+pytest tests/serve/ -v --tb=short
+```
+
+**Important**: This development environment has only 1 GPU available. Disaggregated multi-GPU tests
+will fail with `NVMLError_InvalidArgument` or similar GPU detection errors. Only run aggregated tests
+or tests that use a single GPU. Skip disaggregated tests that require 2+ GPUs.
+
+### 3.5.3 Metrics Server Configuration
+Backend launch scripts must include:
+```
+DYN_SYSTEM_PORT=8081 \
+python -m dynamo.backend_name --model <model> [other_args]
+```
+Without this: tests fail with "Connection refused" on port 8081
+
+=============================================================================
+4. UNIVERSAL CODE STYLE
+=============================================================================
+
+## 4.1 Emojis
+- DO NOT use emojis (unprofessional)
+- Rare exceptions only: ✅ 🚫 ❌ ⚠️
+
+## 4.2 License Headers
+- Use first 2 lines only:
+```
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+```
+
+## 4.3 General Rules
+- Don't remove TODO comments or commented lines below them
+- Don't generate *.md files unless explicitly requested
+- Verify HTML/markdown links work before adding them
+
+## 4.4 Rust Development
+
+### 4.5.1 Code Style
+- snake_case for variables/functions
+- PascalCase for types/traits
+- Use explicit types when it improves readability
+- Add doc comments (///) for public APIs
+- Prefer tracing::error over eprintln
+- Prefer shorter references: `MyStuff` instead of `crate::my_service::MyStuff`
+- Prefer .to_string() over format!() when possible
+- Prefer positive if/else: `if x then A else B` not `if !x then B else A`
+  - Exception: `if !x then A` (without else) is fine
+- Use debug_assert* over assert*
+
+### 4.5.2 File Organization
+- lib.rs: Library entry point
+- mod.rs: Module definitions
+- Separate files per module
+- Tests: tests/ directory or inline with #[cfg(test)]
+
+### 4.4.3 Build Commands
+- Always use --locked: cargo test --locked, cargo build --locked, cargo install --locked
+- Development build: cargo build --locked --features dynamo-llm/block-manager --workspace
+- Clean builds: cargo clean
+- Before commit: cargo fmt (run on all affected directories)
+- See section 13.1 (Pre-Merge CI Checks) for comprehensive build/test/lint commands
+
+### 4.4.4 Type Inference for Examples
+Add to top-level Cargo.toml [workspace] members (REMOVE BEFORE COMMIT):
+```
+======== AUTO ADDED FOR TYPE-INFERENCE, SHOULD BE REMOVED BEFORE COMMIT ========
+"lib/runtime/examples/system_metrics",
+"lib/runtime/examples/hello_world",
+"lib/runtime/examples/service_metrics",
+"lib/bindings/python",
+======== AUTO ADDED FOR TYPE-INFERENCE, SHOULD BE REMOVED BEFORE COMMIT ========
+```
+
+### 4.4.5 Type Inference for lib/bindings/python
+1. Add "lib/bindings/python" to top-level Cargo.toml [workspace] members (see above)
+3. Comment out [workspace] in lib/bindings/python/Cargo.toml:
+```
+======== WORKSPACE DECLARATION REMOVED FOR TYPE-INFERENCE, RESTORE BEFORE COMMIT ========
+[workspace]
+# empty workspace to exclude from top level workspace
+# excluded due to pyo3 extension module build issues
+======== WORKSPACE DECLARATION REMOVED FOR TYPE-INFERENCE, RESTORE BEFORE COMMIT ========
+```
+4. Add empty integration feature to lib/bindings/python/Cargo.toml (if not present):
+```
+[features]
+default = []
+block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
+integration = []  # Empty feature for rust-analyzer compatibility
+```
+5. Restart rust-analyzer (Cmd/Ctrl+Shift+P → "Rust Analyzer: Restart Server")
+6. IMPORTANT: Restore all changes before committing
+
+### 4.5.4 Testing
+- Write unit tests in same file (unless told otherwise)
+- Use #[cfg(test)] for test-only code
+- Mock external dependencies when mocks are available
+- Integration tests use --features integration: cargo test --locked --features integration -- --nocapture
+- Specific integration test: cargo test --locked -p dynamo-runtime --features integration --lib http_server -- --nocapture
+- During tests, show progress if building/compiling
+- List which tests failed (up to 10) and pass/fail breakdown (unit vs integration)
+- For DistributedRuntime/Runtime/drt tests: use unique names (ns515, comp515, ep515)
+  - See lib/runtime/src/metrics.rs for examples
+
+### 4.5.3 Error Handling
+- Use Result<T, E> for fallible operations
+- Use Option<T> for nullable values
+- Prefer ? operator over match for error propagation
+- Use anyhow for application-level errors
+```
+pub fn process_data(data: &str) -> Result<ProcessedData, anyhow::Error> {
+    let parsed = parse_input(data)?;
+    let result = transform_data(parsed)?;
+    Ok(result)
+}
+```
+
+### 4.4.8 Mutability Patterns
+Limit scope of mutable variables:
+```
+// Instead of:
+let mut mut_var = ...;
+mut_var.some_mutable_operation();
+// ... mut_var used all over
+
+// Do this:
+let var = {
+    let mut mut_var = ...;
+    mut_var.some_mutable_operation();
+    mut_var
+};
+```
+
+### 4.4.9 Lock Management
+Release locks before long operations:
+```
+// Bad:
+let reg = self.registry.lock().unwrap();
+if let Some(entry) = reg.get(name) {
+    entry.execute_long_call()  // holds lock too long
+}
+
+// Good:
+let long_call = {
+    let reg = self.registry.lock().unwrap();
+    reg.get(name).clone()
+}; // Lock released here
+long_call()
+```
+
+### 4.4.10 Dependency Management
+Validate dependency updates:
+```
+cargo-deny --version || cargo install --locked cargo-deny@0.16.4
+cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config deny.toml
+```
+
+### 4.4.11 Python Bindings and Wheel Creation
+After changes in lib/bindings/python/rust/*:
+1. cd lib/bindings/python && maturin develop --uv
+3. Or use _/compile.sh shortcut (handles full build workflow)
+
+## 4.5 Python Development
+
+### 4.5.1 Code Style
+- Follow PEP 8
+- Put imports at top of file (not inside functions)
+- Check indentation carefully (must be perfect)
+- Use dataclass for dicts with >4 elements (better type inference)
+- Use simple regex for multi-line string manipulations
+- snake_case for variables/functions
+- PascalCase for classes
+- Add type hints where beneficial
+- Use docstrings for functions/classes
+- Before commit: run mypy and precommit ruff
+- 3+ print statements: use triple quotes """ ... """
+- Outside Docker: source ~/bin/$(uname).$(uname -m)/venv.3.*/bin/activate
+
+### 4.5.2 File Organization
+- __init__.py for package initialization
+- Clear module separation
+- Tests in tests/ directory
+
+### 4.5.3 Error Handling
+```
+def process_file(filename: str) -> None:
+    try:
+        with open(filename, 'r') as f:
+            data = f.read()
+        process_data(data)
+    except FileNotFoundError:
+        logger.error(f"File {filename} not found")
+        raise
+```
+
+### 4.5.4 Testing
+- Framework: pytest
+- Unit tests in tests/ directory
+- Use fixtures for common setup
+- Mock external services
+- Always use: pytest --basetemp=/tmp/pytest_temp tests/
+
+## 4.6 JavaScript/TypeScript
+- camelCase for variables/functions
+- PascalCase for components/classes
+- Prefer const over let, avoid var
+- Use async/await over .then() chains
+- Add JSDoc comments for complex functions
+
+## 4.7 Common Code Patterns
+
+### 4.7.1 Terminal Width Detection
+```
+from common import get_terminal_width
+width = get_terminal_width()  # Fallback to 80 if detection fails
+```
+
+=============================================================================
+5. UNIX/SHELL COMMANDS
+=============================================================================
+
+## 5.1 General Rules
+- Source .bashrc when shell starts
+- Never use "!" inside shell quotes
+- No trailing spaces/tabs on empty lines
+- Use proper quoting to prevent word splitting/globbing
+
+## 5.2 File Operations
+- Check if file is under git before moving
+- Use git mv for tracked files, mv for untracked
+- Delete *.lock files instead of stashing
+
+## 5.3 Permissions
+```
+USER_ID=$(stat -c "%u" .)
+GROUP_ID=$(stat -c "%g" .)
+chown -R $USER_ID:$GROUP_ID .
+```
+
+## 5.4 Piping and Filtering
+Filter out unimportant cargo test output with grep -v:
+- "running 0 tests"
+- "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+- "tower_http::trace::on_failure:"
+
+## 5.5 Path Display
+- Use tilde (~) instead of full paths: ~/path not /home/ubuntu/path
+
+## 5.6 Pre-commit
+ALWAYS run pre-commit checks before committing:
+- For single file: pre-commit run --files <file_path>
+- For all changed files: pre-commit run --all-files
+- Pre-commit runs automatically on git commit, but run manually to catch issues early
+- Fix any issues reported before committing
+
+=============================================================================
+6. GIT WORKFLOW
+=============================================================================
+
+## 6.1 Review Before Git Operations
+Periodically review this .cursorrules before git operations
+
+## 6.2 Git Interactive Editors
+- Git commands like `git rebase --continue`, `git commit --amend`, and `git rebase -i` launch interactive text editors (vim/nano)
+- Cursor cannot interact with these editors directly because they expect terminal input
+- ALWAYS use `GIT_EDITOR=true` prefix to bypass interactive editors:
+  - `GIT_EDITOR=true git rebase --continue` - accepts default commit message
+  - `GIT_EDITOR=true git commit --amend -m "message"` - amends with new message
+  - For commits, use `-m "message"` flag instead of letting editor open
+- If editor opens accidentally, the command will hang waiting for user input
+- Example: `git rebase --continue` will open vim → use `GIT_EDITOR=true git rebase --continue` instead
+
+## 6.3 Merge Conflicts
+After resolving:
+1. git add <resolved_files>
+2. If in rebase: use `GIT_EDITOR=true git rebase --continue` (never let vim open)
+3. Run cargo fmt on directories
+
+## 6.4 Commit Process
+- NEVER launch vim or any editor (always provide -m flag with message)
+- Never commit top-level Cargo.toml or Cargo.lock (unless explicitly told)
+- Never use --no-verify
+- Always use --signoff: git commit --signoff ...
+- Run cargo fmt before committing Rust changes
+- Never add untracked files (unless explicitly told)
+- List untracked files separately from modified files
+- Prompt to git add modified files
+- Diff changes and generate descriptive message
+- Single line message for straightforward changes
+- For merge commits: use git commit -m "Merge ..." or git commit --no-edit
+
+## 6.5 Commit Message Format
+Determine commit type by checking git history:
+- If NO commits exist on current branch (check with: git log --oneline origin/main..HEAD)
+  → Use FIRST/INITIAL commit format (verbose with prefix)
+- If commits already exist on current branch
+  → Use SUBSEQUENT commit format (terse, 1-2 lines)
+
+SUBSEQUENT commits (when branch already has commits): terse, 1 line or at most a couple lines
+- Quick fix of the module in XYZ
+- Documentation updates on XYZ
+- Minor changing the usage of XYZ
+- Renaming of XYZ to ZYX
+- Remove leftover merge conflict marker
+
+FIRST/INITIAL commits (when branch has no commits yet): verbose format with description prefix (e.g. feat:, fix:, test:, ...)
+- feat: add new user authentication system
+- fix: resolve memory leak in data processing
+- docs: update API documentation
+- test: add unit tests for user module
+- ci: configure continuous integration pipeline
+- refactor: restructure code for better readability
+- perf: optimize data processing for speed
+- chore: update dependencies and clean up
+- revert: undo previous commit due to issues
+- style: apply code formatting and style fixes
+- build: update build scripts for new environment
+
+## 6.6 Git Integration (for parsing commit messages)
+- Format: `title (#PR_NUMBER)`
+- Extract PR: r'\(#(\d+)\)'
+- GitHub repo: https://github.com/ai-dynamo/dynamo
+- Use full SHA for URLs, short SHA (7-9 chars) for display
+
+=============================================================================
+7. COMMUNICATION TEMPLATES
+=============================================================================
+
+## 7.1 Slack RFR Template
+Output format (fill <PR#NUMBER>, verify line counts, map GitHub to Slack logins). If <PR#NUMBER> is unknown, ask.
+```
+RFR (code: +123/-55 lines, documents: 50 lines changed):
+*feat:* DIS-123 some feature desc here
+*PR:* http://github.com/ai-dynamo/dynamo/pull/<PR#NUMBER>
+*Reviewers:* <top reviewers based on past commits>, @Ryan McCormick, @Tanmay Verma
+```
+Then add 3 terse bullets about the PR
+Output in plain text surrounded by triple backticks
+
+### 7.1.1 GitHub to Slack Login Mappings
+- rmccormick -> @Ryan McCormick
+- kthui -> @Jacky Hui
+- nv-tusharma, tusharma → @Tushar Sharma
+- ishandhanani → @Ishan Dhanani
+- anant-s → @Anant Sharma
+- hhzhang16 → @Hannah Zhang
+- grahamk → @Graham King
+- krish → @Krishnan Prashanth
+- yanrpei → @Rudy Pei
+- biswa.panda → @Biswa Ranjan Panda
+- tedzhouhk → @Hongkuan Zhou
+- tzulingk → @Tzu-Ling Kan
+- neelays → @Neelay Shah
+- tanmayv25 → @Tanmay Verma
+
+If 0 document lines changed, omit "documents: ..." section
+Never show literal <PR#NUMBER>, ask if unknown
+
+## 7.2 GitHub PR Description Template
+Look at chain of continuous commits from same author
+Output in plain text surrounded by triple backticks (no formatting):
+```
+#### Overview:
+
+<!-- 2-3 terse sentences based on commits -->
+
+#### Details:
+
+<!-- Bullet points describing changes -->
+
+#### Where should the reviewer start?
+
+<!-- Specific files to review closely -->
+
+#### Related Issues: (use Closes / Fixes / Resolves / Relates to)
+
+<!-- Linear ticket (DIS-123, DYN-789) extracted from commits, or leave blank -->
+
+/coderabbit profile chill
+```
+
+=============================================================================
+8. DOCUMENTATION BUILD AND CI CHECKS
+=============================================================================
+
+## 8.1 Sphinx Documentation
+
+### 8.1.1 Overview
+- Source: docs/ directory
+- Build output: docs/build/html/
+- Main script: docs/generate_docs.py
+
+### 8.1.2 Build Documentation
+```
+cd ~/dynamo
+python docs/generate_docs.py
+```
+Steps: make clean → preprocess_docs() → make html
+
+### 8.1.3 Dependencies
+```
+pip install sphinx sphinx-rtd-theme myst-parser
+```
+
+### 8.1.4 Smart Hyperlink Conversion
+docs/generate_docs.py converts links automatically:
+- GitHub URLs → relative paths (for .md files in docs/)
+  Example: https://github.com/ai-dynamo/dynamo/blob/main/docs/guides/metrics.md → ../../guides/metrics.md
+- Relative paths → GitHub URLs (for non-.md or outside docs/)
+  Example: ../examples/config.pbtxt → https://github.com/ai-dynamo/dynamo/blob/main/examples/config.pbtxt
+
+### 8.1.5 Adding New Files
+1. Place file in appropriate subdirectory (docs/backends/*)
+3. Add to docs/hidden_toctree.rst (for backend docs not in main TOC)
+   Example: backends/sglang/prometheus.md
+4. Use relative paths (script handles conversion)
+5. Test: python docs/generate_docs.py
+
+### 8.1.6 Toctree Structure
+- docs/index.rst: Main index
+- docs/_sections/*.rst: Section indexes
+- docs/hidden_toctree.rst: Hidden toctree for files not in main TOC
+- Backend docs order: TensorRT-LLM, SGLang, vLLM
+
+### 8.1.7 Build Warnings
+Sphinx uses -W flag (warnings = errors)
+- Missing toctree entries cause failures
+- All .md files must be referenced in a toctree
+- Check for: "WARNING: document isn't included in any toctree"
+- Invalid JSON in code blocks marked as ```json will cause lexer errors
+  - Either fix JSON syntax (remove ellipsis ..., comments, etc.)
+  - Or change to ```text if non-valid JSON content is intentional
+
+### 8.1.8 Checking Documentation Build
+Test locally before pushing (replicates CI environment):
+```
+cd /path/to/dynamo/repo
+docker build -t docs-builder -f container/Dockerfile.docs .
+```
+Expected: "build succeeded" with no warnings
+If fails: Check for missing images, broken links, invalid JSON in code blocks
+
+### 8.1.9 Exclusions
+Files in docs/exclusions.txt are skipped during hyperlink conversion
+
+## 8.2 Pre-Merge CI Checks
+Run all the checks that CI runs before merging. These commands replicate the
+CI environment locally.
+
+Quick checklist before commit:
+1. cargo fmt (in all affected directories)
+2. cargo clippy --no-deps --all-targets -- -D warnings
+3. cargo test --locked --all-targets
+4. pre-commit run --all-files (if Python changes)
+
+### 8.2.1 Rust Format Check
+Check code formatting (must pass before commit):
+
+cargo fmt -- --check
+
+Check all directories that CI checks:
+(cd . && cargo fmt -- --check)
+(cd lib/bindings/python && cargo fmt -- --check)
+(cd lib/runtime/examples && cargo fmt -- --check)
+(cd launch/dynamo-run && cargo fmt -- --check)
+
+Fix formatting:
+cargo fmt
+
+### 8.2.2 Rust Clippy Checks
+Find unused imports, warnings, and other issues:
+
+cargo clippy --no-deps --all-targets -- -D warnings
+
+Check all directories that CI checks:
+(cd . && cargo clippy --no-deps --all-targets -- -D warnings)
+(cd lib/bindings/python && cargo clippy --no-deps --all-targets -- -D warnings)
+(cd lib/runtime/examples && cargo clippy --no-deps --all-targets -- -D warnings)
+(cd launch/dynamo-run && cargo clippy --no-deps --all-targets -- -D warnings)
+
+Find specific issues:
+cargo clippy --no-deps --all-targets -- -D warnings 2>&1 | grep -B 5 -A 10 "unused import"
+cargo clippy --no-deps --all-targets -- -D warnings 2>&1 | grep -E "^(error|warning)"
+
+### 8.2.3 Rust Tests
+Run all tests (unit, doc, integration):
+
+Compile tests first (separate build from execution):
+cargo test --locked --no-run
+
+Run doc tests (CI runs doc generation first):
+cargo doc --no-deps && cargo test --locked --doc
+
+Run unit tests (--all-targets doesn't run doc tests):
+cargo test --locked --all-targets
+
+NOTE: CI runs tests in these directories: ., lib/bindings/python, lib/runtime/examples, launch/dynamo-run
+
+### 8.2.4 Pre-commit Hooks
+Run all pre-commit hooks (Python linting, formatting, etc.):
+
+pre-commit run --all-files
+pre-commit run --files path/to/file.py
+pre-commit run ruff --all-files
+pre-commit run mypy --all-files
+
+Common hooks: ruff (Python linter), mypy (type checking), trailing-whitespace,
+end-of-file-fixer, check-yaml, check-json
+
+### 8.2.5 Copyright Headers
+Check copyright headers (requires PowerShell):
+
+pwsh .github/workflows/copyright-check.ps1
+
+Or manually check:
+grep -L "SPDX-FileCopyrightText" $(find . -name "*.rs" -o -name "*.py" -o -name "*.go")
+
+### 8.2.6 Cargo Deny (License Checks)
+Check licenses and security advisories:
+
+cargo-deny --version || cargo install cargo-deny@0.16.4
+cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config deny.toml
+
+### 8.2.7 Quick Pre-Commit Checklist
+Before committing Rust changes, run:
+1. cargo fmt
+2. cargo clippy --no-deps --all-targets -- -D warnings
+3. cargo test --locked --all-targets
+4. pre-commit run --all-files  (if Python changes)
+
+Expected result: All checks pass with no errors
+
+=============================================================================
+9. CODE REVIEW GUIDELINES
+=============================================================================
+- Review for security vulnerabilities
+- Check for performance issues
+- Ensure proper error handling
+- Verify test coverage
+- Look for code duplication
+- Check adherence to conventions
