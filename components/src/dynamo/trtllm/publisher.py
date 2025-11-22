@@ -254,11 +254,11 @@ class Publisher:
         self.metrics_publisher = None
         self.kv_event_publisher = None
         self.zmq_kv_event_publisher = None  # ZMQ publisher for consolidator
-        self.publish_kv_cache_events_thread = None
-        self.publish_stats_thread = None
+        self.publish_kv_cache_events_thread: Optional[ManagedThread] = None
+        self.publish_stats_thread: Optional[ManagedThread] = None
         # A set to store the block hash of partial block (i.e. block containing less than kv_block_size tokens) hashes.
         # It is used to prevent sending remove event to kv router since partial blocks are not stored.
-        self.partial_block_hashes = set()
+        self.partial_block_hashes: set[int] = set()
         self.error_queue: Queue = Queue()
         self._stop_event = threading.Event()
 
@@ -468,6 +468,11 @@ class Publisher:
                             f"Block {block_hash} contains {token_num_in_block} tokens, which is greater than kv_block_size {self.kv_block_size}"
                         )
                         return
+                    if block_hash is None:
+                        logging.warning(
+                            f"Skipping block with None hash containing {token_num_in_block} tokens"
+                        )
+                        continue
                     if token_num_in_block < self.kv_block_size:
                         logging.debug(
                             f"Early stop when block {block_hash} containing {token_num_in_block} tokens not equal to kv_block_size {self.kv_block_size}"
@@ -510,9 +515,11 @@ class Publisher:
                     )
             elif data["type"] == "removed":
                 self.processing_initial_created_events = False
-                block_hashes = []
+                block_hashes: list[int] = []
                 for block_hash in data["block_hashes"]:
                     block_hash = _to_signed_i64(block_hash)
+                    if block_hash is None:
+                        continue
                     if block_hash in self.partial_block_hashes:
                         logging.debug(
                             f"Skipping removing block hash {block_hash} since it is a partial block"
