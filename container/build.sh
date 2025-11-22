@@ -117,6 +117,7 @@ SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
+NIXL_LIBFABRIC_REF=v2.3.0
 
 NO_CACHE=""
 
@@ -533,6 +534,8 @@ fi
 
 # Add NIXL_REF as a build argument
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
+# Add NIXL_LIBFABRIC_REF as a build argument
+BUILD_ARGS+=" --build-arg NIXL_LIBFABRIC_REF=${NIXL_LIBFABRIC_REF} "
 
 # Function to build local-dev image with header
 build_local_dev_with_header() {

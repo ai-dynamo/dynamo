@@ -200,6 +200,8 @@ RUN apt-get update && \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \
         libnuma1 librdmacm1 ibverbs-providers \
+        # Libraries required by Libfabric
+        libhwloc15 \
         # JIT Kernel Compilation, flashinfer
         ninja-build \
         g++ \
@@ -245,8 +247,9 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
 USER dynamo
 ENV HOME=/home/dynamo
 
-# Copy UCX and NIXL to system directories
+# Copy UCX, Libfabric, and NIXL to system directories
 COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo: --from=dynamo_base /usr/local/libfabric /usr/local/libfabric
 COPY --chown=dynamo: --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
 ENV PATH=/usr/local/ucx/bin:$PATH
 
@@ -256,6 +259,7 @@ $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
+/usr/local/libfabric/lib:\
 $LD_LIBRARY_PATH
 
 ### VIRTUAL ENVIRONMENT SETUP ###
