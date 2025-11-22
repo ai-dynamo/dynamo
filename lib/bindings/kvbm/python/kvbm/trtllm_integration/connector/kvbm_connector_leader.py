@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-
+import logging
+import os
 from typing import List, Optional
 
 from kvbm import KvbmLeader
@@ -16,13 +17,19 @@ from tensorrt_llm._torch.pyexecutor.kv_cache_connector import (
 from tensorrt_llm.bindings.internal.batch_manager import LlmRequest
 from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 
+logger = logging.getLogger(__name__)
+
 DistributedRuntime = None
 if is_dyn_runtime_enabled():
     from dynamo.runtime import DistributedRuntime
 
 
 class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
-    def __init__(self, llm_args: TorchLlmArgs):
+    def __init__(
+        self,
+        llm_args: TorchLlmArgs,
+        consolidator_trtllm_endpoint: Optional[str] = None,
+    ):
         super().__init__(llm_args)
 
         drt: Optional[object] = None
@@ -39,9 +46,51 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         # Set bytes_per_block to 0, because we will retrieve the actual value from the worker side.
         leader = KvbmLeader(world_size, drt=self.drt)
 
+        # Check if consolidator is enabled first
+        from kvbm.trtllm_integration.consolidator_config import is_truthy
+
+        consolidator_enabled = is_truthy(
+            os.getenv("DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR", "true")
+        )
+
+        trtllm_ep = None
+        if consolidator_enabled:
+            # Get consolidator endpoint from environment variable
+            # DYN_KVBM_TRTLLM_ZMQ_PORT contains just the port number (e.g., "20081")
+            zmq_port = os.getenv("DYN_KVBM_TRTLLM_ZMQ_PORT")
+
+            if zmq_port:
+                try:
+                    port_num = int(zmq_port)
+                    trtllm_ep = f"tcp://127.0.0.1:{port_num}"
+                    logger.info(
+                        f"KV Event Consolidator: Using ZMQ port from DYN_KVBM_TRTLLM_ZMQ_PORT - trtllm={trtllm_ep}"
+                    )
+                except ValueError:
+                    logger.error(
+                        f"KV Event Consolidator: Invalid DYN_KVBM_TRTLLM_ZMQ_PORT value '{zmq_port}', "
+                        f"expected a port number. Consolidator will not be enabled."
+                    )
+                    trtllm_ep = None
+            else:
+                logger.error(
+                    "KV Event Consolidator: No ZMQ port found - consolidator will not be enabled. "
+                    "Set this environment variable before running TensorRT-LLM:\n"
+                    "  export DYN_KVBM_TRTLLM_ZMQ_PORT=20081"
+                )
+                trtllm_ep = None
+        else:
+            logger.info(
+                "KV Event Consolidator disabled via DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR"
+            )
+
         print(f"KvConnectorLeader initialized with rank: {mappings.rank}")
         self._connector = RustKvConnectorLeader(
-            mappings.rank, self.drt, self.block_size, leader
+            mappings.rank,
+            self.drt,
+            self.block_size,
+            leader,
+            consolidator_trtllm_endpoint=trtllm_ep,
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
