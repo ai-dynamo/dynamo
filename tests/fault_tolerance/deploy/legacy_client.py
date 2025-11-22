@@ -228,7 +228,7 @@ def client(
             for i in range(requests_per_client):
                 # Get available pods
                 pods = managed_deployment.get_pods(
-                    managed_deployment.frontend_service_name
+                    [managed_deployment.frontend_service_name]
                 )
                 port = 0
                 pod_name = None

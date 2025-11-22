@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import re
+import secrets
 import shlex
 import time
 from dataclasses import dataclass, field
@@ -14,8 +15,7 @@ import kr8s
 import kubernetes
 import requests
 import yaml
-from kr8s.objects import Pod as kr8s_Pod
-from kr8s.objects import Service as kr8s_Service
+from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 
 
@@ -314,8 +314,42 @@ class DeploymentSpec:
 
         return {"jsonl_enabled": jsonl_enabled, "log_level": log_level}
 
+    def set_service_env_var(self, service_name: str, name: str, value: str):
+        """
+        Set an environment variable for a specific service
+        """
+        # Check service exists
+        if service_name not in self._deployment_spec["spec"]["services"]:
+            raise ValueError(f"Service '{service_name}' not found in deployment spec")
+
+        service = self._deployment_spec["spec"]["services"][service_name]
+        if "envs" not in service:
+            service["envs"] = []
+
+        # if env var already exists, update it
+        for env in service["envs"]:
+            if env["name"] == name:
+                env["value"] = value
+                return
+
+        # if env var does not exist, add it
+        service["envs"].append({"name": name, "value": value})
+
+    def get_service_env_vars(self, service_name: str) -> list[dict]:
+        """
+        Get all environment variables for a specific service
+
+        Returns:
+            List of environment variable dicts (e.g., [{"name": "VAR", "value": "val"}])
+        """
+        # Check service exists
+        if service_name not in self._deployment_spec["spec"]["services"]:
+            raise ValueError(f"Service '{service_name}' not found in deployment spec")
+
+        return self._deployment_spec["spec"]["services"][service_name].get("envs", [])
+
     @property
-    def services(self) -> list:
+    def services(self) -> list[ServiceSpec]:
         """List of ServiceSpec objects"""
         return [
             ServiceSpec(svc, spec)
@@ -384,6 +418,16 @@ class DeploymentSpec:
             # Add new argument
             args_list.extend([arg_name, arg_value])
 
+    def set_service_replicas(self, service_name: str, replicas: int):
+        """
+        Set the number of replicas for a specific service
+        """
+        # Check service exists
+        if service_name not in self._deployment_spec["spec"]["services"]:
+            raise ValueError(f"Service '{service_name}' not found in deployment spec")
+
+        self._deployment_spec["spec"]["services"][service_name]["replicas"] = replicas
+
     def save(self, out_file: str):
         """Save updated deployment to file"""
         with open(out_file, "w") as f:
@@ -391,7 +435,7 @@ class DeploymentSpec:
 
 
 class PodProcess:
-    def __init__(self, pod: kr8s_Pod, line: str):
+    def __init__(self, pod: Pod, line: str):
         self.pid = int(re.split(r"\s+", line)[1])
         self.command = " ".join(
             re.split(r"\s+", line)[10:]
@@ -440,8 +484,9 @@ class ManagedDeployment:
     deployment_spec: DeploymentSpec
     namespace: str
     frontend_service_name: Optional[str] = "Frontend"
+    skip_restart_services: bool = False
 
-    _custom_api: Optional[Any] = None
+    _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[Any] = None
     _in_cluster: bool = False
     _logger: logging.Logger = logging.getLogger()
@@ -511,6 +556,17 @@ class ManagedDeployment:
 
         self._logger.info(f"Restarted {name} {label}")
 
+    async def wait_for_unready(self, timeout: int = 1800, sleep=1, log_interval=60):
+        """
+        Wait for the custom resource to be unready.
+
+        Args:
+            timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
+        """
+        return await self._wait_for_condition(
+            timeout, sleep, log_interval, False, "pending"
+        )
+
     async def _wait_for_ready(self, timeout: int = 1800, sleep=1, log_interval=60):
         """
         Wait for the custom resource to be ready.
@@ -518,9 +574,23 @@ class ManagedDeployment:
         Args:
             timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
         """
+        return await self._wait_for_condition(
+            timeout, sleep, log_interval, True, "successful"
+        )
+
+    async def _wait_for_condition(
+        self,
+        timeout: int = 1800,
+        sleep=1,
+        log_interval=60,
+        ready_condition_val: bool = True,
+        state_val: str = "successful",
+    ):
         start_time = time.time()
 
-        self._logger.info(f"Waiting for Deployment {self._deployment_name}")
+        self._logger.info(
+            f"Waiting for Deployment {self._deployment_name} to have Ready condition {ready_condition_val} and state {state_val}"
+        )
 
         attempt = 0
 
@@ -542,25 +612,28 @@ class ManagedDeployment:
                 conditions = status_obj.get("conditions", [])
                 current_state = status_obj.get("state", "unknown")
 
-                ready_condition = False
+                observed_ready_condition_val = ""
                 for condition in conditions:
-                    if (
-                        condition.get("type") == "Ready"
-                        and condition.get("status") == "True"
-                    ):
-                        ready_condition = True
-                        break
+                    if condition.get("type") == "Ready":
+                        observed_ready_condition_val = condition.get("status")
+                        if observed_ready_condition_val == str(ready_condition_val):
+                            break
 
-                state_successful = status_obj.get("state") == "successful"
+                observed_state_val = status_obj.get("state")
 
-                if ready_condition and state_successful:
+                if (
+                    observed_ready_condition_val == str(ready_condition_val)
+                    and observed_state_val == state_val
+                ):
                     self._logger.info(f"Current deployment state: {current_state}")
                     self._logger.info(f"Current conditions: {conditions}")
                     self._logger.info(
                         f"Elapsed time: {time.time() - start_time:.1f}s / {timeout}s"
                     )
 
-                    self._logger.info(f"Deployment {self._deployment_name} is ready")
+                    self._logger.info(
+                        f"Deployment {self._deployment_name} has Ready condition {ready_condition_val} and state {state_val}"
+                    )
                     return True
                 else:
                     if attempt % log_interval == 0:
@@ -570,7 +643,7 @@ class ManagedDeployment:
                             f"Elapsed time: {time.time() - start_time:.1f}s / {timeout}s"
                         )
                         self._logger.info(
-                            f"Deployment not ready yet - Ready condition: {ready_condition}, State successful: {state_successful}"
+                            f"Deployment has Ready condition {observed_ready_condition_val} and state {observed_state_val}, desired condition {ready_condition_val} and state {state_val}"
                         )
 
             except kubernetes.client.rest.ApiException as e:
@@ -633,7 +706,40 @@ class ManagedDeployment:
                 )
                 raise
 
-    def get_processes(self, pod) -> list:
+    async def trigger_rolling_upgrade(self, service_names: list[str]):
+        """
+        Triggers a rolling update for a list of services
+        This is a dummy update - sets an env var on the service
+        """
+
+        for service_name in service_names:
+            self.deployment_spec.set_service_env_var(
+                service_name, "TEST_ROLLING_UPDATE_TRIGGER", secrets.token_hex(8)
+            )
+
+            updated_envs = self.deployment_spec.get_service_env_vars(service_name)
+
+            try:
+                patch_body = {
+                    "spec": {"services": {service_name: {"envs": updated_envs}}}
+                }
+
+                await self._custom_api.patch_namespaced_custom_object(
+                    group="nvidia.com",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural="dynamographdeployments",
+                    name=self._deployment_name,
+                    body=patch_body,
+                    _content_type="application/merge-patch+json",
+                )
+            except kubernetes.client.rest.ApiException as e:
+                self._logger.info(
+                    f"Failed to patch deployment {self._deployment_name}: {e}"
+                )
+                raise
+
+    def get_processes(self, pod: Pod) -> list[PodProcess]:
         """Get list of processes in the given pod"""
         result = pod.exec(["ps", "-aux"])
         lines = result.stdout.decode().splitlines()
@@ -646,38 +752,34 @@ class ManagedDeployment:
             service_name = ""
         full_service_name = f"{self._deployment_name}-{service_name.lower()}"
 
-        return kr8s_Service.get(full_service_name, namespace=self.namespace)
+        return Service.get(full_service_name, namespace=self.namespace)
 
-    def get_pods(self, service_name=None):
-        result = {}
+    def get_pods(self, service_names: list[str] | None = None) -> dict[str, list[Pod]]:
+        result: dict[str, list[Pod]] = {}
 
-        service_list = []
+        if not service_names:
+            service_names = [service.name for service in self.deployment_spec.services]
 
-        if not service_name:
-            service_list = [service.name for service in self.deployment_spec.services]
-        else:
-            service_list = [service_name]
-
-        for service in service_list:
+        for service_name in service_names:
             # List pods for this service using the selector label
             # nvidia.com/selector: deployment-name-service
             label_selector = (
-                f"nvidia.com/selector={self._deployment_name}-{service.lower()}"
+                f"nvidia.com/selector={self._deployment_name}-{service_name.lower()}"
             )
 
-            pods = []
+            pods: list[Pod] = []
 
             for pod in kr8s.get(
                 "pods", namespace=self.namespace, label_selector=label_selector
             ):
                 pods.append(pod)
 
-            result[service] = pods
+            result[service_name] = pods
 
         return result
 
-    def get_pod_logs(self, service, pod, suffix=""):
-        directory = os.path.join(self.log_dir, service)
+    def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
+        directory = os.path.join(self.log_dir, service_name)
         os.makedirs(directory, exist_ok=True)
 
         try:
@@ -699,16 +801,20 @@ class ManagedDeployment:
         except Exception as e:
             self._logger.debug(e)
 
-        self._get_pod_metrics(pod, service, suffix)
+        self._get_pod_metrics(pod, service_name, suffix)
 
     def _get_service_logs(self, service_name=None, suffix=""):
-        service_pods = self.get_pods(service_name)
+        service_names = None
+        if service_name:
+            service_names = [service_name]
+
+        service_pods = self.get_pods(service_names)
 
         for service, pods in service_pods.items():
-            for i, pod in enumerate(pods):
-                self.get_pod_logs(service, pod, suffix)
+            for pod in pods:
+                self.get_pod_manifest_logs_metrics(service, pod, suffix)
 
-    def _get_pod_metrics(self, pod, service_name, suffix=""):
+    def _get_pod_metrics(self, pod: Pod, service_name: str, suffix=""):
         directory = os.path.join(self.log_dir, service_name)
         os.makedirs(directory, exist_ok=True)
         port = None
@@ -761,7 +867,9 @@ class ManagedDeployment:
             if e.status != 404:  # Ignore if already deleted
                 raise
 
-    def port_forward(self, pod, remote_port, max_connection_attempts=3):
+    def port_forward(
+        self, pod: Pod, remote_port: int, max_connection_attempts: int = 3
+    ):
         """Attempt to connect to a pod and return the port-forward object on success.
 
         Note: Port forwards run in background threads. When pods are terminated,
@@ -866,9 +974,13 @@ class ManagedDeployment:
             self._deployment_name = self.deployment_spec.name
             logging.getLogger("httpx").setLevel(logging.WARNING)
             await self._init_kubernetes()
-            await self._delete_deployment()
-            await self._restart_etcd()
-            await self._restart_nats()
+
+            # Run delete deployment and service restarts in parallel
+            tasks = [self._delete_deployment()]
+            if not self.skip_restart_services:
+                tasks.extend([self._restart_etcd(), self._restart_nats()])
+            await asyncio.gather(*tasks)
+
             await self._create_deployment()
             await self._wait_for_ready()
 
