@@ -125,8 +125,6 @@ jobs:
           push_tag: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
           aws_push: 'false'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
 
   vllm:
@@ -181,8 +179,6 @@ jobs:
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
       - name: Run unit tests
         if: ${{ matrix.platform.arch != 'arm64' }}
@@ -251,8 +247,6 @@ jobs:
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
       - name: Run unit tests
         if: ${{ matrix.platform.arch != 'arm64' }}
@@ -321,8 +315,6 @@ jobs:
           # OPS-1145: Switch aws_push to true
           aws_push: 'false'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
       - name: Run unit tests
         if: ${{ matrix.platform.arch != 'arm64' }}

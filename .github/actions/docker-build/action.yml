@@ -75,6 +75,7 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+        GITHUB_REF_NAME: ${{ github.ref_name }}
       run: |
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
@@ -82,15 +83,21 @@ runs:
         else
           IMAGE_TAG="${{ inputs.framework }}:latest"
         fi
-        ARCH="${PLATFORM##*/}"           # turns linux/amd64 to amd64
 
         BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         echo "🕐 Build started at: ${BUILD_START_TIME}"
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
 
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-        # Collect optional overrides provided by the workflow
+        # Set --cache-from args and set --cache-to if this is a main commit
         EXTRA_ARGS=""
+        EXTRA_ARGS+=("--dynamo-base-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:dynamo-base-${PLATFORM##*/}-cache")
+        EXTRA_ARGS+=("--dynamo-framework-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache")
+        # if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+        EXTRA_ARGS+=("--dynamo-base-cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:dynamo-base-${PLATFORM##*/}-cache,mode=max")
+        EXTRA_ARGS+=("--dynamo-framework-cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max")
+        # fi
+        # Collect optional overrides provided by the workflow
         if [ -n "${{ inputs.base_image_tag }}" ]; then
           EXTRA_ARGS+=" --base-image-tag ${{ inputs.base_image_tag }}"
         fi
@@ -109,8 +116,6 @@ runs:
           --vllm-max-jobs 10 \
           --framework ${{ inputs.framework }} \
           --platform ${{ inputs.platform }} \
-          --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-dynamo-base-${ARCH} \
-          --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-framework-${ARCH} \
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
           --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS
