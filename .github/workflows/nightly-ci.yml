@@ -345,7 +345,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
-          pytest_marks: "${{ matrix.framework }} and integration and nightly"
+          pytest_marks: "integration and (nightly or pre_merge or post_merge)"
           framework: ${{ matrix.framework }}
           test_type: integration
           platform_arch: amd64
@@ -377,7 +377,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
-          pytest_marks: "nightly and ${{ matrix.framework }} and e2e and gpu_1"
+          pytest_marks: "(nightly or pre_merge or post_merge) and ${{ matrix.framework }} and e2e and gpu_1"
           framework: ${{ matrix.framework }}
           test_type: e2e
           platform_arch: amd64
@@ -409,7 +409,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
-          pytest_marks: "nightly and ${{ matrix.framework }} and e2e and gpu_2"
+          pytest_marks: "(nightly or pre_merge or post_merge) and ${{ matrix.framework }} and e2e and gpu_2"
           framework: ${{ matrix.framework }}
           test_type: e2e
           platform_arch: amd64
@@ -459,7 +459,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: ${{ matrix.marks }}
+          pytest_marks: "(${{ matrix.marks }} or (nightly or pre_merge or post_merge))"
           framework: ${{ matrix.framework }}
           test_type: component
           platform_arch: ${{ matrix.arch }}
