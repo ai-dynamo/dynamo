@@ -4,6 +4,7 @@
 
 """
 Script to generate devcontainer.json files for different frameworks using Jinja2 template.
+Useless comment here to kick off CI
 """
 
 from datetime import datetime
