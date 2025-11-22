@@ -6,6 +6,7 @@ import multiprocessing
 import re
 import time
 from contextlib import contextmanager
+from typing import Any
 
 import pytest
 
@@ -188,7 +189,7 @@ def _inject_failures(failures, logger, deployment: ManagedDeployment):  # noqa: 
         Dict mapping failure info to list of affected pod names
         Example: {"VllmDecodeWorker:delete_pod": ["pod-abc123", "pod-xyz789"]}
     """
-    affected_pods = {}
+    affected_pods: dict[str, list] = {}
 
     for failure in failures:
         time.sleep(failure.time)
@@ -261,7 +262,11 @@ def validation_context(request, scenario):  # noqa: F811
     the appropriate parser. After parsing, immediately runs validation checkers.
     """
     # Shared context that test will populate during execution
-    context = {"deployment": None, "namespace": None, "affected_pods": {}}
+    context: dict[str, Any] = {
+        "deployment": None,
+        "namespace": None,
+        "affected_pods": {},
+    }
 
     yield context  # Test receives this and populates it
 
@@ -498,7 +503,9 @@ async def test_fault_scenario(
     ) as deployment:
         # Populate shared context for validation
         validation_context["deployment"] = deployment
-        validation_context["namespace"] = namespace
+        validation_context["namespace"] = (
+            str(namespace) if namespace is not None else None
+        )
 
         with _clients(
             logger,

@@ -23,7 +23,7 @@ to run based on:
 """
 
 import logging
-from typing import List
+from typing import List, Optional
 
 from tests.fault_tolerance.deploy.base_checker import BaseChecker
 from tests.fault_tolerance.deploy.checkers import (
@@ -78,7 +78,7 @@ def get_checkers_for_scenario(test_name: str, scenario: Scenario) -> List[BaseCh
     return checkers
 
 
-def get_scenario_checker(test_name: str, scenario: Scenario) -> BaseChecker:
+def get_scenario_checker(test_name: str, scenario: Scenario) -> Optional[BaseChecker]:
     """Get appropriate scenario checker (Stage 1).
 
     Args:
@@ -86,7 +86,7 @@ def get_scenario_checker(test_name: str, scenario: Scenario) -> BaseChecker:
         scenario: Scenario object
 
     Returns:
-        Scenario checker instance
+        Scenario checker instance or None
     """
     # No failures scenario
     if test_name.endswith("-none]"):
