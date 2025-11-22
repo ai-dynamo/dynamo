@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-accelerate==1.6.0
-aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@5554d2eb8206738c66048bf2d72183e9bcd85759
+--extra-index-url https://download.pytorch.org/whl/cu130 # this is only needed for accelerate dependencies
+accelerate
+# aiconfigurator # @ git+https://github.com/ai-dynamo/aiconfigurator.git@5554d2eb8206738c66048bf2d72183e9bcd85759
 aiofiles
-aiperf @ git+https://github.com/ai-dynamo/aiperf.git@4d3fa29403c8f75da22a14f1f7b3aeb27db9288f
+# aiperf # @ git+https://github.com/ai-dynamo/aiperf.git@4d3fa29403c8f75da22a14f1f7b3aeb27db9288f
 av==15.0.0
 fastapi==0.120.1
 ftfy
@@ -17,7 +17,7 @@ kubernetes_asyncio
 matplotlib
 msgspec
 mypy
-nvidia-ml-py==13.580.65
+nvidia-ml-py==13.580.82
 opentelemetry-api
 opentelemetry-sdk
 pip
@@ -33,8 +33,8 @@ PyYAML
 scikit-learn
 scipy<1.14.0  # Pin scipy version for pmdarima compatibility
 sentencepiece
-tensorboard==2.19.0
-tensorboardX==2.6.2.2
+tensorboard==2.20.0
+tensorboardX==2.6.4
 transformers
 types-aiofiles
 types-PyYAML

@@ -12,7 +12,7 @@ ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
-ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+ARG BASE_IMAGE_TAG="25.09-cuda13.0-devel-ubuntu24.04"
 
 # Build configuration
 ARG ENABLE_KVBM=false
@@ -53,7 +53,7 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 # Redeclare ARGs for this stage
 ARG ARCH
 ARG ARCH_ALT
-ARG PYTHON_VERSION
+ARG PYTHON_VERSION=3.12
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
@@ -410,6 +410,8 @@ COPY --chown=dynamo: --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
 COPY --chown=dynamo: ./ /workspace/
 
+# Install Python packages
+# Install dynamo, NIXL, and dynamo-specific dependencies
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \

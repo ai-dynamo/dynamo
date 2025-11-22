@@ -59,7 +59,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TRTLLM_BASE_IMAGE_TAG=25.06-py3
+TRTLLM_BASE_IMAGE_TAG=25.08-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -89,16 +89,17 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="0c9430e5a530ba958fc9dca561a3ad865ad9f492"
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="736e7ee136e0d65f98704db13ab7e053803033c4" # tag v1.2.0rc1
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
 
 # TensorRT-LLM PyPI index URL
-DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+DEFAULT_TENSORRTLLM_INDEX_URL="https://download.pytorch.org/whl/cu130"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.1.0rc5"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc1"
+TENSORRTLLM_INDEX_URL=""
 TENSORRTLLM_PIP_WHEEL=""
 
 
@@ -107,13 +108,13 @@ VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
-VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+VLLM_BASE_IMAGE_TAG="25.09-cuda13.0-devel-ubuntu24.04"
 
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+NONE_BASE_IMAGE_TAG="25.09-cuda13.0-devel-ubuntu24.04"
 
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+SGLANG_BASE_IMAGE_TAG="25.09-cuda13.0-devel-ubuntu24.04"
 
 NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
@@ -566,7 +567,7 @@ build_local_dev_with_header() {
         set -x
     fi
 
-    $RUN_PREFIX docker build \
+    $RUN_PREFIX docker build --progress=plain  \
         --build-arg DEV_BASE="$dev_base_image" \
         --build-arg USER_UID="$USER_UID" \
         --build-arg USER_GID="$USER_GID" \
@@ -848,15 +849,22 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         echo "======================================"
         echo "Starting Build 1: Base Image"
         echo "======================================"
-        $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        # Build 1 (container/Dockerfile) does NOT use (will be removed soon):
+        #   - FRAMEWORK
+        #   - VLLM_FRAMEWORK (or TRTLLM_FRAMEWORK, SGLANG_FRAMEWORK, etc.)
+        #   - VERSION
+        #   - PYTHON_PACKAGE_VERSION
+        #   - HF_TOKEN
+        #   - MAX_JOBS
+        $RUN_PREFIX docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
         # Start framework build
         echo "======================================"
         echo "Starting Build 2: Framework Image"
         echo "======================================"
         BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        $RUN_PREFIX docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     else
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        $RUN_PREFIX docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     fi
 fi
 
