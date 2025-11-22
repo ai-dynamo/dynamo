@@ -4,6 +4,7 @@
 use std::env;
 
 use clap::{CommandFactory as _, Parser};
+use dynamo_runtime::config::environment_names::logging as env_logging;
 
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_run::Output;
@@ -44,7 +45,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     if log_level != "info" {
-        unsafe { std::env::set_var("DYN_LOG", log_level) };
+        unsafe { std::env::set_var(env_logging::DYN_LOG, log_level) };
     }
 
     logging::init();

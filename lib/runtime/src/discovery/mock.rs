@@ -140,6 +140,18 @@ impl Discovery for MockDiscovery {
         Ok(instance)
     }
 
+    async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+        let instance_id = instance.instance_id();
+
+        self.registry
+            .instances
+            .lock()
+            .unwrap()
+            .retain(|i| i.instance_id() != instance_id);
+
+        Ok(())
+    }
+
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
         let instances = self.registry.instances.lock().unwrap();
         Ok(instances
@@ -218,7 +230,7 @@ mod tests {
             namespace: "test-ns".to_string(),
             component: "test-comp".to_string(),
             endpoint: "test-ep".to_string(),
-            transport: crate::component::TransportType::NatsTcp("test-subject".to_string()),
+            transport: crate::component::TransportType::Nats("test-subject".to_string()),
         };
 
         let query = DiscoveryQuery::Endpoint {

@@ -3,18 +3,17 @@
 
 //! Background processes for the KV Router including event consumption and snapshot uploads.
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use dynamo_runtime::{
     component::Component,
+    config::environment_names::nats as env_nats,
     discovery::DiscoveryQuery,
     prelude::*,
+    storage::key_value_store::WatchEvent,
     traits::events::EventPublisher,
-    transports::{
-        etcd::{Client as EtcdClient, WatchEvent},
-        nats::{NatsQueue, Slug},
-    },
+    transports::nats::{NatsQueue, Slug},
 };
 use futures::StreamExt;
 use rand::Rng;
@@ -231,8 +230,8 @@ pub async fn start_kv_router_background(
     let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
         .to_string()
         .replace("_", "-");
-    let nats_server =
-        std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    let nats_server = std::env::var(env_nats::NATS_SERVER)
+        .unwrap_or_else(|_| "nats://localhost:4222".to_string());
 
     // Create NatsQueue for event consumption
     let mut nats_queue = NatsQueue::new_with_consumer(
@@ -248,12 +247,6 @@ pub async fn start_kv_router_background(
         .server(&nats_server)
         .build()?;
     let nats_client = client_options.connect().await?;
-
-    // Get etcd client (needed for both snapshots and router watching)
-    let etcd_client = component
-        .drt()
-        .etcd_client()
-        .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
 
     // Create bucket name for snapshots/state
     let bucket_name = Slug::slugify(&format!("{}-{RADIX_STATE_BUCKET}", component.subject()))
@@ -273,13 +266,12 @@ pub async fn start_kv_router_background(
     }
 
     // Cleanup orphaned consumers on startup
-    cleanup_orphaned_consumers(&mut nats_queue, &etcd_client, &component, &consumer_uuid).await;
+    cleanup_orphaned_consumers(&mut nats_queue, &component, &consumer_uuid).await;
 
     // Watch for router deletions to clean up orphaned consumers
-    let (_prefix_str, mut router_replicas_rx) = etcd_client
-        .kv_get_and_watch_prefix(&format!("{}/", KV_ROUTERS_ROOT_PATH))
-        .await?
-        .dissolve();
+    let store = component.drt().store();
+    let (_watch_handle, mut router_replicas_rx) =
+        Arc::new(store.clone()).watch(KV_ROUTERS_ROOT_PATH, None, cancellation_token.clone());
 
     // Get the generate endpoint and watch for instance deletions
     let generate_endpoint = component.endpoint("generate");
@@ -424,7 +416,7 @@ pub async fn start_kv_router_background(
                         continue;
                     };
 
-                    let key = String::from_utf8_lossy(kv.key());
+                    let key = kv.as_ref();
                     tracing::info!("Detected router replica deletion: {key}");
 
                     // Only process deletions for routers on the same component
@@ -466,10 +458,9 @@ pub async fn start_kv_router_background(
     Ok(())
 }
 
-/// Cleanup orphaned NATS consumers that no longer have corresponding etcd router entries
+/// Cleanup orphaned NATS consumers that no longer have corresponding router entries
 async fn cleanup_orphaned_consumers(
     nats_queue: &mut NatsQueue,
-    etcd_client: &EtcdClient,
     component: &Component,
     consumer_uuid: &str,
 ) {
@@ -477,18 +468,28 @@ async fn cleanup_orphaned_consumers(
         return;
     };
 
-    let router_prefix = format!("{}/{}/", KV_ROUTERS_ROOT_PATH, component.path());
-    let Ok(router_entries) = etcd_client.kv_get_prefix(&router_prefix).await else {
+    // Get active routers from store
+    let store = component.drt().store();
+    let Ok(Some(router_bucket)) = store.get_bucket(KV_ROUTERS_ROOT_PATH).await else {
+        tracing::debug!("No router bucket found, skipping cleanup");
         return;
     };
 
-    let active_uuids: HashSet<String> = router_entries
+    let Ok(entries) = router_bucket.entries().await else {
+        return;
+    };
+
+    // Filter to only routers for this component
+    let component_path = component.path();
+    let active_uuids: HashSet<String> = entries
         .iter()
-        .filter_map(|kv| {
-            String::from_utf8_lossy(kv.key())
-                .split('/')
-                .next_back()
-                .map(str::to_string)
+        .filter_map(|(key, _)| {
+            // Check if key contains this component's path
+            if !key.as_ref().contains(&component_path) {
+                return None;
+            }
+            // Extract the last part (should be the UUID)
+            key.as_ref().split('/').next_back().map(str::to_string)
         })
         .collect();
 

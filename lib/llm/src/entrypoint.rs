@@ -22,6 +22,7 @@ pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
     pub busy_threshold: Option<f64>,
+    pub enforce_disagg: bool,
 }
 
 impl RouterConfig {
@@ -30,11 +31,17 @@ impl RouterConfig {
             router_mode,
             kv_router_config,
             busy_threshold: None,
+            enforce_disagg: false,
         }
     }
 
     pub fn with_busy_threshold(mut self, threshold: Option<f64>) -> Self {
         self.busy_threshold = threshold;
+        self
+    }
+
+    pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
+        self.enforce_disagg = enforce_disagg;
         self
     }
 }

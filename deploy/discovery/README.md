@@ -16,7 +16,7 @@ When deploying with the Dynamo operator, simply add the annotation to your DGD m
 ```yaml
 metadata:
   annotations:
-    nvidia.com/dynamo-discover-backend: kubernetes
+    nvidia.com/dynamo-discovery-backend: kubernetes
 ```
 
 The operator will automatically configure the required EndpointSlices, labels, and pod environment variables. See [`dgd.yaml`](./dgd.yaml) for a complete example.
