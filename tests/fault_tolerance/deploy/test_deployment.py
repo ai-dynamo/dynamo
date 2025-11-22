@@ -503,9 +503,7 @@ async def test_fault_scenario(
     ) as deployment:
         # Populate shared context for validation
         validation_context["deployment"] = deployment
-        validation_context["namespace"] = (
-            str(namespace) if namespace is not None else None
-        )
+        validation_context["namespace"] = namespace
 
         with _clients(
             logger,
