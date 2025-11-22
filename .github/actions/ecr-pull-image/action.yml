@@ -1,0 +1,74 @@
+name: 'ECR Pull Image with Retry'
+description: 'Pulls an image from ECR with retry logic and proper error handling'
+
+inputs:
+  registry_image:
+    description: 'Registry image name'
+    required: true
+  image_prefix:
+    description: 'Image prefix (e.g., nightly)'
+    required: true
+  framework:
+    description: 'Framework name'
+    required: true
+  architecture:
+    description: 'Architecture (amd64 or arm64)'
+    required: true
+  ecr_hostname:
+    description: 'ECR hostname'
+    required: true
+  max_retries:
+    description: 'Maximum number of retry attempts'
+    required: false
+    default: '3'
+  retry_delay:
+    description: 'Delay between retries in seconds'
+    required: false
+    default: '10'
+
+outputs:
+  local_tag:
+    description: 'Local tag of the pulled image'
+    value: ${{ steps.pull.outputs.local_tag }}
+  full_image:
+    description: 'Full image name with registry'
+    value: ${{ steps.pull.outputs.full_image }}
+
+runs:
+  using: composite
+  steps:
+    - name: Pull and tag image with retry
+      id: pull
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        IMAGE="${{ inputs.ecr_hostname }}/${{ inputs.registry_image }}:${{ inputs.image_prefix }}-${{ inputs.framework }}-${{ inputs.architecture }}"
+        LOCAL_TAG="${{ inputs.image_prefix }}-${{ inputs.framework }}-${{ inputs.architecture }}"
+
+        echo "Pulling image: ${IMAGE}"
+        echo "Local tag: ${LOCAL_TAG}"
+
+        retry_count=0
+        max_retries="${{ inputs.max_retries }}"
+        retry_delay="${{ inputs.retry_delay }}"
+
+        while [ $retry_count -lt $max_retries ]; do
+          if docker pull "${IMAGE}"; then
+            echo "Successfully pulled image on attempt $((retry_count+1))"
+            docker tag "${IMAGE}" "${LOCAL_TAG}"
+            echo "local_tag=${LOCAL_TAG}" >> $GITHUB_OUTPUT
+            echo "full_image=${IMAGE}" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            retry_count=$((retry_count+1))
+            if [ $retry_count -lt $max_retries ]; then
+              echo "Pull failed, retrying ($retry_count/$max_retries) in ${retry_delay}s..."
+              sleep "${retry_delay}"
+            fi
+          fi
+        done
+
+        echo "ERROR: Failed to pull image after ${max_retries} attempts"
+        exit 1
+
