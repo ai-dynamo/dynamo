@@ -89,9 +89,16 @@ class Planner:
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
 
+            # Use backend metrics for vLLM (queries vllm:* metrics directly from workers)
+            # Use frontend metrics for other backends (queries dynamo_frontend_* metrics)
+            metric_source = "backend" if args.backend.lower() == "vllm" else "frontend"
+            logger.info(
+                f"Initializing Prometheus client with metric_source='{metric_source}' for backend '{args.backend}'"
+            )
             self.prometheus_api_client = PrometheusAPIClient(
                 SLAPlannerDefaults.prometheus_endpoint,
                 args.namespace,
+                metric_source=metric_source,
             )
 
         self.num_req_predictor = LOAD_PREDICTORS[args.load_predictor](
