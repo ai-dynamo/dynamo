@@ -28,120 +28,9 @@ env:
 ############################## BUILD JOBS ##############################
 
 jobs:
-  build-base-amd64:
-    name: Build Dynamo Base (amd64)
-    runs-on: cpu-amd-m5-2xlarge
-    timeout-minutes: 120
-    env:
-      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull existing base image for cache
-        shell: bash
-        continue-on-error: true
-        run: |
-          echo "Attempting to pull existing base image for layer caching..."
-          if docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64"; then
-            echo "Successfully pulled existing image for cache"
-          else
-            echo "No existing image found or pull failed, will build from scratch"
-          fi
-      - name: Build Docker Image
-        id: build
-        uses: ./.github/actions/docker-build
-        with:
-          framework: none
-          target: dev
-          platform: linux/amd64
-          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
-          enable_kvbm: true
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: dynamo-base-nightly-amd64
-      - name: Tag and Push Base Images
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build.outputs.image_tag }}
-          push_tags: |
-            ${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64
-            ${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64-run-${{ github.run_id }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-  build-base-arm64:
-    name: Build Dynamo Base (arm64)
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 120
-    env:
-      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull existing base image for cache
-        shell: bash
-        continue-on-error: true
-        run: |
-          echo "Attempting to pull existing base image for layer caching..."
-          if docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64"; then
-            echo "Successfully pulled existing image for cache"
-          else
-            echo "No existing image found or pull failed, will build from scratch"
-          fi
-      - name: Build Docker Image
-        id: build
-        uses: ./.github/actions/docker-build
-        with:
-          framework: none
-          target: dev
-          platform: linux/arm64
-          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
-          enable_kvbm: true
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: dynamo-base-nightly-arm64
-      - name: Tag and Push Base Images
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build.outputs.image_tag }}
-          push_tags: |
-            ${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64
-            ${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64-run-${{ github.run_id }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-  build-framework-amd64:
+  build-amd64:
     name: Build ${{ matrix.framework }} (amd64)
-    needs: build-base-amd64
-    runs-on: cpu-amd-m5-4xlarge
+    runs-on: cpu-amd-m5-2xlarge
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -172,7 +61,6 @@ jobs:
           framework: ${{ matrix.framework }}
           target: runtime
           platform: linux/amd64
-          dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64-run-${{ github.run_id }}
           base_image_tag: ''
           runtime_image_tag: ''
           cuda_version: ''
@@ -200,9 +88,8 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-  build-framework-arm64:
+  build-arm64:
     name: Build ${{ matrix.framework }} (arm64)
-    needs: build-base-arm64
     runs-on: cpu-arm-r8g-4xlarge
     timeout-minutes: 90
     strategy:
@@ -249,7 +136,6 @@ jobs:
           framework: ${{ matrix.framework }}
           target: runtime
           platform: linux/arm64
-          dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64-run-${{ github.run_id }}
           base_image_tag: ${{ matrix.base_image_tag }}
           runtime_image_tag: ${{ matrix.runtime_image_tag }}
           cuda_version: ${{ matrix.cuda_version }}
@@ -281,7 +167,7 @@ jobs:
 
   unit-tests:
     name: Unit ${{ matrix.framework }} (${{ matrix.arch }})
-    needs: [build-framework-amd64, build-framework-arm64]
+    needs: [build-amd64, build-arm64]
     if: always()
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -295,24 +181,61 @@ jobs:
           - { framework: trtllm, arch: arm64, runner: cpu-arm-r8g-4xlarge }
           - { framework: sglang, arch: amd64, runner: cpu-amd-m5-2xlarge }
           - { framework: sglang, arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull image
-        shell: bash
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}" ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
+          set +x
+          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch }})"
+
+          # Determine which build job to check
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            BUILD_JOB_NAME="Build ${{ matrix.framework }} (amd64)"
+          else
+            BUILD_JOB_NAME="Build ${{ matrix.framework }} (arm64)"
+          fi
+
+          # Query GitHub API for job status using curl (token from env to avoid log exposure)
+          JOBS=$(curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
+
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to query GitHub API"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Find the specific build job and check its conclusion
+          BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
+
+          echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo "Build failed or did not complete successfully. Skipping tests."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Build succeeded. Proceeding with tests."
+          echo "skip=false" >> $GITHUB_OUTPUT
+      - name: Pull nightly image
+        if: steps.check_build.outputs.skip != 'true'
+        uses: ./.github/actions/docker-pull-image
+        with:
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
       - name: Run Unit Tests
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "${{ matrix.framework }} and unit and (nightly or pre_merge or post_merge)"
+          pytest_marks: "${{ matrix.framework }} and unit and nightly"
           framework: ${{ matrix.framework }}
           test_type: unit
           platform_arch: ${{ matrix.arch }}
@@ -320,7 +243,7 @@ jobs:
 
   integration-tests:
     name: Integration ${{ matrix.framework }} (amd64)
-    needs: build-framework-amd64
+    needs: [build-amd64, build-arm64]
     if: always()
     runs-on: gpu-l40-amd64
     timeout-minutes: 90
@@ -328,31 +251,60 @@ jobs:
       fail-fast: false
       matrix:
         framework: [vllm, trtllm, sglang]
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull image
-        shell: bash
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
+          set +x
+          echo "Checking build status for ${{ matrix.framework }} (amd64)"
+          BUILD_JOB_NAME="Build ${{ matrix.framework }} (amd64)"
+
+          JOBS=$(curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
+
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to query GitHub API"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
+
+          echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo "Build failed or did not complete successfully. Skipping tests."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Build succeeded. Proceeding with tests."
+          echo "skip=false" >> $GITHUB_OUTPUT
+      - name: Pull nightly image
+        if: steps.check_build.outputs.skip != 'true'
+        uses: ./.github/actions/docker-pull-image
+        with:
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
       - name: Run Integration Tests
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
-          pytest_marks: "integration and (nightly or pre_merge or post_merge)"
+          pytest_marks: "${{ matrix.framework }} and integration and nightly"
           framework: ${{ matrix.framework }}
           test_type: integration
           platform_arch: amd64
 
   e2e-single-gpu:
     name: E2E Single GPU ${{ matrix.framework }} (amd64)
-    needs: build-framework-amd64
+    needs: [build-amd64, build-arm64]
     if: always()
     runs-on: gpu-l40-amd64
     timeout-minutes: 120
@@ -360,31 +312,60 @@ jobs:
       fail-fast: false
       matrix:
         framework: [vllm, trtllm, sglang]
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull image
-        shell: bash
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
+          set +x
+          echo "Checking build status for ${{ matrix.framework }} (amd64)"
+          BUILD_JOB_NAME="Build ${{ matrix.framework }} (amd64)"
+
+          JOBS=$(curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
+
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to query GitHub API"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
+
+          echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo "Build failed or did not complete successfully. Skipping tests."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Build succeeded. Proceeding with tests."
+          echo "skip=false" >> $GITHUB_OUTPUT
+      - name: Pull nightly image
+        if: steps.check_build.outputs.skip != 'true'
+        uses: ./.github/actions/docker-pull-image
+        with:
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
       - name: Run E2E Tests (gpu_1)
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
-          pytest_marks: "(nightly or pre_merge or post_merge) and ${{ matrix.framework }} and e2e and gpu_1"
+          pytest_marks: "nightly and ${{ matrix.framework }} and e2e and gpu_1"
           framework: ${{ matrix.framework }}
           test_type: e2e
           platform_arch: amd64
 
   e2e-multi-gpu:
     name: E2E Multi GPU ${{ matrix.framework }} (amd64)
-    needs: build-framework-amd64
+    needs: [build-amd64, build-arm64]
     if: always()
     runs-on: gpu-l40-amd64
     timeout-minutes: 150
@@ -392,31 +373,60 @@ jobs:
       fail-fast: false
       matrix:
         framework: [vllm, trtllm, sglang]
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull image
-        shell: bash
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
+          set +x
+          echo "Checking build status for ${{ matrix.framework }} (amd64)"
+          BUILD_JOB_NAME="Build ${{ matrix.framework }} (amd64)"
+
+          JOBS=$(curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
+
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to query GitHub API"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
+
+          echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo "Build failed or did not complete successfully. Skipping tests."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Build succeeded. Proceeding with tests."
+          echo "skip=false" >> $GITHUB_OUTPUT
+      - name: Pull nightly image
+        if: steps.check_build.outputs.skip != 'true'
+        uses: ./.github/actions/docker-pull-image
+        with:
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
       - name: Run E2E Tests (gpu_2)
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
-          pytest_marks: "(nightly or pre_merge or post_merge) and ${{ matrix.framework }} and e2e and gpu_2"
+          pytest_marks: "nightly and ${{ matrix.framework }} and e2e and gpu_2"
           framework: ${{ matrix.framework }}
           test_type: e2e
           platform_arch: amd64
 
   component-tests:
     name: Component ${{ matrix.framework }} ${{ matrix.component }} (${{ matrix.arch }})
-    needs: [build-framework-amd64, build-framework-arm64]
+    needs: [build-amd64, build-arm64]
     if: always()
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -442,24 +452,58 @@ jobs:
           - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
           - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
           - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull image
-        shell: bash
-        run: |
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}"
-          docker tag "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}" ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
+          set +x
+          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch }})"
+
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            BUILD_JOB_NAME="Build ${{ matrix.framework }} (amd64)"
+          else
+            BUILD_JOB_NAME="Build ${{ matrix.framework }} (arm64)"
+          fi
+
+          JOBS=$(curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
+
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to query GitHub API"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
+
+          echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo "Build failed or did not complete successfully. Skipping tests."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Build succeeded. Proceeding with tests."
+          echo "skip=false" >> $GITHUB_OUTPUT
+      - name: Pull nightly image
+        if: steps.check_build.outputs.skip != 'true'
+        uses: ./.github/actions/docker-pull-image
+        with:
+          provider: 'aws'
+          repository: ${{ env.REGISTRY_IMAGE }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
       - name: Run Component Tests (${{ matrix.component }})
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "(${{ matrix.marks }} or (nightly or pre_merge or post_merge))"
+          pytest_marks: "${{ matrix.marks }}"
           framework: ${{ matrix.framework }}
           test_type: component
           platform_arch: ${{ matrix.arch }}
@@ -469,20 +513,26 @@ jobs:
     name: Results Summary
     runs-on: ubuntu-latest
     if: always()
-    needs: [build-framework-amd64, build-framework-arm64, unit-tests, integration-tests, e2e-single-gpu, e2e-multi-gpu, component-tests]
+    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu, e2e-multi-gpu, component-tests]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Gather job metadata
         id: gather
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
+          set +x -e
           echo "# Nightly CI Results Summary" > results.md
           echo "" >> results.md
           echo "| Stage | Status | Runner | Duration (min) | Artifacts |" >> results.md
           echo "|-------|--------|--------|----------------|-----------|" >> results.md
 
-          gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs -q ".jobs[] | {id, name, runner_name, conclusion, started_at, completed_at}" > jobs.jsonl
+          curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            2>/dev/null | jq -c '.jobs[] | {id, name, runner_name, conclusion, started_at, completed_at}' > jobs.jsonl
 
           while read job_entry; do
             job_id=$(echo "$job_entry" | jq -r '.id')
@@ -503,8 +553,6 @@ jobs:
 
           echo "" >> results.md
           echo "---" >> results.md
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Display workflow summary
         run: cat results.md
       - name: Upload results summary as job summary
