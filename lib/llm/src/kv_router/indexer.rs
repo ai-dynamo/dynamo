@@ -54,8 +54,9 @@ use xxhash_rust::xxh3;
 
 pub const XXH3_SEED: u64 = 1337;
 
+use crate::kv_router::approx::{BlockEntry, PruneConfig, PruneManager};
 use crate::kv_router::protocols::*;
-use crate::tokens::SequenceHash;
+use crate::tokens::{SequenceHash, TokenBlockSequence};
 
 /// Errors that can occur in the KV Router.
 #[derive(Debug, thiserror::Error)]
@@ -833,6 +834,39 @@ pub trait KvIndexerInterface {
     ///
     /// A vector of RouterEvents representing the current state of the tree.
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError>;
+
+    /// Process a routing decision with pre-computed hashes.
+    ///
+    /// ### Arguments
+    ///
+    /// * `worker` - The worker (with dp_rank) that was selected.
+    /// * `local_hashes` - The local hashes of the tokens sent to the worker.
+    /// * `sequence_hashes` - The sequence hashes of the tokens sent to the worker.
+    async fn process_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError>;
+
+    /// Process a routing decision for a request with tokens.
+    ///
+    /// ### Arguments
+    ///
+    /// * `tokens` - A vector of `u32` tokens.
+    /// * `worker` - The worker (with dp_rank) that was selected.
+    async fn process_routing_decision_for_request(
+        &self,
+        tokens: &[u32],
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError>;
+}
+
+/// A request to process a routing decision.
+struct RoutingDecisionRequest {
+    worker: WorkerWithDpRank,
+    local_hashes: Vec<LocalBlockHash>,
+    sequence_hashes: Vec<SequenceHash>,
 }
 
 /// The KV Indexer, managing the KV store and handling events and match requests.
@@ -849,6 +883,8 @@ pub struct KvIndexer {
     get_workers_tx: mpsc::Sender<GetWorkersRequest>,
     /// A sender for dump requests.
     dump_tx: mpsc::Sender<DumpRequest>,
+    /// A sender for routing decision requests.
+    routing_tx: mpsc::Sender<RoutingDecisionRequest>,
     /// A handle to the background task managing the KV store.
     task: OnceLock<std::thread::JoinHandle<()>>,
     /// The size of the KV block this indexer can handle.
@@ -862,6 +898,8 @@ impl KvIndexer {
     ///
     /// * `token` - A `CancellationToken` for managing shutdown.
     /// * `expiration_duration` - The amount of time that block usage should be buffered.
+    /// * `ttl` - The time-to-live for blocks before they expire.
+    /// * `prune_config` - Configuration for tree-size based pruning.
     ///
     /// ### Returns
     ///
@@ -871,12 +909,15 @@ impl KvIndexer {
         expiration_duration: Option<Duration>,
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
+        prune_config: Option<PruneConfig>,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(2048);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
         let (get_workers_tx, get_workers_rx) = mpsc::channel::<GetWorkersRequest>(16);
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
+        let (routing_tx, mut routing_rx) = mpsc::channel::<RoutingDecisionRequest>(2048);
+        let (prune_tx, mut prune_rx) = mpsc::channel::<()>(1);
         let cancel_clone = token.clone();
 
         let task = std::thread::spawn(move || {
@@ -894,7 +935,22 @@ impl KvIndexer {
                 let mut get_workers_rx = get_workers_rx;
                 let mut dump_rx = dump_rx;
                 let mut trie = RadixTree::new_with_frequency(expiration_duration);
+
+                // Create PruneManager if prune_config is specified
+                let mut prune_manager = prune_config.map(|config| {
+                    PruneManager::<BlockEntry>::new(50, config)
+                });
+                let mut event_id_counter = 0u64;
+
                 loop {
+                    // Create a future that sleeps until the next expiration time
+                    let expiry_fut = if let Some(ref pm) = prune_manager
+                        && let Some(next_expiry) = pm.peek_next_expiry() {
+                        tokio::time::sleep_until(next_expiry)
+                    } else {
+                        tokio::time::sleep(Duration::MAX)
+                    };
+
                     tokio::select! {
                         biased;
 
@@ -912,10 +968,59 @@ impl KvIndexer {
                             let _ = get_workers_req.resp.send(workers);
                         }
 
+                        Some(_) = prune_rx.recv() => {
+                            // Tree size-based pruning triggered
+                            let Some(ref mut pm) = prune_manager else { continue };
+                            let Ok(pruned) = pm.prune(trie.current_size()) else { continue };
+
+                            for p in pruned {
+                                event_id_counter += 1;
+                                let event = RouterEvent::new(
+                                    p.worker.worker_id,
+                                    KvCacheEvent {
+                                        event_id: event_id_counter,
+                                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                            block_hashes: vec![p.key],
+                                        }),
+                                        dp_rank: p.worker.dp_rank,
+                                    }
+                                );
+                                let _ = trie.apply_event(event);
+                            }
+                        }
+
                         Some(event) = event_rx.recv() => {
                             let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                            let result = trie.apply_event(event);
+                            let result = trie.apply_event(event.clone());
+                            let result_is_ok = result.is_ok();
                             metrics.increment_event_applied(event_type, result);
+
+                            // Track blocks in PruneManager if TTL is enabled and event was stored successfully
+                            let Some(ref mut pm) = prune_manager else { continue };
+                            if !result_is_ok { continue };
+                            let KvCacheEventData::Stored(ref store_data) = event.event.data else { continue };
+
+                            let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+                            let block_entries: Vec<BlockEntry> = store_data.blocks.iter().enumerate().map(|(idx, block)| {
+                                BlockEntry {
+                                    key: block.block_hash,
+                                    worker,
+                                    seq_position: idx,
+                                }
+                            }).collect();
+                            pm.insert(block_entries);
+
+                            // Check if we need to prune due to tree size
+                            let Some(ref pc) = pm.prune_config else { continue };
+                            let current_size = trie.current_size();
+                            if current_size > pc.max_tree_size {
+                                tracing::info!(
+                                    "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
+                                    current_size,
+                                    pc.max_tree_size
+                                );
+                                let _ = prune_tx.try_send(());
+                            }
                         }
 
                         Some(dump_req) = dump_rx.recv() => {
@@ -923,9 +1028,80 @@ impl KvIndexer {
                             let _ = dump_req.resp.send(events);
                         }
 
+                        Some(routing_req) = routing_rx.recv() => {
+                            // Process routing decisions when TTL/pruning is enabled
+                            let Some(ref mut pm) = prune_manager else { continue };
+
+                            event_id_counter += 1;
+
+                            let hashes = routing_req.local_hashes.iter().zip(routing_req.sequence_hashes.iter());
+                            let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
+                                parent_hash: None,
+                                blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
+                                    tokens_hash: *local_hash,
+                                    block_hash: ExternalSequenceBlockHash(*sequence_hash),
+                                }).collect(),
+                            });
+
+                            let event = RouterEvent::new(
+                                routing_req.worker.worker_id,
+                                KvCacheEvent {
+                                    event_id: event_id_counter,
+                                    data: stored_event,
+                                    dp_rank: routing_req.worker.dp_rank,
+                                }
+                            );
+
+                            if trie.apply_event(event).is_err() {
+                                continue;
+                            }
+
+                            let block_entries: Vec<BlockEntry> = routing_req.sequence_hashes.iter().enumerate().map(|(idx, h)| {
+                                BlockEntry {
+                                    key: ExternalSequenceBlockHash(*h),
+                                    worker: routing_req.worker,
+                                    seq_position: idx,
+                                }
+                            }).collect();
+                            pm.insert(block_entries);
+
+                            // Check if we need to prune due to tree size
+                            let Some(ref pc) = pm.prune_config else { continue };
+                            let current_size = trie.current_size();
+                            if current_size > pc.max_tree_size {
+                                tracing::info!(
+                                    "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
+                                    current_size,
+                                    pc.max_tree_size
+                                );
+                                let _ = prune_tx.try_send(());
+                            }
+                        }
+
                         Some(req) = match_rx.recv() => {
                             let matches = trie.find_matches(req.sequence, req.early_exit);
                             let _ = req.resp.send(matches);
+                        }
+
+                        _ = expiry_fut => {
+                            // TTL-based expiry triggered
+                            let Some(ref mut pm) = prune_manager else { continue };
+
+                            let expired = pm.pop_expired();
+                            for e in expired {
+                                event_id_counter += 1;
+                                let event = RouterEvent::new(
+                                    e.worker.worker_id,
+                                    KvCacheEvent {
+                                        event_id: event_id_counter,
+                                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                            block_hashes: vec![e.key],
+                                        }),
+                                        dp_rank: e.worker.dp_rank,
+                                    }
+                                );
+                                let _ = trie.apply_event(event);
+                            }
                         }
                     }
                 }
@@ -944,6 +1120,7 @@ impl KvIndexer {
             remove_worker_tx,
             get_workers_tx,
             dump_tx,
+            routing_tx,
             task: once,
             kv_block_size,
         }
@@ -958,7 +1135,7 @@ impl KvIndexer {
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
     ) -> Self {
-        Self::new_with_frequency(token, None, kv_block_size, metrics)
+        Self::new_with_frequency(token, None, kv_block_size, metrics, None)
     }
 
     /// Get a sender for `RouterEvent`s.
@@ -1066,6 +1243,40 @@ impl KvIndexerInterface for KvIndexer {
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
+
+    async fn process_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        self.routing_tx
+            .send(RoutingDecisionRequest {
+                worker,
+                local_hashes,
+                sequence_hashes,
+            })
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        Ok(())
+    }
+
+    async fn process_routing_decision_for_request(
+        &self,
+        tokens: &[u32],
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        let local_hashes = compute_block_hash_for_seq(tokens, self.kv_block_size);
+        let sequence = TokenBlockSequence::new(tokens.into(), self.kv_block_size, None);
+        let sequence_hashes = sequence
+            .blocks()
+            .iter()
+            .map(|b| b.sequence_hash())
+            .collect::<Vec<_>>();
+
+        self.process_routing_decision(worker, local_hashes, sequence_hashes)
+            .await
+    }
 }
 
 impl Drop for KvIndexer {
@@ -1107,6 +1318,7 @@ pub struct KvIndexerSharded {
     request_broadcast_tx: broadcast::Sender<ShardedMatchRequest>,
     remove_worker_tx: Vec<mpsc::Sender<WorkerId>>,
     dump_tx: Vec<mpsc::Sender<DumpRequest>>,
+    routing_tx: Vec<mpsc::Sender<RoutingDecisionRequest>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -1118,6 +1330,8 @@ impl KvIndexerSharded {
     /// * `token` - A `CancellationToken` for managing shutdown.
     /// * `shards` - A list of kvindexer shards.
     /// * `expiration_duration` - The amount of time that block usage should be buffered.
+    /// * `ttl` - The time-to-live for blocks before they expire.
+    /// * `prune_config` - Configuration for tree-size based pruning.
     ///
     /// ### Returns
     ///
@@ -1128,6 +1342,7 @@ impl KvIndexerSharded {
         expiration_duration: Option<Duration>,
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
+        prune_config: Option<PruneConfig>,
     ) -> Self {
         let worker_assignments: HashMap<WorkerId, usize> = HashMap::new();
         let worker_counts: Vec<usize> = vec![0; num_shards];
@@ -1135,7 +1350,8 @@ impl KvIndexerSharded {
         let mut event_tx = Vec::new();
         let mut remove_worker_tx = Vec::new();
         let mut get_workers_tx = Vec::new();
-        let mut dump_tx = Vec::new(); // Add dump channels
+        let mut dump_tx = Vec::new();
+        let mut routing_tx = Vec::new();
         let mut tasks = Vec::new();
 
         let (request_broadcast_tx, _) = broadcast::channel::<ShardedMatchRequest>(1048576);
@@ -1146,15 +1362,20 @@ impl KvIndexerSharded {
                 mpsc::channel::<WorkerId>(16);
             let (shard_get_workers_tx, mut shard_get_workers_rx) =
                 mpsc::channel::<GetWorkersRequest>(16);
-            let (shard_dump_tx, mut shard_dump_rx) = mpsc::channel::<DumpRequest>(16); // Add dump channel
+            let (shard_dump_tx, mut shard_dump_rx) = mpsc::channel::<DumpRequest>(16);
+            let (shard_routing_tx, mut shard_routing_rx) =
+                mpsc::channel::<RoutingDecisionRequest>(2048);
+            let (shard_prune_tx, mut shard_prune_rx) = mpsc::channel::<()>(1);
             let mut shard_broadcast_rx = request_broadcast_tx.subscribe();
             let cancel = token.clone();
             let metrics = metrics.clone();
+            let prune_config_clone = prune_config.clone();
 
             event_tx.push(shard_event_tx);
             remove_worker_tx.push(shard_remove_worker_tx);
             get_workers_tx.push(shard_get_workers_tx);
-            dump_tx.push(shard_dump_tx); // Store dump sender
+            dump_tx.push(shard_dump_tx);
+            routing_tx.push(shard_routing_tx);
 
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1164,7 +1385,22 @@ impl KvIndexerSharded {
             tasks.push(std::thread::spawn(move || {
                 runtime.block_on(async move {
                     let mut trie = RadixTree::new_with_frequency(expiration_duration);
+
+                    // Create PruneManager if prune_config is specified
+                    let mut prune_manager = prune_config_clone.map(|config| {
+                        PruneManager::<BlockEntry>::new(50, config)
+                    });
+                    let mut event_id_counter = 0u64;
+
                     loop {
+                        // Create a future that sleeps until the next expiration time
+                        let expiry_fut = if let Some(ref pm) = prune_manager
+                            && let Some(next_expiry) = pm.peek_next_expiry() {
+                            tokio::time::sleep_until(next_expiry)
+                        } else {
+                            tokio::time::sleep(Duration::MAX)
+                        };
+
                         tokio::select! {
                             biased;
 
@@ -1182,10 +1418,109 @@ impl KvIndexerSharded {
                                 let _ = get_workers_req.resp.send(workers);
                             }
 
+                            Some(_) = shard_prune_rx.recv() => {
+                                // Tree size-based pruning triggered
+                                let Some(ref mut pm) = prune_manager else { continue };
+                                let Ok(pruned) = pm.prune(trie.current_size()) else { continue };
+
+                                for p in pruned {
+                                    event_id_counter += 1;
+                                    let event = RouterEvent::new(
+                                        p.worker.worker_id,
+                                        KvCacheEvent {
+                                            event_id: event_id_counter,
+                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                                block_hashes: vec![p.key],
+                                            }),
+                                            dp_rank: p.worker.dp_rank,
+                                        }
+                                    );
+                                    let _ = trie.apply_event(event);
+                                }
+                            }
+
                             Some(event) = shard_event_rx.recv() => {
                                 let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                                let result = trie.apply_event(event);
+                                let result = trie.apply_event(event.clone());
+                                let result_is_ok = result.is_ok();
                                 metrics.increment_event_applied(event_type, result);
+
+                                // Track blocks in PruneManager if TTL is enabled and event was stored successfully
+                                let Some(ref mut pm) = prune_manager else { continue };
+                                if !result_is_ok { continue };
+                                let KvCacheEventData::Stored(ref store_data) = event.event.data else { continue };
+
+                                let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+                                let block_entries: Vec<BlockEntry> = store_data.blocks.iter().enumerate().map(|(idx, block)| {
+                                    BlockEntry {
+                                        key: block.block_hash,
+                                        worker,
+                                        seq_position: idx,
+                                    }
+                                }).collect();
+                                pm.insert(block_entries);
+
+                                // Check if we need to prune due to tree size
+                                let Some(ref pc) = pm.prune_config else { continue };
+                                let current_size = trie.current_size();
+                                if current_size > pc.max_tree_size {
+                                    tracing::info!(
+                                        "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
+                                        current_size,
+                                        pc.max_tree_size
+                                    );
+                                    let _ = shard_prune_tx.try_send(());
+                                }
+                            }
+
+                            Some(routing_req) = shard_routing_rx.recv() => {
+                                // Process routing decisions when TTL/pruning is enabled
+                                let Some(ref mut pm) = prune_manager else { continue };
+
+                                event_id_counter += 1;
+
+                                let hashes = routing_req.local_hashes.iter().zip(routing_req.sequence_hashes.iter());
+                                let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
+                                    parent_hash: None,
+                                    blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
+                                        tokens_hash: *local_hash,
+                                        block_hash: ExternalSequenceBlockHash(*sequence_hash),
+                                    }).collect(),
+                                });
+
+                                let event = RouterEvent::new(
+                                    routing_req.worker.worker_id,
+                                    KvCacheEvent {
+                                        event_id: event_id_counter,
+                                        data: stored_event,
+                                        dp_rank: routing_req.worker.dp_rank,
+                                    }
+                                );
+
+                                if trie.apply_event(event).is_err() {
+                                    continue;
+                                }
+
+                                let block_entries: Vec<BlockEntry> = routing_req.sequence_hashes.iter().enumerate().map(|(idx, h)| {
+                                    BlockEntry {
+                                        key: ExternalSequenceBlockHash(*h),
+                                        worker: routing_req.worker,
+                                        seq_position: idx,
+                                    }
+                                }).collect();
+                                pm.insert(block_entries);
+
+                                // Check if we need to prune due to tree size
+                                let Some(ref pc) = pm.prune_config else { continue };
+                                let current_size = trie.current_size();
+                                if current_size > pc.max_tree_size {
+                                    tracing::info!(
+                                        "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
+                                        current_size,
+                                        pc.max_tree_size
+                                    );
+                                    let _ = shard_prune_tx.try_send(());
+                                }
                             }
 
                             Some(dump_req) = shard_dump_rx.recv() => {
@@ -1197,6 +1532,27 @@ impl KvIndexerSharded {
                                 let matches = trie.find_matches(req.sequence, req.early_exit);
                                 if let Err(e) = req.resp.send(matches).await {
                                     tracing::trace!("Failed to send match response: {:?}", e);
+                                }
+                            }
+
+                            _ = expiry_fut => {
+                                // TTL-based expiry triggered
+                                let Some(ref mut pm) = prune_manager else { continue };
+
+                                let expired = pm.pop_expired();
+                                for e in expired {
+                                    event_id_counter += 1;
+                                    let event = RouterEvent::new(
+                                        e.worker.worker_id,
+                                        KvCacheEvent {
+                                            event_id: event_id_counter,
+                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                                block_hashes: vec![e.key],
+                                            }),
+                                            dp_rank: e.worker.dp_rank,
+                                        }
+                                    );
+                                    let _ = trie.apply_event(event);
                                 }
                             }
                         }
@@ -1215,7 +1571,8 @@ impl KvIndexerSharded {
             event_tx,
             request_broadcast_tx,
             remove_worker_tx,
-            dump_tx, // Add dump_tx field
+            dump_tx,
+            routing_tx,
             tasks,
         }
     }
@@ -1230,7 +1587,7 @@ impl KvIndexerSharded {
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
     ) -> Self {
-        Self::new_with_frequency(token, num_shards, None, kv_block_size, metrics)
+        Self::new_with_frequency(token, num_shards, None, kv_block_size, metrics, None)
     }
 }
 
@@ -1357,6 +1714,47 @@ impl KvIndexerInterface for KvIndexerSharded {
         }
 
         Ok(all_events)
+    }
+
+    async fn process_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        // Route to the appropriate shard based on worker assignment
+        let shard_idx = self
+            .worker_assignments
+            .get(&worker.worker_id)
+            .copied()
+            .unwrap_or(0);
+
+        self.routing_tx[shard_idx]
+            .send(RoutingDecisionRequest {
+                worker,
+                local_hashes,
+                sequence_hashes,
+            })
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        Ok(())
+    }
+
+    async fn process_routing_decision_for_request(
+        &self,
+        tokens: &[u32],
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        let local_hashes = compute_block_hash_for_seq(tokens, self.kv_block_size);
+        let sequence = TokenBlockSequence::new(tokens.into(), self.kv_block_size, None);
+        let sequence_hashes = sequence
+            .blocks()
+            .iter()
+            .map(|b| b.sequence_hash())
+            .collect::<Vec<_>>();
+
+        self.process_routing_decision(worker, local_hashes, sequence_hashes)
+            .await
     }
 }
 
@@ -2104,6 +2502,7 @@ mod tests {
                 Some(expiration),
                 kv_block_size,
                 metrics,
+                None,
             ));
         } else {
             kv_indexer = Box::new(KvIndexerSharded::new_with_frequency(
@@ -2112,6 +2511,7 @@ mod tests {
                 Some(expiration),
                 kv_block_size,
                 metrics,
+                None,
             ));
         }
 

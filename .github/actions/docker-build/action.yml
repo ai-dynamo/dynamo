@@ -174,7 +174,7 @@ runs:
 
         # Create job-specific metrics file
         mkdir -p build-metrics
-        METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}.json"
+        METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${{ github.run_id }}-${{ job.check_run_id }}.json"
 
         # Create the job metrics file directly
         cat > "$METRICS_FILE" << EOF
@@ -199,6 +199,6 @@ runs:
     - name: Upload Build Metrics
       uses: actions/upload-artifact@v4
       with:
-        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}
-        path: build-metrics/metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}.json
+        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: build-metrics/metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
         retention-days: 7

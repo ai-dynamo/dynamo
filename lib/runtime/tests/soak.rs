@@ -120,8 +120,7 @@ mod integration {
 
         // // make the ingress discoverable via a component service
         // // we must first create a service, then we can attach one more more endpoints
-        let mut component = runtime.namespace(DEFAULT_NAMESPACE)?.component("backend")?;
-        component.add_stats_service().await?;
+        let component = runtime.namespace(DEFAULT_NAMESPACE)?.component("backend")?;
         component
             .endpoint("generate")
             .endpoint_builder()

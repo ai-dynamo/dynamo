@@ -7,7 +7,10 @@ metadata:
   namespace: ${NAMESPACE}
 spec:
   accessModes:
-    - ReadWriteMany
+    - ReadWriteOnce
+  # Uncomment and set storageClassName if you need to use a specific storage class
+  # For ReadWriteMany support, use an RWX-capable storage class (e.g., NFS-based)
+  # storageClassName: your-storageclass
   resources:
     requests:
       storage: 50Gi

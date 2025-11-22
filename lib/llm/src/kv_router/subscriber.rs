@@ -485,11 +485,11 @@ async fn cleanup_orphaned_consumers(
         .iter()
         .filter_map(|(key, _)| {
             // Check if key contains this component's path
-            if !key.contains(&component_path) {
+            if !key.as_ref().contains(&component_path) {
                 return None;
             }
             // Extract the last part (should be the UUID)
-            key.split('/').next_back().map(str::to_string)
+            key.as_ref().split('/').next_back().map(str::to_string)
         })
         .collect();
 

@@ -24,6 +24,7 @@ a high-level, SLA-driven interface for deploying machine learning models on Dyna
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -66,6 +67,26 @@ type ProfilingConfigSpec struct {
 	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
 	// +kubebuilder:validation:Required
 	ProfilerImage string `json:"profilerImage"`
+
+	// OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.
+	// If specified, all profiling artifacts (logs, plots, configs, raw data) will be written
+	// to this PVC instead of an ephemeral emptyDir volume. This allows users to access
+	// complete profiling results after the job completes by mounting the PVC.
+	// The PVC must exist in the same namespace as the DGDR.
+	// If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.
+	// Note: ConfigMaps are still created regardless of this setting for planner integration.
+	// +kubebuilder:validation:Optional
+	OutputPVC string `json:"outputPVC,omitempty"`
+
+	// Resources specifies the compute resource requirements for the profiling job container.
+	// If not specified, no resource requests or limits are set.
+	// +kubebuilder:validation:Optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Tolerations allows the profiling job to be scheduled on nodes with matching taints.
+	// For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint.
+	// +kubebuilder:validation:Optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 }
 
 // DeploymentOverridesSpec allows users to customize metadata for auto-created DynamoGraphDeployments.

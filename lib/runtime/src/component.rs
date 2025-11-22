@@ -35,6 +35,7 @@ use crate::{
     config::HealthStatus,
     distributed::RequestPlaneMode,
     metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
+    service::ServiceClient,
     service::ServiceSet,
     transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
 };
@@ -150,13 +151,12 @@ impl PartialOrd for Instance {
 /// You can also issue a request to a [Component]'s [Endpoint] by creating a [Client].
 #[derive(Educe, Builder, Clone, Validate)]
 #[educe(Debug)]
-#[builder(pattern = "owned")]
+#[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct Component {
     #[builder(private)]
     #[educe(Debug(ignore))]
     drt: Arc<DistributedRuntime>,
 
-    // todo - restrict the namespace to a-z0-9-_A-Z
     /// Name of the component
     #[builder(setter(into))]
     #[validate(custom(function = "validate_allowed_chars"))]
@@ -299,10 +299,14 @@ impl Component {
 
     /// Scrape ServiceSet, which contains NATS stats as well as user defined stats
     /// embedded in data field of ServiceInfo.
-    pub async fn scrape_stats(&self, timeout: Duration) -> anyhow::Result<ServiceSet> {
+    async fn scrape_stats(&self, timeout: Duration) -> anyhow::Result<ServiceSet> {
         // Debug: scraping stats for component
         let service_name = self.service_name();
-        let Some(service_client) = self.drt().service_client() else {
+        let Some(service_client) = self
+            .drt()
+            .nats_client()
+            .map(|nc| ServiceClient::new(nc.clone()))
+        else {
             anyhow::bail!("ServiceSet is gathered via NATS, do not call this in non-NATS setups.");
         };
         service_client
@@ -317,7 +321,7 @@ impl Component {
     /// then subsequent scrapes occur at a fixed interval of 9.8 seconds (MAX_WAIT_MS),
     /// which should be near or smaller than typical Prometheus scraping intervals to ensure
     /// metrics are fresh when Prometheus collects them.
-    pub fn start_scraping_nats_service_component_metrics(&self) -> anyhow::Result<()> {
+    fn start_scraping_nats_service_component_metrics(&self) -> anyhow::Result<()> {
         const MAX_WAIT_MS: std::time::Duration = std::time::Duration::from_millis(9800); // Should be <= Prometheus scrape interval
 
         // If there is another component with the same service name, this will fail.
@@ -364,18 +368,8 @@ impl Component {
         Ok(())
     }
 
-    /// TODO
-    ///
-    /// This method will scrape the stats for all available services
-    /// Returns a stream of `ServiceInfo` objects.
-    /// This should be consumed by a `[tokio::time::timeout_at`] because each services
-    /// will only respond once, but there is no way to know when all services have responded.
-    pub async fn stats_stream(&self) -> anyhow::Result<()> {
-        unimplemented!("collect_stats")
-    }
-
     // Gather NATS metrics
-    pub async fn add_stats_service(&mut self) -> anyhow::Result<()> {
+    async fn add_stats_service(&mut self) -> anyhow::Result<()> {
         let service_name = self.service_name();
 
         // Pre-check to save cost of creating the service, but don't hold the lock
@@ -432,6 +426,21 @@ impl Component {
 impl ComponentBuilder {
     pub fn from_runtime(drt: Arc<DistributedRuntime>) -> Self {
         Self::default().drt(drt)
+    }
+
+    pub fn build(self) -> Result<Component, anyhow::Error> {
+        let component = self.build_internal()?;
+        // If this component is using NATS, gather it's metrics
+        if component.drt().request_plane().is_nats() {
+            let mut c = component.clone();
+            // Start in the background to isolate the async, and because we don't need it yet
+            component.drt().runtime().secondary().spawn(async move {
+                if let Err(err) = c.add_stats_service().await {
+                    tracing::error!(error = %err, component = c.service_name(), "Failed starting stats service");
+                }
+            });
+        }
+        Ok(component)
     }
 }
 
@@ -652,10 +661,10 @@ impl Namespace {
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
     pub fn component(&self, name: impl Into<String>) -> anyhow::Result<Component> {
-        Ok(ComponentBuilder::from_runtime(self.runtime.clone())
+        ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
-            .build()?)
+            .build()
     }
 
     /// Create a [`Namespace`] in the parent namespace
@@ -690,106 +699,3 @@ fn validate_allowed_chars(input: &str) -> Result<(), ValidationError> {
         Err(ValidationError::new("invalid_characters"))
     }
 }
-
-// TODO - enable restrictions to the character sets allowed for namespaces,
-// components, and endpoints.
-//
-// Put Validate traits on the struct and use the `validate_allowed_chars` method
-// to validate the fields.
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use validator::Validate;
-
-//     #[test]
-//     fn test_valid_names() {
-//         // Valid strings
-//         let valid_inputs = vec![
-//             "abc",        // Lowercase letters
-//             "abc123",     // Letters and numbers
-//             "a-b-c",      // Letters with hyphens
-//             "a_b_c",      // Letters with underscores
-//             "a-b_c-123",  // Mixed valid characters
-//             "a",          // Single character
-//             "a_b",        // Short valid pattern
-//             "123456",     // Only numbers
-//             "a---b_c123", // Repeated hyphens/underscores
-//         ];
-
-//         for input in valid_inputs {
-//             let result = validate_allowed_chars(input);
-//             assert!(result.is_ok(), "Expected '{}' to be valid", input);
-//         }
-//     }
-
-//     #[test]
-//     fn test_invalid_names() {
-//         // Invalid strings
-//         let invalid_inputs = vec![
-//             "abc!",     // Invalid character `!`
-//             "abc@",     // Invalid character `@`
-//             "123$",     // Invalid character `$`
-//             "foo.bar",  // Invalid character `.`
-//             "foo/bar",  // Invalid character `/`
-//             "foo\\bar", // Invalid character `\`
-//             "abc#",     // Invalid character `#`
-//             "abc def",  // Spaces are not allowed
-//             "foo,",     // Invalid character `,`
-//             "",         // Empty string
-//         ];
-
-//         for input in invalid_inputs {
-//             let result = validate_allowed_chars(input);
-//             assert!(result.is_err(), "Expected '{}' to be invalid", input);
-//         }
-//     }
-
-//     // #[test]
-//     // fn test_struct_validation_valid() {
-//     //     // Struct with valid data
-//     //     let valid_data = InputData {
-//     //         name: "valid-name_123".to_string(),
-//     //     };
-//     //     assert!(valid_data.validate().is_ok());
-//     // }
-
-//     // #[test]
-//     // fn test_struct_validation_invalid() {
-//     //     // Struct with invalid data
-//     //     let invalid_data = InputData {
-//     //         name: "invalid!name".to_string(),
-//     //     };
-//     //     let result = invalid_data.validate();
-//     //     assert!(result.is_err());
-
-//     //     if let Err(errors) = result {
-//     //         let error_map = errors.field_errors();
-//     //         assert!(error_map.contains_key("name"));
-//     //         let name_errors = &error_map["name"];
-//     //         assert_eq!(name_errors[0].code, "invalid_characters");
-//     //     }
-//     // }
-
-//     #[test]
-//     fn test_edge_cases() {
-//         // Edge cases
-//         let edge_inputs = vec![
-//             ("-", true),   // Single hyphen
-//             ("_", true),   // Single underscore
-//             ("a-", true),  // Letter with hyphen
-//             ("-", false),  // Repeated hyphens
-//             ("-a", false), // Hyphen at the beginning
-//             ("a-", false), // Hyphen at the end
-//         ];
-
-//         for (input, expected_validity) in edge_inputs {
-//             let result = validate_allowed_chars(input);
-//             if expected_validity {
-//                 assert!(result.is_ok(), "Expected '{}' to be valid", input);
-//             } else {
-//                 assert!(result.is_err(), "Expected '{}' to be invalid", input);
-//             }
-//         }
-//     }
-// }

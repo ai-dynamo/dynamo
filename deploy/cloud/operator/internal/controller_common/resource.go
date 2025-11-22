@@ -248,17 +248,26 @@ func getSpec(obj client.Object) (any, error) {
 }
 
 // IsSpecChanged returns the new hash if the spec has changed between the existing one
+// It compares the actual current spec hash with the desired spec hash to detect manual edits
 func IsSpecChanged(current client.Object, desired client.Object) (*string, error) {
-	hashStr, err := GetSpecHash(desired)
+	desiredHash, err := GetSpecHash(desired)
 	if err != nil {
 		return nil, err
 	}
-	if currentHash, ok := current.GetAnnotations()[NvidiaAnnotationHashKey]; ok {
-		if currentHash == hashStr {
-			return nil, nil
-		}
+
+	// Compute hash of the actual current spec (not just the annotation)
+	// This ensures we detect manual edits even if the annotation is stale
+	currentHash, err := GetSpecHash(current)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current spec hash: %w", err)
 	}
-	return &hashStr, nil
+
+	// Compare actual spec hashes
+	if currentHash == desiredHash {
+		return nil, nil
+	}
+
+	return &desiredHash, nil
 }
 
 // generateSpecDiff creates a unified diff showing changes between old and new resource specs

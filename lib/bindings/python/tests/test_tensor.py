@@ -5,15 +5,16 @@
 
 import os
 
+import pytest
 import uvloop
 
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 
 TEST_END_TO_END = os.environ.get("TEST_END_TO_END", 0)
 
 
-@dynamo_worker()
+@pytest.mark.asyncio
 async def test_register(runtime: DistributedRuntime):
     component = runtime.namespace("test").component("tensor")
 

@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context as _;
 use async_nats::jetstream;
 use async_trait::async_trait;
+use dynamo_runtime::transports::nats;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -36,7 +38,7 @@ pub struct NatsSink {
 }
 
 impl NatsSink {
-    pub fn new(nats_client: &dynamo_runtime::transports::nats::Client) -> Self {
+    pub fn new(nats_client: dynamo_runtime::transports::nats::Client) -> Self {
         let subject = std::env::var("DYN_AUDIT_NATS_SUBJECT")
             .unwrap_or_else(|_| "dynamo.audit.v1".to_string());
         Self {
@@ -64,37 +66,32 @@ impl AuditSink for NatsSink {
     }
 }
 
-fn parse_sinks_from_env(
-    nats_client: Option<&dynamo_runtime::transports::nats::Client>,
-) -> Vec<Arc<dyn AuditSink>> {
+async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn AuditSink>>> {
     let cfg = std::env::var("DYN_AUDIT_SINKS").unwrap_or_else(|_| "stderr".into());
     let mut out: Vec<Arc<dyn AuditSink>> = Vec::new();
     for name in cfg.split(',').map(|s| s.trim().to_lowercase()) {
         match name.as_str() {
             "stderr" | "" => out.push(Arc::new(StderrSink)),
             "nats" => {
-                if let Some(client) = nats_client {
-                    out.push(Arc::new(NatsSink::new(client)));
-                } else {
-                    tracing::warn!(
-                        "NATS sink requested but no DistributedRuntime NATS client available; skipping"
-                    );
-                }
+                let nats_client = nats::ClientOptions::default()
+                    .connect()
+                    .await
+                    .context("Attempting to connect NATS sink from env var DYN_AUDIT_SINKS")?;
+                out.push(Arc::new(NatsSink::new(nats_client)));
             }
             // "pg"   => out.push(Arc::new(PostgresSink::from_env())),
             other => tracing::warn!(%other, "audit: unknown sink ignored"),
         }
     }
-    out
+    Ok(out)
 }
 
 /// spawn one worker per sink; each subscribes to the bus (off hot path)
-pub fn spawn_workers_from_env(drt: &dynamo_runtime::DistributedRuntime) {
-    let nats_client = drt.nats_client();
-    let sinks = parse_sinks_from_env(nats_client);
+pub async fn spawn_workers_from_env() -> anyhow::Result<()> {
+    let sinks = parse_sinks_from_env().await?;
     for sink in sinks {
         let name = sink.name();
-        let mut rx: broadcast::Receiver<Arc<AuditRecord>> = bus::subscribe();
+        let mut rx: broadcast::Receiver<AuditRecord> = bus::subscribe();
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
@@ -110,4 +107,5 @@ pub fn spawn_workers_from_env(drt: &dynamo_runtime::DistributedRuntime) {
         });
     }
     tracing::info!("Audit sinks ready.");
+    Ok(())
 }

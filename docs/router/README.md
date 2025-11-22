@@ -210,8 +210,8 @@ The router uses KV events from workers by default to maintain an accurate global
   - Recommended for production deployments
 
 - **Without KV Events (--no-kv-events)**:
-  - Uses ApproxKvIndexer to estimate cached blocks from routing decisions
-  - Assumes blocks from recent requests remain cached
+  - Router predicts cache state based on routing decisions with TTL-based expiration and pruning
+  - Tracks blocks from recent requests with configurable time-to-live
   - Reduces overhead at the cost of routing accuracy
   - Suitable for testing or when event processing becomes a bottleneck
 

@@ -23,6 +23,7 @@ jobs:
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_dynamo
       PYTEST_XML_FILE: pytest_test_report.xml
+      PYTEST_PARALLEL_XML_FILE: pytest_parallel.xml
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -62,9 +63,21 @@ jobs:
         working-directory: ./deploy
         run: |
           docker compose down
-      - name: Run pytest
+      - name: Run pytest (parallel tests with xdist)
         env:
-          PYTEST_MARKS: "pre_merge or mypy"
+          PYTEST_MARKS: "pre_merge and parallel"
+        run: |
+          docker run -w /workspace \
+            --name ${{ env.CONTAINER_ID }}_pytest_parallel \
+            ${{ steps.define_image_tag.outputs.image_tag }} \
+            bash -c "pytest --basetemp=/tmp/pytest-parallel --junitxml=${{ env.PYTEST_PARALLEL_XML_FILE }} -n 4 -m \"${{ env.PYTEST_MARKS }}\""
+      - name: Copy parallel test report from Container
+        if: always()
+        run: |
+          docker cp ${{ env.CONTAINER_ID }}_pytest_parallel:/workspace/${{ env.PYTEST_PARALLEL_XML_FILE }} . || echo "No parallel test report found"
+      - name: Run pytest (sequential tests)
+        env:
+          PYTEST_MARKS: "(pre_merge and not parallel) or mypy"
         run: |
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
@@ -82,6 +95,7 @@ jobs:
           if-no-files-found: error
           path: |
             ${{ env.PYTEST_XML_FILE }}
+            ${{ env.PYTEST_PARALLEL_XML_FILE }}
 
   event_file:
     name: "Event File"

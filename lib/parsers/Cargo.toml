@@ -38,3 +38,6 @@ openai-harmony = "0.0.3"
 lazy_static = "1.5.0"
 rustpython-parser = "0.4.0"
 num-traits = "0.2"
+
+[dev-dependencies]
+rstest = "0.25"

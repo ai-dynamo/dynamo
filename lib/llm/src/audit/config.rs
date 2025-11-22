@@ -10,11 +10,11 @@ pub struct AuditPolicy {
 
 static POLICY: OnceLock<AuditPolicy> = OnceLock::new();
 
+/// Audit is enabled if we have at least one sink
 pub fn init_from_env() -> AuditPolicy {
-    let enabled = std::env::var("DYN_AUDIT_ENABLED")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    AuditPolicy { enabled }
+    AuditPolicy {
+        enabled: std::env::var("DYN_AUDIT_SINKS").is_ok(),
+    }
 }
 
 pub fn policy() -> AuditPolicy {

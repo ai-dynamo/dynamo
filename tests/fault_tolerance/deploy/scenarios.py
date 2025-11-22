@@ -14,13 +14,26 @@
 # limitations under the License.
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Dict, Optional, Pattern
+from typing import TYPE_CHECKING, Dict, List, Optional, Pattern
 
 from typing_extensions import TypedDict
 
 from tests.utils.managed_deployment import DeploymentSpec
+
+if TYPE_CHECKING:
+    from tests.fault_tolerance.deploy.base_checker import BaseChecker
+
+
+# Import checker factory (actual import, not TYPE_CHECKING)
+def _get_checkers_for_scenario(
+    scenario_name: str, scenario: "Scenario"
+) -> List["BaseChecker"]:
+    """Lazy import to avoid circular dependencies during module initialization."""
+    from tests.fault_tolerance.deploy.checker_factory import get_checkers_for_scenario
+
+    return get_checkers_for_scenario(scenario_name, scenario)
 
 
 class TestPhase(Enum):
@@ -187,6 +200,9 @@ class Scenario:
     # When set to True, the test will be automatically marked with @pytest.mark.custom_build
     # and excluded from default test runs unless --include-custom-build flag is used
     requires_custom_build: bool = False  # Flag for tests needing custom builds/setup
+    # List of checkers to run for validation (scenario + results checkers)
+    # If None, factory will determine checkers based on scenario name and deployment
+    checkers: Optional[List["BaseChecker"]] = field(default=None)
 
 
 # Helper functions to create deployment specs
@@ -410,13 +426,6 @@ def _create_backend_failures(backend, deploy_type="disagg"):
         failures["sglang_prefill_detokenizer"] = [
             Failure(30, prefill_worker, "sglang::detokenizer", "SIGKILL")
         ]
-    elif backend == "trtllm":
-        failures["trtllm_decode_engine_core"] = [
-            Failure(30, decode_worker, "TRTLLM::EngineCore", "SIGKILL")
-        ]
-        failures["trtllm_prefill_engine_core"] = [
-            Failure(30, prefill_worker, "TRTLLM::EngineCore", "SIGKILL")
-        ]
 
     return failures
 
@@ -569,14 +578,22 @@ for deployment_name, deployment_info in DEPLOYMENT_SPECS.items():
         # Get model from deployment info or use the global model
         scenario_model = deployment_info.get("model", model)
 
-        scenarios[scenario_name] = Scenario(
+        # Create scenario first (without checkers)
+        scenario = Scenario(
             deployment=deployment_info["spec"],
             load=load_config,
             failures=failure,
             model=scenario_model,
             backend=backend,
+            checkers=None,  # Will be populated below
             requires_custom_build=is_moe,  # MoE models require custom builds
         )
+
+        # Generate checkers for this scenario
+        # This uses the checker factory to determine appropriate validation checks
+        scenario.checkers = _get_checkers_for_scenario(scenario_name, scenario)
+
+        scenarios[scenario_name] = scenario
 
 
 # Add token overflow test scenarios

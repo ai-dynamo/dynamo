@@ -28,10 +28,7 @@ echo "🧹 Cleaning up any existing dynamo processes..."
 pkill -f "dynamo-run" || true
 sleep 2
 
-# Disable LMCache
-export ENABLE_LMCACHE=0
 echo "🔧 Starting dynamo worker without LMCache..."
-
 
 python -m dynamo.frontend &
 python3 -m dynamo.vllm --model $MODEL_URL

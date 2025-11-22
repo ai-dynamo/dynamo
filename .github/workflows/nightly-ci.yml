@@ -17,7 +17,7 @@ jobs:
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 #v4.3.1
       - name: Build vLLM Docker Image
         id: build-vllm
         uses: ./.github/actions/docker-build
@@ -68,3 +68,78 @@ jobs:
           framework: "vllm"
           test_type: "e2e"
           platform_arch: ${{ matrix.platform.arch }}
+
+  ####################
+  # Framework Builds #
+  ####################
+  vllm-framework:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: cpu-amd-m5-4xlarge }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    name: vllm-framework (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    env:
+      FRAMEWORK: vllm
+    steps: &framework-build-steps
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 #v4.3.1
+        with:
+          ref: main
+      - name: Build Image
+        id: build-image
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ env.FRAMEWORK }}
+          target: framework
+          platform: linux/${{ matrix.platform.arch }}
+          # Ternary operations that are specific to vllm/arm64, empty str for all other combinations
+          base_image_tag: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
+          runtime_image_tag: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && '12.9.0-runtime-ubuntu24.04' || '' }}
+          cuda_version: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && '129' || '' }}
+          torch_backend: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && 'cu129' || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Docker Tag and Push
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-image.outputs.image_tag }}
+          push_tag: ai-dynamo/dynamo:main-${{ env.FRAMEWORK }}-framework-${{ matrix.platform.arch }}
+          aws_push: 'true'
+          azure_push: 'false'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  sglang-framework:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: cpu-amd-m5-4xlarge }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    name: sglang-framework (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    env:
+      FRAMEWORK: sglang
+    steps: *framework-build-steps
+  trtllm-framework:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: cpu-amd-m5-4xlarge }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    name: trtllm-framework (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    env:
+      FRAMEWORK: trtllm
+    steps: *framework-build-steps

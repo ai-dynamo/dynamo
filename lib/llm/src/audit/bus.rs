@@ -2,22 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::handle::AuditRecord;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use tokio::sync::broadcast;
 
-static BUS: OnceLock<broadcast::Sender<Arc<AuditRecord>>> = OnceLock::new();
+static BUS: OnceLock<broadcast::Sender<AuditRecord>> = OnceLock::new();
 
 pub fn init(capacity: usize) {
-    let (tx, _rx) = broadcast::channel::<Arc<AuditRecord>>(capacity);
+    let (tx, _rx) = broadcast::channel::<AuditRecord>(capacity);
     let _ = BUS.set(tx);
 }
 
-pub fn subscribe() -> broadcast::Receiver<Arc<AuditRecord>> {
+pub fn subscribe() -> broadcast::Receiver<AuditRecord> {
     BUS.get().expect("audit bus not initialized").subscribe()
 }
 
 pub fn publish(rec: AuditRecord) {
     if let Some(tx) = BUS.get() {
-        let _ = tx.send(Arc::new(rec));
+        let _ = tx.send(rec);
     }
 }

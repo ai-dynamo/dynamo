@@ -148,7 +148,7 @@ The KV-aware routing arguments:
 
 - `--router-temperature`: Sets the temperature when randomly selecting workers to route to via softmax sampling on the router cost logits. Setting it to 0 recovers the deterministic behavior where the min logit is picked.
 
-- `--use-kv-events`: Sets whether to listen to KV events for maintaining the global view of cached blocks. If true, then we use the `KvIndexer` to listen to the block creation and deletion events. If false, `ApproxKvIndexer`, which assumes the kv cache of historical prompts exists for fixed time durations (hard-coded to 120s), is used to predict the kv cache hit ratio in each engine. Set false if your backend engine does not emit KV events.
+- `--use-kv-events`: Sets whether to listen to KV events for maintaining the global view of cached blocks. If true, the router uses KV events to track block creation and deletion from workers. If false, the router predicts cache state based on routing decisions with TTL-based expiration (default 120s) and pruning. Set false if your backend engine does not emit KV events.
 
 ### Request Migration
 

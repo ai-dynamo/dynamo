@@ -5,8 +5,8 @@ Test the correctness of Dynamo integration with LMCache by comparing MMLU benchm
 
 ## Testing Principle
 Compare MMLU test results under two configurations:
-- **Baseline Test**: Dynamo without LMCache (`ENABLE_LMCACHE=0`)
-- **LMCache Test**: Dynamo with LMCache enabled (`ENABLE_LMCACHE=1`)
+- **Baseline Test**: Dynamo without LMCache
+- **LMCache Test**: Dynamo with LMCache enabled
 
 If both configurations produce the same inference results, it verifies that LMCache functionality is correct.
 
@@ -63,14 +63,12 @@ python3 summarize_scores_dynamo.py
 ### Baseline Architecture (deploy-baseline-dynamo.sh)
 ```
 HTTP Request → Dynamo Ingress(8000) → Dynamo Worker → Direct Inference
-Environment: ENABLE_LMCACHE=0
 ```
 
 ### LMCache Architecture (deploy-lmcache_enabled-dynamo.sh)
 ```
 HTTP Request → Dynamo Ingress(8000) → Dynamo Worker → LMCache-enabled Inference
-Environment: ENABLE_LMCACHE=1
-            LMCACHE_CHUNK_SIZE=256
+Environment:LMCACHE_CHUNK_SIZE=256
             LMCACHE_LOCAL_CPU=True
             LMCACHE_MAX_LOCAL_CPU_SIZE=1.0
 ```

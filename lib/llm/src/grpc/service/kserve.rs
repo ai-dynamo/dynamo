@@ -8,7 +8,7 @@ use crate::grpc::service::kserve::inference::DataType;
 use crate::grpc::service::kserve::inference::ModelInput;
 use crate::grpc::service::kserve::inference::ModelOutput;
 use crate::http::service::Metrics;
-use crate::http::service::metrics;
+use crate::http::service::service_v2 as http_service;
 
 use crate::discovery::ModelManager;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
@@ -42,20 +42,29 @@ use inference::{
 
 use prost::Message;
 
-/// [gluo TODO] 'metrics' are for HTTP service and there is HTTP endpoint
-/// for it as part of HTTP service. Should we always start HTTP service up
-/// for non-inference?
+/// gRPC service state - shares metrics with HTTP service for unified metrics collection
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
 }
 
+#[derive(Default, Builder)]
+#[builder(
+    pattern = "owned",
+    build_fn(private, name = "build_internal"),
+    name = "StateBuilder",
+    vis = "pub"
+)]
+pub(crate) struct StateConfig {
+    #[builder(default, setter(strip_option))]
+    metrics: Option<Arc<Metrics>>,
+    #[builder(default, setter(strip_option))]
+    manager: Option<Arc<ModelManager>>,
+}
+
 impl State {
-    pub fn new(manager: Arc<ModelManager>) -> Self {
-        Self {
-            manager,
-            metrics: Arc::new(Metrics::default()),
-        }
+    pub fn builder() -> StateBuilder {
+        StateBuilder::default()
     }
 
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
@@ -76,10 +85,28 @@ impl State {
     }
 }
 
+impl StateBuilder {
+    pub fn build(self) -> Result<State, anyhow::Error> {
+        let config = self.build_internal()?;
+
+        Ok(State {
+            manager: config
+                .manager
+                .unwrap_or_else(|| Arc::new(ModelManager::new())),
+            metrics: config
+                .metrics
+                .unwrap_or_else(|| Arc::new(Metrics::default())),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct KserveService {
     // The state we share with every request handler
     state: Arc<State>,
+
+    // HTTP service for metrics endpoint
+    http_service: http_service::HttpService,
 
     port: u16,
     host: String,
@@ -97,6 +124,12 @@ pub struct KserveServiceConfig {
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
+
+    #[builder(default = "8788")]
+    http_metrics_port: u16,
+
+    #[builder(setter(into), default = "String::from(\"0.0.0.0\")")]
+    http_metrics_host: String,
 }
 
 impl KserveService {
@@ -114,6 +147,10 @@ impl KserveService {
 
     pub fn model_manager(&self) -> &ModelManager {
         self.state().manager()
+    }
+
+    pub fn http_service(&self) -> &http_service::HttpService {
+        &self.http_service
     }
 
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
@@ -140,15 +177,29 @@ impl KserveServiceConfigBuilder {
     pub fn build(self) -> Result<KserveService, anyhow::Error> {
         let config: KserveServiceConfig = self.build_internal()?;
 
-        let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new(model_manager));
+        // Create HTTP service with only non-inference endpoints (metrics, health, models list)
+        // This provides the metrics endpoint and shared metrics object
+        let http_service = http_service::HttpService::builder()
+            .port(config.http_metrics_port)
+            .host(config.http_metrics_host.clone())
+            // Disable all inference endpoints - only use for metrics/health
+            .enable_chat_endpoints(false)
+            .enable_cmpl_endpoints(false)
+            .enable_embeddings_endpoints(false)
+            .enable_responses_endpoints(false)
+            .build()?;
 
-        // enable prometheus metrics
-        let registry = metrics::Registry::new();
-        state.metrics_clone().register(&registry)?;
+        // Share the HTTP service's model manager and metrics object with gRPC state
+        let state = Arc::new(
+            State::builder()
+                .manager(http_service.state().manager_clone())
+                .metrics(http_service.state().metrics_clone())
+                .build()?,
+        );
 
         Ok(KserveService {
             state,
+            http_service,
             port: config.port,
             host: config.host,
             request_template: config.request_template,

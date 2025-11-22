@@ -14,8 +14,8 @@ use parking_lot::Mutex;
 use pyo3::{exceptions::PyException, prelude::*};
 
 use super::to_pyerr;
-use dynamo_runtime::CancellationToken;
-use dynamo_runtime::transports::etcd::{Client, KvCache};
+use dynamo_runtime::transports::etcd::{self, Client, KvCache};
+use tokio_util::sync::CancellationToken;
 
 // All three AI's I asked agreed, this is the way
 const NONE_SENTINEL: usize = usize::MAX;
@@ -45,32 +45,39 @@ pub struct VirtualConnectorCoordinator(Arc<InnerConnector>);
 impl VirtualConnectorCoordinator {
     #[new]
     pub fn new(
-        runtime: super::DistributedRuntime,
+        drt: super::DistributedRuntime,
         dynamo_namespace: &str,
         check_interval_secs: usize,
         max_wait_time_secs: usize,
         max_retries: usize,
-    ) -> Self {
+    ) -> PyResult<Self> {
         let check_interval = Duration::from_secs(check_interval_secs as u64);
         let max_wait_time = Duration::from_secs(max_wait_time_secs as u64);
+        // default reads from environment variables
+        let etcd_config = etcd::ClientOptions::default();
+        // etcd client construction is async, but async python constructors are not allowed
+        let etcd_client = drt
+            .inner
+            .runtime()
+            .secondary()
+            .block_on(
+                async move { etcd::Client::new(etcd_config, drt.inner.runtime().clone()).await },
+            )
+            .map_err(to_pyerr)?;
 
         let c = InnerConnector {
             check_interval,
             max_wait_time,
             max_retries,
             namespace: dynamo_namespace.to_string(),
-            etcd_client: runtime
-                .inner()
-                .etcd_client()
-                .expect("Planner cannot run without etcd / in static mode"),
-
+            etcd_client,
             kv_cache: Mutex::new(None),
             num_prefill_workers: AtomicUsize::new(NONE_SENTINEL),
             num_decode_workers: AtomicUsize::new(NONE_SENTINEL),
             decision_id: AtomicUsize::new(NONE_SENTINEL),
             first_skip_timestamp: AtomicUsize::new(NONE_SENTINEL),
         };
-        Self(Arc::new(c))
+        Ok(Self(Arc::new(c)))
     }
 
     #[pyo3(signature = ())]
@@ -365,16 +372,24 @@ pub struct VirtualConnectorClient(Arc<InnerClient>);
 #[pymethods]
 impl VirtualConnectorClient {
     #[new]
-    pub fn new(runtime: super::DistributedRuntime, dynamo_namespace: &str) -> Self {
+    pub fn new(drt: super::DistributedRuntime, dynamo_namespace: &str) -> PyResult<Self> {
+        let runtime = drt.inner.runtime();
+        let cancellation_token = runtime.child_token();
+        // default reads from environment variables
+        let etcd_config = etcd::ClientOptions::default();
+        // etcd client construction is async, but async python constructors are not allowed
+        let etcd_client = runtime
+            .secondary()
+            .block_on(
+                async move { etcd::Client::new(etcd_config, drt.inner.runtime().clone()).await },
+            )
+            .map_err(to_pyerr)?;
         let c = InnerClient {
-            etcd_client: runtime
-                .inner
-                .etcd_client()
-                .expect("Planner cannot run without etcd / in static mode"),
+            etcd_client,
             key: root_key(dynamo_namespace),
-            cancellation_token: runtime.inner().child_token(),
+            cancellation_token,
         };
-        Self(Arc::new(c))
+        Ok(Self(Arc::new(c)))
     }
 
     /// Get the current values as a PlannerDecision

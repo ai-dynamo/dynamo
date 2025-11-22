@@ -1,70 +1,29 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Approximate KV Indexer
+//! Pruning and TTL utilities for KV Indexers
 //!
-//! - This module implements an approximate KV indexer that can be used to find matches for a given sequence of tokens.
-//! - It is designed to be used in conjunction with the KV router to find matches for a given sequence of tokens.
-//!
-//! # Overview
-//!
-//! - The Approximate KV Indexer, unlike the regular KV Indexer, does not depend on KV events.
-//! - The approximate indexer depends only on the input tokens. We can use input tokens + our routing decision to approximate the radix trees across workers.
-//!
-//! - The thinking behind this is that if we send a request to a worker, and shortly after get a request with a similar prefix, odds
-//!   are that routing to the same worker will result in a large cache hit.
-//! - Another benefit is the ability to bound the size of the radix tree, which is not possible if we were trying to accurately represent
-//!   the state of each worker.
+//! This module provides utilities for managing TTL-based expiration and size-based pruning
+//! of blocks in the radix tree. These utilities are used by the KvIndexer to manage
+//! memory usage and keep the cache fresh.
 
-use async_trait::async_trait;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::hash::Hash;
-use std::sync::OnceLock;
-use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant};
-use tokio_util::sync::CancellationToken;
 
-use crate::tokens::{SequenceHash, TokenBlockSequence};
-
-use crate::kv_router::indexer::{
-    DumpRequest, KvIndexerInterface, KvRouterError, OverlapScores, RadixTree, RouterEvent,
-    compute_block_hash_for_seq,
-};
-use crate::kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, WorkerId, WorkerWithDpRank,
-};
-
-#[derive(Debug)]
-struct MatchRequest {
-    /// Sequence of tokens.
-    sequence: Vec<LocalBlockHash>,
-    /// A channel to send the `OverlapScores` response.
-    resp: oneshot::Sender<OverlapScores>,
-}
-
-#[derive(Debug)]
-struct RouterResult {
-    /// The worker (with dp_rank) that was selected.
-    worker: WorkerWithDpRank,
-
-    /// The local hashes of the tokens sent to the worker.
-    local_hashes: Vec<LocalBlockHash>,
-
-    /// The sequence hashes of the tokens sent to the worker.
-    sequence_hashes: Vec<u64>,
-}
+use crate::kv_router::indexer::KvRouterError;
+use crate::kv_router::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
 /// Block entry to be inserted in the [`PruneManager::expirations`] heap.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-struct BlockEntry {
+pub struct BlockEntry {
     /// The key of the block entry.
-    key: ExternalSequenceBlockHash,
+    pub key: ExternalSequenceBlockHash,
     /// The worker (with dp_rank) that stored this block.
-    worker: WorkerWithDpRank,
+    pub worker: WorkerWithDpRank,
     /// The position of this block in the sequence (0-indexed).
-    seq_position: usize,
+    pub seq_position: usize,
 }
 
 impl PartialOrd for BlockEntry {
@@ -85,6 +44,8 @@ impl Ord for BlockEntry {
 
 #[derive(Debug, Clone)]
 pub struct PruneConfig {
+    /// Time-to-live duration for blocks before they expire.
+    pub ttl: Duration,
     /// The maximum tree size before pruning is considered.
     pub max_tree_size: usize,
     /// The target size ratio to prune down to when max_tree_size is exceeded.
@@ -93,13 +54,23 @@ pub struct PruneConfig {
     pub prune_target_ratio: f64,
 }
 
+impl Default for PruneConfig {
+    fn default() -> Self {
+        Self {
+            ttl: Duration::from_secs(120), // 120 seconds
+            max_tree_size: 2usize.pow(20), // 2^20 = 1048576
+            prune_target_ratio: 0.8,       // Prune down to 80% of max
+        }
+    }
+}
+
 /// A data structure to manage a collection of timers, addressable by a key.
 /// This is structured as a sort of "priority queue" of keys, where the priority is the expiration time.
 /// It supports insertion as well as updating the expiration time of a key.
 /// The [`PruneManager::expirations`] heap is lazily updated to reflect the true expiration times in [`PruneManager::timers`]
 /// For now, we have a fixed expiration time for all keys.
 #[derive(Debug)]
-struct PruneManager<K: Clone + Hash + Eq + Ord> {
+pub struct PruneManager<K: Clone + Hash + Eq + Ord> {
     /// The source of truth. Maps a key to its current expiration instant.
     timers: HashMap<K, Instant>,
 
@@ -116,18 +87,19 @@ struct PruneManager<K: Clone + Hash + Eq + Ord> {
     ttl: Duration,
 
     /// The configuration for tree-size pruning.
-    prune_config: Option<PruneConfig>,
+    pub prune_config: Option<PruneConfig>,
 }
 
 impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
     /// Creates a new, empty PruneManager.
-    pub fn new(ttl: Duration, threshold: usize, prune_config: Option<PruneConfig>) -> Self {
+    pub fn new(threshold: usize, prune_config: PruneConfig) -> Self {
+        let ttl = prune_config.ttl;
         PruneManager {
             timers: HashMap::new(),
             expirations: BinaryHeap::new(),
             ttl,
             threshold,
-            prune_config,
+            prune_config: Some(prune_config),
         }
     }
 
@@ -247,310 +219,12 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
     }
 }
 
-pub struct ApproxKvIndexer {
-    /// A `CancellationToken` for managing shutdown.
-    cancel: CancellationToken,
-    /// A sender for `MatchRequest`s.
-    match_tx: mpsc::Sender<MatchRequest>,
-    /// A sender for `RouterResult`s.
-    route_tx: mpsc::Sender<RouterResult>,
-    /// A sender for remove worker requests.
-    remove_worker_tx: mpsc::Sender<WorkerId>,
-    /// A sender for dump requests.
-    dump_tx: mpsc::Sender<DumpRequest>,
-    /// A handle to the background task managing the KV store.
-    task: OnceLock<std::thread::JoinHandle<()>>,
-    /// The size of the KV block this indexer can handle.
-    kv_block_size: u32,
-}
-
-impl ApproxKvIndexer {
-    pub fn new(
-        token: CancellationToken,
-        kv_block_size: u32,
-        ttl: Duration,
-        prune_config: Option<PruneConfig>,
-    ) -> Self {
-        let (match_tx, mut match_rx) = mpsc::channel::<MatchRequest>(2048);
-        let (route_tx, mut route_rx) = mpsc::channel::<RouterResult>(2048);
-        let (remove_worker_tx, mut remove_worker_rx) = mpsc::channel::<WorkerId>(16);
-        let (_get_workers_tx, mut get_workers_rx) =
-            mpsc::channel::<super::indexer::GetWorkersRequest>(16);
-        let (dump_tx, mut dump_rx) = mpsc::channel::<DumpRequest>(16);
-        let (prune_tx, mut prune_rx) = mpsc::channel::<()>(1);
-        let cancel_clone = token.clone();
-        let task = std::thread::spawn(move || {
-            // create a new tokio runtime which will only perform work on a single thread
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-
-            runtime.block_on(async move {
-                let mut trie = RadixTree::new();
-                // Use a reasonable threshold for ttl - can be made configurable if needed
-                let mut prune_manager: PruneManager<BlockEntry> = PruneManager::new(ttl, 50, prune_config.clone());
-                let mut event_id = 0;
-
-                loop {
-                    // Create a future that sleeps until the next expiration time.
-                    let expiry_fut = if let Some(next_expiry) = prune_manager.peek_next_expiry() {
-                        tokio::time::sleep_until(next_expiry)
-                    } else {
-                        // If there are no timers, sleep forever.
-                        tokio::time::sleep(Duration::MAX)
-                    };
-
-                    tokio::select! {
-                        biased;
-
-                        _ = cancel_clone.cancelled() => {
-                            tracing::debug!("Approximate Indexer progress loop shutting down");
-                            return;
-                        }
-
-                        Some(worker) = remove_worker_rx.recv() => {
-                            trie.remove_worker(worker);
-                        }
-
-                        Some(get_workers_req) = get_workers_rx.recv() => {
-                            let workers = trie.get_workers();
-                            let _ = get_workers_req.resp.send(workers);
-                        }
-
-                        Some(_) = prune_rx.recv() => {
-                            // The tree has exceeded the max tree size, so proceed with pruning.
-                            if let Ok(pruned) = prune_manager.prune(trie.current_size()) {
-                                pruned.iter().for_each(|p| {
-                                    event_id += 1;
-
-                                    let event = RouterEvent::new(
-                                        p.worker.worker_id,
-                                        KvCacheEvent {
-                                            event_id,
-                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                                block_hashes: vec![p.key],
-                                            }),
-                                            dp_rank: p.worker.dp_rank,
-                                        }
-                                    );
-                                    let _ = trie.apply_event(event);
-                                });
-                            }
-                        }
-
-                        Some(result) = route_rx.recv() => {
-                            let hashes = result.local_hashes.iter().zip(result.sequence_hashes.iter());
-
-                            let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
-                                parent_hash: None,
-                                blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
-                                    tokens_hash: *local_hash,
-                                    block_hash: ExternalSequenceBlockHash(*sequence_hash),
-                                }).collect(),
-                            });
-                            event_id += 1;
-
-                            let event = RouterEvent::new(
-                                result.worker.worker_id,
-                                KvCacheEvent {
-                                    event_id,
-                                    data: stored_event,
-                                    dp_rank: result.worker.dp_rank,
-                                }
-                            );
-
-                            if trie.apply_event(event).is_ok() {
-                                prune_manager.insert(result.sequence_hashes.iter().enumerate().map(|(idx, h)| BlockEntry {
-                                    key: ExternalSequenceBlockHash(*h),
-                                    worker: result.worker,
-                                    seq_position: idx,
-                                }).collect());
-
-                                // Check if we need to prune due to tree size exceeding max threshold.
-                                if let Some(prune_config) = &prune_manager.prune_config {
-                                    let current_size = trie.current_size();
-                                    if current_size > prune_config.max_tree_size {
-                                        tracing::info!(
-                                            "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
-                                            current_size,
-                                            prune_config.max_tree_size
-                                        );
-                                        // Send a signal to the pruning receiver to schedule pruning.
-                                        if let Err(mpsc::error::TrySendError::Closed(_)) = prune_tx.try_send(()) {
-                                            tracing::error!("Failed to send prune schedule signal, prune receiver is closed");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        Some(dump_req) = dump_rx.recv() => {
-                            let events = trie.dump_tree_as_events();
-                            let _ = dump_req.resp.send(events);
-                        }
-
-                        Some(request) = match_rx.recv() => {
-                            let scores = trie.find_matches(request.sequence, false);
-                            request.resp.send(scores).unwrap();
-                        }
-
-                        _ = expiry_fut => {
-                            let expired = prune_manager.pop_expired();
-
-                            expired.iter().for_each(|e| {
-                                event_id += 1;
-
-                                let event = RouterEvent::new(
-                                    e.worker.worker_id,
-                                    KvCacheEvent {
-                                        event_id,
-                                        data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                            block_hashes: vec![e.key],
-                                        }),
-                                        dp_rank: e.worker.dp_rank,
-                                    }
-                                );
-
-                                let _ = trie.apply_event(event);
-                            });
-                        }
-                    }
-                }
-            });
-        });
-
-        let once = OnceLock::new();
-        once.set(task).unwrap();
-
-        Self {
-            cancel: token,
-            match_tx,
-            route_tx,
-            remove_worker_tx,
-            dump_tx,
-            task: once,
-            kv_block_size,
-        }
-    }
-
-    pub fn block_size(&self) -> u32 {
-        self.kv_block_size
-    }
-
-    /// Core function to process a routing decision with pre-computed hashes
-    pub async fn process_routing_decision(
-        &self,
-        worker: WorkerWithDpRank,
-        local_hashes: Vec<LocalBlockHash>,
-        sequence_hashes: Vec<SequenceHash>,
-    ) -> Result<(), KvRouterError> {
-        self.route_tx
-            .send(RouterResult {
-                worker,
-                local_hashes,
-                sequence_hashes,
-            })
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
-
-        Ok(())
-    }
-
-    /// Wrapper function that computes hashes from tokens and calls the core function
-    pub async fn process_routing_decision_for_request(
-        &self,
-        tokens: &[u32],
-        worker: WorkerWithDpRank,
-    ) -> Result<(), KvRouterError> {
-        let local_hashes = compute_block_hash_for_seq(tokens, self.kv_block_size);
-
-        let sequence = TokenBlockSequence::new(tokens.into(), self.kv_block_size, None);
-        let sequence_hashes = sequence
-            .blocks()
-            .iter()
-            .map(|b| b.sequence_hash())
-            .collect::<Vec<_>>();
-
-        self.process_routing_decision(worker, local_hashes, sequence_hashes)
-            .await
-    }
-}
-
-#[async_trait]
-impl KvIndexerInterface for ApproxKvIndexer {
-    async fn find_matches(
-        &self,
-        sequence: Vec<LocalBlockHash>,
-    ) -> Result<OverlapScores, KvRouterError> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let request = MatchRequest {
-            sequence,
-            resp: resp_tx,
-        };
-
-        if let Err(e) = self.match_tx.send(request).await {
-            tracing::error!(
-                "Failed to send match request: {:?}; the indexer maybe offline",
-                e
-            );
-            return Err(KvRouterError::IndexerOffline);
-        }
-
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)
-    }
-
-    async fn find_matches_for_request(
-        &self,
-        tokens: &[u32],
-    ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size);
-        self.find_matches(sequence).await
-    }
-
-    async fn apply_event(&mut self, _event: RouterEvent) {
-        panic!("Approximate Indexer does not support apply_event");
-    }
-
-    async fn remove_worker(&mut self, worker: WorkerId) {
-        self.remove_worker_tx.send(worker).await.unwrap();
-    }
-
-    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        let dump_req = DumpRequest { resp: resp_tx };
-
-        if let Err(e) = self.dump_tx.send(dump_req).await {
-            tracing::error!("Failed to send dump request: {:?}", e);
-            return Err(KvRouterError::IndexerOffline);
-        }
-
-        resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)
-    }
-
-    fn shutdown(&mut self) {
-        self.cancel.cancel();
-        if let Some(task) = self.task.take() {
-            task.join()
-                .expect("Failed to join approximate indexer task");
-        }
-    }
-}
-
-impl Drop for ApproxKvIndexer {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use crate::kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+    use crate::kv_router::protocols::{WorkerId, WorkerWithDpRank};
+    use std::sync::Arc;
     use tokio::time::{self, Duration, Instant};
     use tokio_util::sync::CancellationToken;
 
@@ -585,7 +259,12 @@ mod tests {
     #[tokio::test]
     async fn test_prune_manager_expiry() {
         const TTL: Duration = Duration::from_millis(50);
-        let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, None);
+        let prune_config = PruneConfig {
+            ttl: TTL,
+            max_tree_size: usize::MAX, // Effectively disable size-based pruning
+            prune_target_ratio: 0.5,
+        };
+        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
 
         pm.insert(vec![1, 2, 3]);
         assert!(pm.get_expiry(&1).is_some());
@@ -606,7 +285,12 @@ mod tests {
     async fn test_prune_manager_update_resets_ttl() {
         // Validate that reinserting an existing key extends its TTL and prevents premature expiry.
         const TTL: Duration = Duration::from_millis(50);
-        let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, None);
+        let prune_config = PruneConfig {
+            ttl: TTL,
+            max_tree_size: usize::MAX,
+            prune_target_ratio: 0.5,
+        };
+        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
 
         // Initial insert and capture the original expiry.
         pm.insert(vec![42]);
@@ -638,7 +322,7 @@ mod tests {
         assert_eq!(expired_after, vec![42]);
     }
 
-    /// End-to-end test for [`ApproxKvIndexer`]:
+    /// End-to-end test for [`KvIndexer`] with TTL:
     ///   1. No matches before routing decision
     ///   2. Matches appear after `process_routing_decision`
     ///   3. Matches disappear after TTL expiry
@@ -646,7 +330,19 @@ mod tests {
     async fn test_approx_kv_indexer_basic_flow() {
         const TTL: Duration = Duration::from_millis(200);
         let cancel = CancellationToken::new();
-        let indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL, None);
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let prune_config = PruneConfig {
+            ttl: TTL,
+            max_tree_size: usize::MAX,
+            prune_target_ratio: 0.5,
+        };
+        let indexer = KvIndexer::new_with_frequency(
+            cancel.clone(),
+            None,
+            KV_BLOCK_SIZE,
+            metrics,
+            Some(prune_config),
+        );
 
         let tokens: Vec<u32> = vec![1, 2, 3, 4]; // Exactly one KV block
         let worker_id: WorkerId = 0;
@@ -688,7 +384,19 @@ mod tests {
     async fn test_remove_worker() {
         const TTL: Duration = Duration::from_secs(5); // Large enough to avoid expiry during test
         let cancel = CancellationToken::new();
-        let mut indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL, None);
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let prune_config = PruneConfig {
+            ttl: TTL,
+            max_tree_size: usize::MAX,
+            prune_target_ratio: 0.5,
+        };
+        let mut indexer = KvIndexer::new_with_frequency(
+            cancel.clone(),
+            None,
+            KV_BLOCK_SIZE,
+            metrics,
+            Some(prune_config),
+        );
 
         let tokens: Vec<u32> = vec![10, 11, 12, 13];
         let worker_id: WorkerId = 7;
@@ -727,7 +435,19 @@ mod tests {
         const TTL: Duration = Duration::from_secs(5); // Large enough to avoid expiry during test
 
         let cancel = CancellationToken::new();
-        let mut indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL, None);
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let prune_config = PruneConfig {
+            ttl: TTL,
+            max_tree_size: usize::MAX,
+            prune_target_ratio: 0.5,
+        };
+        let mut indexer = KvIndexer::new_with_frequency(
+            cancel.clone(),
+            None,
+            KV_BLOCK_SIZE,
+            metrics,
+            Some(prune_config),
+        );
 
         let tokens: Vec<u32> = vec![100, 101, 102, 103];
         let worker_0: WorkerId = 30;
@@ -785,7 +505,19 @@ mod tests {
         const TTL: Duration = Duration::from_secs(5);
 
         let cancel = CancellationToken::new();
-        let indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL, None);
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let prune_config = PruneConfig {
+            ttl: TTL,
+            max_tree_size: usize::MAX,
+            prune_target_ratio: 0.5,
+        };
+        let indexer = KvIndexer::new_with_frequency(
+            cancel.clone(),
+            None,
+            KV_BLOCK_SIZE,
+            metrics,
+            Some(prune_config),
+        );
 
         // Sequence A : single block
         let seq_a: Vec<u32> = vec![1, 2, 3, 4];
@@ -831,7 +563,19 @@ mod tests {
         const TTL: Duration = Duration::from_secs(5);
 
         let cancel = CancellationToken::new();
-        let indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL, None);
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let prune_config = PruneConfig {
+            ttl: TTL,
+            max_tree_size: usize::MAX,
+            prune_target_ratio: 0.5,
+        };
+        let indexer = KvIndexer::new_with_frequency(
+            cancel.clone(),
+            None,
+            KV_BLOCK_SIZE,
+            metrics,
+            Some(prune_config),
+        );
 
         let tokens: Vec<u32> = vec![9, 8, 7, 6];
         let worker_0: WorkerId = 21;
@@ -888,11 +632,12 @@ mod tests {
     async fn test_prune_manager_no_prune_when_within_bounds() {
         const TTL: Duration = Duration::from_secs(10);
         let prune_config = PruneConfig {
+            ttl: TTL,
             max_tree_size: 100,
             prune_target_ratio: 0.5,
         };
 
-        let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, Some(prune_config));
+        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
 
         // Insert 50 keys (well below max_tree_size of 100)
         pm.insert((0..50).collect());
@@ -912,11 +657,12 @@ mod tests {
     async fn test_prune_manager_prune_removes_oldest_first() {
         const TTL: Duration = Duration::from_secs(10);
         let prune_config = PruneConfig {
+            ttl: TTL,
             max_tree_size: 10,
             prune_target_ratio: 0.5,
         };
 
-        let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, Some(prune_config));
+        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
 
         // Insert keys one at a time with delays to ensure different timestamps
         for i in 1..=15 {
@@ -945,7 +691,14 @@ mod tests {
     #[tokio::test]
     async fn test_prune_manager_prune_fails_without_config() {
         const TTL: Duration = Duration::from_secs(10);
-        let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, None);
+        let prune_config = PruneConfig {
+            ttl: TTL,
+            max_tree_size: usize::MAX,
+            prune_target_ratio: 0.5,
+        };
+        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
+        // Temporarily set prune_config to None to test the error case
+        pm.prune_config = None;
 
         pm.insert(vec![1, 2, 3]);
 
@@ -975,7 +728,7 @@ mod tests {
         assert!(entry1 < entry2);
     }
 
-    /// End-to-end test for [`ApproxKvIndexer`] with pruning
+    /// End-to-end test for [`KvIndexer`] with TTL and pruning
     ///   0. Max tree size is 5, target size is 2 (prune_target_ratio = 0.4)
     ///   1. Insert 5 blocks (at max_tree_size but not exceeding)
     ///   2. Verify all 5 blocks are present
@@ -986,12 +739,20 @@ mod tests {
     async fn test_approx_indexer_e2e_pruning() {
         const TTL: Duration = Duration::from_secs(60); // Long TTL to avoid expiry
         let prune_config = PruneConfig {
+            ttl: TTL,
             max_tree_size: 5,        // Very small to trigger pruning quickly
             prune_target_ratio: 0.4, // target size is 5 * 0.4 = 2
         };
 
         let cancel = CancellationToken::new();
-        let indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL, Some(prune_config));
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let indexer = KvIndexer::new_with_frequency(
+            cancel.clone(),
+            None,
+            KV_BLOCK_SIZE,
+            metrics,
+            Some(prune_config),
+        );
 
         let worker = WorkerWithDpRank::from_worker_id(42);
 
@@ -1059,11 +820,12 @@ mod tests {
     async fn test_prune_manager_prune_reinsertion_updates_position() {
         const TTL: Duration = Duration::from_secs(10);
         let prune_config = PruneConfig {
+            ttl: TTL,
             max_tree_size: 5,
             prune_target_ratio: 0.8,
         };
 
-        let mut pm: PruneManager<u32> = PruneManager::new(TTL, 50, Some(prune_config));
+        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
 
         // Insert keys
         for i in 1..=10 {

@@ -302,7 +302,7 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
 
-        # Run basic router test (starts router internally, vLLM workers need frontend readiness check)
+        # Run basic router test (starts router internally and waits for workers to be ready)
         _test_router_basic(
             engine_workers=vllm_workers,
             block_size=BLOCK_SIZE,
@@ -310,7 +310,6 @@ def test_vllm_kv_router_basic(request, runtime_services, predownload_tokenizers)
             frontend_port=PORTS[0],
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
-            wait_for_frontend=True,  # vLLM workers need time to load models
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
             store_backend="etcd",  # Explicit for clarity
         )

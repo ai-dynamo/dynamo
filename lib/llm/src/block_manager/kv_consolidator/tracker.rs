@@ -3,11 +3,11 @@
 
 //! Cache Status Tracker
 //!
-//! Maintains the state of KV cache blocks across different event sources (vLLM and KVBM)
+//! Maintains the state of KV cache blocks across different event sources (vLLM, TensorRT-LLM, and KVBM)
 //! and determines when to emit STORE/REMOVE events.
 //!
-//! - Tracks by EVENT SOURCE (vLLM vs KVBM) instead of storage tier
-//! - vLLM source: G1 (GPU) events from vLLM worker
+//! - Tracks by EVENT SOURCE (vLLM/TensorRT-LLM vs KVBM) instead of storage tier
+//! - vLLM/TensorRT-LLM source: G1 (GPU) events from vLLM or TensorRT-LLM worker
 //! - KVBM source: G2/G3 (host pinned/disk) events from KVBM
 //! - Deduplication: Uses SequenceHash as the key
 //!   - Always computes sequence hash using KVBM's xxHash3 method, regardless of source
@@ -59,10 +59,12 @@ fn compute_sequence_hash(
 }
 
 /// Event source for KV cache events
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EventSource {
     /// Events from vLLM worker (G1/GPU)
     Vllm,
+    /// Events from TensorRT-LLM worker (G1/GPU)
+    Trtllm,
     /// Events from KVBM
     Kvbm,
 }
@@ -73,6 +75,7 @@ impl std::str::FromStr for EventSource {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "vllm" | "VLLM" | "GPU" => Ok(EventSource::Vllm),
+            "trtllm" | "TRTLLM" | "TensorRT-LLM" => Ok(EventSource::Trtllm),
             "kvbm" | "KVBM" => Ok(EventSource::Kvbm),
             _ => Err(format!("Unknown event source: {}", s)),
         }
@@ -84,6 +87,7 @@ impl EventSource {
     pub fn to_str(&self) -> &'static str {
         match self {
             EventSource::Vllm => "vllm",
+            EventSource::Trtllm => "trtllm",
             EventSource::Kvbm => "kvbm",
         }
     }

@@ -185,7 +185,7 @@ def parse_args():
         action="store_false",
         dest="use_kv_events",
         default=True,
-        help="KV Router: Disable KV events. When set, uses ApproxKvRouter for predicting block creation/deletion based only on incoming requests. By default, KV events are enabled.",
+        help="KV Router: Disable KV events. When set, the router predicts cache state based on routing decisions with TTL-based expiration and pruning, rather than receiving events from workers. By default, KV events are enabled.",
     )
 
     parser.add_argument(
@@ -218,6 +218,27 @@ def parse_args():
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing (default: True)",
     )
 
+    parser.add_argument(
+        "--router-ttl-secs",
+        type=float,
+        default=120.0,
+        help="KV Router: TTL for blocks in seconds. Only used when --no-kv-events is set. Controls how long cached blocks are considered valid without explicit events (default: 120.0)",
+    )
+
+    parser.add_argument(
+        "--router-max-tree-size",
+        type=int,
+        default=2**10,
+        help="KV Router: Maximum tree size before pruning. Only used when --no-kv-events is set. When the indexer tree exceeds this size, pruning is triggered (default: 1024)",
+    )
+
+    parser.add_argument(
+        "--router-prune-target-ratio",
+        type=float,
+        default=0.8,
+        help="KV Router: Target size ratio after pruning (0.0-1.0). Only used when --no-kv-events is set. Determines how aggressively to prune the tree (default: 0.8)",
+    )
+
     return parser.parse_args()
 
 
@@ -244,7 +265,10 @@ async def worker(runtime: DistributedRuntime):
         f"use_kv_events={args.use_kv_events}, "
         f"router_replica_sync={args.router_replica_sync}, "
         f"router_reset_states={args.router_reset_states}, "
-        f"router_track_active_blocks={args.router_track_active_blocks}"
+        f"router_track_active_blocks={args.router_track_active_blocks}, "
+        f"router_ttl_secs={args.router_ttl_secs}, "
+        f"router_max_tree_size={args.router_max_tree_size}, "
+        f"router_prune_target_ratio={args.router_prune_target_ratio}"
     )
 
     # Create KvRouter configuration
@@ -256,6 +280,9 @@ async def worker(runtime: DistributedRuntime):
         router_snapshot_threshold=args.router_snapshot_threshold,
         router_reset_states=args.router_reset_states,
         router_track_active_blocks=args.router_track_active_blocks,
+        router_ttl_secs=args.router_ttl_secs,
+        router_max_tree_size=args.router_max_tree_size,
+        router_prune_target_ratio=args.router_prune_target_ratio,
     )
 
     # Create service component - use "router" as component name

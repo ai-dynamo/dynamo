@@ -414,6 +414,46 @@ metadata:
     dgdr.nvidia.com/namespace: your-namespace
 ```
 
+### Accessing Detailed Profiling Artifacts
+
+By default, profiling jobs save essential data to ConfigMaps for planner integration. For advanced users who need access to detailed artifacts (logs, performance plots, AIPerf results, etc), configure the DGDR to use `dynamo-pvc`. This is optional and will not affect the functionality of profiler or Planner.
+
+**What's available in ConfigMaps (always created):**
+- Generated DGD configuration
+- Profiling data for Planner (`.json` files)
+
+**What's available in PVC if attached to DGDR (optional):**
+- Performance plots (PNGs)
+- DGD configuration and logs of all services for each profiled deployment
+- AIPerf profiling artifacts for each AIPerf run
+- Raw profiling data (`.npz` files)
+- Profiler log
+
+**Setup:**
+
+1. Set up the benchmarking PVC:
+```bash
+export NAMESPACE=your-namespace
+deploy/utils/setup_benchmarking_resources.sh
+```
+
+2. Add `outputPVC` to your DGDR's `profilingConfig`:
+```yaml
+spec:
+  profilingConfig:
+    outputPVC: "dynamo-pvc"
+    config:
+      # ... rest of config
+```
+
+3. After profiling completes, access results:
+```bash
+kubectl apply -f deploy/utils/manifests/pvc-access-pod.yaml -n $NAMESPACE
+kubectl wait --for=condition=Ready pod/pvc-access-pod -n $NAMESPACE --timeout=60s
+kubectl cp $NAMESPACE/pvc-access-pod:/data ./profiling-results
+kubectl delete pod pvc-access-pod -n $NAMESPACE
+```
+
 ## Troubleshooting
 
 ### Quick Diagnostics

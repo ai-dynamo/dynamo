@@ -6,6 +6,7 @@ import json
 import logging
 import random
 import string
+import time
 from typing import Any, Optional
 
 import aiohttp
@@ -29,7 +30,12 @@ class KVRouterProcess(ManagedProcess):
     """Manages the KV router process using dynamo.frontend"""
 
     def __init__(
-        self, request, block_size: int, frontend_port: int, store_backend: str = "etcd"
+        self,
+        request,
+        block_size: int,
+        frontend_port: int,
+        namespace: str,
+        store_backend: str = "etcd",
     ):
         command = [
             "python3",
@@ -43,6 +49,8 @@ class KVRouterProcess(ManagedProcess):
             str(frontend_port),
             "--store-kv",
             store_backend,
+            "--namespace",
+            namespace,
         ]
 
         super().__init__(
@@ -498,17 +506,15 @@ def _test_router_basic(
     frontend_port: int,
     test_payload: dict,
     num_requests: int,
-    wait_for_frontend: bool = False,
-    frontend_timeout: int = 180,
+    frontend_timeout: int = 120,
     store_backend: str = "etcd",
 ):
-    """Basic router test: start router, wait for workers (optional) and send concurrent requests via HTTP frontend.
+    """Basic router test: start router, wait for workers and send concurrent requests via HTTP frontend.
 
     Assumes engine_workers are already initialized. This function manages router lifecycle.
 
     This is a shared test implementation for both mocker and vLLM workers.
-    The key difference is that vLLM workers need time to load models and register,
-    so they require wait_for_frontend=True.
+    Always waits for workers to be properly registered before sending requests to avoid flakiness.
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -517,8 +523,7 @@ def _test_router_basic(
         frontend_port: Port to start the frontend HTTP server on
         test_payload: Test payload to send to /v1/chat/completions
         num_requests: Number of concurrent requests to send
-        wait_for_frontend: If True, poll /v1/models and /v1/chat/completions until ready
-        frontend_timeout: Timeout for frontend readiness check (only used if wait_for_frontend=True)
+        frontend_timeout: Timeout for frontend readiness check (default: 120s)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
 
     Raises:
@@ -528,21 +533,22 @@ def _test_router_basic(
     try:
         # Start KV router frontend
         logger.info(f"Starting KV router frontend on port {frontend_port}")
-        kv_router = KVRouterProcess(request, block_size, frontend_port, store_backend)
+        kv_router = KVRouterProcess(
+            request, block_size, frontend_port, engine_workers.namespace, store_backend
+        )
         kv_router.__enter__()
 
         frontend_url = f"http://localhost:{frontend_port}"
 
-        # Wait for workers to register with frontend if needed (vLLM requires this)
-        if wait_for_frontend:
-            logger.info("Waiting for workers to register with frontend...")
-            asyncio.run(
-                wait_for_frontend_ready(
-                    frontend_url=frontend_url,
-                    expected_num_workers=engine_workers.num_workers,
-                    timeout=frontend_timeout,
-                )
+        # Always wait for workers to register with frontend to avoid flakiness
+        logger.info("Waiting for workers to register with frontend...")
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=engine_workers.num_workers,
+                timeout=frontend_timeout,
             )
+        )
 
         # Send concurrent requests to the frontend
         logger.info(f"Sending {num_requests} concurrent requests to frontend...")
@@ -598,11 +604,35 @@ def _test_router_two_routers(
 
     try:
         # Start two KV routers on different ports
-        for port in router_ports:
+        for i, port in enumerate(router_ports):
             logger.info(f"Starting KV router frontend on port {port}")
-            kv_router = KVRouterProcess(request, block_size, port, store_backend)
+            kv_router = KVRouterProcess(
+                request, block_size, port, engine_workers.namespace, store_backend
+            )
             kv_router.__enter__()
             kv_routers.append(kv_router)
+
+            # Add delay between routers for file backend to ensure first router's
+            # registration is visible before second router starts its cleanup
+            if i == 0 and store_backend == "file":
+                logger.info(
+                    "Waiting 0.5s for first router to fully register (file backend)"
+                )
+                time.sleep(0.5)
+
+        # Wait for workers to be ready on both routers
+        logger.info("Waiting for workers to register with both routers...")
+        for i, port in enumerate(router_ports):
+            frontend_url = f"http://localhost:{port}"
+            logger.info(f"Waiting for router {i} on port {port} to discover workers...")
+            asyncio.run(
+                wait_for_frontend_ready(
+                    frontend_url=frontend_url,
+                    expected_num_workers=engine_workers.num_workers,
+                    timeout=120,
+                )
+            )
+        logger.info("Both routers have discovered workers")
 
         # Build URLs for both routers
         router_urls = [
@@ -874,7 +904,9 @@ def _test_router_query_instance_id(
     try:
         # Start KV router (frontend)
         logger.info(f"Starting KV router frontend on port {frontend_port}")
-        kv_router = KVRouterProcess(request, block_size, frontend_port, store_backend)
+        kv_router = KVRouterProcess(
+            request, block_size, frontend_port, engine_workers.namespace, store_backend
+        )
         kv_router.__enter__()
 
         url = f"http://localhost:{frontend_port}/v1/chat/completions"

@@ -3,12 +3,47 @@
 
 import json
 import logging
+import re
 import time
+from copy import deepcopy
 from typing import Any, Dict
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+def _truncate_base64_url(url: str, max_length: int = 100) -> str:
+    """Helper to truncate a single base64 data URL."""
+    if (m := re.match(r"^(data:image/[^;]+;base64,)(.+)$", url)) and len(
+        m.group(2)
+    ) > max_length:
+        data = m.group(2)
+        return f"{m.group(1)}{data[:max_length]}...<{len(data)} chars, truncated>"
+    return url
+
+
+def _sanitize_payload_for_logging(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Truncate base64-encoded images in multimodal payloads for cleaner logging.
+    Multimodal payloads can contain base64 images with multiple MB of data in
+    the field "type": "image_url", "image_url": "data: ... <MB of data>"
+    """
+    sanitized = deepcopy(payload)
+
+    # Handle chat completions with multimodal content
+    if "messages" in sanitized:
+        for message in sanitized["messages"]:
+            content = message.get("content")
+            # Content can be string or list of content parts (multimodal)
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        image_url = part.get("image_url", {})
+                        if "url" in image_url:
+                            image_url["url"] = _truncate_base64_url(image_url["url"])
+
+    return sanitized
 
 
 def send_request(
@@ -35,7 +70,10 @@ def send_request(
     """
 
     method_upper = method.upper()
-    payload_json = json.dumps(payload, indent=2)
+
+    # Sanitize payload for logging (truncate base64 images)
+    sanitized_payload = _sanitize_payload_for_logging(payload)
+    payload_json = json.dumps(sanitized_payload, indent=2)
 
     curl_command = ""
     if method_upper == "GET":

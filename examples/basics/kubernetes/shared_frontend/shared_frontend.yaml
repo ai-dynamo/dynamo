@@ -19,7 +19,7 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: dynamo
+      globalDynamoNamespace: true
       replicas: 1
       extraPodSpec:
         mainContainer:
@@ -30,14 +30,15 @@ kind: DynamoGraphDeployment
 metadata:
   name: vllm-agg
 spec:
+  pvcs:
+  - name: dynamo-model-cache
+    create: false
   services:
     VllmDecodeWorker:
-      pvc:
-        create: false
-        name: dynamo-model-cache
+      volumeMounts:
+      - name: dynamo-model-cache
         mountPoint: /root/.cache/huggingface
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg
       componentType: worker
       replicas: 1
       resources:
@@ -61,12 +62,10 @@ spec:
   backendFramework: vllm
   services:
     EncodeWorker:
-      pvc:
-        create: false
-        name: dynamo-model-cache
+      volumeMounts:
+      - name: dynamo-model-cache
         mountPoint: /root/.cache/huggingface
       envFromSecret: hf-token-secret
-      dynamoNamespace: agg-qwen
       componentType: worker
       replicas: 1
       resources:
@@ -82,12 +81,10 @@ spec:
           args:
             - python3 components/encode_worker.py --model Qwen/Qwen2.5-VL-7B-Instruct
     VLMWorker:
-      pvc:
-        create: false
-        name: dynamo-model-cache
+      volumeMounts:
+      - name: dynamo-model-cache
         mountPoint: /root/.cache/huggingface
       envFromSecret: hf-token-secret
-      dynamoNamespace: agg-qwen
       componentType: worker
       replicas: 1
       resources:
@@ -103,12 +100,10 @@ spec:
           args:
             - python3 components/worker.py --model Qwen/Qwen2.5-VL-7B-Instruct --worker-type prefill
     Processor:
-      pvc:
-        create: false
-        name: dynamo-model-cache
+      volumeMounts:
+      - name: dynamo-model-cache
         mountPoint: /root/.cache/huggingface
       envFromSecret: hf-token-secret
-      dynamoNamespace: agg-qwen
       componentType: worker
       replicas: 1
       resources:

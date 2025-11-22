@@ -23,7 +23,6 @@ When running vLLM through Dynamo, vLLM engine metrics are automatically passed t
 |---------------|-------------|---------|---------|
 | `DYN_SYSTEM_PORT` | System metrics/health port. Required to expose `/metrics` endpoint. | `-1` (disabled) | `8081` |
 | `--connector` | KV connector to use. Use `lmcache` to enable LMCache metrics. | `nixl` | `--connector lmcache` |
-| `ENABLE_LMCACHE` | Sets Dynamo's recommended LMCache defaults (optional). | Not set | `ENABLE_LMCACHE=1` |
 
 ## Getting Started Quickly
 
@@ -117,15 +116,9 @@ To access LMCache metrics, both of these are required:
 1. `--connector lmcache` - Enables LMCache in vLLM
 2. `DYN_SYSTEM_PORT=8081` - Enables Dynamo's metrics HTTP endpoint
 
-**Minimal example:**
+**Example:**
 ```bash
 DYN_SYSTEM_PORT=8081 \
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector lmcache
-```
-
-**Recommended (with Dynamo defaults):**
-```bash
-DYN_SYSTEM_PORT=8081 ENABLE_LMCACHE=1 \
 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector lmcache
 ```
 

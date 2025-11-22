@@ -69,8 +69,8 @@ pub struct Flags {
     pub router_temperature: Option<f64>,
 
     /// KV Router: Whether to use KV events to maintain the view of cached blocks
-    /// If false, would use ApproxKvRouter for predicting block creation / deletion
-    /// based only on incoming requests at a timer.
+    /// If false, the router predicts cache state based on routing decisions
+    /// with TTL-based expiration and pruning, rather than receiving events from workers.
     /// Default: true
     #[arg(long)]
     pub use_kv_events: Option<bool>,
@@ -187,6 +187,9 @@ impl Flags {
                 self.router_replica_sync,
                 self.router_track_active_blocks,
                 // defaulting below args (no longer maintaining new flags for dynamo-run)
+                None,
+                None,
+                None,
                 None,
                 None,
             ),
