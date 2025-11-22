@@ -77,6 +77,7 @@ runs:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
         GITHUB_REF_NAME: ${{ github.ref_name }}
       run: |
+        set -x
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
           IMAGE_TAG="${{ inputs.image_tag }}"
@@ -92,11 +93,12 @@ runs:
         # Set --cache-from args and set --cache-to if this is a main commit
         EXTRA_ARGS=""
         EXTRA_ARGS+=("--dynamo-base-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:dynamo-base-${PLATFORM##*/}-cache")
-        EXTRA_ARGS+=("--dynamo-framework-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache")
+        EXTRA_ARGS+=("--framework-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache")
         # if [[ "$GITHUB_REF_NAME" == "main" ]]; then
         EXTRA_ARGS+=("--dynamo-base-cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:dynamo-base-${PLATFORM##*/}-cache,mode=max")
-        EXTRA_ARGS+=("--dynamo-framework-cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max")
+        EXTRA_ARGS+=("--framework-cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max")
         # fi
+        echo "$EXTRA_ARGS"
         # Collect optional overrides provided by the workflow
         if [ -n "${{ inputs.base_image_tag }}" ]; then
           EXTRA_ARGS+=" --base-image-tag ${{ inputs.base_image_tag }}"
