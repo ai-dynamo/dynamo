@@ -2972,6 +2972,7 @@ dependencies = [
  "ravif",
  "rayon",
  "rgb",
+ "serde",
  "tiff",
  "zune-core",
  "zune-jpeg",
@@ -3906,6 +3907,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.110",
+]
+
+[[package]]
+name = "moxcms"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fbdd3d7436f8b5e892b8b7ea114271ff0fa00bc5acae845d53b07d498616ef6"
+dependencies = [
+ "num-traits",
+ "pxfm",
 ]
 
 [[package]]

@@ -27,7 +27,8 @@ use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
-use crate::preprocessor::media::MediaLoader;
+#[cfg(feature = "media-nixl")]
+use crate::preprocessor::media::{MediaDecoder, MediaFetcher, MediaLoader};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder,
@@ -114,6 +115,7 @@ pub struct OpenAIPreprocessor {
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
+    #[cfg(feature = "media-nixl")]
     media_loader: Option<MediaLoader>,
 }
 
@@ -143,7 +145,13 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
-        let media_loader = None; // TODO: enable with decoder config from MDC
+
+        #[cfg(feature = "media-nixl")]
+        let media_loader = match mdc.media_decoder {
+            Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
+            None => None,
+        };
+
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
@@ -151,6 +159,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             runtime_config,
             tool_call_parser,
+            #[cfg(feature = "media-nixl")]
             media_loader,
         }))
     }
@@ -280,7 +289,9 @@ impl OpenAIPreprocessor {
         let messages = request.messages();
         let message_count = messages.len().unwrap_or(0);
         let mut media_map: MultimodalDataMap = HashMap::new();
-        let mut fetch_tasks = Vec::new();
+        #[cfg(feature = "media-nixl")]
+        let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
+            Vec::new();
 
         for idx in 0..message_count {
             let msg = messages
@@ -313,29 +324,39 @@ impl OpenAIPreprocessor {
                     _ => continue,
                 };
 
+                #[cfg(feature = "media-nixl")]
                 if self.media_loader.is_some() {
                     fetch_tasks.push((type_str, content_part.clone()));
-                } else {
-                    // No loader, just pass the URL through
-                    media_map
-                        .entry(type_str)
-                        .or_default()
-                        .push(MultimodalData::Url(url));
+                    continue;
                 }
+
+                //Fallback: ust pass the URL through
+                media_map
+                    .entry(type_str)
+                    .or_default()
+                    .push(MultimodalData::Url(url));
             }
         }
 
         // Execute all fetch tasks
+        #[cfg(feature = "media-nixl")]
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
-            let _results = futures::future::join_all(
+            let results = futures::future::join_all(
                 fetch_tasks
                     .iter()
                     .map(|(_, content_part)| loader.fetch_and_decode_media_part(content_part)),
             )
             .await;
 
-            // TODO: decode and pass NIXL descriptors to the media map
+            for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {
+                // if one item fails, errors the whole request, other items will be cleaned up by Drop
+                let rdma_descriptor = result?;
+                media_map
+                    .entry(type_str)
+                    .or_default()
+                    .push(MultimodalData::Decoded(rdma_descriptor));
+            }
         }
 
         if !media_map.is_empty() {

@@ -6,14 +6,15 @@ use std::io::Cursor;
 use anyhow::Result;
 use image::{ColorType, GenericImageView, ImageFormat, ImageReader};
 use ndarray::Array3;
+use serde::{Deserialize, Serialize};
 
 use super::super::common::EncodedMediaData;
-use super::super::decoders::{DecodedMediaData, DecodedMediaMetadata};
-use super::Decoder;
+use super::super::rdma::DecodedMediaData;
+use super::{DecodedMediaMetadata, Decoder};
 
 const DEFAULT_MAX_ALLOC: u64 = 128 * 1024 * 1024; // 128 MB
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageDecoder {
     #[serde(default)]
@@ -36,18 +37,15 @@ impl Default for ImageDecoder {
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum ImageLayout {
     HWC,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub struct ImageMetadata {
-    #[allow(dead_code)] // used in followup MR
     pub(crate) format: Option<ImageFormat>,
-    #[allow(dead_code)] // used in followup MR
     pub(crate) color_type: ColorType,
-    #[allow(dead_code)] // used in followup MR
     pub(crate) layout: ImageLayout,
 }
 
@@ -78,8 +76,8 @@ impl Decoder for ImageDecoder {
         let (width, height) = img.dimensions();
         let shape = (height as usize, width as usize, n_channels as usize);
         let array = Array3::from_shape_vec(shape, data)?;
-        let mut decoded: DecodedMediaData = array.into();
-        decoded.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
+        let mut decoded: DecodedMediaData = array.try_into()?;
+        decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
             format,
             color_type,
             layout: ImageLayout::HWC,
@@ -90,7 +88,7 @@ impl Decoder for ImageDecoder {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::decoders::DataType;
+    use super::super::super::rdma::DataType;
     use super::*;
     use image::{DynamicImage, ImageBuffer};
     use rstest::rstest;
@@ -156,10 +154,10 @@ mod tests {
 
         let decoded = result.unwrap();
         assert_eq!(
-            decoded.shape,
+            decoded.tensor_info.shape,
             vec![height as usize, width as usize, expected_channels as usize]
         );
-        assert_eq!(decoded.dtype, DataType::UINT8);
+        assert_eq!(decoded.tensor_info.dtype, DataType::UINT8);
     }
 
     #[rstest]
@@ -196,9 +194,12 @@ mod tests {
                 format
             );
             let decoded = result.unwrap();
-            assert_eq!(decoded.shape, vec![height as usize, width as usize, 3]);
             assert_eq!(
-                decoded.dtype,
+                decoded.tensor_info.shape,
+                vec![height as usize, width as usize, 3]
+            );
+            assert_eq!(
+                decoded.tensor_info.dtype,
                 DataType::UINT8,
                 "dtype should be uint8 for case: {}",
                 test_case
@@ -236,11 +237,15 @@ mod tests {
         );
 
         let decoded = result.unwrap();
-        assert_eq!(decoded.shape.len(), 3, "Should have 3 dimensions");
-        assert_eq!(decoded.shape[0], 1, "Height should be 1");
-        assert_eq!(decoded.shape[1], 1, "Width should be 1");
         assert_eq!(
-            decoded.dtype,
+            decoded.tensor_info.shape.len(),
+            3,
+            "Should have 3 dimensions"
+        );
+        assert_eq!(decoded.tensor_info.shape[0], 1, "Height should be 1");
+        assert_eq!(decoded.tensor_info.shape[1], 1, "Width should be 1");
+        assert_eq!(
+            decoded.tensor_info.dtype,
             DataType::UINT8,
             "dtype should be uint8 for {} channels {:?}",
             input_channels,
