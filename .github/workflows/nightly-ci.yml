@@ -28,100 +28,119 @@ env:
 ############################## BUILD JOBS ##############################
 
 jobs:
-  # build-base-amd64:
-  #   name: Build Dynamo Base (amd64)
-  #   runs-on: cpu-amd-m5-2xlarge
-  #   timeout-minutes: 120
-  #   env:
-  #     BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Build Docker Image
-  #       id: build
-  #       uses: ./.github/actions/docker-build
-  #       with:
-  #         framework: none
-  #         target: dev
-  #         platform: linux/amd64
-  #         base_image_tag: ${{ env.BASE_IMAGE_TAG }}
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  #         image_tag: dynamo-base-nightly-amd64
-  #     - name: Login to ECR
-  #       shell: bash
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-  #     - name: Tag and Push Base Images
-  #       uses: ./.github/actions/docker-tag-push
-  #       with:
-  #         local_image: ${{ steps.build.outputs.image_tag }}
-  #         push_tags: |
-  #           ${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64
-  #           ${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64-run-${{ github.run_id }}
-  #         aws_push: 'true'
-  #         azure_push: 'true'
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  build-base-amd64:
+    name: Build Dynamo Base (amd64)
+    runs-on: cpu-amd-m5-2xlarge
+    timeout-minutes: 120
+    env:
+      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to ECR
+        shell: bash
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+      - name: Pull existing base image for cache
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "Attempting to pull existing base image for layer caching..."
+          if docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64"; then
+            echo "Successfully pulled existing image for cache"
+          else
+            echo "No existing image found or pull failed, will build from scratch"
+          fi
+      - name: Build Docker Image
+        id: build
+        uses: ./.github/actions/docker-build
+        with:
+          framework: none
+          target: dev
+          platform: linux/amd64
+          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
+          enable_kvbm: true
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: dynamo-base-nightly-amd64
+      - name: Tag and Push Base Images
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build.outputs.image_tag }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64
+            ${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64-run-${{ github.run_id }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
-  # build-base-arm64:
-  #   name: Build Dynamo Base (arm64)
-  #   runs-on: cpu-arm-r8g-4xlarge
-  #   timeout-minutes: 120
-  #   env:
-  #     BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Build Docker Image
-  #       id: build
-  #       uses: ./.github/actions/docker-build
-  #       with:
-  #         framework: none
-  #         target: dev
-  #         platform: linux/arm64
-  #         base_image_tag: ${{ env.BASE_IMAGE_TAG }}
-  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  #         image_tag: dynamo-base-nightly-arm64
-  #     - name: Login to ECR
-  #       shell: bash
-  #       env:
-  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #       run: |
-  #         aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-  #     - name: Tag and Push Base Images
-  #       uses: ./.github/actions/docker-tag-push
-  #       with:
-  #         local_image: ${{ steps.build.outputs.image_tag }}
-  #         push_tags: |
-  #           ${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64
-  #           ${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64-run-${{ github.run_id }}
-  #         aws_push: 'true'
-  #         azure_push: 'true'
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  build-base-arm64:
+    name: Build Dynamo Base (arm64)
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 120
+    env:
+      BASE_IMAGE_TAG: '25.06-cuda12.9-devel-ubuntu24.04'
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to ECR
+        shell: bash
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+      - name: Pull existing base image for cache
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "Attempting to pull existing base image for layer caching..."
+          if docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64"; then
+            echo "Successfully pulled existing image for cache"
+          else
+            echo "No existing image found or pull failed, will build from scratch"
+          fi
+      - name: Build Docker Image
+        id: build
+        uses: ./.github/actions/docker-build
+        with:
+          framework: none
+          target: dev
+          platform: linux/arm64
+          base_image_tag: ${{ env.BASE_IMAGE_TAG }}
+          enable_kvbm: true
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: dynamo-base-nightly-arm64
+      - name: Tag and Push Base Images
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build.outputs.image_tag }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64
+            ${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64-run-${{ github.run_id }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   build-framework-amd64:
     name: Build ${{ matrix.framework }} (amd64)
-    # Uncomment the next line if build-base-amd64 is enabled
-    # needs: build-base-amd64
+    needs: build-base-amd64
     runs-on: cpu-amd-m5-4xlarge
     timeout-minutes: 90
     strategy:
@@ -136,6 +155,16 @@ jobs:
         shell: bash
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+      - name: Pull existing framework image for cache
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "Attempting to pull existing ${{ matrix.framework }} image for layer caching..."
+          if docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-amd64"; then
+            echo "Successfully pulled existing image for cache"
+          else
+            echo "No existing image found or pull failed, will build from scratch"
+          fi
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -143,7 +172,7 @@ jobs:
           framework: ${{ matrix.framework }}
           target: runtime
           platform: linux/amd64
-          dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64
+          dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-amd64-run-${{ github.run_id }}
           base_image_tag: ''
           runtime_image_tag: ''
           cuda_version: ''
@@ -173,8 +202,7 @@ jobs:
 
   build-framework-arm64:
     name: Build ${{ matrix.framework }} (arm64)
-    # Uncomment the next line if build-base-arm64 is enabled
-    # needs: build-base-arm64
+    needs: build-base-arm64
     runs-on: cpu-arm-r8g-4xlarge
     timeout-minutes: 90
     strategy:
@@ -204,6 +232,16 @@ jobs:
         shell: bash
         run: |
           aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+      - name: Pull existing framework image for cache
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "Attempting to pull existing ${{ matrix.framework }} image for layer caching..."
+          if docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-arm64"; then
+            echo "Successfully pulled existing image for cache"
+          else
+            echo "No existing image found or pull failed, will build from scratch"
+          fi
       - name: Build Docker Image
         id: build
         uses: ./.github/actions/docker-build
@@ -211,7 +249,7 @@ jobs:
           framework: ${{ matrix.framework }}
           target: runtime
           platform: linux/arm64
-          dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64
+          dynamo_base_image: ${{ env.ECR_HOSTNAME }}/${{ env.REGISTRY_IMAGE }}:dynamo-base-nightly-arm64-run-${{ github.run_id }}
           base_image_tag: ${{ matrix.base_image_tag }}
           runtime_image_tag: ${{ matrix.runtime_image_tag }}
           cuda_version: ${{ matrix.cuda_version }}
@@ -257,8 +295,8 @@ jobs:
           - { framework: trtllm, arch: arm64, runner: cpu-arm-r8g-4xlarge }
           - { framework: sglang, arch: amd64, runner: cpu-amd-m5-2xlarge }
           - { framework: sglang, arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
@@ -274,7 +312,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "${{ matrix.framework }} and unit and nightly"
+          pytest_marks: "${{ matrix.framework }} and unit and (nightly or pre_merge or post_merge)"
           framework: ${{ matrix.framework }}
           test_type: unit
           platform_arch: ${{ matrix.arch }}
@@ -290,8 +328,8 @@ jobs:
       fail-fast: false
       matrix:
         framework: [vllm, trtllm, sglang]
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
@@ -322,8 +360,8 @@ jobs:
       fail-fast: false
       matrix:
         framework: [vllm, trtllm, sglang]
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
@@ -354,8 +392,8 @@ jobs:
       fail-fast: false
       matrix:
         framework: [vllm, trtllm, sglang]
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
@@ -404,8 +442,8 @@ jobs:
           - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
           - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
           - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
