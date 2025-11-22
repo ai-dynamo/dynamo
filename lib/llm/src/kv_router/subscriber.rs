@@ -8,7 +8,6 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 use anyhow::Result;
 use dynamo_runtime::{
     component::Component,
-    config::environment_names::nats as env_nats,
     discovery::DiscoveryQuery,
     prelude::*,
     storage::key_value_store::WatchEvent,
@@ -230,13 +229,16 @@ pub async fn start_kv_router_background(
     let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
         .to_string()
         .replace("_", "-");
-    let nats_server = std::env::var(env_nats::NATS_SERVER)
-        .unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    let nats_servers: Vec<String> = std::env::var("NATS_SERVER")
+        .unwrap_or_else(|_| "nats://localhost:4222".to_string())
+        .split(',')
+        .map(|s| s.to_owned())
+        .collect();
 
     // Create NatsQueue for event consumption
     let mut nats_queue = NatsQueue::new_with_consumer(
         stream_name.clone(),
-        nats_server.clone(),
+        nats_servers.clone(),
         std::time::Duration::from_secs(60), // 1 minute timeout
         consumer_uuid.clone(),
     );
@@ -244,7 +246,7 @@ pub async fn start_kv_router_background(
 
     // Always create NATS client (needed for both reset and snapshots)
     let client_options = dynamo_runtime::transports::nats::Client::builder()
-        .server(&nats_server)
+        .servers(nats_servers)
         .build()?;
     let nats_client = client_options.connect().await?;
 
