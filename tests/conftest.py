@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import tempfile
+from datetime import datetime
 
 import pytest
 
@@ -154,10 +155,14 @@ def predownload_tokenizers(pytestconfig):
 
 @pytest.fixture(autouse=True)
 def logger(request):
-    log_path = os.path.join(request.node.name, "test.log.txt")
+    timestamp = datetime.now().strftime("%m-%d-%Y_%H-%M-%S")
+    log_dir = f"{request.node.name}_{timestamp}"
+    request.node.log_dir = log_dir
+    log_path = os.path.join(log_dir, "test.log.txt")
+
     logger = logging.getLogger()
-    shutil.rmtree(request.node.name, ignore_errors=True)
-    os.makedirs(request.node.name, exist_ok=True)
+    shutil.rmtree(log_dir, ignore_errors=True)
+    os.makedirs(log_dir, exist_ok=True)
     handler = logging.FileHandler(log_path, mode="w")
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     handler.setFormatter(formatter)

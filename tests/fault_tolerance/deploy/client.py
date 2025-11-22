@@ -18,6 +18,7 @@
 import json
 import logging
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -60,7 +61,7 @@ def get_frontend_port(
     Returns:
         Tuple of (pod_name, local_port, pod_instance) or (None, None, None) if failed
     """
-    pods = managed_deployment.get_pods(managed_deployment.frontend_service_name)
+    pods = managed_deployment.get_pods([managed_deployment.frontend_service_name])
 
     port = 0
     pod_name = None
@@ -270,6 +271,7 @@ def run_aiperf(
     logger: logging.Logger,
     max_retries: int = 1,
     retry_delay: float = 1,
+    continuous_load: bool = False,
 ) -> bool:
     """
     Execute AI-Perf with specified parameters.
@@ -280,13 +282,14 @@ def run_aiperf(
         model: Model name
         pod_name: Selected pod name for logging
         port: Local port number
-        requests_per_client: Number of requests to send
+        requests_per_client: Number of requests to send (used if continuous load not enabled)
         input_token_length: Input token count
         output_token_length: Output token count
         output_dir: Directory for AI-Perf artifacts
         logger: Logger instance
         max_retries: Maximum number of retry attempts (default: 1)
         retry_delay: Delay in seconds between retries (default: 1)
+        continous_load: If True, use continuous load instead of fixed request count
 
     Returns:
         True if successful, False otherwise
@@ -315,8 +318,6 @@ def run_aiperf(
         # Enable streaming for TTFT and ITL metrics
         "--streaming",
         # Request parameters
-        "--request-count",
-        str(requests_per_client),  # Required: how many requests
         "--concurrency",
         "1",  # Optional: we set to 1 for sequential
         # Token configuration
@@ -338,8 +339,18 @@ def run_aiperf(
         "100",  # For reproducible results
     ]
 
-    # Calculate timeout (same as legacy would for all requests)
-    timeout = max(requests_per_client * 2 + 60, 300)  # At least 5 minutes
+    # Add request parameters based on continuous load mode
+    if continuous_load:
+        # Use benchmark duration for continuous load
+        cmd.extend(["--benchmark-duration", "1800"])  # 30 minutes for continuous load
+        logger.info("Using continuous load with duration: 30 minutes")
+        # Set a very long timeout for duration-based tests
+        timeout = 1860  # 31 minutes default for duration-based tests (30 minutes + 1 minute buffer)
+    else:
+        # Normal mode - use requests_per_client
+        cmd.extend(["--request-count", str(requests_per_client)])
+        # Calculate timeout (same as legacy would for all requests)
+        timeout = max(requests_per_client * 2 + 60, 300)  # At least 5 minutes
 
     # Log execution
     logger.info(f"Starting AI-Perf for Pod {pod_name} Local Port {port}")
@@ -354,15 +365,20 @@ def run_aiperf(
     logger.info(f"Command: {' '.join(cmd)}")
 
     # Retry logic for fault tolerance - retry FULL request count until success
-
-    max_attempts = max_retries if max_retries > 0 else 1
+    # Note: For continuous load, we only run once and expect SIGINT to stop it
+    max_attempts = 1 if continuous_load else (max_retries if max_retries > 0 else 1)
     success = False
     all_results = []
 
     for attempt in range(max_attempts):
-        logger.info(
-            f"AI-Perf attempt {attempt + 1}/{max_attempts} with {requests_per_client} requests"
-        )
+        if continuous_load:
+            logger.info(
+                "AI-Perf continuous load (will run until interrupted by SIGINT)"
+            )
+        else:
+            logger.info(
+                f"AI-Perf attempt {attempt + 1}/{max_attempts} with {requests_per_client} requests"
+            )
 
         # Update output directory for this attempt
         attempt_dir = output_dir / f"attempt_{attempt}"
@@ -374,13 +390,17 @@ def run_aiperf(
         cmd_attempt[artifact_dir_idx] = str(attempt_dir)
 
         try:
-            result = subprocess.run(
-                cmd_attempt,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                stdin=subprocess.DEVNULL,  # Prevent stdin reading which can cause process suspension
-            )
+            if continuous_load:
+                result = run_continuous_load_process(cmd_attempt, logger, timeout)
+            else:
+                # Normal mode - use subprocess.run
+                result = subprocess.run(
+                    cmd_attempt,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    stdin=subprocess.DEVNULL,  # Prevent stdin reading which can cause process suspension
+                )
 
             # Save logs for this attempt
             with open(attempt_dir / "genai_perf.log", "w") as f:
@@ -398,6 +418,7 @@ def run_aiperf(
                 }
             )
 
+            # Even with continous load, with SIGINT, aiperf should return 0 and create the profile_export_aiperf.json file
             if result.returncode == 0:
                 # AI-Perf returns 0 even if all requests failed, so we need to check the output
                 json_path = attempt_dir / "profile_export_aiperf.json"
@@ -412,6 +433,19 @@ def run_aiperf(
                 )
                 if success:
                     break  # Success - exit the retry loop
+            ## TODO: bug with aiperf git+https://github.com/ai-dynamo/aiperf.git@4d3fa29403c8f75da22a14f1f7b3aeb27db9288f
+            ## where sending a SIGINT on Mac can sometimes have an error code of -9 (SIGABRT) which results in profile_export_aiperf.json not being created
+            elif result.returncode == -9 and continuous_load:
+                logger.warning(
+                    f"""
+                    Attempt {attempt + 1} failed with return code {result.returncode}
+                    This is a known bug with aiperf on Mac where sending a SIGINT can sometimes have an error code of -9 (SIGABRT)
+                    which results in profile_export_aiperf.json not being created
+                    """
+                )
+                logger.debug(
+                    f"Stderr: {result.stderr[:500] if result.stderr else 'No stderr'}"
+                )
             else:
                 logger.warning(
                     f"Attempt {attempt + 1} failed with return code {result.returncode}"
@@ -423,18 +457,73 @@ def run_aiperf(
             logger.error(f"Error in attempt {attempt + 1}: {str(e)}")
             all_results.append({"attempt": attempt + 1, "error": str(e)})
 
-        # Sleep before next attempt (if not the last attempt)
-        if not success and attempt < max_attempts - 1:
+        # Sleep before next attempt (if not the last attempt and not continuous load)
+        if not success and attempt < max_attempts - 1 and not continuous_load:
             time.sleep(retry_delay)
 
-    if success:
+    if success and not continuous_load:
         logger.info(
             f"AI-Perf successfully completed all {requests_per_client} requests for {pod_name}"
+        )
+    elif success and continuous_load:
+        logger.info(
+            f"AI-Perf sustained continuous load for {pod_name} and existed succesfully"
         )
     else:
         logger.error(f"AI-Perf failed all {max_attempts} attempts for {pod_name}")
 
     return success
+
+
+def run_continuous_load_process(
+    cmd_attempt: List[str],
+    logger: logging.Logger,
+    timeout: int,
+) -> subprocess.CompletedProcess:
+    """
+    Run aiperf in continuous load mode and return the result.
+
+    Handles SIGINT and timeout when running with subprocess.Popen.
+    """
+    proc = subprocess.Popen(
+        cmd_attempt,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+
+    # Set up signal handler to forward SIGINT to subprocess
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}, forwarding to aiperf subprocess")
+        try:
+            proc.send_signal(signal.SIGINT)
+        except ProcessLookupError:
+            pass  # Process already terminated
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        returncode = proc.returncode
+    except subprocess.TimeoutExpired:
+        logger.warning(f"AI-Perf subprocess timed out after {timeout}s")
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        returncode = proc.returncode
+    except KeyboardInterrupt:
+        logger.info("Received KeyboardInterrupt, sending SIGINT to aiperf subprocess")
+        proc.send_signal(signal.SIGINT)
+        try:
+            stdout, stderr = proc.communicate(timeout=30)  # Give it time to clean up
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            logger.warning("Subprocess didn't terminate gracefully, killing it")
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            returncode = proc.returncode
+
+    return subprocess.CompletedProcess(cmd_attempt, returncode, stdout, stderr)
 
 
 def log_summary_metrics(
@@ -513,6 +602,7 @@ def client(
     output_token_length: int,
     max_retries: int,
     retry_delay: float = 1,
+    continuous_load: bool = False,
 ):
     """
     Generate load using AI-Perf for fault tolerance testing.
@@ -527,11 +617,12 @@ def client(
         model: Model name
         log_dir: Directory for output logs and AI-Perf artifacts
         index: Client index used for round-robin pod selection
-        requests_per_client: Number of requests to generate
+        requests_per_client: Number of requests to generate (used if continuous load not enabled)
         input_token_length: Number of input tokens per request
         output_token_length: Number of output tokens per request
         max_retries: Maximum retry attempts for AI-Perf execution
         retry_delay: Delay in seconds between retry attempts
+        continuous_load: If True, use continuous load instead of fixed request count
     """
     logger = logging.getLogger(f"CLIENT: {index}")
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -578,6 +669,7 @@ def client(
             logger=logger,
             max_retries=max_retries,
             retry_delay=retry_delay,
+            continuous_load=continuous_load,
         )
 
         if not success:
