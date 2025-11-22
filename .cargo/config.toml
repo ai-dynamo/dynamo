@@ -4,3 +4,6 @@
 [build]
 # tokio-console needs this
 rustflags = ["--cfg", "tokio_unstable"]
+
+[target.aarch64-unknown-linux-gnu]
+    rustflags = ["-C", "target-feature=+fp16"]
