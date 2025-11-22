@@ -411,17 +411,11 @@ COPY --chown=dynamo: --from=wheel_builder $CARGO_HOME $CARGO_HOME
 COPY --chown=dynamo: ./ /workspace/
 
 # Install Python packages
-COPY benchmarks/ /opt/dynamo/benchmarks/
-RUN uv pip list
-RUN ls -lah /opt/dynamo/wheelhouse/ &&\
-    uv pip install \
+# Install dynamo, NIXL, and dynamo-specific dependencies
+RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-    && cd /opt/dynamo/benchmarks \
-    && UV_GIT_LFS=1 uv pip install --no-cache . \
-    && cd - \
-    && rm -rf /opt/dynamo/benchmarks
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         uv pip install /opt/dynamo/wheelhouse/kvbm*.whl; \
     fi \
