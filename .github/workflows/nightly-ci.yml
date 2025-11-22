@@ -295,8 +295,8 @@ jobs:
           - { framework: trtllm, arch: arm64, runner: cpu-arm-r8g-4xlarge }
           - { framework: sglang, arch: amd64, runner: cpu-amd-m5-2xlarge }
           - { framework: sglang, arch: arm64, runner: cpu-arm-r8g-4xlarge }
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
@@ -328,8 +328,8 @@ jobs:
       fail-fast: false
       matrix:
         framework: [vllm, trtllm, sglang]
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
@@ -360,8 +360,8 @@ jobs:
       fail-fast: false
       matrix:
         framework: [vllm, trtllm, sglang]
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
@@ -392,8 +392,8 @@ jobs:
       fail-fast: false
       matrix:
         framework: [vllm, trtllm, sglang]
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
@@ -442,8 +442,8 @@ jobs:
           - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
           - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
           - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
       - name: Login to ECR
