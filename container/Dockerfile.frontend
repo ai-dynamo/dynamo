@@ -40,7 +40,7 @@ ENV DYNAMO_HOME=/opt/dynamo
 WORKDIR /
 COPY --chown=dynamo: --from=epp /epp /epp
 
-COPY --chown=dynamo: container/launch_message.txt /opt/dynamo/.launch_screen
+COPY --chown=dynamo: container/launch_message/frontend.txt /opt/dynamo/.launch_screen
 # Copy tests, benchmarks, deploy and components with correct ownership
 COPY --chown=dynamo: tests /workspace/tests
 COPY --chown=dynamo: examples /workspace/examples
