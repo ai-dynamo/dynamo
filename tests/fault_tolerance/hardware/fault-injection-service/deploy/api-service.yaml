@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fault-injection-api
+  namespace: fault-injection-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fault-injection-api
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "pods", "services"]
+  verbs: ["get", "list", "watch", "patch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "daemonsets", "statefulsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get", "list", "create", "delete"]
+- apiGroups: ["chaos-mesh.org"]
+  resources: ["networkchaos", "podchaos", "stresschaos", "iochaos"]
+  verbs: ["get", "list", "create", "delete", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fault-injection-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fault-injection-api
+subjects:
+- kind: ServiceAccount
+  name: fault-injection-api
+  namespace: fault-injection-system
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fault-injection-api
+  namespace: fault-injection-system
+  labels:
+    app: fault-injection-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fault-injection-api
+  template:
+    metadata:
+      labels:
+        app: fault-injection-api
+    spec:
+      serviceAccountName: fault-injection-api
+      # Use host network to communicate with hostNetwork agents
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Tolerate GPU node taints
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              # Require GPU nodes (A100 pools)
+              - key: nvidia.com/gpu.present
+                operator: In
+                values:
+                - "true"
+              # Prefer stable instance types
+              - key: node.kubernetes.io/instance-type
+                operator: In
+                values:
+                - Standard_ND96amsr_A100_v4
+      containers:
+      - name: api
+        # Replace with your Azure Container Registry (ACR)
+        image: dynamoci.azurecr.io/fault-injection-api:latest
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fault-injection-api
+  namespace: fault-injection-system
+  labels:
+    app: fault-injection-api
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  selector:
+    app: fault-injection-api
+

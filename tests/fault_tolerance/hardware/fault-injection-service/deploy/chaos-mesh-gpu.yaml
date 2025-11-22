@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# ChaosMesh Setup for GPU Fault Injection
+# Install ChaosMesh if not already present
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaos-mesh
+---
+# This is a placeholder - use Helm to install ChaosMesh
+#
+# Installation commands:
+#
+# helm repo add chaos-mesh https://charts.chaos-mesh.org
+# helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh \
+#   --set chaosDaemon.runtime=containerd \
+#   --set chaosDaemon.socketPath=/run/containerd/containerd.sock \
+#   --set dashboard.create=true \
+#   --set dashboard.securityMode=false
+#
+# Verify installation:
+#   kubectl get pods -n chaos-mesh
+#
+# Access dashboard:
+#   kubectl port-forward -n chaos-mesh svc/chaos-dashboard 2333:2333
+#   open http://localhost:2333
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chaos-mesh-gpu-experiments
+  namespace: fault-injection-system
+data:
+  README.md: |
+    # ChaosMesh GPU Fault Injection
+
+    ChaosMesh provides the following chaos types for GPU fault injection:
+
+    ## PodChaos
+    - **pod-kill**: Kill GPU pods (simulates XID 79)
+    - **container-kill**: Kill GPU containers
+    - **pod-failure**: Make GPU pods unavailable
+
+    ## StressChaos
+    - **memory-stress**: Stress GPU node memory (simulates XID 48, 94, 95)
+    - **cpu-stress**: Stress GPU node CPU (can trigger thermal issues)
+
+    ## IOChaos
+    - **fault**: Inject I/O errors on GPU devices
+    - **latency**: Add I/O latency
+
+    ## TimeChaos
+    - **time-offset**: Offset system time (can trigger XID 119, 120 timeouts)
+
+    ## NetworkChaos (for multi-GPU scenarios)
+    - **partition**: Isolate GPU nodes
+    - **loss**: Packet loss between GPU nodes (NVLink errors)
+    - **delay**: Network delay
+
+    ## Usage Examples
+
+    See gpu_chaos_mesh.py for programmatic injection via API.
+
+    Or use kubectl:
+
+
+    ```bash
+    # Kill GPU pod
+    kubectl apply -f - <<EOF
+    apiVersion: chaos-mesh.org/v1alpha1
+    kind: PodChaos
+    metadata:
+      name: gpu-pod-kill
+      namespace: dynamo-oviya
+    spec:
+      action: pod-kill
+      mode: one
+      selector:
+        namespaces: ["dynamo-oviya"]
+        labelSelectors:
+          app: vllm-worker
+        nodeSelectors:
+          kubernetes.io/hostname: <gpu-node-name>
+      duration: 60s
+    EOF
+    ```
+
+    ```bash
+    # Memory stress on GPU node
+    kubectl apply -f - <<EOF
+    apiVersion: chaos-mesh.org/v1alpha1
+    kind: StressChaos
+    metadata:
+      name: gpu-memory-stress
+      namespace: dynamo-oviya
+    spec:
+      mode: one
+      selector:
+        namespaces: ["dynamo-oviya"]
+        nodeSelectors:
+          kubernetes.io/hostname: <gpu-node-name>
+      stressors:
+        memory:
+          workers: 4
+          size: 8GB
+      duration: 60s
+    EOF
+    ```
+

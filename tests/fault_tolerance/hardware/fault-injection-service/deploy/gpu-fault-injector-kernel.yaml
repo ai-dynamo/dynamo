@@ -1,0 +1,287 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# GPU Fault Injector with Kernel-Level Access (Privileged DaemonSet)
+# Similar to Strobelight's privileged configuration for kernel-level operations
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-fault-injector-kernel
+  namespace: fault-injection-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gpu-fault-injector-kernel
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gpu-fault-injector-kernel
+subjects:
+- kind: ServiceAccount
+  name: gpu-fault-injector-kernel
+  namespace: fault-injection-system
+roleRef:
+  kind: ClusterRole
+  name: gpu-fault-injector-kernel
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gpu-fault-injector-kernel
+  namespace: fault-injection-system
+  labels:
+    app: gpu-fault-injector-kernel
+    component: fault-injection
+spec:
+  selector:
+    matchLabels:
+      app: gpu-fault-injector-kernel
+  template:
+    metadata:
+      labels:
+        app: gpu-fault-injector-kernel
+        component: fault-injection
+    spec:
+      serviceAccountName: gpu-fault-injector-kernel
+      hostPID: true
+      hostNetwork: true
+      hostIPC: true
+
+      # Node selector: Only run on GPU nodes
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+
+      tolerations:
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists
+
+      containers:
+      - name: gpu-fault-injector
+        # UPDATE: Replace with your Azure Container Registry (ACR)
+        # Example: yourregistry.azurecr.io/gpu-fault-injector:latest
+        image: dynamoci.azurecr.io/gpu-fault-injector:latest
+        imagePullPolicy: Always
+
+        # PRIVILEGED MODE - Required for kernel-level operations
+        securityContext:
+          privileged: true
+          runAsUser: 0  # Must run as root
+          capabilities:
+            add:
+            - SYS_ADMIN      # System administration (mount, sysctl, etc)
+            - SYS_PTRACE     # Process tracing
+            - SYS_RESOURCE   # Resource limits
+            - NET_ADMIN      # Network administration
+            - BPF            # eBPF program loading
+            - SYS_BOOT       # Reboot/poweroff (for severe faults)
+            - SYS_MODULE     # Kernel module loading
+            - DAC_OVERRIDE   # Bypass file permissions
+            - CAP_PERFMON    # Performance monitoring
+
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: PRIVILEGED_MODE
+          value: "true"
+        - name: ENABLE_KERNEL_INJECTION
+          value: "true"
+        - name: ENABLE_EBPF
+          value: "true"
+
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+
+        volumeMounts:
+        # Kernel access
+        - name: sys-kernel-debug
+          mountPath: /sys/kernel/debug
+        - name: sys-kernel-tracing
+          mountPath: /sys/kernel/tracing
+        - name: sys-kernel-btf
+          mountPath: /sys/kernel/btf
+        - name: lib-modules
+          mountPath: /lib/modules
+          readOnly: true
+
+        # System access
+        - name: sys
+          mountPath: /host/sys
+        - name: proc
+          mountPath: /host/proc
+        - name: dev
+          mountPath: /host/dev
+
+        # PCI bus access for XID 79 injection
+        - name: sys-bus-pci
+          mountPath: /sys/bus/pci
+
+        # CUDA/NVML libraries
+        - name: nvidia-driver
+          mountPath: /usr/local/nvidia
+          readOnly: true
+
+        # Configuration
+        - name: config
+          mountPath: /etc/gpu-fault-injector
+          readOnly: true
+
+        # Logs
+        - name: logs
+          mountPath: /var/log/gpu-fault-injector
+
+        ports:
+        - containerPort: 8083
+          name: http
+          protocol: TCP
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8083
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8083
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+
+      volumes:
+      # Kernel volumes
+      - name: sys-kernel-debug
+        hostPath:
+          path: /sys/kernel/debug
+          type: DirectoryOrCreate
+      - name: sys-kernel-tracing
+        hostPath:
+          path: /sys/kernel/tracing
+          type: DirectoryOrCreate
+      - name: sys-kernel-btf
+        hostPath:
+          path: /sys/kernel/btf
+          type: DirectoryOrCreate
+      - name: lib-modules
+        hostPath:
+          path: /lib/modules
+          type: Directory
+
+      # System volumes
+      - name: sys
+        hostPath:
+          path: /sys
+          type: Directory
+      - name: proc
+        hostPath:
+          path: /proc
+          type: Directory
+      - name: dev
+        hostPath:
+          path: /dev
+          type: Directory
+
+      # PCI bus
+      - name: sys-bus-pci
+        hostPath:
+          path: /sys/bus/pci
+          type: Directory
+
+      # NVIDIA driver
+      - name: nvidia-driver
+        hostPath:
+          path: /usr/local/nvidia
+          type: Directory
+
+      # Configuration
+      - name: config
+        configMap:
+          name: gpu-fault-injector-config
+
+      # Logs
+      - name: logs
+        hostPath:
+          path: /var/log/gpu-fault-injector
+          type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-fault-injector-config
+  namespace: fault-injection-system
+data:
+  config.yaml: |
+    # GPU Fault Injector Configuration
+
+    # Injection methods (in order of preference)
+    methods:
+      - kernel_level
+      - chaos_mesh
+      - nvidia_smi
+
+    # Safety settings
+    safety:
+      require_confirmation: false  # Set to true in production
+      max_concurrent_faults: 3
+      cooldown_seconds: 30
+
+    # Kernel-level injection settings
+    kernel:
+      enable_ebpf: true
+      enable_pci_manipulation: true
+      enable_cuda_interception: true
+      nvcc_path: /usr/local/cuda/bin/nvcc
+
+    # Logging
+    logging:
+      level: info
+      file: /var/log/gpu-fault-injector/agent.log
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpu-fault-injector-kernel
+  namespace: fault-injection-system
+  labels:
+    app: gpu-fault-injector-kernel
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless service for DaemonSet
+  selector:
+    app: gpu-fault-injector-kernel
+  ports:
+  - port: 8083
+    targetPort: 8083
+    protocol: TCP
+    name: http
+
