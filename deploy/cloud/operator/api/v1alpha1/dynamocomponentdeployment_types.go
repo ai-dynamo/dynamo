@@ -118,8 +118,9 @@ type MultinodeSpec struct {
 	// +kubebuilder:default=2
 	// Indicates the number of nodes to deploy for multinode components.
 	// Total number of GPUs is NumberOfNodes * GPU limit.
-	// Must be greater than 1.
-	// +kubebuilder:validation:Minimum=2
+	// Must be at least 1. For disaggregated serving, each service (e.g., prefill, decode)
+	// can have nodeCount=1 while still requiring multinode/distributed initialization.
+	// +kubebuilder:validation:Minimum=1
 	NodeCount int32 `json:"nodeCount"`
 }
 
@@ -252,7 +253,7 @@ func (s *DynamoComponentDeployment) SetDynamoDeploymentConfig(config []byte) {
 }
 
 func (s *DynamoComponentDeployment) IsMultinode() bool {
-	return s.GetNumberOfNodes() > 1
+	return s.Spec.Multinode != nil
 }
 
 func (s *DynamoComponentDeployment) GetNumberOfNodes() int32 {
