@@ -155,14 +155,19 @@ class Load:
     overflow_request_count: int = 15  # Number of overflow requests
     normal_request_count: int = 15  # Number of normal requests after overflow
 
+    continuous_load: bool = (
+        False  # If True, use continuous load instead of fixed request count
+    )
+
 
 @dataclass
 class Failure:
     time: int
-    pod_name: str
+    service_names: list[str]
     command: str
     signal: str = "SIGINT"
     replicas: int = 1
+    end_condition: Optional[str] = None  # End condition for failure (e.g., "dgd_ready")
 
 
 @dataclass
@@ -182,7 +187,7 @@ class TokenOverflowFailure(Failure):
     ):
         super().__init__(
             time=time,
-            pod_name="Client",
+            service_names=["Client"],
             command="token_overflow",
         )
         self.max_seq_len = max_seq_len
@@ -206,7 +211,7 @@ class Scenario:
 
 
 # Helper functions to create deployment specs
-def _create_deployment_spec(backend: str, yaml_path: str) -> DeploymentInfo:
+def _create_deployment_info(backend: str, yaml_path: str) -> DeploymentInfo:
     """Create a deployment spec with backend information.
 
     Args:
@@ -240,7 +245,9 @@ def _set_replicas(deployment_spec, backend, deploy_type, replicas):
             spec[WORKER_MAP[backend]["prefill"]].replicas = replicas
 
 
-def _set_tensor_parallel(deployment_spec, backend, deploy_type, tp_size):
+def _set_tensor_parallel(
+    deployment_spec: DeploymentSpec, backend: str, deploy_type: str, tp_size: int
+):
     """Set tensor parallel size for worker components."""
     spec = deployment_spec["spec"]
 
@@ -308,7 +315,7 @@ def _create_deployments_for_backend(backend: str) -> Dict[str, DeploymentInfo]:
             scenario_name = "-".join(name_parts)
 
             # Create and configure the deployment
-            deployment = _create_deployment_spec(backend, yaml_files[deploy_type])
+            deployment = _create_deployment_info(backend, yaml_files[deploy_type])
             if tp_size > 1:
                 _set_tensor_parallel(deployment, backend, deploy_type, tp_size)
             if dp_replicas > 1:
@@ -397,34 +404,41 @@ def _create_backend_failures(backend, deploy_type="disagg"):
     process_name = f"dynamo.{backend}"
 
     failures = {
-        "frontend": [Failure(30, "Frontend", "dynamo.frontend")],
-        "frontend_pod": [Failure(30, "Frontend", "delete_pod")],
-        "decode_worker": [Failure(30, decode_worker, process_name, "SIGKILL")],
-        "decode_worker_pod": [Failure(30, decode_worker, "delete_pod")],
-        "prefill_worker": [Failure(30, prefill_worker, process_name, "SIGKILL")],
-        "prefill_worker_pod": [Failure(30, prefill_worker, "delete_pod")],
+        "frontend": [Failure(30, ["Frontend"], "dynamo.frontend")],
+        "frontend_pod": [Failure(30, ["Frontend"], "delete_pod")],
+        "decode_worker": [Failure(30, [decode_worker], process_name, "SIGKILL")],
+        "decode_worker_pod": [Failure(30, [decode_worker], "delete_pod")],
+        "prefill_worker": [Failure(30, [prefill_worker], process_name, "SIGKILL")],
+        "prefill_worker_pod": [Failure(30, [prefill_worker], "delete_pod")],
         "none": [],
     }
 
     if backend == "vllm":
         failures["vllm_decode_engine_core"] = [
-            Failure(30, decode_worker, "VLLM::EngineCore", "SIGKILL")
+            Failure(30, [decode_worker], "VLLM::EngineCore", "SIGKILL")
         ]
         failures["vllm_prefill_engine_core"] = [
-            Failure(30, prefill_worker, "VLLM::EngineCore", "SIGKILL")
+            Failure(30, [prefill_worker], "VLLM::EngineCore", "SIGKILL")
         ]
     elif backend == "sglang":
         failures["sglang_decode_scheduler"] = [
-            Failure(30, decode_worker, "sglang::scheduler", "SIGKILL")
+            Failure(30, [decode_worker], "sglang::scheduler", "SIGKILL")
         ]
         failures["sglang_decode_detokenizer"] = [
-            Failure(30, decode_worker, "sglang::detokenizer", "SIGKILL")
+            Failure(30, [decode_worker], "sglang::detokenizer", "SIGKILL")
         ]
         failures["sglang_prefill_scheduler"] = [
-            Failure(30, prefill_worker, "sglang::scheduler", "SIGKILL")
+            Failure(30, [prefill_worker], "sglang::scheduler", "SIGKILL")
         ]
         failures["sglang_prefill_detokenizer"] = [
-            Failure(30, prefill_worker, "sglang::detokenizer", "SIGKILL")
+            Failure(30, [prefill_worker], "sglang::detokenizer", "SIGKILL")
+        ]
+    elif backend == "trtllm":
+        failures["trtllm_decode_engine_core"] = [
+            Failure(30, [decode_worker], "TRTLLM::EngineCore", "SIGKILL")
+        ]
+        failures["trtllm_prefill_engine_core"] = [
+            Failure(30, [prefill_worker], "TRTLLM::EngineCore", "SIGKILL")
         ]
 
     return failures
@@ -533,7 +547,7 @@ model = None
 
 # Populate Scenarios
 
-scenarios = {}
+scenarios: dict[str, Scenario] = {}
 
 # Map of backend+deploy_type to failure definitions
 backend_failure_map = {}
@@ -729,5 +743,65 @@ def add_token_overflow_scenarios():
         )
 
 
+def add_rolling_upgrade_scenarios():
+    for backend in ["vllm", "sglang", "trtllm"]:
+        for worker_mode in ["agg", "disagg"]:
+            yaml_files = {
+                "agg": f"examples/backends/{backend}/deploy/agg.yaml",
+                "disagg": f"examples/backends/{backend}/deploy/disagg.yaml",
+            }
+            deployment_info = _create_deployment_info(backend, yaml_files[worker_mode])
+            deployment_spec: DeploymentSpec = deployment_info["spec"]
+
+            service_names: list[str] = []
+
+            ## TODO: vllm disagg has both decode workers restart at same time but the prefill does one at a time, it also looks like the test exits when the first prefill worker is ready but the second is recreated
+            ## (Bug in operator?)
+            ## TODO: maybe add a bit of buffer time after the rolling upgrade is completed (after the DGD is ready again)
+
+            # setting replicas to 2 so we have availability of 1 replica at a time
+            if worker_mode == "agg" and backend == "trtllm":
+                service_names.append(WORKER_MAP[backend]["decode_agg"])
+            else:
+                service_names.append(WORKER_MAP[backend]["decode"])
+
+            if worker_mode == "disagg":
+                service_names.append(WORKER_MAP[backend]["prefill"])
+
+            for service_name in service_names:
+                deployment_spec.set_service_replicas(service_name, 2)
+
+            load = Load(
+                clients=10,
+                input_token_length=100,
+                output_token_length=100,
+                max_retries=1,
+                client_type="aiperf",
+                max_request_rate=1.0,
+                success_threshold=100.0,
+                continuous_load=True,
+            )
+
+            scenario_name = f"{backend}-{worker_mode}-rolling-upgrade"
+            model = "Qwen/Qwen3-0.6B"
+
+            failure = Failure(
+                time=30,
+                service_names=service_names,
+                command="rolling_upgrade",
+                end_condition="dgd_ready",  # Wait for DGD to be ready before stopping clients
+            )
+            scenarios[scenario_name] = Scenario(
+                deployment=deployment_info["spec"],
+                load=load,
+                failures=[failure],
+                model=model,
+                backend=backend,
+            )
+
+
 # Add the token overflow scenarios
 add_token_overflow_scenarios()
+
+# Add the rolling upgrade scenarios
+add_rolling_upgrade_scenarios()

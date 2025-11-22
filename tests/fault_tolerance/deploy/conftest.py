@@ -35,6 +35,13 @@ def pytest_addoption(parser):
         help="Include tests that require custom builds (e.g., MoE models). "
         "By default, these tests are excluded.",
     )
+    parser.addoption(
+        "--skip-restart-services",
+        action="store_true",
+        default=False,
+        help="Skip restarting NATS and etcd services before deployment. "
+        "By default, these services are restarted.",
+    )
 
 
 def pytest_generate_tests(metafunc):
@@ -109,3 +116,9 @@ def namespace(request):
 def client_type(request):
     """Get client type from command line or use scenario default."""
     return request.config.getoption("--client-type")
+
+
+@pytest.fixture
+def skip_restart_services(request):
+    """Get skip restart services flag from command line."""
+    return request.config.getoption("--skip-restart-services")
