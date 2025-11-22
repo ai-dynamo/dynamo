@@ -45,7 +45,8 @@ done
 export DYN_REQUEST_PLANE=tcp
 
 # Start frontend with Rust OpenAIPreprocessor
-python -m dynamo.frontend --http-port=8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python -m dynamo.frontend &
 
 # Configure GPU memory optimization for specific models
 EXTRA_ARGS=""
@@ -59,7 +60,7 @@ fi
 # Multimodal data (images) are decoded in the backend worker using ImageLoader
 # --enforce-eager: Quick deployment (remove for production)
 # --connector none: No KV transfer needed for aggregated serving
-DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME --enforce-eager --connector none $EXTRA_ARGS
 
 # Wait for all background processes to complete

@@ -44,12 +44,13 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 
 # run ingress
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
-python3 -m dynamo.frontend --http-port=8000 &
+python3 -m dynamo.frontend &
 DYNAMO_PID=$!
 
 # run prefill worker
-OTEL_SERVICE_NAME=dynamo-worker-prefill DYN_SYSTEM_PORT=8081 \
+OTEL_SERVICE_NAME=dynamo-worker-prefill DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_PREFILL:-8081} \
 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
@@ -64,7 +65,7 @@ python3 -m dynamo.sglang \
 PREFILL_PID=$!
 
 # run decode worker
-OTEL_SERVICE_NAME=dynamo-worker-decode DYN_SYSTEM_PORT=8082 \
+OTEL_SERVICE_NAME=dynamo-worker-decode DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_DECODE:-8082} \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
