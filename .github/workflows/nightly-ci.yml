@@ -30,7 +30,7 @@ env:
 jobs:
   build-amd64:
     name: Build ${{ matrix.framework }} (amd64)
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: cpu-amd-m5-4xlarge
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -175,11 +175,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { framework: vllm, arch: amd64, runner: cpu-amd-m5-2xlarge }
+          - { framework: vllm, arch: amd64, runner: gpu-l40-amd64 }
           - { framework: vllm, arch: arm64, runner: cpu-arm-r8g-4xlarge }
-          - { framework: trtllm, arch: amd64, runner: cpu-amd-m5-2xlarge }
+          - { framework: trtllm, arch: amd64, runner: gpu-l40-amd64 }
           - { framework: trtllm, arch: arm64, runner: cpu-arm-r8g-4xlarge }
-          - { framework: sglang, arch: amd64, runner: cpu-amd-m5-2xlarge }
+          - { framework: sglang, arch: amd64, runner: gpu-l40-amd64 }
           - { framework: sglang, arch: arm64, runner: cpu-arm-r8g-4xlarge }
     steps:
       - uses: actions/checkout@v4
@@ -255,11 +255,11 @@ jobs:
       matrix:
         include:
           - { framework: vllm, arch: amd64, runner: gpu-l40-amd64, timeout: 90 }
-          - { framework: vllm, arch: arm64, runner: gpu-arm-gh200-4xlarge, timeout: 90 }
+          - { framework: vllm, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 90 }
           - { framework: trtllm, arch: amd64, runner: gpu-l40-amd64, timeout: 90 }
-          - { framework: trtllm, arch: arm64, runner: gpu-arm-gh200-4xlarge, timeout: 90 }
+          - { framework: trtllm, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 90 }
           - { framework: sglang, arch: amd64, runner: gpu-l40-amd64, timeout: 90 }
-          - { framework: sglang, arch: arm64, runner: gpu-arm-gh200-4xlarge, timeout: 90 }
+          - { framework: sglang, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 90 }
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
@@ -325,11 +325,11 @@ jobs:
       matrix:
         include:
           - { framework: vllm, arch: amd64, runner: gpu-l40-amd64, timeout: 120 }
-          - { framework: vllm, arch: arm64, runner: gpu-arm-gh200-4xlarge, timeout: 120 }
+          - { framework: vllm, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 120 }
           - { framework: trtllm, arch: amd64, runner: gpu-l40-amd64, timeout: 120 }
-          - { framework: trtllm, arch: arm64, runner: gpu-arm-gh200-4xlarge, timeout: 120 }
+          - { framework: trtllm, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 120 }
           - { framework: sglang, arch: amd64, runner: gpu-l40-amd64, timeout: 120 }
-          - { framework: sglang, arch: arm64, runner: gpu-arm-gh200-4xlarge, timeout: 120 }
+          - { framework: sglang, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 120 }
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
@@ -395,11 +395,11 @@ jobs:
       matrix:
         include:
           - { framework: vllm, arch: amd64, runner: gpu-l40-amd64, timeout: 150 }
-          - { framework: vllm, arch: arm64, runner: gpu-arm-gh200-4xlarge, timeout: 150 }
+          - { framework: vllm, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 150 }
           - { framework: trtllm, arch: amd64, runner: gpu-l40-amd64, timeout: 150 }
-          - { framework: trtllm, arch: arm64, runner: gpu-arm-gh200-4xlarge, timeout: 150 }
+          - { framework: trtllm, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 150 }
           - { framework: sglang, arch: amd64, runner: gpu-l40-amd64, timeout: 150 }
-          - { framework: sglang, arch: arm64, runner: gpu-arm-gh200-4xlarge, timeout: 150 }
+          - { framework: sglang, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 150 }
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
