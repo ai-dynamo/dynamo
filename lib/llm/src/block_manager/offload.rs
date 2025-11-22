@@ -78,6 +78,7 @@ pub struct OffloadManagerConfig {
     pub async_rt_handle: Handle,
     pub cancellation_token: CancellationToken,
     pub model_config: KvManagerModelConfig,
+    pub offload_block_size_ratio: usize,
     /// Optional KVBM-level metrics for tracking offload/onboard operations
     pub kvbm_metrics: Option<crate::block_manager::metrics_kvbm::KvbmMetrics>,
     /// If true, offload directly from device (G1) to disk (G3), bypassing host (G2)
@@ -151,6 +152,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
             num_outer_components: config.model_config.outer_dim,
             num_layers: config.model_config.num_layers,
+            offload_block_size_ratio: config.offload_block_size_ratio,
         };
 
         // We want cuda offloads to happen in parallel with host onboards, so we need to use a different stream.
@@ -874,6 +876,7 @@ mod tests {
             async_rt_handle,
             cancellation_token: CancellationToken::new(),
             model_config: minimal_config,
+            offload_block_size_ratio: 1,
             kvbm_metrics: None,
             bypass_cpu_mem,
         };

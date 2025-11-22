@@ -14,6 +14,7 @@ use dynamo_llm::{
     tokens::TokenBlock,
 };
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
+use smallvec::SmallVec;
 use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::cache_stats::CacheStatsTracker;
@@ -220,8 +221,9 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             }
         });
         tracing::debug!(
-            "creating slot manager with block size: {}",
-            block_manager.block_size()
+            "creating slot manager with engine block size: {}, offload block size: {}",
+            block_manager.engine_block_size(),
+            block_manager.offload_block_size(),
         );
 
         let (xfer_tx, xfer_rx) = mpsc::unbounded_channel();
@@ -352,7 +354,9 @@ pub struct VllmConnectorSlot {
     /// Phantom data to ensure the storage type is correct.
     block_manager: VllmBlockManager,
 
-    block_size: usize,
+    offload_block_size: usize,
+    engine_block_size: usize,
+    offload_block_size_ratio: usize,
 
     iteration_first_scheduled: Option<u64>,
 
@@ -390,15 +394,20 @@ impl VllmConnectorSlot {
         cache_stats: Arc<CacheStatsTracker>,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
-        let block_size = block_manager.block_size();
-        debug_assert!(block_size.is_power_of_two() && block_size <= 1024);
-        let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
+        let offload_block_size = block_manager.offload_block_size();
+        let engine_block_size = block_manager.engine_block_size();
+        let offload_block_size_ratio = block_manager.offload_block_size_ratio();
+        debug_assert!(offload_block_size.is_power_of_two() && offload_block_size <= 1024);
+        debug_assert!(engine_block_size.is_power_of_two() && engine_block_size <= 1024);
+        let sequence = TokenBlockSequence::new(tokens, offload_block_size as u32, Some(salt_hash));
 
         Self {
             request_id,
             sequence,
             block_manager,
-            block_size,
+            engine_block_size,
+            offload_block_size,
+            offload_block_size_ratio,
             xfer_tx,
             // default values
             state: SlotState::Initialized,
@@ -546,7 +555,10 @@ impl Slot for VllmConnectorSlot {
         // Use max to advance both current_position and evaluated_blocks at least by num_computed_tokens.
         // This logic is to prevent redundant block offloading.
         self.current_position = max(self.current_position, num_computed_tokens);
-        self.evaluated_blocks = max(self.evaluated_blocks, num_computed_tokens / self.block_size);
+        self.evaluated_blocks = max(
+            self.evaluated_blocks,
+            num_computed_tokens / self.engine_block_size,
+        );
 
         // apply new block_ids
         if !block_ids.is_empty() {
@@ -556,12 +568,13 @@ impl Slot for VllmConnectorSlot {
 
         // we should have enough device blocks to cover the newly scheduled tokens
         let next_position = self.current_position + num_scheduled_tokens;
+
         assert!(
-            next_position <= self.device_blocks.len() * self.block_size,
-            "next_position: {} > device_blocks.len() {} * block_size {}",
+            next_position <= self.device_blocks.len() * self.engine_block_size,
+            "next_position: {} > device_blocks.len() {} * engine_block_size {}",
             next_position,
             self.device_blocks.len(),
-            self.block_size
+            self.engine_block_size
         );
 
         if next_position > self.sequence.total_tokens() {
@@ -584,9 +597,9 @@ impl Slot for VllmConnectorSlot {
         // TODO(ryan) - apply policy
         let next_position = self.current_position + num_scheduled_tokens;
 
-        debug_assert!(next_position / self.block_size >= self.evaluated_blocks);
+        debug_assert!(next_position / self.engine_block_size >= self.evaluated_blocks);
 
-        let num_candidate_blocks = (next_position / self.block_size) - self.evaluated_blocks;
+        let num_candidate_blocks = (next_position / self.engine_block_size) - self.evaluated_blocks;
 
         tracing::debug!(
             "evaluating policy with the following parameters: state: {:?}; current_position: {}; num_candidate_blocks: {}; num_scheduled_tokens: {}",
@@ -596,20 +609,22 @@ impl Slot for VllmConnectorSlot {
             num_scheduled_tokens
         );
 
-        if num_candidate_blocks != 0 {
+        if num_candidate_blocks / self.offload_block_size_ratio != 0 {
             // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
             // for now, offload all the blocks to the host
+            let aligned_candidates = (num_candidate_blocks / self.offload_block_size_ratio)
+                * self.offload_block_size_ratio;
             let offload_block_ids: Vec<usize> = self
                 .device_blocks
                 .iter()
                 .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
+                .take(aligned_candidates)
                 .copied()
                 .collect::<Vec<_>>();
 
             assert_eq!(
                 offload_block_ids.len(),
-                num_candidate_blocks,
+                aligned_candidates,
                 "device block overflow - candidate blocks exceed block count at offset {}",
                 self.evaluated_blocks
             );
@@ -618,15 +633,15 @@ impl Slot for VllmConnectorSlot {
                 .sequence
                 .blocks()
                 .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
+                .skip(self.evaluated_blocks / self.offload_block_size_ratio)
+                .take(aligned_candidates / self.offload_block_size_ratio)
                 .cloned()
                 .collect::<Vec<_>>();
 
             self.offload_blocks(&offload_block_ids, &offload_token_blocks)
                 .expect("failed to offload blocks");
 
-            self.evaluated_blocks += num_candidate_blocks;
+            self.evaluated_blocks += aligned_candidates;
         }
 
         // done applying policy
@@ -695,11 +710,11 @@ impl Slot for VllmConnectorSlot {
             is_new_request && computed_position > 0 && self.evaluated_blocks == 0;
 
         if maybe_have_device_matched_blocks {
-            self.evaluated_blocks = (computed_position + 1) / self.block_size;
+            self.evaluated_blocks = (computed_position + 1) / self.offload_block_size;
         }
 
-        let num_candidate_blocks =
-            ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
+        let num_candidate_blocks = ((computed_position + 1) / self.offload_block_size)
+            .saturating_sub(self.evaluated_blocks);
 
         if num_candidate_blocks > 0 {
             // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
@@ -757,7 +772,7 @@ impl Slot for VllmConnectorSlot {
     fn mark_as_finished(&mut self, _iteration: u64) -> Result<(), SlotError> {
         // Report cache statistics if we performed a cache lookup
         if self.performed_cache_lookup {
-            let block_size = self.block_size;
+            let block_size = self.engine_block_size;
 
             // Convert cached tokens to blocks (rounding up)
             let host_blocks = (self.tokens_cached_from_host + block_size - 1) / block_size;
@@ -843,7 +858,7 @@ impl Slot for VllmConnectorSlot {
             tracing::info!("slot is in the Preempted state; we get another chance to match");
         }
 
-        let block_size = self.block_manager.block_size();
+        let block_size = self.block_manager.offload_block_size();
         let num_computed_blocks = num_computed_tokens / block_size;
         debug_assert!(num_computed_tokens % block_size == 0);
 
@@ -984,28 +999,40 @@ impl Slot for VllmConnectorSlot {
         }
 
         debug_assert_eq!(self.evaluated_blocks, 0);
-        debug_assert_eq!(self.current_position % self.block_size, 0);
-        debug_assert_eq!(num_external_tokens % self.block_size, 0);
+        debug_assert_eq!(self.current_position % self.engine_block_size, 0);
+        debug_assert_eq!(num_external_tokens % self.engine_block_size, 0);
 
-        let num_computed_blocks = self.current_position / self.block_size;
+        let num_computed_blocks = self.current_position / self.offload_block_size;
 
         // shift the evaluated blocks position to the end of the computed/cached blocks
-        self.evaluated_blocks = num_computed_blocks;
+        self.evaluated_blocks = num_computed_blocks * self.offload_block_size_ratio;
+
+        tracing::debug!(
+            "trigger_onboarding: self.device_blocks.len()={:?}",
+            self.device_blocks.len()
+        );
 
         // match the host / disk blocks to the newly assigned mutable device blocks
         if let Some(host_blocks) = self.staging_from_host.take() {
             let num_host_blocks = host_blocks.len();
+            tracing::debug!(
+                "trigger_onboarding: host_blocks.len()={:?}",
+                num_host_blocks
+            );
 
             // get device block ids
             let dst_block_ids = self
                 .device_blocks
                 .iter()
                 .skip(self.evaluated_blocks)
-                .take(num_host_blocks)
+                .take(num_host_blocks * self.offload_block_size_ratio)
                 .copied()
                 .collect::<Vec<_>>();
 
-            debug_assert_eq!(dst_block_ids.len(), num_host_blocks);
+            debug_assert_eq!(
+                dst_block_ids.len(),
+                num_host_blocks * self.offload_block_size_ratio
+            );
 
             // construct offload requests - transfer engine + worker
             let src_blocks = Box::new(AnyImmutableBlocks::<PinnedStorage, _, _>::new(host_blocks));
@@ -1013,22 +1040,30 @@ impl Slot for VllmConnectorSlot {
             self.onboard_blocks(src_blocks, dst_block_ids)?;
 
             // shift the evaluated blocks position to the end of the computed/cached blocks
-            self.evaluated_blocks += num_host_blocks;
+            self.evaluated_blocks += num_host_blocks * self.offload_block_size_ratio;
         }
 
         if let Some(disk_blocks) = self.staging_from_disk.take() {
             let num_disk_blocks = disk_blocks.len();
 
+            tracing::debug!(
+                "trigger_onboarding: dist_blocks.len()={:?}",
+                num_disk_blocks
+            );
+
             // get device block ids
             let dst_block_ids = self
                 .device_blocks
                 .iter()
-                .skip(self.evaluated_blocks)
+                .skip(self.evaluated_blocks * self.offload_block_size_ratio)
                 .take(num_disk_blocks)
                 .copied()
                 .collect::<Vec<_>>();
 
-            debug_assert_eq!(dst_block_ids.len(), num_disk_blocks);
+            debug_assert_eq!(
+                dst_block_ids.len(),
+                num_disk_blocks * self.offload_block_size_ratio
+            );
 
             // construct offload requests - transfer engine + worker
             let src_blocks = Box::new(AnyImmutableBlocks::<DiskStorage, _, _>::new(disk_blocks));
@@ -1036,7 +1071,7 @@ impl Slot for VllmConnectorSlot {
             self.onboard_blocks(src_blocks, dst_block_ids)?;
 
             // shift the evaluated blocks position to the end of the computed/cached blocks
-            self.evaluated_blocks += num_disk_blocks;
+            self.evaluated_blocks += num_disk_blocks * self.offload_block_size_ratio;
         }
 
         self.state = SlotState::Onboarding(num_external_tokens);
@@ -1104,7 +1139,7 @@ impl VllmConnectorSlot {
             return Ok(());
         }
 
-        assert!(block_ids.len() == token_blocks.len());
+        assert!(block_ids.len() == token_blocks.len() * self.offload_block_size_ratio);
         let operation_id = uuid::Uuid::new_v4();
 
         let xfer_req = LocalTransferRequest::Offload(LocalOffloadRequest::new(
@@ -1134,7 +1169,7 @@ impl VllmConnectorSlot {
         tracing::debug!(
             request_id = self.request_id,
             operation_id = %operation_id,
-            "offloading {} blocks to host",
+            "offloading {} device blocks to host",
             block_ids.len()
         );
 
@@ -1293,6 +1328,7 @@ impl LocalTransferEngine {
 
         // Clone resources needed for tasks
         let block_manager_offload = self.block_manager.clone();
+        let block_manager_onboard = self.block_manager.clone();
         let leader_offload = Arc::clone(&self.leader);
         let leader_onboard = Arc::clone(&self.leader);
 
@@ -1306,9 +1342,13 @@ impl LocalTransferEngine {
                         tracing::debug!("LocalOnboardTask: received cancellation signal");
                         break;
                     }
-                    if let Err(e) =
-                        process_onboard_request(req, &leader_onboard, kvbm_metrics_onboard.clone())
-                            .await
+                    if let Err(e) = process_onboard_request(
+                        req,
+                        &block_manager_onboard,
+                        &leader_onboard,
+                        kvbm_metrics_onboard.clone(),
+                    )
+                    .await
                     {
                         tracing::error!("LocalOnboardTask: error processing request: {:?}", e);
                     }
@@ -1435,9 +1475,14 @@ async fn process_offload_request(
     let request_id = offload_req.request_id.clone();
     let operation_id = offload_req.operation_id;
 
+    let engine_blocks_per_offload_block =
+        block_manager.offload_block_size() / block_manager.engine_block_size();
     tracing::debug!(
-        "Processing offload request for {} blocks",
-        offload_req.block_ids.len()
+        "Processing offload request for {} blocks, engine_blocks_per_offload_block = {} ({}/{})",
+        offload_req.block_ids.len(),
+        engine_blocks_per_offload_block,
+        block_manager.offload_block_size(),
+        block_manager.engine_block_size(),
     );
 
     // Determine if we should bypass CPU memory (G2) and offload directly from GPU (G1) to Disk (G3)
@@ -1457,6 +1502,7 @@ async fn process_offload_request(
 
         process_offload_to_storage(
             offload_req,
+            engine_blocks_per_offload_block,
             block_manager.disk().unwrap(),
             BlockTransferPool::Disk,
             leader,
@@ -1473,6 +1519,7 @@ async fn process_offload_request(
 
         process_offload_to_storage(
             offload_req,
+            engine_blocks_per_offload_block,
             block_manager.host().unwrap(),
             BlockTransferPool::Host,
             leader,
@@ -1488,6 +1535,7 @@ async fn process_offload_request(
 
 async fn process_offload_to_storage<S, L, M>(
     offload_req: LocalOffloadRequest,
+    engine_blocks_per_offload_block: usize,
     storage_pool: &dyn BlockPool<S, L, M>,
     transfer_pool: BlockTransferPool,
     leader: &Arc<KvbmLeader>,
@@ -1502,15 +1550,16 @@ where
 {
     // 1. Acquire mutable blocks
     let blocks = storage_pool
-        .allocate_blocks(offload_req.block_ids.len())
+        .allocate_blocks(offload_req.block_ids.len() / engine_blocks_per_offload_block)
         .await?;
     let token_blocks = offload_req.token_blocks;
 
     let allocated_block_ids: Vec<usize> = blocks.iter().map(|b| b.block_id()).collect();
-    let block_pairs: Vec<(usize, usize)> = offload_req
+    let block_pairs: Vec<_> = offload_req
         .block_ids
-        .into_iter()
+        .chunks(engine_blocks_per_offload_block)
         .zip(allocated_block_ids.into_iter())
+        .map(|(src, dst)| (SmallVec::from(src), SmallVec::from([dst])))
         .collect();
 
     tracing::debug!(
@@ -1595,6 +1644,7 @@ where
 
 async fn process_onboard_request(
     onboard_req: LocalOnboardRequest,
+    block_manager: &VllmBlockManager,
     leader: &Arc<KvbmLeader>,
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
@@ -1610,16 +1660,22 @@ async fn process_onboard_request(
 
     let request_id = &onboard_req.request_id;
     let operation_id = &onboard_req.operation_id;
+    let engine_blocks_per_offload_block =
+        block_manager.offload_block_size() / block_manager.engine_block_size();
 
     // extract source block ids
     let src_block_ids = onboard_req.src_blocks.block_ids();
 
     // create block pairs
-    let block_pairs = src_block_ids
+    let block_pairs: Vec<_> = src_block_ids
         .iter()
-        .zip(onboard_req.dst_block_ids.iter())
-        .map(|(src, dst)| (*src, *dst))
-        .collect::<Vec<_>>();
+        .zip(
+            onboard_req
+                .dst_block_ids
+                .chunks(engine_blocks_per_offload_block),
+        )
+        .map(|(src, dst)| (SmallVec::from([*src]), SmallVec::from(dst)))
+        .collect();
 
     // create transfer request
     let block_xfer_req = BlockTransferRequest {

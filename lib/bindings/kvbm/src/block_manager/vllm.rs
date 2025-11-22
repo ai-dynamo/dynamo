@@ -83,7 +83,10 @@ impl KvbmCacheManager {
     #[new]
     #[pyo3(signature = (block_manager))]
     pub fn new(block_manager: PyBlockManager) -> PyResult<Self> {
-        let slot_manager = Mutex::new(SlotManager::new(block_manager.block_size()));
+        let slot_manager = Mutex::new(SlotManager::new(
+            block_manager.engine_block_size(),
+            block_manager.offload_block_size(),
+        ));
         Ok(Self {
             block_manager,
             slot_manager,
@@ -286,7 +289,7 @@ pub struct GenericSlotUpdate<R> {
     pub num_new_tokens: usize,
 
     /// The number of new computed tokens in the request.
-    /// The `num_new_tokens / block_size` should be equal to the length of the `new_computed_blocks`,
+    /// The `num_new_tokens / engine_block_size` should be equal to the length of the `new_computed_blocks`,
     /// it may have a remainder for the partial block state.
     /// Note: this field is solely tied to the `new_computed_blocks` field and not used when `tokens_to_append` is provided.
     /// The name might be confusing, but the name matched the vLLM implementation.
@@ -401,15 +404,17 @@ impl SlotError {
 
 pub struct SlotManager<R: RequestKey> {
     slots: HashMap<R, Slot<DeviceStorage, Logical<DistributedLeaderWorkerResources>>>,
-    block_size: usize,
+    engine_block_size: usize,
+    offload_block_size: usize,
 }
 
 impl<R: RequestKey> SlotManager<R> {
     /// Creates a new slot manager.
-    pub fn new(block_size: usize) -> Self {
+    pub fn new(engine_block_size: usize, offload_block_size: usize) -> Self {
         Self {
             slots: HashMap::new(),
-            block_size,
+            engine_block_size,
+            offload_block_size,
         }
     }
 
@@ -436,7 +441,7 @@ impl<R: RequestKey> SlotManager<R> {
         if !self.slots.contains_key(request_id) {
             self.slots.insert(
                 request_id.clone(),
-                Slot::new(tokens.into(), self.block_size, salt_hash),
+                Slot::new(tokens.into(), self.engine_block_size, salt_hash),
             );
             tracing::debug!(
                 request_id,
@@ -498,7 +503,7 @@ impl<R: RequestKey> SlotManager<R> {
                     tracing::debug!(
                         request_id,
                         "applying {} cache-hit tokens",
-                        blocks.len() * self.block_size
+                        blocks.len() * self.engine_block_size
                     );
                     slot.initialize_with_device_matches(blocks)?;
                 }
@@ -566,9 +571,9 @@ impl<R: RequestKey> SlotManager<R> {
         match self.slots.remove(request_id) {
             Some(slot) => {
                 let isl = slot.num_tokens(SlotPosition::Prefill);
-                let isl_device = slot.num_blocks_cached_from_device() * self.block_size;
-                let isl_host = slot.num_blocks_cached_from_host() * self.block_size;
-                let isl_disk = slot.num_blocks_cached_from_disk() * self.block_size;
+                let isl_device = slot.num_blocks_cached_from_device() * self.engine_block_size;
+                let isl_host = slot.num_blocks_cached_from_host() * self.offload_block_size;
+                let isl_disk = slot.num_blocks_cached_from_disk() * self.offload_block_size;
                 tracing::info!(
                     request_id,
                     "request complete isl: {} - cache hits: device: {}, host: {}, disk: {} - prefilled: {}",
@@ -603,14 +608,14 @@ impl<R: RequestKey> SlotManager<R> {
         assert!(num_computed_tokens <= request_num_tokens);
 
         // early exit if we cannot match full block
-        if (request_num_tokens - num_computed_tokens) < self.block_size {
+        if (request_num_tokens - num_computed_tokens) < self.engine_block_size {
             return Ok((0, false));
         }
 
         // num_computed_tokens represents the number of tokens already on the device
         // this much be a multiple of the block size
-        let num_device_blocks = num_computed_tokens / self.block_size;
-        debug_assert_eq!(num_computed_tokens % self.block_size, 0);
+        let num_device_blocks = num_computed_tokens / self.engine_block_size;
+        debug_assert_eq!(num_computed_tokens % self.engine_block_size, 0);
 
         // get the sequence hashes for the device matched tokens
         let sequence_hashes = slot.sequence_hashes(SlotPosition::All);
@@ -661,7 +666,7 @@ impl<R: RequestKey> SlotManager<R> {
             return Ok((0, false));
         }
 
-        let mut num_new_matched_tokens = num_matched_blocks * self.block_size;
+        let mut num_new_matched_tokens = num_matched_blocks * self.engine_block_size;
 
         // we are on a block boundary, so we need to throw away the last block
         if num_computed_tokens + num_new_matched_tokens == request_num_tokens {
@@ -681,7 +686,7 @@ impl<R: RequestKey> SlotManager<R> {
             }
 
             // decrement the number of new matched tokens by the block size
-            num_new_matched_tokens -= self.block_size;
+            num_new_matched_tokens -= self.engine_block_size;
         }
 
         slot.store_onboard_blocks(host_blocks, disk_blocks);

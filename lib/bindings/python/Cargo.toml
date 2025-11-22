@@ -40,6 +40,7 @@ once_cell = { version = "1.20.3" }
 parking_lot = { version = "0.12.4" }
 serde = { version = "1" }
 serde_json = { version = "1.0.138" }
+smallvec = { version = "1.15.1", features = ["serde"] }
 thiserror = { version = "2.0" }
 tokio = { version = "1.46.0", features = ["full"] }
 tokio-stream = { version = "0" }

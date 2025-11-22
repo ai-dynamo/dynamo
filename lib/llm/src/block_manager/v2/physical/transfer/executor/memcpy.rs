@@ -6,6 +6,7 @@
 use crate::block_manager::v2::physical::transfer::PhysicalLayout;
 use crate::block_manager::v2::physical::transfer::context::TransferCompleteNotification;
 use anyhow::Result;
+use smallvec::SmallVec;
 use std::ops::Range;
 
 /// Execute a memcpy transfer between host memory locations.
@@ -21,8 +22,8 @@ use std::ops::Range;
 pub fn execute_memcpy_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[SmallVec<[usize; 1]>],
+    dst_block_ids: &[SmallVec<[usize; 1]>],
     layer_range: Option<Range<usize>>,
 ) -> Result<TransferCompleteNotification> {
     // Validate layouts have compatible structure
@@ -49,17 +50,20 @@ pub fn execute_memcpy_transfer(
     let layers = layer_range.unwrap_or(0..src_layout.num_layers());
 
     // Perform synchronous copies
-    for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
+    for (src_block_id, dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
         for layer_id in layers.clone() {
             for outer_id in 0..src_layout.outer_dim() {
+                anyhow::ensure!(src_block_ids[0].len() == 1, "Source Memcpy is fragmented");
+                anyhow::ensure!(dst_block_ids[0].len() == 1, "Target Memcpy is fragmented");
+
                 // Get source and destination memory regions
-                let src_region = src.memory_region(src_block_id, layer_id, outer_id)?;
-                let dst_region = dst.memory_region(dst_block_id, layer_id, outer_id)?;
+                let src_region = src.memory_region(src_block_id[0], layer_id, outer_id)?;
+                let dst_region = dst.memory_region(dst_block_id[0], layer_id, outer_id)?;
 
                 // Validate sizes match
                 if src_region.size() != dst_region.size() {
                     return Err(anyhow::anyhow!(
-                        "Memory region size mismatch at block=({},{}), layer={}, outer={}: src={}, dst={}",
+                        "Memory region size mismatch at block=({:?},{:?}), layer={}, outer={}: src={}, dst={}",
                         src_block_id,
                         dst_block_id,
                         layer_id,

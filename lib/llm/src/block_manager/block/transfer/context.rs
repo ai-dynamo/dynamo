@@ -161,6 +161,7 @@ pub struct PoolConfig {
     pub max_concurrent_transfers: usize,
     pub max_transfer_batch_size: usize,
     pub num_outer_components: usize,
+    pub offload_block_size_ratio: usize,
     pub num_layers: usize,
 }
 
@@ -200,6 +201,7 @@ impl TransferContext {
                 let buffer_size = max_blocks_per_transfer
                     * config.num_outer_components
                     * config.num_layers
+                    * config.offload_block_size_ratio
                     * std::mem::size_of::<u64>();
 
                 tracing::info!(
