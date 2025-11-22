@@ -29,7 +29,6 @@ pub(crate) trait EventMessenger: Send + Sync {
     fn send_system(&self, target: InstanceId, handler: &str, payload: Bytes) -> Result<()>;
 }
 
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct EventSubscribeMessage {
     pub handle: u128,

@@ -8,4 +8,5 @@
 
 // pub mod cohort;
 
+pub mod leader;
 pub mod worker;

@@ -134,7 +134,10 @@ impl NovaBackend {
     ///     }
     /// }
     /// ```
-    pub fn try_translate_worker_id(&self, worker_id: WorkerId) -> Result<InstanceId, NovaBackendError> {
+    pub fn try_translate_worker_id(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<InstanceId, NovaBackendError> {
         self.workers
             .get(&worker_id)
             .map(|entry| *entry)

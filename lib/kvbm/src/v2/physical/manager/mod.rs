@@ -20,6 +20,7 @@ use crate::v2::physical::layout::PhysicalLayout;
 use crate::v2::physical::transfer::TransferContext;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
 use crate::v2::physical::transfer::options::TransferOptions;
+use crate::v2::physical::transfer::BounceBufferSpec;
 use anyhow::{Result, anyhow, bail};
 use dynamo_memory::StorageKind;
 use dynamo_memory::nixl::NixlAgent;
@@ -201,6 +202,26 @@ impl TransportManager {
     /// Get handles for all imported remote layouts.
     pub fn get_remote_handles(&self) -> Vec<LayoutHandle> {
         self.registry.read().unwrap().remote_handles()
+    }
+
+    /// Create a bounce buffer specification from a layout handle and block IDs.
+    ///
+    /// This resolves the layout handle to a physical layout and wraps it in a
+    /// BounceBufferSpec implementation for use in transfer options.
+    pub fn create_bounce_buffer(
+        &self,
+        handle: LayoutHandle,
+        block_ids: Vec<BlockId>,
+    ) -> Result<Arc<dyn BounceBufferSpec>> {
+        let layout = {
+            let registry = self.registry.read().unwrap();
+            registry
+                .get_layout(handle)
+                .ok_or_else(|| anyhow!("invalid bounce buffer handle: {}", handle))?
+                .clone()
+        };
+
+        Ok(Arc::new(SimpleBounceBuffer { layout, block_ids }))
     }
 
     // ===== Internal Methods for Testing =====
@@ -478,6 +499,22 @@ impl LayoutRegistry {
     /// Get all remote layout handles.
     pub(crate) fn remote_handles(&self) -> Vec<LayoutHandle> {
         self.remote_layouts.keys().copied().collect()
+    }
+}
+
+/// Simple implementation of BounceBufferSpec for use with resolved handles
+struct SimpleBounceBuffer {
+    layout: PhysicalLayout,
+    block_ids: Vec<BlockId>,
+}
+
+impl BounceBufferSpec for SimpleBounceBuffer {
+    fn layout(&self) -> &PhysicalLayout {
+        &self.layout
+    }
+
+    fn block_ids(&self) -> &[BlockId] {
+        &self.block_ids
     }
 }
 

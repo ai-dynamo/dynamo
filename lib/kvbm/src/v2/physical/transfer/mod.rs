@@ -56,6 +56,7 @@ pub use dynamo_memory::StorageKind;
 
 pub use capabilities::TransferCapabilities;
 pub use checksum::{BlockChecksum, compute_block_checksums, compute_layer_checksums};
+pub use context::TransferCompleteNotification;
 pub use dynamo_memory::nixl::{NixlAgent, NixlBackendConfig};
 pub use fill::{FillPattern, fill_blocks, fill_layers};
 pub use options::{TransferOptions, TransferOptionsBuilder};
