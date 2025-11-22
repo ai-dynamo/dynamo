@@ -92,11 +92,11 @@ runs:
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         # Set --cache-from args and set --cache-to if this is a main commit
         EXTRA_ARGS=""
-        EXTRA_ARGS+=("--dynamo-base-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:dynamo-base-${PLATFORM##*/}-cache")
-        EXTRA_ARGS+=("--framework-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache")
+        EXTRA_ARGS+=" --dynamo-base-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:dynamo-base-${PLATFORM##*/}-cache"
+        EXTRA_ARGS+=" --framework-cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache"
         # if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-        EXTRA_ARGS+=("--dynamo-base-cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:dynamo-base-${PLATFORM##*/}-cache,mode=max")
-        EXTRA_ARGS+=("--framework-cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max")
+        EXTRA_ARGS+=" --dynamo-base-cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:dynamo-base-${PLATFORM##*/}-cache,mode=max"
+        EXTRA_ARGS+=" --framework-cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max"
         # fi
         echo "$EXTRA_ARGS"
         # Collect optional overrides provided by the workflow
