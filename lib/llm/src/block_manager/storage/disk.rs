@@ -48,7 +48,7 @@ impl AlignedBuffer {
     /// Size will be rounded up to the nearest page boundary.
     fn new(size: usize) -> anyhow::Result<Self> {
         // Round up to nearest page size to ensure alignment requirements
-        let aligned_size = (size + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+        let aligned_size = size.div_ceil(PAGE_SIZE) * PAGE_SIZE;
 
         let layout = std::alloc::Layout::from_size_align(aligned_size, PAGE_SIZE)
             .context("Failed to create aligned layout")?;
@@ -133,8 +133,7 @@ fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
                             buf.len()
                         } else {
                             // Last partial write - round up to page size for O_DIRECT
-                            let aligned =
-                                ((remaining as usize + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+                            let aligned = (remaining as usize).div_ceil(PAGE_SIZE) * PAGE_SIZE;
                             std::cmp::min(aligned, buf.len())
                         };
 
@@ -476,7 +475,6 @@ impl StorageAllocator<DiskStorage> for DiskAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::FileExt;
 
     /// Mock writer that enforces strict O_DIRECT alignment rules like Lustre.
     /// This allows us to test the alignment logic without needing an actual Lustre filesystem.
@@ -647,7 +645,9 @@ mod tests {
     #[test]
     #[ignore]
     fn test_zerofill_with_o_direct() {
-        std::env::set_var(DISK_ZEROFILL_FALLBACK_KEY, "1");
+        unsafe {
+            std::env::set_var(DISK_ZEROFILL_FALLBACK_KEY, "1");
+        }
 
         // Test various sizes including non-page-aligned sizes that would fail with
         // unaligned buffers on Lustre
@@ -673,10 +673,8 @@ mod tests {
             let fd = storage.fd() as RawFd;
             let mut buf = vec![0u8; std::cmp::min(size, 4096)];
 
-            let bytes_read = unsafe {
-                nix::sys::uio::pread(fd, &mut buf, 0)
-                    .unwrap_or_else(|e| panic!("Failed to read back data for {}: {:?}", name, e))
-            };
+            let bytes_read = unsafe { nix::sys::uio::pread(fd, &mut buf, 0) }
+                .unwrap_or_else(|e| panic!("Failed to read back data for {}: {:?}", name, e));
 
             assert!(bytes_read > 0, "No data read back for {}", name);
             assert!(
@@ -688,22 +686,28 @@ mod tests {
             eprintln!("✓ {} passed", name);
         }
 
-        std::env::remove_var(DISK_ZEROFILL_FALLBACK_KEY);
+        unsafe {
+            std::env::remove_var(DISK_ZEROFILL_FALLBACK_KEY);
+        }
     }
 
     /// Test that O_DIRECT can be disabled and allocation still works.
     #[test]
     #[ignore]
     fn test_disable_o_direct() {
-        std::env::set_var(DISK_DISABLE_O_DIRECT_KEY, "1");
-        std::env::set_var(DISK_ZEROFILL_FALLBACK_KEY, "1");
+        unsafe {
+            std::env::set_var(DISK_DISABLE_O_DIRECT_KEY, "1");
+            std::env::set_var(DISK_ZEROFILL_FALLBACK_KEY, "1");
+        }
 
         let size = 1024 * 1024;
         let storage = DiskStorage::new(size).expect("Failed to allocate with O_DIRECT disabled");
 
         assert_eq!(storage.size(), size);
 
-        std::env::remove_var(DISK_DISABLE_O_DIRECT_KEY);
-        std::env::remove_var(DISK_ZEROFILL_FALLBACK_KEY);
+        unsafe {
+            std::env::remove_var(DISK_DISABLE_O_DIRECT_KEY);
+            std::env::remove_var(DISK_ZEROFILL_FALLBACK_KEY);
+        }
     }
 }
