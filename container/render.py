@@ -4,12 +4,11 @@
 
 from jinja2 import Environment, FileSystemLoader
 
-env = Environment(loader=FileSystemLoader("."), trim_blocks=True, lstrip_blocks=True)
+env = Environment(loader=FileSystemLoader("."),trim_blocks=True,lstrip_blocks=True)
 template = env.get_template("Dockerfile.template")
-
 rendered = template.render(
-    framework="vllm",
-    target="runtime"
+    framework="none",
+    target="dev"
 )
 
 with open("rendered.Dockerfile", "w") as f:

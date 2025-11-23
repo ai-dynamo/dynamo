@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ### Base Image Stages
+
 {% if framework != "none" %}
     {% include "templates/dynamo_base.Dockerfile" %}
     {% include "templates/wheel_builder.Dockerfile" %}
@@ -21,6 +22,7 @@
 {% endif %}
 
 ### Framework Stages
+
 {% if target == "framework" and framework != "none" %}
     {% include "templates/" ~ framework ~ "_framework.Dockerfile" %}
 {% elif target == "runtime" and framework != "none" %}
