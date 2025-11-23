@@ -41,11 +41,11 @@ class Config:
         self.kv_block_size: int = 32
         self.migration_limit: int = 0
         self.gpus_per_node: Optional[int] = None
-        self.max_batch_size: int = BuildConfig.max_batch_size
-        self.max_num_tokens: int = BuildConfig.max_num_tokens
-        self.max_seq_len: int = BuildConfig.max_seq_len
-        self.max_beam_width: int = BuildConfig.max_beam_width
-        self.free_gpu_memory_fraction: Optional[float] = None
+        self.max_batch_size: int = BuildConfig.model_fields["max_batch_size"].default
+        self.max_num_tokens: int = BuildConfig.model_fields["max_num_tokens"].default
+        self.max_seq_len: int = BuildConfig.model_fields["max_seq_len"].default
+        self.max_beam_width: int = BuildConfig.model_fields["max_beam_width"].default
+        self.free_gpu_memory_fraction: float = 0.9
         self.extra_engine_args: str = ""
         self.override_engine_args: str = ""
         self.publish_events_and_metrics: bool = False
@@ -176,26 +176,26 @@ def cmd_line_args():
     parser.add_argument(
         "--max-batch-size",
         type=int,
-        default=BuildConfig.max_batch_size,
+        default=BuildConfig.model_fields["max_batch_size"].default,
         help="Maximum number of requests that the engine can schedule.",
     )
     parser.add_argument(
         "--max-num-tokens",
         type=int,
-        default=BuildConfig.max_num_tokens,
+        default=BuildConfig.model_fields["max_num_tokens"].default,
         help="Maximum number of batched input tokens after padding is removed in each batch.",
     )
     parser.add_argument(
         "--max-seq-len",
         type=int,
-        default=BuildConfig.max_seq_len,
+        default=BuildConfig.model_fields["max_seq_len"].default,
         help="Maximum total length of one request, including prompt and outputs. "
         "If unspecified, the value is deduced from the model config.",
     )
     parser.add_argument(
         "--max-beam-width",
         type=int,
-        default=BuildConfig.max_beam_width,
+        default=BuildConfig.model_fields["max_beam_width"].default,
         help="Maximum number of beams for beam search decoding.",
     )
     parser.add_argument(
