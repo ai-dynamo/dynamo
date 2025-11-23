@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+### Base Image Stages
+{% if framework != "none" %}
+    {% include "templates/dynamo_base.Dockerfile" %}
+    {% include "templates/wheel_builder.Dockerfile" %}
+    {% include "templates/dynamo_dev.Dockerfile" %}
+{% elif framework == "none" %}
+    {% if target == "dev" %}
+        {% include "templates/dynamo_base.Dockerfile" %}
+        {% include "templates/wheel_builder.Dockerfile" %}
+        {% include "templates/dynamo_dev.Dockerfile" %}
+    {% elif target == "wheel_builder" %}
+        {% include "templates/dynamo_base.Dockerfile" %}
+        {% include "templates/wheel_builder.Dockerfile" %}
+    {% elif target == "base" %}
+        {% include "templates/dynamo_base.Dockerfile" %}
+    {% endif %}
+{% endif %}
+
+### Framework Stages
+{% if target == "framework" and framework != "none" %}
+    {% include "templates/" ~ framework ~ "_framework.Dockerfile" %}
+{% elif target == "runtime" and framework != "none" %}
+    {% include "templates/" ~ framework ~ "_framework.Dockerfile" %}
+    {% include "templates/" ~ framework ~ "_runtime.Dockerfile" %}
+{% endif %}
