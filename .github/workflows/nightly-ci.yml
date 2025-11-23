@@ -238,7 +238,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "${{ matrix.framework }} and unit and nightly"
+          pytest_marks: "${{ matrix.framework }} and unit and (nightly or post_merge or pre_merge)"
           framework: ${{ matrix.framework }}
           test_type: unit
           platform_arch: ${{ matrix.arch }}
@@ -309,7 +309,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "${{ matrix.framework }} and integration and nightly"
+          pytest_marks: "${{ matrix.framework }} and integration and (nightly or post_merge or pre_merge)"
           framework: ${{ matrix.framework }}
           test_type: integration
           platform_arch: ${{ matrix.arch }}
@@ -379,7 +379,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "nightly and ${{ matrix.framework }} and e2e and gpu_1"
+          pytest_marks: "(nightly or post_merge or pre_merge) and ${{ matrix.framework }} and e2e and gpu_1"
           framework: ${{ matrix.framework }}
           test_type: e2e
           platform_arch: ${{ matrix.arch }}
@@ -449,7 +449,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "nightly and ${{ matrix.framework }} and e2e and gpu_2"
+          pytest_marks: "(nightly or post_merge or pre_merge) and ${{ matrix.framework }} and e2e and gpu_2"
           framework: ${{ matrix.framework }}
           test_type: e2e
           platform_arch: ${{ matrix.arch }}
@@ -538,7 +538,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "${{ matrix.marks }}"
+          pytest_marks: "(${matrix.marks} or (post_merge or pre_merge or nightly))"
           framework: ${{ matrix.framework }}
           test_type: component
           platform_arch: ${{ matrix.arch }}
@@ -599,3 +599,70 @@ jobs:
           name: nightly-results-summary
           path: results.md
           retention-days: 7
+
+  ############################## SLACK NOTIFICATION ##############################
+  notify-slack:
+    name: Notify Slack
+    runs-on: cpu-amd-m5-4xlarge
+    if: always() && github.event_name == 'schedule' && !github.event.repository.fork
+    needs: results-summary
+    permissions:
+      contents: read
+    env:
+      HAS_SLACK_WEBHOOK: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL != '' }}
+    steps:
+      - name: Send Slack notification
+        if: env.HAS_SLACK_WEBHOOK == 'true'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          JOBS_JSON=$(mktemp)
+          trap 'rm -f "$JOBS_JSON"' EXIT
+
+          if ! curl -sSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            > "$JOBS_JSON"; then
+            echo "Error: Failed to fetch job data from GitHub API"
+            exit 1
+          fi
+
+          if [ ! -s "$JOBS_JSON" ]; then
+            echo "Error: No job data received"
+            exit 1
+          fi
+
+          TOTAL_JOBS=$(jq '[.jobs[]] | length' "$JOBS_JSON")
+          SUCCESS_COUNT=$(jq '[.jobs[] | select(.conclusion == "success")] | length' "$JOBS_JSON")
+          FAILED_COUNT=$(jq '[.jobs[] | select(.conclusion == "failure")] | length' "$JOBS_JSON")
+
+          if [ "$FAILED_COUNT" -eq 0 ]; then
+            STATUS="Success ✅"
+          else
+            STATUS="Failed ❌"
+          fi
+
+          MESSAGE="Nightly CI Pipeline - ${STATUS}"
+          MESSAGE="${MESSAGE}\n\nSummary: ${SUCCESS_COUNT}/${TOTAL_JOBS} jobs passed"
+
+          if [ "$FAILED_COUNT" -gt 0 ]; then
+            FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | "  - " + .name' "$JOBS_JSON")
+            MESSAGE="${MESSAGE}\n\nFailed Jobs (${FAILED_COUNT}):\n${FAILED_JOBS}"
+          fi
+
+          MESSAGE="${MESSAGE}\n\nView Workflow Summary: ${RUN_URL}"
+
+          PAYLOAD=$(jq -n --arg text "$MESSAGE" '{text: $text}')
+
+          if curl -sSf -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$SLACK_WEBHOOK_URL"; then
+            echo "Slack notification sent successfully"
+          else
+            echo "Warning: Failed to send Slack notification"
+            exit 1
+          fi
