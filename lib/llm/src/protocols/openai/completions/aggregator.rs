@@ -24,6 +24,7 @@ pub struct DeltaAggregator {
     system_fingerprint: Option<String>,
     choices: HashMap<u32, DeltaChoice>,
     error: Option<String>,
+    nvext: Option<serde_json::Value>,
 }
 
 struct DeltaChoice {
@@ -49,6 +50,7 @@ impl DeltaAggregator {
             system_fingerprint: None,
             choices: HashMap::new(),
             error: None,
+            nvext: None,
         }
     }
 
@@ -83,6 +85,10 @@ impl DeltaAggregator {
                     }
                     if let Some(system_fingerprint) = delta.inner.system_fingerprint {
                         aggregator.system_fingerprint = Some(system_fingerprint);
+                    }
+                    // Aggregate nvext field (take the last non-None value)
+                    if delta.inner.nvext.is_some() {
+                        aggregator.nvext = delta.inner.nvext;
                     }
 
                     // handle the choices
@@ -163,6 +169,7 @@ impl DeltaAggregator {
             object: "text_completion".to_string(),
             system_fingerprint: aggregator.system_fingerprint,
             choices,
+            nvext: aggregator.nvext,
         };
 
         let response = NvCreateCompletionResponse { inner };
@@ -250,6 +257,7 @@ mod tests {
                 logprobs,
             }],
             object: "text_completion".to_string(),
+            nvext: None,
         };
 
         let response = NvCreateCompletionResponse { inner };
@@ -379,6 +387,7 @@ mod tests {
                 },
             ],
             object: "text_completion".to_string(),
+            nvext: None,
         };
 
         let response = NvCreateCompletionResponse { inner };

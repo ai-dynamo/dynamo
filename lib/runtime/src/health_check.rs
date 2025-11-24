@@ -80,7 +80,7 @@ impl HealthCheckManager {
         }
 
         // Create a client that discovers instances dynamically for this endpoint
-        let client = Client::new_dynamic(endpoint).await?;
+        let client = Client::new(endpoint).await?;
 
         // Create PushRouter - it will use direct routing when we call direct()
         let router: Arc<PushRouter<serde_json::Value, Annotated<serde_json::Value>>> = Arc::new(
@@ -442,7 +442,7 @@ mod integration_tests {
                 endpoint: "test_endpoint".to_string(),
                 namespace: "test_namespace".to_string(),
                 instance_id: 12345,
-                transport: crate::component::TransportType::NatsTcp(endpoint.to_string()),
+                transport: crate::component::TransportType::Nats(endpoint.to_string()),
             },
             payload.clone(),
         );
@@ -477,7 +477,7 @@ mod integration_tests {
                     endpoint: format!("test_endpoint_{}", i),
                     namespace: "test_namespace".to_string(),
                     instance_id: i,
-                    transport: crate::component::TransportType::NatsTcp(endpoint.clone()),
+                    transport: crate::component::TransportType::Nats(endpoint.clone()),
                 },
                 payload,
             );
@@ -520,7 +520,7 @@ mod integration_tests {
                 endpoint: "test_endpoint_notifier".to_string(),
                 namespace: "test_namespace".to_string(),
                 instance_id: 999,
-                transport: crate::component::TransportType::NatsTcp(endpoint.to_string()),
+                transport: crate::component::TransportType::Nats(endpoint.to_string()),
             },
             payload.clone(),
         );

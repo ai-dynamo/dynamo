@@ -5,7 +5,7 @@ use anyhow::Context as _;
 use dynamo_llm::entrypoint::EngineConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
-use dynamo_runtime::distributed::DistributedConfig;
+use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
 use dynamo_runtime::transports::nats;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -78,16 +78,18 @@ pub async fn run(
         builder.endpoint_id(Some(path.parse().with_context(|| path.clone())?));
     }
     let selected_store: KeyValueStoreSelect = flags.store_kv.parse()?;
+    let request_plane: RequestPlaneMode = flags.request_plane.parse()?;
     let dst_config = DistributedConfig {
         store_backend: selected_store,
-        nats_config: nats::ClientOptions::default(),
-        is_static: flags.static_worker,
+        // We only need NATS here to monitor it's metrics, so only if it's our request plane.
+        nats_config: if request_plane.is_nats() {
+            Some(nats::ClientOptions::default())
+        } else {
+            None
+        },
+        request_plane,
     };
     let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
-    if let Some(Output::Static(path)) = &out_opt {
-        builder.endpoint_id(Some(path.parse().with_context(|| path.clone())?));
-    }
-
     let local_model = builder.build().await?;
 
     //
@@ -98,7 +100,7 @@ pub async fn run(
     print_cuda(&out_opt);
 
     // Now that we know the output we're targeting, check if we expect it to work
-    flags.validate(&in_opt, &out_opt)?;
+    flags.validate(&out_opt)?;
 
     // Make an engine from the local_model, flags and output.
     let engine_config = engine_for(
@@ -128,20 +130,14 @@ async fn engine_for(
             // Auto-discover backends
             Ok(EngineConfig::Dynamic(Box::new(local_model)))
         }
-        Output::Static(_) => {
-            // A single static backend, no etcd
-            Ok(EngineConfig::StaticRemote(Box::new(local_model)))
-        }
         Output::Echo => Ok(EngineConfig::StaticFull {
             model: Box::new(local_model),
             engine: dynamo_llm::engines::make_echo_engine(),
-            is_static: flags.static_worker,
         }),
         #[cfg(feature = "mistralrs")]
         Output::MistralRs => Ok(EngineConfig::StaticFull {
             engine: dynamo_engine_mistralrs::make_engine(&local_model).await?,
             model: Box::new(local_model),
-            is_static: flags.static_worker,
         }),
         Output::Mocker => {
             let args = flags.mocker_config();
@@ -153,7 +149,6 @@ async fn engine_for(
             Ok(EngineConfig::StaticCore {
                 engine,
                 model: Box::new(local_model),
-                is_static: flags.static_worker,
                 is_prefill: false,
             })
         }

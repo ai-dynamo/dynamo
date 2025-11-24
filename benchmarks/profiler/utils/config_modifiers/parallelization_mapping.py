@@ -226,6 +226,7 @@ def apply_parallel_mapping_to_config(
         cfg = config_modifier.set_prefill_config(
             cfg,
             max_batch_size=mapping.get_attn_dp_size(),
-            max_num_tokens=PREFILL_MAX_NUM_TOKENS,
+            # max num tokens is shared by all attention dp ranks
+            max_num_tokens=PREFILL_MAX_NUM_TOKENS * mapping.get_attn_dp_size(),
         )
     return cfg

@@ -184,7 +184,7 @@ impl Discovery for KVStoreDiscovery {
             key_path
         );
         let bucket = self.store.get_or_create_bucket(bucket_name, None).await?;
-        let key = crate::storage::key_value_store::Key::from_raw(key_path.clone());
+        let key = crate::storage::key_value_store::Key::new(key_path.clone());
 
         tracing::debug!(
             "KVStoreDiscovery::register: Inserting into bucket={}, key={}",
@@ -201,6 +201,62 @@ impl Discovery for KVStoreDiscovery {
         );
 
         Ok(instance)
+    }
+
+    async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+        let (bucket_name, key_path) = match &instance {
+            DiscoveryInstance::Endpoint(inst) => {
+                let key = Self::endpoint_key(
+                    &inst.namespace,
+                    &inst.component,
+                    &inst.endpoint,
+                    inst.instance_id,
+                );
+                tracing::debug!(
+                    "Unregistering endpoint instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                    inst.instance_id,
+                    inst.namespace,
+                    inst.component,
+                    inst.endpoint,
+                    key
+                );
+                (INSTANCES_BUCKET, key)
+            }
+            DiscoveryInstance::Model {
+                namespace,
+                component,
+                endpoint,
+                instance_id,
+                ..
+            } => {
+                let key = Self::model_key(namespace, component, endpoint, *instance_id);
+                tracing::debug!(
+                    "Unregistering model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                    instance_id,
+                    namespace,
+                    component,
+                    endpoint,
+                    key
+                );
+                (MODELS_BUCKET, key)
+            }
+        };
+
+        // Get the bucket - if it doesn't exist, the instance is already removed from the KV store
+        let Some(bucket) = self.store.get_bucket(bucket_name).await? else {
+            tracing::warn!(
+                "Bucket {} does not exist, instance already removed",
+                bucket_name
+            );
+            return Ok(());
+        };
+
+        let key = crate::storage::key_value_store::Key::new(key_path.clone());
+
+        // Delete the entry from the bucket
+        bucket.delete(&key).await?;
+
+        Ok(())
     }
 
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
@@ -221,12 +277,12 @@ impl Discovery for KVStoreDiscovery {
 
         // Filter by prefix and deserialize
         let mut instances = Vec::new();
-        for (key_str, value) in entries {
-            if Self::matches_prefix(&key_str, &prefix, bucket_name) {
+        for (key, value) in entries {
+            if Self::matches_prefix(key.as_ref(), &prefix, bucket_name) {
                 match Self::parse_instance(&value) {
                     Ok(instance) => instances.push(instance),
                     Err(e) => {
-                        tracing::warn!(key = %key_str, error = %e, "Failed to parse discovery instance");
+                        tracing::warn!(%key, error = %e, "Failed to parse discovery instance");
                     }
                 }
             }
@@ -247,7 +303,7 @@ impl Discovery for KVStoreDiscovery {
             MODELS_BUCKET
         };
 
-        tracing::debug!(
+        tracing::trace!(
             "KVStoreDiscovery::list_and_watch: Starting watch for query={:?}, prefix={}, bucket={}",
             query,
             prefix,
@@ -264,47 +320,18 @@ impl Discovery for KVStoreDiscovery {
             cancel_token,
         );
 
-        tracing::debug!(
-            "KVStoreDiscovery::list_and_watch: Got watch receiver for bucket={}",
-            bucket_name
-        );
-
         // Create a stream that filters and transforms WatchEvents to DiscoveryEvents
         let stream = async_stream::stream! {
-            let mut event_count = 0;
-            tracing::debug!("KVStoreDiscovery::list_and_watch: Stream started, waiting for events on prefix={}", prefix);
             while let Some(event) = rx.recv().await {
-                event_count += 1;
-                tracing::debug!(
-                    "KVStoreDiscovery::list_and_watch: Received event #{} for prefix={}",
-                    event_count,
-                    prefix
-                );
                 let discovery_event = match event {
                     WatchEvent::Put(kv) => {
-                        tracing::debug!(
-                            "KVStoreDiscovery::list_and_watch: Put event, key={}, prefix={}, matches={}",
-                            kv.key_str(),
-                            prefix,
-                            Self::matches_prefix(kv.key_str(), &prefix, bucket_name)
-                        );
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(kv.key_str(), &prefix, bucket_name) {
-                            tracing::debug!(
-                                "KVStoreDiscovery::list_and_watch: Skipping key {} (doesn't match prefix {})",
-                                kv.key_str(),
-                                prefix
-                            );
                             continue;
                         }
 
                         match Self::parse_instance(kv.value()) {
                             Ok(instance) => {
-                                tracing::debug!(
-                                    "KVStoreDiscovery::list_and_watch: Emitting Added event for instance_id={}, key={}",
-                                    instance.instance_id(),
-                                    kv.key_str()
-                                );
                                 Some(DiscoveryEvent::Added(instance))
                             },
                             Err(e) => {
@@ -319,18 +346,8 @@ impl Discovery for KVStoreDiscovery {
                     }
                     WatchEvent::Delete(kv) => {
                         let key_str = kv.as_ref();
-                        tracing::debug!(
-                            "KVStoreDiscovery::list_and_watch: Delete event, key={}, prefix={}",
-                            key_str,
-                            prefix
-                        );
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(key_str, &prefix, bucket_name) {
-                            tracing::debug!(
-                                "KVStoreDiscovery::list_and_watch: Skipping deleted key {} (doesn't match prefix {})",
-                                key_str,
-                                prefix
-                            );
                             continue;
                         }
 
@@ -342,11 +359,6 @@ impl Discovery for KVStoreDiscovery {
                             Some(instance_id_hex) => {
                                 match u64::from_str_radix(instance_id_hex, 16) {
                                     Ok(instance_id) => {
-                                        tracing::debug!(
-                                            "KVStoreDiscovery::list_and_watch: Emitting Removed event for instance_id={}, key={}",
-                                            instance_id,
-                                            key_str
-                                        );
                                         Some(DiscoveryEvent::Removed(instance_id))
                                     }
                                     Err(e) => {
@@ -371,19 +383,10 @@ impl Discovery for KVStoreDiscovery {
                 };
 
                 if let Some(event) = discovery_event {
-                    tracing::debug!("KVStoreDiscovery::list_and_watch: Yielding event: {:?}", event);
                     yield Ok(event);
-                } else {
-                    tracing::debug!("KVStoreDiscovery::list_and_watch: Event was filtered out (None)");
                 }
             }
-            tracing::debug!("KVStoreDiscovery::list_and_watch: Stream ended after {} events for prefix={}", event_count, prefix);
         };
-
-        tracing::debug!(
-            "KVStoreDiscovery::list_and_watch: Returning stream for query={:?}",
-            query
-        );
         Ok(Box::pin(stream))
     }
 }
@@ -403,7 +406,7 @@ mod tests {
             namespace: "test".to_string(),
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
 
         let instance = client.register(spec).await.unwrap();
@@ -429,7 +432,7 @@ mod tests {
             namespace: "ns1".to_string(),
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec1).await.unwrap();
 
@@ -437,7 +440,7 @@ mod tests {
             namespace: "ns1".to_string(),
             component: "comp1".to_string(),
             endpoint: "ep2".to_string(),
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec2).await.unwrap();
 
@@ -445,7 +448,7 @@ mod tests {
             namespace: "ns2".to_string(),
             component: "comp2".to_string(),
             endpoint: "ep1".to_string(),
-            transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec3).await.unwrap();
 
@@ -493,7 +496,7 @@ mod tests {
                 namespace: "test".to_string(),
                 component: "comp1".to_string(),
                 endpoint: "ep1".to_string(),
-                transport: TransportType::NatsTcp("nats://localhost:4222".to_string()),
+                transport: TransportType::Nats("nats://localhost:4222".to_string()),
             };
             client_clone.register(spec).await.unwrap();
         });
