@@ -85,6 +85,7 @@ class BaseWorkerHandler(ABC):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        enable_multimodal: bool = False,
     ):
         self.runtime = runtime
         self.component = component
@@ -95,6 +96,7 @@ class BaseWorkerHandler(ABC):
         self.image_loader = ImageLoader()
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
+        self.enable_multimodal = enable_multimodal
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -158,6 +160,13 @@ class BaseWorkerHandler(ABC):
         """
         if "multi_modal_data" not in request or request["multi_modal_data"] is None:
             return None
+
+        # Security check: reject multimodal data if not explicitly enabled
+        if not self.enable_multimodal:
+            raise ValueError(
+                "Received multimodal data but multimodal processing is not enabled. "
+                "Use --enable-multimodal flag to enable multimodal processing."
+            )
 
         mm_map = request["multi_modal_data"]
         vllm_mm_data = {}
@@ -271,9 +280,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        enable_multimodal: bool = False,
     ):
         super().__init__(
-            runtime, component, engine, default_sampling_params, model_max_len
+            runtime,
+            component,
+            engine,
+            default_sampling_params,
+            model_max_len,
+            enable_multimodal,
         )
 
     async def generate(self, request, context):
@@ -339,9 +354,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        enable_multimodal: bool = False,
     ):
         super().__init__(
-            runtime, component, engine, default_sampling_params, model_max_len
+            runtime,
+            component,
+            engine,
+            default_sampling_params,
+            model_max_len,
+            enable_multimodal,
         )
 
     async def generate(self, request, context):
