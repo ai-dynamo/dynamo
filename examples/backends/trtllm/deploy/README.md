@@ -89,7 +89,7 @@ resources:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: my-registry/trtllm-runtime:my-tag
+    image: my-registry/tensorrtllm-runtime:my-tag
     workingDir: /workspace/examples/backends/trtllm
     args:
       - "python3"
@@ -109,7 +109,7 @@ Before using these templates, ensure you have:
 
 ### Container Images
 
-The deployment files currently require access to `my-registry/trtllm-runtime`. If you don't have access, build and push your own image:
+The deployment files currently require access to `my-registry/tensorrtllm-runtime`. If you don't have access, build and push your own image:
 
 ```bash
 ./container/build.sh --framework tensorrtllm
@@ -141,7 +141,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: my-registry/trtllm-runtime:my-tag
+image: my-registry/tensorrtllm-runtime:my-tag
 
 # Configure your model and deployment settings
 args:
@@ -212,23 +212,8 @@ spec:
 
 TensorRT-LLM workers are configured through command-line arguments in the deployment YAML. Key configuration areas include:
 
-- **Disaggregation Strategy**: Control request flow with `DISAGGREGATION_STRATEGY` environment variable
 - **KV Cache Transfer**: Choose between UCX (default) or NIXL for disaggregated serving
 - **Request Migration**: Enable graceful failure handling with `--migration-limit`
-
-### Disaggregation Strategy
-
-The disaggregation strategy controls how requests are distributed between prefill and decode workers:
-
-- **`decode_first`** (default): Requests routed to decode worker first, then forwarded to prefill worker
-- **`prefill_first`**: Requests routed directly to prefill worker (used with KV routing)
-
-Set via environment variable:
-```yaml
-envs:
-  - name: DISAGGREGATION_STRATEGY
-    value: "prefill_first"
-```
 
 ## Testing the Deployment
 

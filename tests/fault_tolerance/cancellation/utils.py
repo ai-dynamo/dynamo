@@ -29,6 +29,8 @@ class DynamoFrontendProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
+        env.pop("DYN_SYSTEM_PORT", None)
 
         log_dir = f"{request.node.name}_frontend"
 
@@ -386,6 +388,6 @@ def poll_for_pattern(
         time.sleep(poll_interval_ms / 1000.0)
         iteration += 1
 
-    pytest.fail(
+    raise AssertionError(
         f"Failed to find '{pattern}' pattern after {max_iterations} iterations ({max_wait_ms}ms)"
     )

@@ -238,11 +238,20 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, kv_block_size, dp_rank=0))]
-    fn new(component: Component, kv_block_size: usize, dp_rank: DpRank) -> PyResult<Self> {
+    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0))]
+    fn new(
+        component: Component,
+        worker_id: WorkerId,
+        kv_block_size: usize,
+        dp_rank: DpRank,
+    ) -> PyResult<Self> {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
+
+        // Note: worker_id parameter matches the Python stub (_core.pyi) signature but is not used.
+        // The actual worker_id is inferred from component's connection_id in the Rust implementation.
+        let _ = worker_id;
 
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
@@ -263,7 +272,7 @@ impl KvEventPublisher {
     #[pyo3(signature = (event_id, token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None))]
     fn publish_stored(
         &mut self,
-        _py: Python,
+        py: Python,
         event_id: u64,
         token_ids: Vec<u32>,
         num_block_tokens: Vec<u64>,
@@ -271,38 +280,50 @@ impl KvEventPublisher {
         lora_id: u64,
         parent_hash: Option<i64>,
     ) -> PyResult<()> {
-        let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
-        let event = KvCacheEvent {
-            event_id,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
-                blocks: create_stored_blocks(
-                    self.kv_block_size as u32,
-                    &token_ids,
-                    &num_block_tokens,
-                    &block_hashes_u64,
-                    lora_id,
-                    &self.warning_count,
-                ),
-            }),
-            dp_rank: self.dp_rank,
-        };
+        let kv_block_size = self.kv_block_size as u32;
+        let dp_rank = self.dp_rank;
+        let warning_count = self.warning_count.clone();
+        let inner = self.inner.clone();
 
-        self.inner.publish(event).map_err(to_pyerr)
+        py.allow_threads(|| {
+            let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                    blocks: create_stored_blocks(
+                        kv_block_size,
+                        &token_ids,
+                        &num_block_tokens,
+                        &block_hashes_u64,
+                        lora_id,
+                        &warning_count,
+                    ),
+                }),
+                dp_rank,
+            };
+
+            inner.publish(event).map_err(to_pyerr)
+        })
     }
 
-    fn publish_removed(&self, _py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
-        let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
-            .into_iter()
-            .map(ExternalSequenceBlockHash::from)
-            .collect();
-        let event = KvCacheEvent {
-            event_id,
-            data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
-            dp_rank: self.dp_rank,
-        };
+    fn publish_removed(&self, py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
+        let dp_rank = self.dp_rank;
+        let inner = self.inner.clone();
 
-        self.inner.publish(event).map_err(to_pyerr)
+        py.allow_threads(|| {
+            let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
+                .into_iter()
+                .map(ExternalSequenceBlockHash::from)
+                .collect();
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+                dp_rank,
+            };
+
+            inner.publish(event).map_err(to_pyerr)
+        })
     }
 }
 
@@ -702,28 +723,57 @@ impl KvIndexer {
     }
 }
 
-/// Bindings for the approximate KV indexer. We need to exactly match the regular KV Indexer
-/// interface, so that the router can switch between the two.
+/// Bindings for the approximate KV indexer. This is a wrapper around KvIndexer
+/// that uses TTL-based expiration and pruning instead of receiving KV events from workers.
 #[pyclass]
 pub(crate) struct ApproxKvIndexer {
-    inner: Arc<llm_rs::kv_router::approx::ApproxKvIndexer>,
+    inner: Arc<llm_rs::kv_router::indexer::KvIndexer>,
 }
 
 #[pymethods]
 impl ApproxKvIndexer {
     #[new]
-    fn new(component: Component, kv_block_size: usize, ttl_secs: f64) -> PyResult<Self> {
-        let ttl = tokio::time::Duration::from_secs_f64(ttl_secs);
-        let inner = Arc::new(llm_rs::kv_router::approx::ApproxKvIndexer::new(
-            component.inner.drt().runtime().child_token(),
-            kv_block_size as u32,
-            ttl,
-        ));
-        Ok(Self { inner })
+    #[pyo3(signature = (component, kv_block_size, router_ttl_secs=120.0, router_max_tree_size=1024, router_prune_target_ratio=0.8))]
+    fn new(
+        component: Component,
+        kv_block_size: usize,
+        router_ttl_secs: f64,
+        router_max_tree_size: usize,
+        router_prune_target_ratio: f64,
+    ) -> PyResult<Self> {
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        runtime.block_on(async {
+            let cancellation_token = component.inner.drt().runtime().child_token();
+            let kv_indexer_metrics =
+                llm_rs::kv_router::indexer::KvIndexerMetrics::from_component(&component.inner);
+
+            // Build PruneConfig with the provided parameters
+            let prune_config = llm_rs::kv_router::approx::PruneConfig {
+                ttl: std::time::Duration::from_secs_f64(router_ttl_secs),
+                max_tree_size: router_max_tree_size,
+                prune_target_ratio: router_prune_target_ratio,
+            };
+
+            // Create KvIndexer with pruning enabled, but DO NOT subscribe to events
+            let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
+                llm_rs::kv_router::indexer::KvIndexer::new_with_frequency(
+                    cancellation_token.clone(),
+                    None, // expiration_duration - not used with prune_config
+                    kv_block_size as u32,
+                    kv_indexer_metrics,
+                    Some(prune_config),
+                )
+                .into();
+
+            // Note: We deliberately do NOT call start_kv_router_background here
+            // because ApproxKvIndexer doesn't use KV events from workers
+
+            Ok(Self { inner })
+        })
     }
 
-    fn block_size(&self) -> u32 {
-        self.inner.block_size()
+    fn block_size(&self) -> usize {
+        self.inner.block_size() as usize
     }
 
     fn find_matches_for_request<'p>(
@@ -981,13 +1031,10 @@ async fn create_kv_router_from_endpoint(
     block_size: usize,
     kv_router_config: Option<llm_rs::kv_router::KvRouterConfig>,
 ) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
-    // Get component from endpoint
-    let component = endpoint.inner.component();
-
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let kv_router = model_manager
-        .kv_chooser_for(component, block_size as u32, kv_router_config)
+        .kv_chooser_for(&endpoint.inner, block_size as u32, kv_router_config)
         .await
         .map_err(to_pyerr)?;
 
@@ -1103,47 +1150,36 @@ impl KvPushRouter {
         extra_args: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
-        let (stop_conditions, sampling_options, output_options, router_config_override, extra_args) =
-            Python::with_gil(|py| {
-                let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?
-                } else {
-                    StopConditions::default()
-                };
+        let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
+            depythonize(obj.bind(py)).map_err(to_pyerr)?
+        } else {
+            StopConditions::default()
+        };
 
-                let sampling_options: SamplingOptions = if let Some(obj) = sampling_options {
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?
-                } else {
-                    SamplingOptions::default()
-                };
+        let sampling_options: SamplingOptions = if let Some(obj) = sampling_options {
+            depythonize(obj.bind(py)).map_err(to_pyerr)?
+        } else {
+            SamplingOptions::default()
+        };
 
-                let output_options: OutputOptions = if let Some(obj) = output_options {
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?
-                } else {
-                    OutputOptions::default()
-                };
+        let output_options: OutputOptions = if let Some(obj) = output_options {
+            depythonize(obj.bind(py)).map_err(to_pyerr)?
+        } else {
+            OutputOptions::default()
+        };
 
-                let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
-                    if let Some(obj) = router_config_override {
-                        Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-                    } else {
-                        None
-                    };
+        let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
+            if let Some(obj) = router_config_override {
+                Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+            } else {
+                None
+            };
 
-                let extra_args: Option<serde_json::Value> = if let Some(obj) = extra_args {
-                    Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-                } else {
-                    None
-                };
-
-                Ok::<_, PyErr>((
-                    stop_conditions,
-                    sampling_options,
-                    output_options,
-                    router_config_override,
-                    extra_args,
-                ))
-            })?;
+        let extra_args: Option<serde_json::Value> = if let Some(obj) = extra_args {
+            Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+        } else {
+            None
+        };
 
         // Build the PreprocessedRequest
         let mut request_builder =
@@ -1176,7 +1212,7 @@ impl KvPushRouter {
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the request directly into PreprocessedRequest
         let request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
-            Python::with_gil(|py| depythonize(request.bind(py)).map_err(to_pyerr))?;
+            depythonize(request.bind(py)).map_err(to_pyerr)?;
 
         // Use the helper method to process the request
         Self::process_request_to_stream(py, self.inner.clone(), request)
@@ -1191,11 +1227,9 @@ impl KvPushRouter {
         request_id: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
-            Python::with_gil(|py| {
-                let override_config: llm_rs::kv_router::RouterConfigOverride =
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?;
-                Ok::<_, PyErr>(Some(override_config))
-            })?
+            let override_config: llm_rs::kv_router::RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
         } else {
             None
         };
@@ -1238,11 +1272,9 @@ impl KvPushRouter {
         )?;
 
         let router_config_override = if let Some(obj) = router_config_override {
-            Python::with_gil(|py| {
-                let override_config: llm_rs::kv_router::RouterConfigOverride =
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?;
-                Ok::<_, PyErr>(Some(override_config))
-            })?
+            let override_config: llm_rs::kv_router::RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
         } else {
             None
         };

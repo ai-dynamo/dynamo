@@ -15,10 +15,6 @@ spec:
   profilingConfig:
     profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
     config:
-      # Engine configuration
-      engine:
-        is_moe_model: true  # Enable MoE model support (uses TEP/DEP instead of TP)
-
       # Sweep/profiling configuration
       sweep:
         # Standard online profiling (not using AI Configurator)

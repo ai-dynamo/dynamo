@@ -67,7 +67,7 @@ def test_prometheus_metrics_integration():
             endpoint=mock_endpoint,
             registry=REGISTRY,
             exclude_prefixes=["python_", "process_"],
-            add_prefix="trtllm:",
+            add_prefix="trtllm_",
         )
 
         print("✅ Prometheus metrics integration test passed")

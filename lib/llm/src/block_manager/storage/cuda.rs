@@ -315,8 +315,8 @@ impl StorageAllocator<PinnedStorage> for PinnedAllocator {
 /// When building a [`DeviceStorage`] from a torch tensor, we need to ensure that
 /// the torch tensor is not GCed until the [`DeviceStorage`] is dropped.
 /// Because of this, we need to store a reference to the torch tensor in the [`DeviceStorage`]
-#[derive(Debug)]
-enum DeviceStorageType {
+#[derive(Clone, Debug)]
+pub enum DeviceStorageType {
     Owned,                                   // Memory that we allocated ourselves.
     Torch { _tensor: Arc<dyn TorchTensor> }, // Memory that came from a torch tensor.
 }
@@ -328,7 +328,7 @@ pub struct DeviceStorage {
     size: usize,
     ctx: Arc<CudaContext>,
     handles: RegistrationHandles,
-    _storage_type: DeviceStorageType,
+    storage_type: DeviceStorageType,
 }
 
 impl Local for DeviceStorage {}
@@ -345,7 +345,7 @@ impl DeviceStorage {
             size,
             ctx: ctx.clone(),
             handles: RegistrationHandles::new(),
-            _storage_type: DeviceStorageType::Owned,
+            storage_type: DeviceStorageType::Owned,
         })
     }
 
@@ -373,13 +373,17 @@ impl DeviceStorage {
             size,
             ctx: ctx.clone(),
             handles: RegistrationHandles::new(),
-            _storage_type: DeviceStorageType::Torch { _tensor: tensor },
+            storage_type: DeviceStorageType::Torch { _tensor: tensor },
         })
     }
 
     /// Get the CUDA context
     pub fn context(&self) -> &Arc<CudaContext> {
         &self.ctx
+    }
+
+    pub fn device_storage_type(&self) -> &DeviceStorageType {
+        &self.storage_type
     }
 }
 
@@ -414,7 +418,7 @@ impl CudaContextProivder for DeviceStorage {
 impl Drop for DeviceStorage {
     fn drop(&mut self) {
         self.handles.release();
-        match &self._storage_type {
+        match &self.storage_type {
             DeviceStorageType::Owned => {
                 unsafe { cudarc::driver::result::free_sync(self.ptr as _) }.unwrap()
             }

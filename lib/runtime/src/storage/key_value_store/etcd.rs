@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::{
     storage::key_value_store::{Key, KeyValue, WatchEvent},
-    transports::etcd::Client,
+    transports::etcd,
 };
 use async_stream::stream;
 use async_trait::async_trait;
@@ -17,11 +17,11 @@ use super::{KeyValueBucket, KeyValueStore, StoreError, StoreOutcome};
 
 #[derive(Clone)]
 pub struct EtcdStore {
-    client: Client,
+    client: etcd::Client,
 }
 
 impl EtcdStore {
-    pub fn new(client: Client) -> Self {
+    pub fn new(client: etcd::Client) -> Self {
         Self { client }
     }
 }
@@ -54,10 +54,14 @@ impl KeyValueStore for EtcdStore {
     fn connection_id(&self) -> u64 {
         self.client.lease_id()
     }
+
+    fn shutdown(&self) {
+        // Revoke the lease? etcd will do it for us on disconnect.
+    }
 }
 
 pub struct EtcdBucket {
-    client: Client,
+    client: etcd::Client,
     bucket_name: String,
 }
 
@@ -110,36 +114,37 @@ impl KeyValueBucket for EtcdBucket {
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
         let prefix = make_key(&self.bucket_name, &"".into());
         tracing::trace!("etcd watch: {prefix}");
-        let (watcher, mut watch_stream) = self
+        let watcher = self
             .client
-            .etcd_client()
-            .clone()
-            .watch(prefix.as_bytes(), Some(WatchOptions::new().with_prefix()))
+            .kv_watch_prefix(&prefix)
             .await
             .map_err(|e| StoreError::EtcdError(e.to_string()))?;
+        let (_, mut watch_stream) = watcher.dissolve();
         let output = stream! {
-            let _watcher = watcher; // Keep it alive. Not sure if necessary.
-            while let Ok(Some(resp)) = watch_stream.message().await {
-                for e in resp.events() {
-                    let Some(kv) = e.kv() else {
-                        continue;
-                    };
-                    let (k_bytes, v_bytes) = kv.clone().into_key_value();
-                    let key = match String::from_utf8(k_bytes) {
-                        Ok(k) => k,
-                        Err(err) => {
-                            tracing::error!(%err, prefix, "Invalid UTF8 in etcd key");
-                            continue;
-                        }
-                    };
-                    let item = KeyValue::new(key, v_bytes.into());
-                    match e.event_type() {
-                        EventType::Put => {
-                            yield WatchEvent::Put(item);
-                        }
-                        EventType::Delete => {
-                            yield WatchEvent::Delete(item);
-                        }
+            while let Some(event) = watch_stream.recv().await {
+                match event {
+                    etcd::WatchEvent::Put(kv) => {
+                        let (k, v) = kv.into_key_value();
+                        let key = match String::from_utf8(k) {
+                            Ok(k) => Key::new(k),
+                            Err(err) => {
+                                tracing::error!(%err, prefix, "Invalid UTF8 in etcd key");
+                                continue;
+                            }
+                        };
+                        let item = KeyValue::new(key, v.into());
+                        yield WatchEvent::Put(item);
+                    }
+                    etcd::WatchEvent::Delete(kv) => {
+                        let (k, _) = kv.into_key_value();
+                        let key = match String::from_utf8(k) {
+                            Ok(k) => Key::new(k),
+                            Err(err) => {
+                                tracing::error!(%err, prefix, "Invalid UTF8 in etcd key");
+                                continue;
+                            }
+                        };
+                        yield WatchEvent::Delete(key);
                     }
                 }
             }
@@ -147,7 +152,7 @@ impl KeyValueBucket for EtcdBucket {
         Ok(Box::pin(output))
     }
 
-    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError> {
+    async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
         let k = make_key(&self.bucket_name, &"".into());
         tracing::trace!("etcd entries: {k}");
 
@@ -156,11 +161,11 @@ impl KeyValueBucket for EtcdBucket {
             .kv_get_prefix(k)
             .await
             .map_err(|e| StoreError::EtcdError(e.to_string()))?;
-        let out: HashMap<String, bytes::Bytes> = resp
+        let out: HashMap<Key, bytes::Bytes> = resp
             .into_iter()
             .map(|kv| {
                 let (k, v) = kv.into_key_value();
-                (String::from_utf8_lossy(&k).to_string(), v.into())
+                (Key::new(String::from_utf8_lossy(&k).to_string()), v.into())
             })
             .collect();
 
@@ -177,43 +182,18 @@ impl EtcdBucket {
         let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd create: {k}");
 
-        // Use atomic transaction to check and create in one operation
-        let put_options = PutOptions::new().with_lease(self.client.lease_id() as i64);
-
-        // Build transaction that creates key only if it doesn't exist
-        let txn = Txn::new()
-            .when(vec![Compare::version(k.as_str(), CompareOp::Equal, 0)]) // Atomic check
-            .and_then(vec![TxnOp::put(k.as_str(), value, Some(put_options))]) // Only if check passes
-            .or_else(vec![
-                TxnOp::get(k.as_str(), None), // Key exists, get its info
-            ]);
-
-        // Execute the transaction
-        let result = self
+        match self
             .client
-            .etcd_client()
-            .kv_client()
-            .txn(txn)
+            .kv_create(k.as_str(), value.into(), None)
             .await
-            .map_err(|e| StoreError::EtcdError(e.to_string()))?;
-
-        if result.succeeded() {
-            // Key was created successfully
-            return Ok(StoreOutcome::Created(1)); // version of new key is always 1
-        }
-
-        // Key already existed, get its version
-        if let Some(etcd_client::TxnOpResponse::Get(get_resp)) =
-            result.op_responses().into_iter().next()
-            && let Some(kv) = get_resp.kvs().first()
+            .map_err(|e| StoreError::EtcdError(e.to_string()))?
         {
-            let version = kv.version() as u64;
-            return Ok(StoreOutcome::Exists(version));
+            None => {
+                // Key was created successfully
+                Ok(StoreOutcome::Created(1)) // version of new key is always 1
+            }
+            Some(revision) => Ok(StoreOutcome::Exists(revision)),
         }
-        // Shouldn't happen, but handle edge case
-        Err(StoreError::EtcdError(
-            "Unexpected transaction response".to_string(),
-        ))
     }
 
     async fn update(
@@ -284,7 +264,7 @@ mod concurrent_create_tests {
     fn test_concurrent_etcd_create_race_condition() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings(false);
+        let config = DistributedConfig::from_settings();
 
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();
@@ -293,8 +273,7 @@ mod concurrent_create_tests {
     }
 
     async fn test_concurrent_create(drt: DistributedRuntime) -> Result<(), StoreError> {
-        let etcd_client = drt.etcd_client().expect("etcd client should be available");
-        let storage = EtcdStore::new(etcd_client);
+        let storage = drt.store();
 
         // Create a bucket for testing
         let bucket = Arc::new(tokio::sync::Mutex::new(
@@ -308,7 +287,7 @@ mod concurrent_create_tests {
         let barrier = Arc::new(Barrier::new(num_workers));
 
         // Shared test data
-        let test_key: Key = Key::new(&format!("concurrent_test_key_{}", uuid::Uuid::new_v4()));
+        let test_key: Key = Key::new(format!("concurrent_test_key_{}", uuid::Uuid::new_v4()));
         let test_value = "test_value";
 
         // Spawn multiple tasks that will all try to create the same key simultaneously

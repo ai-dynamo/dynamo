@@ -32,9 +32,11 @@ type DynamoGraphDeploymentSpec struct {
 	// PVCs defines a list of persistent volume claims that can be referenced by components.
 	// Each PVC must have a unique name that can be referenced in component specifications.
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxItems=100
 	PVCs []PVC `json:"pvcs,omitempty"`
 	// Services are the services to deploy as part of this deployment.
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxProperties=25
 	Services map[string]*DynamoComponentDeploymentSharedSpec `json:"services,omitempty"`
 	// Envs are environment variables applied to all services in the deployment unless
 	// overridden by service-specific configuration.

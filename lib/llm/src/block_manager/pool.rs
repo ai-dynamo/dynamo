@@ -4,6 +4,7 @@
 pub mod managed;
 pub use managed::ManagedBlockPool;
 
+use anyhow::Result;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
 use serde::{Deserialize, Serialize};
@@ -30,8 +31,6 @@ use std::{
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-
-use dynamo_runtime::Result;
 
 // Type aliases to reduce complexity across the module
 type BlockPoolResult<T> = Result<T, BlockPoolError>;

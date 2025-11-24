@@ -3,7 +3,7 @@
 
 use super::{AsyncEngineContextProvider, ResponseStream, STREAM_ERR_MSG};
 use crate::{
-    component::{Client, Endpoint, InstanceSource},
+    component::{Client, Endpoint},
     engine::{AsyncEngine, Data},
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
@@ -89,13 +89,17 @@ impl RouterMode {
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
-    let Some(nats_client) = endpoint.drt().nats_client() else {
-        anyhow::bail!("Missing NATS. Please ensure it is running and accessible.");
-    };
-    AddressedPushRouter::new(
-        nats_client.client().clone(),
-        endpoint.drt().tcp_server().await?,
-    )
+    // Get network manager and create client (no mode checks!)
+    let manager = endpoint.drt().network_manager().await?;
+    let req_client = manager.create_client()?;
+    let resp_transport = endpoint.drt().tcp_server().await?;
+
+    tracing::debug!(
+        transport = req_client.transport_name(),
+        "Creating AddressedPushRouter with request plane client"
+    );
+
+    AddressedPushRouter::new(req_client, resp_transport)
 }
 
 impl<T, U> PushRouter<T, U>
@@ -118,9 +122,7 @@ where
         let addressed = addressed_router(&client.endpoint).await?;
 
         // Start worker monitor if provided and in dynamic mode
-        if let Some(monitor) = worker_monitor.as_ref()
-            && matches!(client.instance_source.as_ref(), InstanceSource::Dynamic(_))
-        {
+        if let Some(monitor) = worker_monitor.as_ref() {
             monitor.start_monitoring().await?;
         }
 
@@ -196,6 +198,7 @@ where
             .await
     }
 
+    /*
     pub async fn r#static(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let subject = self.client.endpoint.subject();
         tracing::debug!("static got subject: {subject}");
@@ -203,6 +206,7 @@ where
         tracing::debug!("router generate");
         self.addressed.generate(request).await
     }
+    */
 
     async fn generate_with_fault_detection(
         &self,
@@ -224,8 +228,48 @@ where
             }
         }
 
-        let subject = self.client.endpoint.subject_to(instance_id);
-        let request = request.map(|req| AddressedRequest::new(req, subject));
+        // Get the address based on discovered transport type
+        let address = {
+            use crate::component::TransportType;
+
+            // Get the instance and use its actual transport type
+            let instances = self.client.instances();
+            let instance = instances
+                .iter()
+                .find(|i| i.instance_id == instance_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Instance {} not found in available instances", instance_id)
+                })?;
+
+            match &instance.transport {
+                TransportType::Http(http_endpoint) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        http_endpoint = %http_endpoint,
+                        "Using HTTP transport for instance"
+                    );
+                    http_endpoint.clone()
+                }
+                TransportType::Tcp(tcp_endpoint) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        tcp_endpoint = %tcp_endpoint,
+                        "Using TCP transport for instance"
+                    );
+                    tcp_endpoint.clone()
+                }
+                TransportType::Nats(subject) => {
+                    tracing::debug!(
+                        instance_id = instance_id,
+                        subject = %subject,
+                        "Using NATS transport for instance"
+                    );
+                    subject.clone()
+                }
+            }
+        };
+
+        let request = request.map(|req| AddressedRequest::new(req, address));
 
         let stream: anyhow::Result<ManyOut<U>> = self.addressed.generate(request).await;
         match stream {
@@ -268,16 +312,14 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
-        match self.client.instance_source.as_ref() {
-            InstanceSource::Static => self.r#static(request).await,
-            InstanceSource::Dynamic(_) => match self.router_mode {
-                RouterMode::Random => self.random(request).await,
-                RouterMode::RoundRobin => self.round_robin(request).await,
-                RouterMode::Direct(instance_id) => self.direct(request, instance_id).await,
-                RouterMode::KV => {
-                    anyhow::bail!("KV routing should not call generate on PushRouter");
-                }
-            },
+        //InstanceSource::Static => self.r#static(request).await,
+        match self.router_mode {
+            RouterMode::Random => self.random(request).await,
+            RouterMode::RoundRobin => self.round_robin(request).await,
+            RouterMode::Direct(instance_id) => self.direct(request, instance_id).await,
+            RouterMode::KV => {
+                anyhow::bail!("KV routing should not call generate on PushRouter");
+            }
         }
     }
 }

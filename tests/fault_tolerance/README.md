@@ -60,19 +60,17 @@ pytest tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellatio
 
 #### TRT-LLM Cancellation Tests
 
-| Test | Mode | Strategy | Cancellation Phase | Request Type | Setup |
-|------|------|----------|-------------------|--------------|-------|
-| `test_request_cancellation_trtllm_aggregated` | Aggregated | N/A | During generation | 3 scenarios: completion, chat, streaming chat | 1 worker (prefill_and_decode) |
-| `test_request_cancellation_trtllm_decode_first_decode_cancel` | Disaggregated | Decode-first | Remote decode | Streaming chat (5 responses read) | Prefill + Decode workers |
-| `test_request_cancellation_trtllm_decode_first_remote_prefill_cancel` | Disaggregated | Decode-first | Remote prefill | Completion (long prompt) | Prefill + Decode workers |
-| `test_request_cancellation_trtllm_prefill_first_prefill_cancel` | Disaggregated | Prefill-first | Local prefill | Completion (long prompt) | Decode + Prefill workers |
-| `test_request_cancellation_trtllm_prefill_first_remote_decode_cancel` | Disaggregated | Prefill-first | Remote decode | Streaming chat (5 responses read) | Decode + Prefill workers |
+| Test | Mode | Cancellation Phase | Request Type | Setup |
+|------|------|--------------------|--------------|-------|
+| `test_request_cancellation_trtllm_aggregated` | Aggregated | During generation | 3 scenarios: completion, chat, streaming chat | 1 worker (prefill_and_decode) |
+| `test_request_cancellation_trtllm_disagg_decode_cancel` | Disaggregated | Remote decode | Streaming chat (5 responses read) | Prefill + Decode workers |
+| `test_request_cancellation_trtllm_disagg_prefill_cancel` | Disaggregated | Remote prefill | Completion (long prompt) | Prefill + Decode workers |
 
 **Run examples:**
 ```bash
 pytest tests/fault_tolerance/cancellation/test_trtllm.py::test_request_cancellation_trtllm_aggregated -v -s
-pytest tests/fault_tolerance/cancellation/test_trtllm.py::test_request_cancellation_trtllm_decode_first_decode_cancel -v -s
-# ... (other tests follow same pattern)
+pytest tests/fault_tolerance/cancellation/test_trtllm.py::test_request_cancellation_trtllm_disagg_decode_cancel -v -s
+pytest tests/fault_tolerance/cancellation/test_trtllm.py::test_request_cancellation_trtllm_disagg_prefill_cancel -v -s
 ```
 
 #### SGLang Cancellation Tests
@@ -99,5 +97,5 @@ pytest tests/fault_tolerance/cancellation/test_sglang.py::test_request_cancellat
 
 **Verification patterns:**
 - Aggregated mode: "Aborted Request ID" in worker logs
-- Remote prefill: "Aborted Request ID" in prefill, "Aborted Remote Request ID" in decode
-- Remote decode: "Aborted Request ID" in decode, "Aborted Remote Request ID" in prefill
+- Disaggregated - prefill cancellation: "Aborted Request ID" in prefill worker (cancellation during prefill)
+- Disaggregated - decode cancellation: "Aborted Request ID" in decode worker (cancellation during decode)

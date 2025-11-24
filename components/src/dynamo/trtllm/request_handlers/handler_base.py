@@ -52,11 +52,6 @@ class DisaggregationMode(Enum):
     ENCODE = "encode"
 
 
-class DisaggregationStrategy(Enum):
-    PREFILL_FIRST = "prefill_first"
-    DECODE_FIRST = "decode_first"
-
-
 @dataclass
 class RequestHandlerConfig:
     """
@@ -68,9 +63,6 @@ class RequestHandlerConfig:
     default_sampling_params: SamplingParams
     publisher: Publisher
     disaggregation_mode: DisaggregationMode
-    disaggregation_strategy: DisaggregationStrategy
-    next_client: object
-    next_router_client: Optional[object] = None
     encode_client: Optional[object] = None
     multimodal_processor: Optional[
         MultimodalRequestProcessor
@@ -80,6 +72,7 @@ class RequestHandlerConfig:
         DistributedRuntime
     ] = None  # DistributedRuntime reference for graceful shutdown
     metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
+    kv_block_size: int = 32
 
 
 class HandlerBase:
@@ -94,15 +87,13 @@ class HandlerBase:
         self.publisher = config.publisher
         self.metrics_collector = config.metrics_collector
         self.disaggregation_mode = config.disaggregation_mode
-        self.disaggregation_strategy = config.disaggregation_strategy
-        self.next_client = config.next_client
-        self.next_router_client = config.next_router_client
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
         self.connector = config.connector
         # Store runtime reference for graceful shutdown
         self.runtime = config.runtime
+        self.kv_block_size: int = config.kv_block_size
 
     def check_error(self, result: dict):
         """
@@ -219,11 +210,13 @@ class HandlerBase:
             request["stop_conditions"]["max_tokens"] = 1
             disaggregated_params = LlmDisaggregatedParams(request_type="context_only")
 
-        if "disaggregated_params" in request:
+        if "prefill_result" in request:
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 raise ValueError("Cannot provide disaggregated_params in prefill mode")
             disaggregated_params = DisaggregatedParamsCodec.decode(
-                DisaggregatedParams(**request["disaggregated_params"])
+                DisaggregatedParams(
+                    **request["prefill_result"].get("disaggregated_params")
+                )
             )
             disaggregated_params.request_type = "generation_only"
 
@@ -267,13 +260,17 @@ class HandlerBase:
         )
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
-        model_name = request.get("model", "unknown_model")
 
         # Optional test-only logits processing (enable with DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1)
         if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
             processors = [HelloWorldLogitsProcessor(self.engine.llm.tokenizer)]
             adapters = create_trtllm_adapters(processors)
             sampling_params.logits_processor = adapters
+
+        prefill_result = request.get("prefill_result")
+        prefill_prompt_tokens_details = (
+            prefill_result.get("prompt_tokens_details") if prefill_result else None
+        )
 
         try:
             # NEW: Updated engine call to include multimodal data
@@ -293,18 +290,6 @@ class HandlerBase:
                         self.publisher.start()
                         self.first_generation = False
 
-                    # Upon completion, send a final chunk with "stop" as the finish reason.
-                    # This signals to the client that the stream has ended.
-                    if (
-                        res.finished
-                        and self.disaggregation_mode != DisaggregationMode.PREFILL
-                    ):
-                        if self.multimodal_processor:
-                            final_out = self.multimodal_processor.get_stop_response(
-                                request_id, model_name
-                            )
-                            yield final_out
-
                     # If we are not done generating, but there are no outputs, return an error
                     if not res.outputs and not res.finished:
                         yield {"finish_reason": "error", "token_ids": []}
@@ -314,12 +299,9 @@ class HandlerBase:
                     # The engine returns all tokens generated so far. We must calculate the new
                     # tokens generated in this iteration to create the "delta".
                     next_total_toks = len(output.token_ids)
-                    if self.multimodal_processor:
-                        out = self.multimodal_processor.create_response_chunk(
-                            output, num_output_tokens_so_far, request_id, model_name
-                        )
-                    else:
-                        out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
+                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
                     if output.stop_reason:
@@ -329,6 +311,34 @@ class HandlerBase:
                         out["disaggregated_params"] = asdict(
                             DisaggregatedParamsCodec.encode(output.disaggregated_params)
                         )
+
+                    if out.get("finish_reason"):
+                        num_input_tokens = len(request.get("token_ids", []))
+
+                        prompt_tokens_details = None
+                        if prefill_prompt_tokens_details:
+                            prompt_tokens_details = prefill_prompt_tokens_details
+                        else:
+                            if output.request_perf_metrics is not None:
+                                kv_cache_metrics = (
+                                    output.request_perf_metrics.kv_cache_metrics
+                                )
+                                cached_tokens = min(
+                                    num_input_tokens,
+                                    kv_cache_metrics.num_reused_blocks
+                                    * self.kv_block_size,
+                                )
+                                if cached_tokens > 0:
+                                    prompt_tokens_details = {
+                                        "cached_tokens": int(cached_tokens),
+                                    }
+
+                        out["completion_usage"] = {
+                            "prompt_tokens": int(num_input_tokens),
+                            "completion_tokens": int(next_total_toks),
+                            "total_tokens": int(num_input_tokens + next_total_toks),
+                            "prompt_tokens_details": prompt_tokens_details,
+                        }
 
                     if res.finished and not out.get("finish_reason"):
                         out["finish_reason"] = "unknown"

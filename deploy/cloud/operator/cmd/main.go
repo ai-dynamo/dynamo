@@ -60,10 +60,13 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/etcd"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secrets"
+	internalwebhook "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook"
+	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook/validation"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	//+kubebuilder:scaffold:imports
 )
@@ -145,6 +148,8 @@ func main() {
 	var namespaceScopeLeaseDuration time.Duration
 	var namespaceScopeLeaseRenewInterval time.Duration
 	var operatorVersion string
+	var discoveryBackend string
+	var enableWebhooks bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -154,6 +159,9 @@ func main() {
 		"If set the metrics endpoint is served securely")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.BoolVar(&enableWebhooks, "enable-webhooks", false,
+		"Enable admission webhooks for validation. When enabled, controllers skip validation "+
+			"(webhooks handle it). When disabled, controllers perform validation.")
 	flag.StringVar(&restrictedNamespace, "restrictedNamespace", "",
 		"Enable resources filtering, only the resources belonging to the given namespace will be handled.")
 	flag.StringVar(&leaderElectionID, "leader-election-id", "", "Leader election id"+
@@ -193,6 +201,8 @@ func main() {
 		"Interval for renewing namespace scope marker lease (namespace-restricted mode only)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
+	flag.StringVar(&discoveryBackend, "discovery-backend", "",
+		"Discovery backend to use: empty string (default, uses ETCD) or 'kubernetes' (uses Kubernetes API)")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -202,6 +212,17 @@ func main() {
 	if restrictedNamespace == "" && plannerClusterRoleName == "" {
 		setupLog.Error(nil, "planner-cluster-role-name is required in cluster-wide mode")
 		os.Exit(1)
+	}
+
+	// Validate discoverBackend value
+	if discoveryBackend != "" && discoveryBackend != "kubernetes" {
+		setupLog.Error(nil, "invalid discover-backend value, must be empty string or 'kubernetes'", "value", discoveryBackend)
+		os.Exit(1)
+	}
+	if discoveryBackend != "" {
+		setupLog.Info("Discovery backend configured", "backend", discoveryBackend)
+	} else {
+		setupLog.Info("Discovery backend configured", "backend", "etcd (default)")
 	}
 
 	// Validate modelExpressURL if provided
@@ -252,6 +273,7 @@ func main() {
 			PlannerClusterRoleName:       plannerClusterRoleName,
 			DGDRProfilingClusterRoleName: dgdrProfilingClusterRoleName,
 		},
+		DiscoveryBackend: discoveryBackend,
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
@@ -274,6 +296,12 @@ func main() {
 	}
 
 	webhookServer := webhook.NewServer(webhook.Options{
+		// Bind to all interfaces so the Service can reach the webhook server
+		Host: "0.0.0.0",
+		// Must match the port exposed by the manager container and targeted by the Service.
+		Port: 9443,
+		// Must match the mountPath of the webhook certificate secret in the Deployment.
+		CertDir: "/tmp/k8s-webhook-server/serving-certs",
 		TLSOpts: tlsOpts,
 	})
 
@@ -558,6 +586,72 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeploymentRequest")
 		os.Exit(1)
+	}
+
+	if err = (&controller.DynamoModelReconciler{
+		Client:         mgr.GetClient(),
+		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
+		EndpointClient: modelendpoint.NewClient(),
+		Config:         ctrlConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoModel")
+		os.Exit(1)
+	}
+
+	// Set webhooks enabled flag in config
+	ctrlConfig.WebhooksEnabled = enableWebhooks
+
+	if enableWebhooks {
+		setupLog.Info("Webhooks are enabled - webhooks will validate, controllers will skip validation")
+	} else {
+		setupLog.Info("Webhooks are disabled - controllers will validate (defense in depth)")
+	}
+
+	// Configure webhooks with lease-based namespace exclusion (only if enabled)
+	// In cluster-wide mode, inject ctrlConfig.ExcludedNamespaces (leaseWatcher) so webhooks can defer
+	// to namespace-restricted operators. In namespace-restricted mode, webhooks validate without checking
+	// leases (ExcludedNamespaces is nil). The webhooks use LeaseAwareValidator wrapper to add coordination.
+	if enableWebhooks {
+		if ctrlConfig.RestrictedNamespace == "" {
+			// Cluster-wide mode: inject the same ExcludedNamespaces used by controllers
+			setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
+			internalwebhook.SetExcludedNamespaces(ctrlConfig.ExcludedNamespaces)
+		} else {
+			// Namespace-restricted mode: no exclusion checking needed (validators not wrapped)
+			setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
+				"restrictedNamespace", ctrlConfig.RestrictedNamespace)
+			internalwebhook.SetExcludedNamespaces(nil)
+		}
+
+		// Register validation webhook handlers
+		setupLog.Info("Registering validation webhooks")
+
+		dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
+		if err = dcdHandler.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoComponentDeployment")
+			os.Exit(1)
+		}
+
+		dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler()
+		if err = dgdHandler.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment")
+			os.Exit(1)
+		}
+
+		dmHandler := webhookvalidation.NewDynamoModelHandler()
+		if err = dmHandler.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoModel")
+			os.Exit(1)
+		}
+
+		isClusterWide := ctrlConfig.RestrictedNamespace == ""
+		dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(isClusterWide)
+		if err = dgdrHandler.RegisterWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeploymentRequest")
+			os.Exit(1)
+		}
+
+		setupLog.Info("Validation webhooks registered successfully")
 	}
 	//+kubebuilder:scaffold:builder
 

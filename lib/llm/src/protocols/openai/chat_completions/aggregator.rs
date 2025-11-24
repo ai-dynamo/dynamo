@@ -34,6 +34,8 @@ pub struct DeltaAggregator {
     error: Option<String>,
     /// Optional service tier information for the response.
     service_tier: Option<dynamo_async_openai::types::ServiceTierResponse>,
+    /// Aggregated nvext field from stream responses
+    nvext: Option<serde_json::Value>,
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
@@ -97,6 +99,7 @@ impl DeltaAggregator {
             choices: HashMap::new(),
             error: None,
             service_tier: None,
+            nvext: None,
         }
     }
 
@@ -140,6 +143,11 @@ impl DeltaAggregator {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
 
+                    // Aggregate nvext field (take the last non-None value)
+                    if delta.nvext.is_some() {
+                        aggregator.nvext = delta.nvext;
+                    }
+
                     // Aggregate choices incrementally.
                     for choice in delta.choices {
                         let state_choice =
@@ -157,7 +165,7 @@ impl DeltaAggregator {
                                 });
                         // Append content if available.
                         if let Some(content) = &choice.delta.content {
-                            state_choice.text.push_str(content.trim_end());
+                            state_choice.text.push_str(content);
                         }
 
                         if let Some(reasoning_content) = &choice.delta.reasoning_content {
@@ -247,6 +255,7 @@ impl DeltaAggregator {
             system_fingerprint: aggregator.system_fingerprint,
             choices,
             service_tier: aggregator.service_tier,
+            nvext: aggregator.nvext,
         };
 
         Ok(response)
@@ -411,6 +420,7 @@ mod tests {
             system_fingerprint: None,
             choices: vec![choice],
             object: "chat.completion".to_string(),
+            nvext: None,
         };
 
         Annotated {
@@ -545,6 +555,53 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_preserves_intermediate_whitespace_chunks() {
+        // This validates behavior before/after removing trim_end():
+        // If a whitespace-only chunk (" ") arrives between tokens, it must be preserved.
+        // With trim_end(), that chunk was dropped, yielding "Helloworld" instead of "Hello world".
+
+        let annotated_delta1 = create_test_delta(
+            0,
+            "Hello",
+            Some(dynamo_async_openai::types::Role::User),
+            None,
+            None,
+            None,
+        );
+        // A whitespace-only chunk
+        let annotated_delta2 = create_test_delta(0, " ", None, None, None, None);
+        let annotated_delta3 = create_test_delta(
+            0,
+            "world",
+            None,
+            Some(dynamo_async_openai::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![
+            annotated_delta1,
+            annotated_delta2,
+            annotated_delta3,
+        ]));
+
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        assert_eq!(choice.index, 0);
+        assert_eq!(choice.message.content.as_deref(), Some("Hello world"));
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::Stop)
+        );
+        assert_eq!(choice.message.role, dynamo_async_openai::types::Role::User);
+    }
+
     #[allow(deprecated)]
     #[tokio::test]
     async fn test_multiple_choices() {
@@ -586,6 +643,7 @@ mod tests {
                 },
             ],
             object: "chat.completion".to_string(),
+            nvext: None,
         };
 
         // Wrap it in Annotated and create a stream

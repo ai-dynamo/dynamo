@@ -5,17 +5,17 @@ use futures::StreamExt;
 use service_metrics::DEFAULT_NAMESPACE;
 
 use dynamo_runtime::{
-    DistributedRuntime, Result, Runtime, Worker, logging, pipeline::PushRouter,
-    protocols::annotated::Annotated, utils::Duration,
+    DistributedRuntime, Runtime, Worker, logging, pipeline::PushRouter,
+    protocols::annotated::Annotated,
 };
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     logging::init();
     let worker = Worker::from_settings()?;
     worker.execute(app)
 }
 
-async fn app(runtime: Runtime) -> Result<()> {
+async fn app(runtime: Runtime) -> anyhow::Result<()> {
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
     let namespace = distributed.namespace(DEFAULT_NAMESPACE)?;
@@ -33,13 +33,6 @@ async fn app(runtime: Runtime) -> Result<()> {
         println!("{:?}", resp);
     }
 
-    // This is just an illustration to invoke the server's stats_registry(<action>), where
-    // the action currently increments the `service_requests_total` metric. You can validate
-    // the result by running `curl http://localhost:8000/metrics`
-    let service_set = component.scrape_stats(Duration::from_millis(100)).await?;
-    println!("{:?}", service_set);
-
     runtime.shutdown();
-
     Ok(())
 }

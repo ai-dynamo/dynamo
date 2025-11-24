@@ -7,7 +7,7 @@
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 NUM_WORKERS=8
 MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-RECIPE_PATH="$DYNAMO_HOME/recipes/deepseek-r1-distill-llama-8b/trtllm"
+ENGINE_CONFIG_PATH="$DYNAMO_HOME/examples/backends/trtllm/engine_configs/deepseek-r1-distill-llama-8b"
 TENSOR_PARALLEL_SIZE=1
 DATA_PARALLEL_SIZE=1
 USE_MOCKERS=false
@@ -86,13 +86,13 @@ if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
         )
     elif [ "$USE_TRTLLM" = true ]; then
         # Default args for TensorRT-LLM engine using predefined YAML configs
-        # Config files located at: $RECIPE_PATH/{agg,decode,prefill}.yaml
+        # Config files located at: $ENGINE_CONFIG_PATH/{agg,decode,prefill}.yaml
         if [ "$MODE" = "prefill" ]; then
-            ENGINE_CONFIG="$RECIPE_PATH/prefill.yaml"
+            ENGINE_CONFIG="$ENGINE_CONFIG_PATH/prefill.yaml"
         elif [ "$MODE" = "decode" ]; then
-            ENGINE_CONFIG="$RECIPE_PATH/decode.yaml"
+            ENGINE_CONFIG="$ENGINE_CONFIG_PATH/decode.yaml"
         else
-            ENGINE_CONFIG="$RECIPE_PATH/agg.yaml"
+            ENGINE_CONFIG="$ENGINE_CONFIG_PATH/agg.yaml"
         fi
 
         EXTRA_ARGS=(
@@ -225,7 +225,7 @@ else
 
             if [ "$USE_TRTLLM" = true ]; then
                 echo "[$MODE_CAPITALIZED Worker-$i] Using GPUs: $GPU_DEVICES"
-                # Run TensorRT-LLM engine with trtllm-llmapi-launch for proper initialization
+                # Run TensorRT-LLM engine
                 TRTLLM_ARGS=()
                 TRTLLM_ARGS+=("--model-path" "$MODEL_PATH")
                 TRTLLM_ARGS+=("--tensor-parallel-size" "$TENSOR_PARALLEL_SIZE")
@@ -234,7 +234,7 @@ else
                 fi
                 TRTLLM_ARGS+=("${EXTRA_ARGS[@]}")
 
-                exec env CUDA_VISIBLE_DEVICES=$GPU_DEVICES trtllm-llmapi-launch python -m dynamo.trtllm \
+                exec env CUDA_VISIBLE_DEVICES=$GPU_DEVICES trtllm-llmapi-launch python3 -m dynamo.trtllm \
                     "${TRTLLM_ARGS[@]}"
             else
                 echo "[$MODE_CAPITALIZED Worker-$i] Using GPUs: $GPU_DEVICES"
@@ -252,12 +252,18 @@ else
                 fi
                 VLLM_ARGS+=("${EXTRA_ARGS[@]}")
 
-                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES python -m dynamo.vllm \
+                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES python3 -m dynamo.vllm \
                     "${VLLM_ARGS[@]}"
             fi
         } &
         PIDS+=($!)
         echo "Started $MODE worker $i (PID: $!)"
+
+        # Add delay between TensorRT-LLM worker launches to avoid MPI initialization conflicts
+        if [ "$USE_TRTLLM" = true ] && [ "$i" -lt "$NUM_WORKERS" ]; then
+            echo "Waiting 2 seconds before launching next TensorRT-LLM worker..."
+            sleep 2
+        fi
     done
 fi
 

@@ -70,7 +70,6 @@ Quickstart
    :hidden:
    :caption: Components
 
-   Frontends <_sections/frontends>
    Backends <_sections/backends>
    Router <router/README>
    Planner <planner/planner_intro>

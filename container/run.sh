@@ -45,6 +45,7 @@ USE_NIXL_GDS=
 RUNTIME=nvidia
 WORKDIR=/workspace
 NETWORK=host
+USER=
 
 get_options() {
     while :; do
@@ -183,6 +184,14 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+        --user)
+            if [ "$2" ]; then
+                USER=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
         --dry-run)
             RUN_PREFIX="echo"
             echo ""
@@ -267,11 +276,10 @@ get_options() {
 
     if [ -n "$HF_HOME" ]; then
         mkdir -p "$HF_HOME"
-        # Use /home/ubuntu for local-dev target, /root for dev target.
-        if [ "$TARGET" = "local-dev" ] || [[ "$IMAGE" == *"local-dev"* ]]; then
-            HF_HOME_TARGET="/home/ubuntu/.cache/huggingface"
-        else
+        if [[ ${USER} == "root" ]] || [[ ${USER} == "0" ]]; then
             HF_HOME_TARGET="/root/.cache/huggingface"
+        else
+            HF_HOME_TARGET="/home/dynamo/.cache/huggingface"
         fi
         VOLUME_MOUNTS+=" -v $HF_HOME:$HF_HOME_TARGET"
     fi
@@ -313,6 +321,12 @@ get_options() {
             RUNTIME=""
     fi
 
+    if [[ ${USER} == "" ]]; then
+        USER_STRING=""
+    else
+        USER_STRING="--user ${USER}"
+    fi
+
     REMAINING_ARGS=("$@")
 }
 
@@ -330,6 +344,8 @@ show_help() {
     echo "           Options: 'host' (default), 'bridge', 'none', 'container:name'"
     echo "           Examples: --network bridge (isolated), --network none (no network - WARNING: breaks most functionality)"
     echo "                    --network container:redis (share network with 'redis' container)"
+    echo "  [--user <name|uid>[:<group|gid>] specify user to run container as]"
+    echo "           Format: username or numeric UID, optionally with group/GID (e.g., 'root', '0', '1000:0')"
     echo "  [-v add volume mount]"
     echo "  [-p|--port add port mapping (host_port:container_port)]"
     echo "  [-e add environment variable]"
@@ -376,6 +392,7 @@ ${RUN_PREFIX} docker run \
     ${NIXL_GDS_CAPS} \
     --ipc host \
     ${PRIVILEGED_STRING} \
+    ${USER_STRING} \
     ${NAME_STRING} \
     ${ENTRYPOINT_STRING} \
     ${IMAGE} \

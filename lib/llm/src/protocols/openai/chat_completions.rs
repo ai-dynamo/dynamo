@@ -198,6 +198,10 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
     fn get_include_stop_str_in_output(&self) -> Option<bool> {
         self.common.include_stop_str_in_output
     }
+
+    fn get_skip_special_tokens(&self) -> Option<bool> {
+        self.common.skip_special_tokens
+    }
 }
 
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateChatCompletionRequest`,
@@ -263,7 +267,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
     }
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
-        None
+        CommonExtProvider::get_skip_special_tokens(self)
     }
 
     fn get_formatted_prompt(&self) -> Option<bool> {
@@ -314,5 +318,55 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::common::OutputOptionsProvider;
+    use serde_json::json;
+
+    #[test]
+    fn test_skip_special_tokens_none() {
+        let json_str = json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert_eq!(request.common.skip_special_tokens, None);
+
+        let output_options = request
+            .extract_output_options()
+            .expect("Failed to extract output options");
+
+        assert_eq!(output_options.skip_special_tokens, None);
+    }
+
+    #[test]
+    fn test_skip_special_tokens_propagates() {
+        for skip_value in [true, false] {
+            let json_str = json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Hello"}
+                ],
+                "skip_special_tokens": skip_value
+            });
+
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+            let output_options = request
+                .extract_output_options()
+                .expect("Failed to extract output options");
+
+            assert_eq!(output_options.skip_special_tokens, Some(skip_value));
+        }
     }
 }

@@ -274,12 +274,11 @@ def client(
                 )
 
                 # Log result
-                logger.info(
+                logger.debug(
                     f"Request: {i} Pod {pod_name} Local Port {port} "
                     f"Status: {result['results'][-1]['status']} "
                     f"Latency: {result['results'][-1]['request_elapsed_time']}"
                 )
-
                 # Write to JSONL log file
                 log.write(json.dumps(result) + "\n")
                 log.flush()
