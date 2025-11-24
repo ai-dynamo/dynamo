@@ -107,7 +107,7 @@ def build_kv_connector_config(config: Config):
     if config.connector is not None:
         if config.connector == "kvbm":
             return KvCacheConnectorConfig(
-                connector_module="dynamo.llm.trtllm_integration.connector",
+                connector_module="kvbm.trtllm_integration.connector",
                 connector_scheduler_class="DynamoKVBMConnectorLeader",
                 connector_worker_class="DynamoKVBMConnectorWorker",
             )
@@ -179,6 +179,9 @@ async def init(runtime: DistributedRuntime, config: Config):
     kv_cache_config = KvCacheConfig(
         free_gpu_memory_fraction=config.free_gpu_memory_fraction
     )
+
+    if config.connector is not None and "kvbm" in config.connector:
+        kv_cache_config.enable_partial_reuse = False
 
     dynamic_batch_config = DynamicBatchConfig(
         enable_batch_size_tuning=True,
