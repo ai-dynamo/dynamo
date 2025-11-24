@@ -1193,16 +1193,19 @@ mod tests_startup_helpers {
             .unwrap();
 
         // Verify event was published to NATS (same as test_start_event_processor)
-        let published_events = published.lock().unwrap();
-        assert_eq!(published_events.len(), 1);
-        let (subject, _) = &published_events[0];
-        assert_eq!(subject, QUEUE_NAME);
+        {
+            let published_events = published.lock().unwrap();
+            assert_eq!(published_events.len(), 1);
+            let (subject, _) = &published_events[0];
+            assert_eq!(subject, QUEUE_NAME);
+        } // drop lock
 
         // Verify event was applied to local indexer
         // We can check by querying the workers that have blocks
         let get_workers_tx = local_indexer.get_workers_sender();
         let mut found = false;
-        for _ in 0..20 {  // Try up to 20 times (200ms total)
+        for _ in 0..20 {
+            // Try up to 20 times (200ms total)
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             get_workers_tx
                 .send(crate::kv_router::indexer::GetWorkersRequest { resp: resp_tx })
@@ -1220,7 +1223,10 @@ mod tests_startup_helpers {
         }
 
         // Worker 1 should be in the set (we used worker_id=1)
-        assert!(found, "Worker 1 was not found in the indexer after processing");
+        assert!(
+            found,
+            "Worker 1 was not found in the indexer after processing"
+        );
 
         // Cleanup
         token.cancel();
@@ -1280,7 +1286,8 @@ mod tests_startup_helpers {
 
         // Local indexer should have no block
         let mut no_blocks = false;
-        for _ in 0..20 {  // Try up to 20 times (200ms total)
+        for _ in 0..20 {
+            // Try up to 20 times (200ms total)
             let scores = local_indexer
                 .find_matches(vec![LocalBlockHash(200)])
                 .await
@@ -1295,7 +1302,12 @@ mod tests_startup_helpers {
 
         // Global kvindexer should have recieved two events (create/remove)
         let published = published.lock().unwrap();
-        assert_eq!(published.len(), 2, "expected 2 published events, found {}", published.len());
+        assert_eq!(
+            published.len(),
+            2,
+            "expected 2 published events, found {}",
+            published.len()
+        );
 
         token.cancel();
     }
@@ -1352,7 +1364,8 @@ mod tests_startup_helpers {
 
         // Local indexer should have no block
         let mut no_blocks = false;
-        for _ in 0..20 {  // Try up to 20 times (200ms total)
+        for _ in 0..20 {
+            // Try up to 20 times (200ms total)
             let scores = local_indexer
                 .find_matches(vec![LocalBlockHash(200)])
                 .await
@@ -1367,7 +1380,12 @@ mod tests_startup_helpers {
 
         // Global kvindexer should have recieved two events (create/remove)
         let published = published.lock().unwrap();
-        assert_eq!(published.len(), 2, "expected 2 published events, found {}", published.len());
+        assert_eq!(
+            published.len(),
+            2,
+            "expected 2 published events, found {}",
+            published.len()
+        );
 
         token.cancel();
     }

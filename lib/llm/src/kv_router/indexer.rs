@@ -1314,7 +1314,7 @@ impl LocalKvIndexer {
             indexer: KvIndexer::new(token, kv_block_size, metrics),
             event_buffer: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(
                 max_buffer_size,
-            )),  // circular buffer for O(1) pop
+            )), // circular buffer for O(1) pop
             max_buffer_size,
         }
     }
@@ -1334,6 +1334,9 @@ impl LocalKvIndexer {
 
     /// TODO implement method which returns all events
     /// starting and/or ending in a given event id
+    pub fn get_events_in_id_range(&self, _start_id: u64, _end_id: u64) -> Vec<(WorkerId, KvCacheEvent)> {
+        todo!("Implement method which returns all events starting and/or ending in a given event id")
+    }
 
     /// Record an event in the buffer
     fn record_event(&self, worker_id: WorkerId, event: KvCacheEvent) {
@@ -1439,6 +1442,27 @@ impl KvIndexerInterface for LocalKvIndexer {
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         self.indexer.dump_events().await
+    }
+
+    async fn process_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        self.indexer
+            .process_routing_decision(worker, local_hashes, sequence_hashes)
+            .await
+    }
+
+    async fn process_routing_decision_for_request(
+        &self,
+        tokens: &[u32],
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        self.indexer
+            .process_routing_decision_for_request(tokens, worker)
+            .await
     }
 }
 
