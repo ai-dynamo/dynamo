@@ -12,7 +12,6 @@ from typing import Any
 from multiprocessing.context import SpawnProcess
 
 import pytest
-from kr8s.objects import Pod
 
 from tests.fault_tolerance.deploy.base_checker import ValidationContext
 from tests.fault_tolerance.deploy.client_factory import get_client_function
@@ -24,7 +23,6 @@ from tests.fault_tolerance.deploy.scenarios import (
     Failure,
     Load,
     Scenario,
-    TokenOverflowFailure,
     scenarios,
 )
 from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
@@ -227,84 +225,15 @@ async def _inject_failures(
     failures: list[Failure],
     logger: logging.Logger,
     deployment: ManagedDeployment,
-):  # noqa: F811
+) -> dict[str, list]:  # noqa: F811
     affected_pods: dict[str, list] = {}
 
     for failure in failures:
         time.sleep(failure.time)
 
-        # Handle TokenOverflowFailure differently - it's a client-side injection
-        if isinstance(failure, TokenOverflowFailure):
-            # The actual overflow is handled by the client configuration
-            # which uses the input_token_length from the Load config
-            # This is just logging for visibility
-            continue
-
-        service_pod_dict = deployment.get_pods(failure.service_names)
-        pods: list[Pod] = []
-        for service_name in failure.service_names:
-            pods.extend(service_pod_dict[service_name])
-
-        if not pods:
-            logger.warning(f"No pods found for {failure.service_names}")
-            continue
-
         logger.info(f"Injecting failure for: {failure}")
 
-        # Track which pods were affected by this failure
-        failure_key = f"{failure.pod_name}:{failure.command}"
-        if failure_key not in affected_pods:
-            affected_pods[failure_key] = []
-
-        for x in range(replicas):
-            pod = pods[x % len(pods)]
-
-            # Capture the exact pod name before we kill it
-            pod_name = pod.name
-            affected_pods[failure_key].append(pod_name)
-
-            logger.info(f"Target pod for failure: {pod_name}")
-
-            if failure.command == "delete_pod":
-                deployment.get_pod_logs(failure.pod_name, pod, ".before_delete")
-                logger.info(f"Deleting pod: {pod_name}")
-                pod.delete(force=True)
-            else:
-                processes = deployment.get_processes(pod)
-                for process in processes:
-                    if failure.command in process.command:
-                        logger.info(
-                            f"Terminating {failure.pod_name} Pid {process.pid} Command {process.command} in pod {pod_name}"
-                        )
-                        process.kill(failure.signal)
-
-        if failure.command == "rolling_upgrade":
-            await deployment.trigger_rolling_upgrade(failure.service_names)
-
-            # Need to wait for the deployment to be unready so we know the rolling upgrade has started
-            await deployment.wait_for_unready(timeout=60, log_interval=10)
-        else:
-            for service_name, pods in service_pod_dict.items():
-                for pod in pods:
-                    if failure.command == "delete_pod":
-                        deployment.get_pod_manifest_logs_metrics(
-                            service_name, pod, ".before_delete"
-                        )
-                        pod.delete(force=True)  # force means no graceful termination
-                    else:
-                        processes = deployment.get_processes(pod)
-                        for process in processes:
-                            if failure.command in process.command:
-                                logger.info(
-                                    f"Terminating {failure.service_names} Pid {process.pid} Command {process.command}"
-                                )
-                                process.kill(failure.signal)
-
-        # Wait until DGD is ready (this means the rolling upgrade is complete)
-        if failure.end_condition == "dgd_ready":
-            logger.info("Waiting for DGD to be ready")
-            await deployment._wait_for_ready(timeout=1800)  # 30 minute timeout
-            logger.info("DGD is ready")
+        affected_pods[failure.get_failure_key()] = await failure.execute(deployment, logger)
 
     return affected_pods
 
@@ -583,10 +512,8 @@ async def test_fault_scenario(
             scenario.load,  # Pass entire Load config object
         ) as client_procs:
             # Inject failures and capture which pods were affected
-            affected_pods = _inject_failures(scenario.failures, logger, deployment)
+            affected_pods = await _inject_failures(scenario.failures, logger, deployment)
             logger.info(f"Affected pods during test: {affected_pods}")
-
-            await _inject_failures(scenario.failures, logger, deployment)
 
             if scenario.load.continuous_load:
                 _terminate_client_processes(client_procs, logger)

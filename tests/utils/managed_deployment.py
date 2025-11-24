@@ -489,7 +489,7 @@ class ManagedDeployment:
     skip_restart_services: bool = False
 
     _custom_api: Optional[client.CustomObjectsApi] = None
-    _core_api: Optional[Any] = None
+    _core_api: Optional[client.CoreV1Api] = None
     _in_cluster: bool = False
     _logger: logging.Logger = logging.getLogger()
     _port_forward: Optional[Any] = None
@@ -745,6 +745,23 @@ class ManagedDeployment:
                 f"Failed to patch deployment {self._deployment_name}: {e}"
             )
             raise
+    
+    async def get_pod_names(self, service_names: list[str] | None = None) -> list[str]:
+        if not service_names:
+            service_names = [service.name for service in self.deployment_spec.services]
+
+        pod_names: list[str] = []
+
+        for service_name in service_names:
+            label_selector = (
+                f"nvidia.com/selector={self._deployment_name}-{service_name.lower()}"
+            )
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            pods: client.V1PodList = await self._core_api.list_namespaced_pod(self.namespace, label_selector=label_selector)
+            for pod in pods.items:
+                pod_names.append(pod.metadata.name)
+        
+        return pod_names
 
     def get_processes(self, pod: Pod) -> list[PodProcess]:
         """Get list of processes in the given pod"""
