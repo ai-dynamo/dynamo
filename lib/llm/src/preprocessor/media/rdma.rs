@@ -124,9 +124,10 @@ pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<
 
     // Compress metadata before base64 encoding (matches Python nixl_connect behavior)
     // Backend expects: b64:<base64_of_compressed_bytes>
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
-    encoder.write_all(&nixl_md)?;
-    let compressed = encoder.finish()?;
+    // Note: Python nixl_connect automatically decompresses when seeing "b64:" prefix
+    let mut zlib_encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
+    zlib_encoder.write_all(&nixl_md)?;
+    let compressed = zlib_encoder.finish()?;
 
     let b64_encoded = general_purpose::STANDARD.encode(&compressed);
     Ok(format!("b64:{}", b64_encoded))

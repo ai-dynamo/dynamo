@@ -65,6 +65,7 @@ class Config:
     multimodal_decode_worker: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
+    frontend_decoding: bool = False
     # dump config to file
     dump_config_to: Optional[str] = None
 
@@ -173,6 +174,16 @@ def parse_args() -> Config:
             "For example, if the user prompt is 'please describe the image' and the prompt template is "
             "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
             "'USER: <image> please describe the image ASSISTANT:'."
+        ),
+    )
+    parser.add_argument(
+        "--frontend-decoding",
+        action="store_true",
+        help=(
+            "EXPERIMENTAL: Enable frontend decoding of multimodal images. "
+            "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
+            "Requires building Dynamo's Rust components with '--features media-nixl'. "
+            "Without this flag, images are decoded in the Python backend (default behavior)."
         ),
     )
     parser.add_argument(
