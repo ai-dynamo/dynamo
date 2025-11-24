@@ -151,11 +151,6 @@ runs:
       id: metrics
       shell: bash
       run: |
-        echo "=========================================="
-        echo "📊 CAPTURING BUILD METRICS"
-        echo "=========================================="
-        echo "Framework: ${{ inputs.framework }}"
-        echo "Platform: ${{ inputs.platform }}"
 
         # Create metrics directory
         mkdir -p build-metrics
@@ -169,7 +164,6 @@ runs:
         END_EPOCH=$(date -d "$BUILD_END_TIME" +%s)
         BUILD_DURATION_SEC=$((END_EPOCH - START_EPOCH))
 
-        echo ""
         echo "🕐 Build timing:"
         echo "  Start: ${BUILD_START_TIME}"
         echo "  End: ${BUILD_END_TIME}"
@@ -179,16 +173,12 @@ runs:
         IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
         if [ -n "$IMAGE_TAG" ]; then
           IMAGE_SIZE_BYTES=$(docker image inspect "$IMAGE_TAG" --format='{{.Size}}' 2>/dev/null || echo "0")
-          echo ""
-          echo "📦 Image size: ${IMAGE_SIZE_BYTES} bytes ($(numfmt --to=iec-i --suffix=B ${IMAGE_SIZE_BYTES} 2>/dev/null || echo 'N/A'))"
+          echo "📦 Image size: ${IMAGE_SIZE_BYTES} bytes"
         else
           IMAGE_SIZE_BYTES=0
-          echo ""
           echo "⚠️  No image tag available"
         fi
 
-        echo ""
-        echo "🔍 Platform information:"
         PLATFORM_ARCH=$(echo "${{ inputs.platform }}" | sed 's/linux\///')
         echo "  Architecture: ${PLATFORM_ARCH}"
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
@@ -198,9 +188,6 @@ runs:
         # Create job-specific metrics file
         mkdir -p build-metrics
         METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${{ github.run_id }}-${{ job.check_run_id }}.json"
-
-        echo ""
-        echo "💾 Writing metrics to: ${METRICS_FILE}"
         
         # Create the job metrics file
         cat > "$METRICS_FILE" << EOF
@@ -216,13 +203,7 @@ runs:
         }
         EOF
 
-        echo ""
-        echo "📄 Metrics file contents:"
         cat "$METRICS_FILE"
-
-        echo ""
-        echo "✅ Metrics captured and saved successfully"
-        echo "=========================================="
 
     - name: Generate BuildKit Report
       id: buildkit-report
@@ -285,24 +266,10 @@ runs:
         echo "📊 Parser exit code: ${PARSER_EXIT_CODE}"
         
         if [ ${PARSER_EXIT_CODE} -eq 0 ] && [ -f "$REPORT_FILE" ]; then
-          echo ""
           echo "✅ BuildKit report generated successfully"
-          echo "📄 Report file: $REPORT_FILE"
-          echo "📄 JSON file: $JSON_FILE"
-          echo ""
-          
-          # Display the report
-          echo "=========================================="
-          echo "📊 BUILDKIT REPORT PREVIEW"
-          echo "=========================================="
-          cat "$REPORT_FILE"
-          echo ""
         else
           echo "⚠️  BuildKit report generation had issues but continuing..."
         fi
-        
-        echo "✅ BuildKit report step completed"
-        echo "=========================================="
 
     # Upload job-specific build metrics as artifact
     - name: Upload Build Metrics
