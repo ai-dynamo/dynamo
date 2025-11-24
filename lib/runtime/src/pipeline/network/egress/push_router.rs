@@ -148,7 +148,7 @@ where
             if count == 0 {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    self.client.endpoint.id()
                 ));
             }
             instance_ids[counter % count]
@@ -167,7 +167,7 @@ where
             if count == 0 {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    self.client.endpoint.id()
                 ));
             }
             let counter = rand::rng().random::<u64>() as usize;
@@ -190,7 +190,7 @@ where
         if !found {
             return Err(anyhow::anyhow!(
                 "instance_id={instance_id} not found for endpoint {:?}",
-                self.client.endpoint.etcd_root()
+                self.client.endpoint.id()
             ));
         }
 
