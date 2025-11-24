@@ -16,6 +16,7 @@
 import logging
 import re
 from dataclasses import dataclass, field
+import time
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Dict, List, Optional, Pattern
@@ -206,6 +207,10 @@ class RollingUpgradeFailure(Failure):
         await deployment.wait_for_unready(timeout=60, log_interval=10)
 
         await deployment._wait_for_ready(timeout=1800)  # 30 minute timeout
+
+        time.sleep(
+            self.time
+        )  # have some requests processed after the rolling upgrade has completed
 
         return await deployment.get_pod_names(self.service_names)
     
@@ -914,8 +919,6 @@ def add_rolling_upgrade_scenarios():
             deployment_spec: DeploymentSpec = deployment_info["spec"]
 
             service_names: list[str] = []
-
-            ## TODO: maybe add a bit of buffer time after the rolling upgrade is completed (after the DGD is ready again)
 
             # setting replicas to 2 so we have availability of 1 replica at a time
             if worker_mode == "agg" and backend == "trtllm":

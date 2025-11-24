@@ -585,13 +585,13 @@ class ManagedDeployment:
         timeout: int = 1800,
         sleep=1,
         log_interval=60,
-        ready_condition_val: bool = True,
-        state_val: str = "successful",
+        desired_ready_condition_val: bool = True,
+        desired_state_val: str = "successful",
     ):
         start_time = time.time()
 
         self._logger.info(
-            f"Waiting for Deployment {self._deployment_name} to have Ready condition {ready_condition_val} and state {state_val}"
+            f"Waiting for Deployment {self._deployment_name} to have Ready condition {desired_ready_condition_val} and state {desired_state_val}"
         )
 
         attempt = 0
@@ -618,14 +618,16 @@ class ManagedDeployment:
                 for condition in conditions:
                     if condition.get("type") == "Ready":
                         observed_ready_condition_val = condition.get("status")
-                        if observed_ready_condition_val == str(ready_condition_val):
+                        if observed_ready_condition_val == str(
+                            desired_ready_condition_val
+                        ):
                             break
 
                 observed_state_val = status_obj.get("state")  # type: ignore[attr-defined]
 
                 if (
-                    observed_ready_condition_val == str(ready_condition_val)
-                    and observed_state_val == state_val
+                    observed_ready_condition_val == str(desired_ready_condition_val)
+                    and observed_state_val == desired_state_val
                 ):
                     self._logger.info(f"Current deployment state: {current_state}")
                     self._logger.info(f"Current conditions: {conditions}")
@@ -634,7 +636,7 @@ class ManagedDeployment:
                     )
 
                     self._logger.info(
-                        f"Deployment {self._deployment_name} has Ready condition {ready_condition_val} and state {state_val}"
+                        f"Deployment {self._deployment_name} has Ready condition {desired_ready_condition_val} and state {desired_state_val}"
                     )
                     return True
                 else:
@@ -645,7 +647,7 @@ class ManagedDeployment:
                             f"Elapsed time: {time.time() - start_time:.1f}s / {timeout}s"
                         )
                         self._logger.info(
-                            f"Deployment has Ready condition {observed_ready_condition_val} and state {observed_state_val}, desired condition {ready_condition_val} and state {state_val}"
+                            f"Deployment has Ready condition {observed_ready_condition_val} and state {observed_state_val}, desired condition {desired_ready_condition_val} and state {desired_state_val}"
                         )
 
             except exceptions.ApiException as e:
