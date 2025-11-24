@@ -515,7 +515,7 @@ class Publisher:
                     )
             elif data["type"] == "removed":
                 self.processing_initial_created_events = False
-                block_hashes: list[int] = []
+                removed_block_hashes: list[int] = []
                 for block_hash in data["block_hashes"]:
                     block_hash = _to_signed_i64(block_hash)
                     if block_hash is None:
@@ -526,18 +526,22 @@ class Publisher:
                         )
                         self.partial_block_hashes.remove(block_hash)
                         continue
-                    block_hashes.append(block_hash)
+                    removed_block_hashes.append(block_hash)
 
                 logging.debug(
-                    f"publish removed event: event_id: {event_id}, block_hashes: {block_hashes}"
+                    f"publish removed event: event_id: {event_id}, block_hashes: {removed_block_hashes}"
                 )
                 # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
                 if self.zmq_kv_event_publisher:
                     # Consolidator enabled: publish to ZMQ only
-                    self.zmq_kv_event_publisher.publish_removed(event_id, block_hashes)
+                    self.zmq_kv_event_publisher.publish_removed(
+                        event_id, removed_block_hashes
+                    )
                 elif self.kv_event_publisher:
                     # No consolidator: publish to NATS (router subscribes directly)
-                    self.kv_event_publisher.publish_removed(event_id, block_hashes)
+                    self.kv_event_publisher.publish_removed(
+                        event_id, removed_block_hashes
+                    )
             elif data["type"] == "created" and self.processing_initial_created_events:
                 self.update_max_window_size(event)
 
