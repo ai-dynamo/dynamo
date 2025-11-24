@@ -39,7 +39,7 @@ mod tests {
     /// Helper to create a test NATS client
     async fn create_test_nats_client() -> nats::Client {
         nats::ClientOptions::builder()
-            .server("nats://localhost:4222")
+            .servers(vec!["nats://localhost:4222".to_string()])
             .build()
             .expect("Failed to build NATS client options")
             .connect()
