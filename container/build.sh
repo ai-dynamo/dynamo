@@ -1005,8 +1005,14 @@ if [ -d "${BUILD_LOG_DIR:-}" ] && command -v python3 &>/dev/null; then
         # Process each build log
         for log_file in $(find "${BUILD_LOG_DIR}" -name "*.log" -type f 2>/dev/null); do
             LOG_BASENAME=$(basename "${log_file}" .log)
-            REPORT_FILE="${REPORTS_DIR}/${LOG_BASENAME}-report.txt"
-            JSON_FILE="${REPORTS_DIR}/${LOG_BASENAME}-data.json"
+            
+            if [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITHUB_JOB:-}" ]; then
+                REPORT_FILE="${REPORTS_DIR}/${LOG_BASENAME}-${GITHUB_RUN_ID}-${GITHUB_JOB}-report.txt"
+                JSON_FILE="${REPORTS_DIR}/${LOG_BASENAME}-${GITHUB_RUN_ID}-${GITHUB_JOB}.json"
+            else
+                REPORT_FILE="${REPORTS_DIR}/${LOG_BASENAME}-report.txt"
+                JSON_FILE="${REPORTS_DIR}/${LOG_BASENAME}.json"
+            fi
             
             # Determine image name from log file name
             IMAGE_NAME="Unknown"

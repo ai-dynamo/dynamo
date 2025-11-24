@@ -90,6 +90,8 @@ runs:
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_JOB: ${{ github.job }}
       run: |
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
@@ -227,6 +229,8 @@ runs:
         mkdir -p build-metrics/buildkit-reports
         
         PLATFORM_ARCH="${{ env.PLATFORM_ARCH }}"
+        WORKFLOW_ID="${{ github.run_id }}"
+        JOB_ID="${{ github.job }}"
         
         # Determine image name and sanitize for filename
         if [ "${{ inputs.target }}" == "runtime" ]; then
@@ -240,8 +244,8 @@ runs:
           IMAGE_DISPLAY="${{ inputs.framework }} (${{ inputs.target }})"
         fi
         
-        REPORT_FILE="build-metrics/buildkit-reports/${IMAGE_NAME}-${PLATFORM_ARCH}-report.txt"
-        JSON_FILE="build-metrics/buildkit-reports/${IMAGE_NAME}-${PLATFORM_ARCH}-data.json"
+        REPORT_FILE="build-metrics/buildkit-reports/${IMAGE_NAME}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}-report.txt"
+        JSON_FILE="build-metrics/buildkit-reports/${IMAGE_NAME}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
         
         echo "🚀 Parsing BuildKit output..."
         echo "Image: ${IMAGE_DISPLAY}"
