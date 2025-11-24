@@ -58,8 +58,8 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         for req in scheduler_output.new_requests:
             if not hasattr(req, "num_scheduled_tokens"):
                 raise ValueError(
-                    """num_scheduled_tokens is not found in the SchedulerOutput!  
-                    This indicates you're using an older, unsupported version of TensorRT-LLM. 
+                    """num_scheduled_tokens is not found in the SchedulerOutput!
+                    This indicates you're using an older, unsupported version of TensorRT-LLM.
                     Are you running at least TRTLLM v1.2.0rc2?"""
                 )
             output.add_new_request(
