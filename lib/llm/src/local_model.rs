@@ -5,15 +5,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::discovery::DiscoveryInstance;
+use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
-use dynamo_runtime::storage::key_value_store::Key;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
 use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::MockEngineArgs;
-use crate::model_card::{self, ModelDeploymentCard};
+use crate::model_card::ModelDeploymentCard;
 use crate::model_type::{ModelInput, ModelType};
+use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
@@ -52,6 +54,8 @@ pub struct LocalModelBuilder {
     namespace: Option<String>,
     custom_backend_metrics_endpoint: Option<String>,
     custom_backend_metrics_polling_interval: Option<f64>,
+    media_decoder: Option<MediaDecoder>,
+    media_fetcher: Option<MediaFetcher>,
 }
 
 impl Default for LocalModelBuilder {
@@ -77,6 +81,8 @@ impl Default for LocalModelBuilder {
             namespace: Default::default(),
             custom_backend_metrics_endpoint: Default::default(),
             custom_backend_metrics_polling_interval: Default::default(),
+            media_decoder: Default::default(),
+            media_fetcher: Default::default(),
         }
     }
 }
@@ -184,6 +190,16 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn media_decoder(&mut self, media_decoder: Option<MediaDecoder>) -> &mut Self {
+        self.media_decoder = media_decoder;
+        self
+    }
+
+    pub fn media_fetcher(&mut self, media_fetcher: Option<MediaFetcher>) -> &mut Self {
+        self.media_fetcher = media_fetcher;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -219,6 +235,8 @@ impl LocalModelBuilder {
             self.runtime_config.max_num_batched_tokens =
                 mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
             self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
+            self.media_decoder = Some(MediaDecoder::default());
+            self.media_fetcher = Some(MediaFetcher::default());
         }
 
         // frontend and echo engine don't need a path.
@@ -230,6 +248,8 @@ impl LocalModelBuilder {
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
             card.runtime_config = self.runtime_config.clone();
+            card.media_decoder = self.media_decoder.clone();
+            card.media_fetcher = self.media_fetcher.clone();
 
             return Ok(LocalModel {
                 card,
@@ -280,6 +300,8 @@ impl LocalModelBuilder {
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
         card.runtime_config = self.runtime_config.clone();
+        card.media_decoder = self.media_decoder.clone();
+        card.media_fetcher = self.media_fetcher.clone();
 
         Ok(LocalModel {
             card,
@@ -413,13 +435,39 @@ impl LocalModel {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
 
-        // Publish the Model Deployment Card to KV store
-        let card_store = endpoint.drt().store();
-        let key = Key::from_raw(endpoint.unique_path(card_store.connection_id()));
+        // Register the Model Deployment Card via discovery interface
+        let discovery = endpoint.drt().discovery();
+        let spec = DiscoverySpec::from_model(
+            endpoint.component().namespace().name().to_string(),
+            endpoint.component().name().to_string(),
+            endpoint.name().to_string(),
+            &self.card,
+        )?;
+        let _instance = discovery.register(spec).await?;
 
-        let _outcome = card_store
-            .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
-            .await?;
+        Ok(())
+    }
+
+    /// Helper associated function to detach a model from an endpoint
+    pub async fn detach_model_from_endpoint(endpoint: &Endpoint) -> anyhow::Result<()> {
+        let drt = endpoint.drt();
+        let instance_id = drt.connection_id();
+
+        let endpoint_id = endpoint.id();
+
+        let instance = DiscoveryInstance::Model {
+            namespace: endpoint_id.namespace,
+            component: endpoint_id.component,
+            endpoint: endpoint_id.name,
+            instance_id,
+            card_json: serde_json::Value::Null,
+        };
+
+        let discovery = drt.discovery();
+        discovery.unregister(instance).await?;
+
+        tracing::info!("Successfully unregistered model from discovery");
+
         Ok(())
     }
 }

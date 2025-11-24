@@ -23,9 +23,12 @@ jobs:
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_dynamo
       PYTEST_XML_FILE: pytest_test_report.xml
+      PYTEST_PARALLEL_XML_FILE: pytest_parallel.xml
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          lfs: true
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to NGC
@@ -47,7 +50,7 @@ jobs:
           docker compose up -d nats-server etcd-server
       - name: Run Rust checks (block-manager + integration tests)
         run: |
-          docker run --rm -v ${{ github.workspace }}:/workspace -w /workspace/lib/llm \
+          docker run --rm -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
             ${{ steps.define_image_tag.outputs.image_tag }} \
             bash -ec 'rustup component add rustfmt clippy && \
@@ -60,11 +63,23 @@ jobs:
         working-directory: ./deploy
         run: |
           docker compose down
-      - name: Run pytest
+      - name: Run pytest (parallel tests with xdist)
         env:
-          PYTEST_MARKS: "pre_merge or mypy"
+          PYTEST_MARKS: "pre_merge and parallel"
         run: |
-          docker run -v ${{ github.workspace }}:/workspace -w /workspace \
+          docker run -w /workspace \
+            --name ${{ env.CONTAINER_ID }}_pytest_parallel \
+            ${{ steps.define_image_tag.outputs.image_tag }} \
+            bash -c "pytest --basetemp=/tmp/pytest-parallel --junitxml=${{ env.PYTEST_PARALLEL_XML_FILE }} -n 4 -m \"${{ env.PYTEST_MARKS }}\""
+      - name: Copy parallel test report from Container
+        if: always()
+        run: |
+          docker cp ${{ env.CONTAINER_ID }}_pytest_parallel:/workspace/${{ env.PYTEST_PARALLEL_XML_FILE }} . || echo "No parallel test report found"
+      - name: Run pytest (sequential tests)
+        env:
+          PYTEST_MARKS: "(pre_merge and not parallel) or mypy"
+        run: |
+          docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ steps.define_image_tag.outputs.image_tag }} \
             bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\" "
@@ -80,6 +95,7 @@ jobs:
           if-no-files-found: error
           path: |
             ${{ env.PYTEST_XML_FILE }}
+            ${{ env.PYTEST_PARALLEL_XML_FILE }}
 
   event_file:
     name: "Event File"

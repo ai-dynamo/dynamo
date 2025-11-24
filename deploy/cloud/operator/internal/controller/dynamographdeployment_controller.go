@@ -25,6 +25,7 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -40,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -47,6 +49,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
+	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook/validation"
+	rbacv1 "k8s.io/api/rbac/v1"
 )
 
 type State string
@@ -96,10 +100,9 @@ type DynamoGraphDeploymentReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.1/pkg/reconcile
-func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logger := log.FromContext(ctx)
 
-	var err error
 	reason := Reason("undefined")
 	message := Message("")
 	state := PendingState
@@ -110,6 +113,12 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	defer func() {
+		// Skip status update if DGD is being deleted
+		if !dynamoDeployment.GetDeletionTimestamp().IsZero() {
+			logger.Info("Reconciliation done - skipping status update for deleted resource")
+			return
+		}
+
 		if err != nil {
 			state = FailedState
 			message = Message(err.Error())
@@ -131,12 +140,38 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			LastTransitionTime: metav1.Now(),
 		})
 
-		err = r.Status().Update(ctx, dynamoDeployment)
-		if err != nil {
-			logger.Error(err, "Unable to update the CRD status", "crd", req.NamespacedName, "state", state, "reason", reason, "message", message)
+		updateErr := r.Status().Update(ctx, dynamoDeployment)
+		if updateErr != nil {
+			logger.Error(updateErr, "Unable to update the CRD status", "crd", req.NamespacedName, "state", state, "reason", reason, "message", message)
+			// Set err to trigger requeue
+			if err == nil {
+				err = updateErr
+			}
 		}
 		logger.Info("Reconciliation done")
 	}()
+
+	// Validate the DynamoGraphDeployment spec (defense in depth - only when webhooks are disabled)
+	if !r.Config.WebhooksEnabled {
+		validator := webhookvalidation.NewDynamoGraphDeploymentValidator(dynamoDeployment)
+		if _, validationErr := validator.Validate(); validationErr != nil {
+			logger.Error(validationErr, "DynamoGraphDeployment validation failed, refusing to reconcile")
+
+			// Set validation error state and reason (defer will update status)
+			state = FailedState
+			reason = Reason("ValidationFailed")
+			message = Message(fmt.Sprintf("Validation failed: %v", validationErr))
+
+			// Record event for visibility
+			r.Recorder.Event(dynamoDeployment, corev1.EventTypeWarning, "ValidationFailed", validationErr.Error())
+
+			// Don't requeue - user must fix the spec
+			logger.Info("DynamoGraphDeployment is invalid, not reconciling until spec is fixed")
+
+			// Return without error so defer updates status but doesn't requeue
+			return ctrl.Result{}, nil
+		}
+	}
 
 	deleted, err := commonController.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
 	if err != nil {
@@ -188,6 +223,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	if err != nil {
 		logger.Error(err, "Failed to reconcile top-level PVCs")
 		return "", "", "", fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
+	}
+
+	// Reconcile the SA, Role and RoleBinding if k8s discovery is enabled
+	err = r.reconcileK8sDiscoveryResources(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile K8s discovery resources")
+		return "", "", "", fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
 	}
 
 	// Orchestrator selection via single boolean annotation: nvidia.com/enable-grove
@@ -300,6 +342,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
+
 	// generate the dynamoComponentsDeployments from the config
 	groveGangSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever)
 	if err != nil {
@@ -331,11 +374,26 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		return "", "", "", fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
+	// Reconcile headless services for model endpoint discovery
+	if err := dynamo.ReconcileModelServicesForComponents(
+		ctx,
+		r,
+		dynamoDeployment,
+		dynamoDeployment.Spec.Services,
+		dynamoDeployment.Namespace,
+	); err != nil {
+		logger.Error(err, "failed to reconcile model services")
+		return "", "", "", fmt.Errorf("failed to reconcile model services: %w", err)
+	}
+
 	resources := []Resource{groveGangSetAsResource}
 	for componentName, component := range dynamoDeployment.Spec.Services {
-		if component.ComponentType == consts.ComponentTypeFrontend {
-			// generate the main component service
-			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace)
+
+		// if k8s discovery is enabled, create a service for each component
+		// else, only create for the frontend component
+		isK8sDiscoveryEnabled := r.Config.IsK8sDiscoveryEnabled(dynamoDeployment.Annotations)
+		if isK8sDiscoveryEnabled || component.ComponentType == consts.ComponentTypeFrontend {
+			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamoDeployment, component, componentName, isK8sDiscoveryEnabled)
 			if err != nil {
 				logger.Error(err, "failed to generate the main component service")
 				return "", "", "", fmt.Errorf("failed to generate the main component service: %w", err)
@@ -352,6 +410,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 					return true, ""
 				})
 			resources = append(resources, mainComponentServiceAsResource)
+		}
+
+		if component.ComponentType == consts.ComponentTypeFrontend {
 			// generate the main component ingress
 			ingressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
 			if component.Ingress != nil {
@@ -479,6 +540,47 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVC(ctx context.Context, dyna
 	return pvc, nil
 }
 
+func (r *DynamoGraphDeploymentReconciler) reconcileK8sDiscoveryResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	logger := log.FromContext(ctx)
+
+	if !r.Config.IsK8sDiscoveryEnabled(dynamoDeployment.Annotations) {
+		logger.Info("K8s discovery is not enabled")
+		return nil
+	} else {
+		logger.Info("K8s discovery is enabled")
+	}
+
+	serviceAccount := discovery.GetK8sDiscoveryServiceAccount(dynamoDeployment.Name, dynamoDeployment.Namespace)
+	_, _, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
+		return serviceAccount, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the k8s discovery service account")
+		return fmt.Errorf("failed to sync the k8s discovery service account: %w", err)
+	}
+
+	role := discovery.GetK8sDiscoveryRole(dynamoDeployment.Name, dynamoDeployment.Namespace)
+	_, _, err = commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*rbacv1.Role, bool, error) {
+		return role, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the k8s discovery role")
+		return fmt.Errorf("failed to sync the k8s discovery role: %w", err)
+	}
+
+	roleBinding := discovery.GetK8sDiscoveryRoleBinding(dynamoDeployment.Name, dynamoDeployment.Namespace)
+	_, _, err = commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*rbacv1.RoleBinding, bool, error) {
+		return roleBinding, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the k8s discovery role binding")
+		return fmt.Errorf("failed to sync the k8s discovery role binding: %w", err)
+	}
+
+	return nil
+
+}
+
 // reconcilePVCs reconciles all top-level PVCs defined in the DynamoGraphDeployment spec
 func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
@@ -539,11 +641,59 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		}))
+		})).
+			// Watch PodClique resources - only on status changes
+			// Note: We don't need to watch PodCliqueScalingGroup because it's just a container
+			// for PodCliques. The actual status changes happen at the PodClique level.
+			Watches(
+				&grovev1alpha1.PodClique{},
+				handler.EnqueueRequestsFromMapFunc(r.mapPodCliqueToRequests),
+				builder.WithPredicates(predicate.Funcs{
+					CreateFunc: func(ce event.CreateEvent) bool { return false },
+					DeleteFunc: func(de event.DeleteEvent) bool { return false },
+					UpdateFunc: func(ue event.UpdateEvent) bool {
+						// Only trigger on status changes (readyReplicas or replicas)
+						oldPC, okOld := ue.ObjectOld.(*grovev1alpha1.PodClique)
+						newPC, okNew := ue.ObjectNew.(*grovev1alpha1.PodClique)
+						if !okOld || !okNew {
+							return false
+						}
+						// Trigger if readyReplicas or replicas changed
+						return oldPC.Status.ReadyReplicas != newPC.Status.ReadyReplicas ||
+							oldPC.Spec.Replicas != newPC.Spec.Replicas
+					},
+					GenericFunc: func(ge event.GenericEvent) bool { return false },
+				}),
+			)
 	}
 	return ctrlBuilder.Complete(r)
 }
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
+}
+
+// mapPodCliqueToRequests maps a PodClique to reconcile requests for its owning DGD
+// Uses the nvidia.com/dynamo-graph-deployment-name label for direct lookup - no API calls needed!
+func (r *DynamoGraphDeploymentReconciler) mapPodCliqueToRequests(ctx context.Context, obj client.Object) []ctrl.Request {
+	podClique, ok := obj.(*grovev1alpha1.PodClique)
+	if !ok {
+		return nil
+	}
+
+	// PodCliques are labeled with the DGD name and live in the same namespace
+	dgdName, hasLabel := podClique.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
+	if !hasLabel || dgdName == "" {
+		log.FromContext(ctx).V(1).Info("PodClique missing DGD label",
+			"podClique", podClique.Name,
+			"namespace", podClique.Namespace)
+		return nil
+	}
+
+	return []ctrl.Request{{
+		NamespacedName: types.NamespacedName{
+			Name:      dgdName,
+			Namespace: podClique.Namespace,
+		},
+	}}
 }

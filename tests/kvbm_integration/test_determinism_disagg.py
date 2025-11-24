@@ -213,6 +213,21 @@ class LLMServerManager:
         # Give frontend time to start up
         time.sleep(5)
 
+        model = os.environ.get(
+            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+        )
+
+        # Try to download the model.
+        print("Attempting model download...")
+        try:
+            subprocess.run(
+                f"pip install hf_transfer && HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model}",
+                check=True,
+                shell=True,
+            )
+        except subprocess.CalledProcessError:
+            print("Model download failed. Is this a locally stored model?")
+
         # Launch decoder
         self.process_decoder = subprocess.Popen(
             self.decoder_cmd,
@@ -222,11 +237,6 @@ class LLMServerManager:
             preexec_fn=os.setsid,
         )
         print(f"Decoder process started with PID: {self.process_decoder.pid}")
-
-        # The prefiller and decoder cannot download the model simultaneously,
-        # because the Hugging Face rust library (invoked by fetch_llm) needs to hold an exclusive lock on the model files.
-        print("Sleeping for 60 seconds to allow the decoder to download the model. ")
-        time.sleep(60)
 
         # Launch prefiller
         self.process_prefiller = subprocess.Popen(
@@ -419,7 +429,7 @@ def llm_server(request, runtime_services):
         server_type=server_type,
     )
 
-    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "300"))
+    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
     if not server_manager.start_server(timeout=start_timeout):
         pytest.fail(
             f"Failed to start {server_type} server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
@@ -457,6 +467,30 @@ class TestDeterminismDisagg(BaseTestDeterminism):
         self, tester, llm_server, runtime_services
     ):
         """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
+        # Call the base class implementation
+        super().base_test_determinism_with_cache_reset(
+            tester,
+            llm_server,
+            runtime_services,
+            success_rate_threshold=SUCCESS_RATE_THRESHOLD,
+        )
+
+    @pytest.mark.parametrize(
+        "llm_server",
+        [
+            {
+                "cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000")),
+                "gpu_blocks": int(os.environ.get("KVBM_GPU_BLOCKS", "1000")),
+            },
+        ],
+        indirect=True,
+    )
+    @pytest.mark.kvbm_v2
+    def test_determinism_disagg_with_cache_reset_v2(
+        self, tester, llm_server, runtime_services, monkeypatch
+    ):
+        """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
+        monkeypatch.setenv("DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL", "1")
         # Call the base class implementation
         super().base_test_determinism_with_cache_reset(
             tester,

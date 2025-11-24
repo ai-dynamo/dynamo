@@ -102,7 +102,7 @@ impl KvEventConsolidator {
     pub async fn start(&mut self) -> Result<()> {
         tracing::info!(
             "Starting KV Event Consolidator: subscribe from {}, publish to {}",
-            self.config.vllm_event_endpoint,
+            self.config.engine_event_endpoint,
             self.config.consolidated_event_endpoint
         );
 
@@ -116,11 +116,12 @@ impl KvEventConsolidator {
         tracing::info!("Waiting for downstream subscribers to connect...");
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Start the subscriber (connects to vLLM's publisher)
+        // Start the subscriber (connects to engine's publisher - vLLM or TensorRT-LLM)
         let handle = start_simple_zmq_listener(
-            self.config.vllm_event_endpoint.clone(),
+            self.config.engine_event_endpoint.clone(),
             self.tracker.clone(),
             self.cancellation_token.clone(),
+            self.config.engine_source,
         )
         .await?;
 

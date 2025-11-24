@@ -1,0 +1,47 @@
+{
+  "request_id": "deepseek-v3-tool-call-test",
+  "expected_output": {
+    "normal_content": "",
+    "reasoning_content": "The user wants to check the weather in Beijing and Shanghai, I need to call the get_current_weather tool to get this information.",
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+          "name": "get_current_weather",
+          "arguments": "{\"location\": \"Beijing\", \"format\": \"celsius\"}"
+        }
+      },
+      {
+        "id": "call_2",
+        "type": "function",
+        "function": {
+          "name": "get_current_weather",
+          "arguments": "{\"location\": \"Shanghai\", \"format\": \"celsius\"}"
+        }
+      }
+    ]
+  },
+  "input_stream": [
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"<think>The user wants to check the weather in Beijing and Shanghai, I need to call the get_current_weather tool to get this information.</think>","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":"The user wants to check the weather in Beijing and Shanghai, I need to call the get_current_weather tool to get this information."}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"<｜tool▁calls▁begin｜>","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"<｜tool▁call▁begin｜>","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"function","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"<｜tool▁sep｜>","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"get_current_weather","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"\n```json\n","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"{\"location\": \"Beijing\", \"format\": \"celsius\"}\n","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"```","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"<｜tool▁call▁end｜>","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"<｜tool▁call▁begin｜>","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"function","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"<｜tool▁sep｜>","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"get_current_weather","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"\n```json\n","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"{\"location\": \"Shanghai\", \"format\": \"celsius\"}\n","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"```","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"<｜tool▁call▁end｜>","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":"<｜tool▁calls▁end｜>","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v3-tool","choices":[{"index":0,"delta":{"content":null,"function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null},"finish_reason":"tool_calls"}]}}
+  ]
+}

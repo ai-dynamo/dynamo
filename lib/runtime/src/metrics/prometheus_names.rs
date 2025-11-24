@@ -113,6 +113,9 @@ pub mod frontend_service {
     /// Output sequence length in tokens
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "output_sequence_tokens";
 
+    /// Total number of output tokens generated (counter that updates in real-time)
+    pub const OUTPUT_TOKENS_TOTAL: &str = "output_tokens_total";
+
     /// Time to first token in seconds
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "time_to_first_token_seconds";
 
@@ -336,6 +339,12 @@ pub mod kvbm {
 
     /// The number of matched tokens
     pub const MATCHED_TOKENS: &str = "matched_tokens";
+
+    /// Host cache hit rate (0.0-1.0) from the sliding window
+    pub const HOST_CACHE_HIT_RATE: &str = "host_cache_hit_rate";
+
+    /// Disk cache hit rate (0.0-1.0) from the sliding window
+    pub const DISK_CACHE_HIT_RATE: &str = "disk_cache_hit_rate";
 }
 
 /// KvStats metrics from LLM workers

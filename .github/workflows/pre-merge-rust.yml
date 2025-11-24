@@ -39,11 +39,14 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
+      # removing kvbm from here - it will fail to test with nixl dep enabled
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
     permissions:
       contents: read
     steps:
     - uses: actions/checkout@v4
+      with:
+        lfs: true
     - name: Set up system dependencies
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
@@ -94,6 +97,8 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
+      with:
+        lfs: true
     - name: Set up system dependencies
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)

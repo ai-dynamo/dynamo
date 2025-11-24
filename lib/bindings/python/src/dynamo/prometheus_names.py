@@ -55,6 +55,8 @@ class frontend_service:
     INPUT_SEQUENCE_TOKENS = "input_sequence_tokens"
     # Output sequence length in tokens
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
+    # Total number of output tokens generated (counter that updates in real-time)
+    OUTPUT_TOKENS_TOTAL = "output_tokens_total"
     # Time to first token in seconds
     TIME_TO_FIRST_TOKEN_SECONDS = "time_to_first_token_seconds"
     # Inter-token latency in seconds
@@ -76,13 +78,21 @@ class frontend_service:
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
 
 
-class kvbm_connector:
-    """KVBM connector"""
+class kvbm:
+    """KVBM"""
 
-    # KVBM connector leader
-    KVBM_CONNECTOR_LEADER = "kvbm_connector_leader"
-    # KVBM connector worker
-    KVBM_CONNECTOR_WORKER = "kvbm_connector_worker"
+    # The number of offload blocks from device to host
+    OFFLOAD_BLOCKS_D2H = "offload_blocks_d2h"
+    # The number of offload blocks from host to disk
+    OFFLOAD_BLOCKS_H2D = "offload_blocks_h2d"
+    # The number of offload blocks from device to disk (bypassing host memory)
+    OFFLOAD_BLOCKS_D2D = "offload_blocks_d2d"
+    # The number of onboard blocks from host to device
+    ONBOARD_BLOCKS_H2D = "onboard_blocks_h2d"
+    # The number of onboard blocks from disk to device
+    ONBOARD_BLOCKS_D2D = "onboard_blocks_d2d"
+    # The number of matched tokens
+    MATCHED_TOKENS = "matched_tokens"
 
 
 class kvrouter:

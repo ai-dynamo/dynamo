@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use etcd_client::{Compare, CompareOp, PutOptions, Txn, TxnOp};
 
-use crate::Result;
+use anyhow::Result;
 
 use super::Client;
 

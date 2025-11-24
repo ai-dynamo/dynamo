@@ -9,14 +9,26 @@ on:
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
+  workflow_dispatch:
+    inputs:
+      run_deploy_operator:
+        description: 'Run deploy operator and deployment tests'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
-    group: ${{ github.workflow }}-build-test-${{ github.ref_name || github.run_id }}
+    # The group name is a ternary operation. If the ref_name is 'main',
+    # then the group name uses the run_id to ensure a unique group for
+    # 'main' pushes. Otherwise, the group name is the ref_name, so that
+    # workflows on the same PR/branch have the same group name for cancelling.
+    group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
     cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   changed-files:
     runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
       has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
     steps:
@@ -49,6 +61,10 @@ jobs:
     name: operator (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Set up Docker Buildx
@@ -75,6 +91,19 @@ jobs:
         run: |
           cd deploy/cloud/operator
           docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.24'
+      - name: Check for uncommitted changes
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          sudo apt-get update && sudo apt-get install -y make
+          cd deploy/cloud/operator
+          make check
       - name: Build Container
         id: build-image
         shell: bash
@@ -112,6 +141,10 @@ jobs:
     name: vllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Build Container
@@ -177,6 +210,10 @@ jobs:
     name: sglang (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
@@ -240,6 +277,10 @@ jobs:
     name: trtllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
@@ -290,6 +331,149 @@ jobs:
           framework: "trtllm"
           test_type: "e2e, gpu_1"
           platform_arch: ${{ matrix.platform.arch }}
+
+  deploy-test-fault-tolerance:
+    runs-on: cpu-amd-m5-2xlarge
+    if: needs.changed-files.outputs.has_code_changes == 'true'
+    needs: [changed-files, operator, vllm, trtllm, sglang]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      # Run matrix jobs sequentially to prevent a Helm race condition
+      # Parallel jobs conflict on ClusterRole ownership when installing the chart.
+      # Error: ClusterRole "...-operator" exists... cannot be imported... current value is "...-ft-vllm"
+      max-parallel: 1
+      matrix:
+        framework:
+          - { name: vllm, test_scenario: vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
+          - { name: trtllm, test_scenario: trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
+          - { name: sglang, test_scenario: sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
+    name: deploy-test-fault-tolerance (${{ matrix.framework.name }})
+    env:
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+    steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Set namespace
+        run: |
+          # Set namespace using test scenario
+          export FRAMEWORK=${{ matrix.framework.name }}
+          echo "NAMESPACE=gh-id-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
+          set -x
+
+          # Setup kubeconfig
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+          chmod 600 .kubeconfig
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+          kubectl config current-context
+      - name: Deploy Operator
+        run: |
+          set -x
+          export KUBECONFIG=$(pwd)/.kubeconfig
+
+          # Create a namespace for this job
+          echo "Creating an ephemeral namespace..."
+          kubectl delete namespace $NAMESPACE || true
+          kubectl create namespace $NAMESPACE || true
+          echo "Attaching the labels for secrets and cleanup"
+          kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+
+          # Set the namespace as default
+          kubectl config set-context --current --namespace=$NAMESPACE
+
+          # Check if Istio is installed
+          kubectl get pods -n istio-system
+          # Check if default storage class exists
+          kubectl get storageclass
+
+          # Install Helm chart
+          export VIRTUAL_ENV=/opt/dynamo/venv
+          export KUBE_NS=$NAMESPACE
+          export ISTIO_ENABLED=true
+          export ISTIO_GATEWAY=istio-system/ingress-alb
+          export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
+          export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
+
+          # Install dynamo env secrets
+          kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
+          # Create docker pull secret for operator image
+          kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
+          # Install helm dependencies
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          cd deploy/cloud/helm/platform/
+          helm dep build .
+          # Install platform with namespace restriction for single profile testing
+          helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+            --set dynamo-operator.namespaceRestriction.enabled=true \
+            --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+            --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
+            --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
+            --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
+            --timeout 10m --wait
+          # Wait for all deployments to be ready
+          timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+          cd -
+
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE
+      - name: Run Fault Tolerance Tests
+        run: |
+          set -x
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          export NAMESPACE=$NAMESPACE
+          export FRAMEWORK=${{ matrix.framework.name }}
+          export IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
+
+          echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
+          echo "Using namespace: $NAMESPACE"
+          echo "Using image: $IMAGE"
+
+          # Install python3-venv package if not already installed
+          sudo apt-get update && sudo apt-get install -y python3-venv
+
+          # Set up Python virtual environment and install test dependencies
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r container/deps/requirements.test.txt
+          pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
+
+          # Run the pytest command (tests orchestrate K8s, don't need dynamo package)
+          pytest tests/fault_tolerance/deploy/test_deployment.py \
+            -m 'k8s and fault_tolerance' \
+            -k '${{ matrix.framework.test_scenario }}' \
+            -s -v \
+            --namespace ${NAMESPACE} \
+            --image ${IMAGE} \
+            --client-type legacy
+      - name: Cleanup
+        if: always()
+        timeout-minutes: 5
+        run: |
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+          chmod 600 .kubeconfig
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+
+          # For debugging purposes, list all the resources before we uninstall
+          kubectl get all
+
+          echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
+          kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+
+          # Uninstall the helm chart
+          helm ls
+          helm uninstall dynamo-platform || true
+
+          echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
+          kubectl delete namespace $NAMESPACE || true
+          echo "Namespace $NAMESPACE completed."
 
   # Upload metrics for this workflow and all its jobs
   upload-workflow-metrics:
@@ -343,13 +527,19 @@ jobs:
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
-    needs: [changed-files, operator]
+    # TODO: Uncomment this when we have a way to test the deploy-operator job in CI.
+    #if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: github.event.inputs.run_deploy_operator
+    needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
     outputs:
       NAMESPACE: ${{ steps.deploy-operator-step.outputs.namespace }}
     steps:
+    - name: Output Node Name
+      shell: bash
+      run: |
+        echo ${K8S_NODE_NAME}
     - uses: actions/checkout@v4
     - name: Deploy Operator
       id: deploy-operator-step
@@ -358,9 +548,12 @@ jobs:
       run: |
         set -x
 
-        # Set namespace using branch
-        BRANCH_SANITIZED="${BRANCH/\//-}"
-        NAMESPACE="gh-job-id-${{ github.run_id }}-${BRANCH_SANITIZED}-deploy-tests"
+        # Set namespace
+        # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
+        BRANCH_SANITIZED="${BRANCH//\//-}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
+        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+        NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
         echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
 
         # Setup kubeconfig
@@ -412,12 +605,15 @@ jobs:
 
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # TODO: Uncomment this when we have a way to test the deploy-test-vllm job in CI.
+    #if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: github.event.inputs.run_deploy_operator
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         profile:
           - agg
@@ -431,6 +627,10 @@ jobs:
       DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
       MODEL_NAME: "Qwen/Qwen3-0.6B"
     steps: &deploy-test-steps
+    - name: Output Node Name
+      shell: bash
+      run: |
+        echo ${K8S_NODE_NAME}
     - uses: actions/checkout@v4
     - name: Setup Kubeconfig
       env:
@@ -455,6 +655,7 @@ jobs:
         export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
         export KUBE_NS=$NAMESPACE
         export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
+        echo "GRAPH_NAME=${GRAPH_NAME}" >> $GITHUB_ENV
         # Update the deployment file in-place
         yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE
 
@@ -471,7 +672,7 @@ jobs:
         export GRAPH_NAME=$(yq e '.metadata.name' $DEPLOYMENT_FILE)
         echo "Waiting for all pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
         # Wait for all pods with the deployment label to be ready
-        kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1000s
+        kubectl wait --for=condition=ready pod -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${KUBE_NS} --timeout=1800s
 
         # Debug: Show final pod statuses for the deployment
         echo "=== FINAL POD STATUSES ==="
@@ -479,7 +680,7 @@ jobs:
         echo ""
 
         kubectl get all -n $KUBE_NS
-        export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+        export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} | tail -n1 | awk '{print $1}')
         export CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${KUBE_NS} -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
         echo "Container port is ${CONTAINER_PORT}"
         kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${KUBE_NS} &
@@ -547,7 +748,6 @@ jobs:
       timeout-minutes: 5
       env:
         NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-        PROFILE: ${{ matrix.profile }}
       run: |
         set -x
         export KUBECONFIG=$(pwd)/.kubeconfig
@@ -557,17 +757,19 @@ jobs:
         kubectl get all
 
         echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
-        PROFILE_SANITIZED="${PROFILE/_/-}"
-        kubectl delete dynamographdeployments $FRAMEWORK-$PROFILE_SANITIZED -n $NAMESPACE || true
+        kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE || true
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # TODO: Uncomment this when we have a way to test the deploy-test-sglang job in CI.
+    #if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: github.event.inputs.run_deploy_operator
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         profile:
           - agg
@@ -582,12 +784,15 @@ jobs:
 
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    # TODO: Uncomment this when we have a way to test the deploy-test-trtllm job in CI.
+    #if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: github.event.inputs.run_deploy_operator
     needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         profile:
           - agg
@@ -604,9 +809,15 @@ jobs:
 
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
-    if: always()
+    # TODO: Uncomment the below if statement when we have a way to test the cleanup job in CI.
+    # if: always()
+    if: github.event.inputs.run_deploy_operator
     needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
     steps:
+    - name: Output Node Name
+      shell: bash
+      run: |
+        echo ${K8S_NODE_NAME}
     - uses: actions/checkout@v4
     - name: Setup Kubeconfig
       env:

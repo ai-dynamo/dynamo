@@ -17,13 +17,11 @@ NUM_GPUS_PER_NODE=${NUM_GPUS_PER_NODE:-4}
 
 NUM_PREFILL_NODES=${NUM_PREFILL_NODES:-4}
 NUM_PREFILL_WORKERS=${NUM_PREFILL_WORKERS:-1}
-PREFILL_ENGINE_CONFIG="${PREFILL_ENGINE_CONFIG:-/mnt/recipes/deepseek-r1/trtllm/disagg/wide_ep/wide_ep_prefill.yaml}"
+PREFILL_ENGINE_CONFIG="${PREFILL_ENGINE_CONFIG:-/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/disagg/wide_ep/wide_ep_prefill.yaml}"
 
 NUM_DECODE_NODES=${NUM_DECODE_NODES:-4}
 NUM_DECODE_WORKERS=${NUM_DECODE_WORKERS:-1}
-DECODE_ENGINE_CONFIG="${DECODE_ENGINE_CONFIG:-/mnt/recipes/deepseek-r1/trtllm/disagg/wide_ep/wide_ep_decode.yaml}"
-
-DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"decode_first"}
+DECODE_ENGINE_CONFIG="${DECODE_ENGINE_CONFIG:-/mnt/examples/backends/trtllm/engine_configs/deepseek-r1/disagg/wide_ep/wide_ep_decode.yaml}"
 
 # Automate settings of certain variables for convenience, but you are free
 # to manually set these for more control as well.
@@ -70,7 +68,7 @@ for ((i=1; i<=${NUM_PREFILL_WORKERS}; i++)); do
     --oversubscribe \
     --container-image "${IMAGE}" \
     --container-mounts "${MOUNTS}" \
-    --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,DISAGGREGATION_STRATEGY,ENGINE_CONFIG \
+    --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,ENGINE_CONFIG \
     --verbose \
     --label \
     -A "${ACCOUNT}" \
@@ -90,7 +88,7 @@ for ((i=1; i<=${NUM_DECODE_WORKERS}; i++)); do
     --oversubscribe \
     --container-image "${IMAGE}" \
     --container-mounts "${MOUNTS}" \
-    --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,DISAGGREGATION_STRATEGY,ENGINE_CONFIG \
+    --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,ENGINE_CONFIG \
     --verbose \
     --label \
     -A "${ACCOUNT}" \

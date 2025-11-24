@@ -25,6 +25,8 @@ While this guide does not use Prometheus, it assumes Grafana is pre-installed wi
 
 ### 3. Environment Variables
 
+#### Kubernetes Setup Variables
+
 The following env variables are set:
 - `MONITORING_NAMESPACE`: The namespace where Loki is installed
 - `DYN_NAMESPACE`: The namespace where Dynamo Cloud Operator is installed
@@ -33,6 +35,14 @@ The following env variables are set:
 export MONITORING_NAMESPACE=monitoring
 export DYN_NAMESPACE=dynamo-system
 ```
+
+#### Dynamo Logging Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `DYN_LOGGING_JSONL` | Enable JSONL logging format (required for Loki) | `true` |
+| `DYN_LOG` | Log levels per target `<default_level>,<module_path>=<level>,<module_path>=<level>` | `DYN_LOG=info,dynamo_runtime::system_status_server:trace` |
+| `DYN_LOG_USE_LOCAL_TZ` | Use local timezone for timestamps | `true` |
 
 ## Installation Steps
 
@@ -46,7 +56,7 @@ helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update
 
 # Install Loki
-helm install --values deploy/logging/values/loki-values.yaml loki grafana/loki -n $MONITORING_NAMESPACE
+helm install --values deploy/observability/k8s/logging/values/loki-values.yaml loki grafana/loki -n $MONITORING_NAMESPACE
 ```
 
 Our configuration (`loki-values.yaml`) sets up Loki in a simple configuration that is suitable for testing and development. It uses a local MinIO for storage. The installation pods can be viewed with:
@@ -60,7 +70,7 @@ Next, install the Grafana Alloy collector to gather logs from your Kubernetes cl
 
 ```bash
 # Generate a custom values file with the namespace information
-envsubst < deploy/logging/values/alloy-values.yaml > alloy-custom-values.yaml
+envsubst < deploy/observability/k8s/logging/values/alloy-values.yaml > alloy-custom-values.yaml
 
 # Install the collector
 helm install --values alloy-custom-values.yaml alloy grafana/k8s-monitoring -n $MONITORING_NAMESPACE
@@ -110,10 +120,10 @@ Since we are using Grafana with the Prometheus Operator, we can simply apply the
 
 ```bash
 # Configure Grafana with the Loki datasource
-envsubst < deploy/logging/grafana/loki-datasource.yaml | kubectl apply -n $MONITORING_NAMESPACE -f -
+envsubst < deploy/observability/k8s/logging/grafana/loki-datasource.yaml | kubectl apply -n $MONITORING_NAMESPACE -f -
 
 # Configure Grafana with the Dynamo Logs dashboard
-envsubst < deploy/logging/grafana/logging-dashboard.yaml | kubectl apply -n $MONITORING_NAMESPACE -f -
+envsubst < deploy/observability/k8s/logging/grafana/logging-dashboard.yaml | kubectl apply -n $MONITORING_NAMESPACE -f -
 ```
 
 > [!Note]
@@ -141,4 +151,4 @@ kubectl port-forward svc/prometheus-grafana 3000:80 -n $MONITORING_NAMESPACE
 
 If everything is working, under Home > Dashboards > Dynamo Logs, you should see a dashboard that can be used to view the logs associated with our DynamoGraphDeployments
 
-The dashboard enables filtering by DynamoGraphDeployment, namespace, and component type (e.g frontend, worker, etc).
+The dashboard enables filtering by DynamoGraphDeployment, namespace, and component type (e.g., frontend, worker, etc.).

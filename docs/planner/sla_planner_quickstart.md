@@ -58,7 +58,6 @@ The Dynamo Operator watches for DGDRs and automatically:
 Before creating a DGDR, ensure:
 - **Dynamo platform installed** with the operator running (see [Installation Guide](/docs/kubernetes/installation_guide.md))
 - **[kube-prometheus-stack](/docs/kubernetes/observability/metrics.md) installed and running** (required for SLA planner)
-- **Profiling PVC created** (see [Benchmarking Resource Setup](/deploy/utils/README.md#benchmarking-resource-setup#BenchmarkingResourceSetup))
 - **Image pull secrets configured** if using private registries (typically `nvcr-imagepullsecret` for NVIDIA images)
 - **Sufficient GPU resources** available in your cluster for profiling
 - **Runtime images available** that contain both profiler and runtime components
@@ -230,7 +229,7 @@ sweep:
 sweep:
   use_ai_configurator: true
   aic_system: h200_sxm
-  aic_model_name: QWEN3_32B
+  aic_hf_id: Qwen/Qwen3-32B
   aic_backend_version: "0.20.0"
 ```
 
@@ -315,7 +314,8 @@ profilingConfig:
 
     # Profiling sweep settings (optional)
     sweep:
-      force_rerun: false
+      prefill_interpolation_granularity: 16  # Number of samples for prefill ISL sweep
+      decode_interpolation_granularity: 6    # Number of samples for decode sweep
 ```
 
 > **Note**: `engine.config` is a **file path** to a DGD YAML file, not inline configuration. Use ConfigMapRef (recommended) or leave it unset to auto-generate.
@@ -345,25 +345,56 @@ DGDRs are **immutable** - if you need to update SLAs or configuration:
 
 ### Manual Deployment Control
 
-Disable auto-deployment to review configurations before deploying:
+There are two ways to manually control deployment after profiling:
+
+#### Option 1: Use DGDR-Generated Configuration (Recommended)
+
+Disable auto-deployment to review the generated DGD before applying:
 
 ```yaml
 spec:
   autoApply: false
 ```
 
-Then manually apply the generated DGD:
+Then manually extract and apply the generated DGD:
 
 ```bash
-# Extract generated config
-kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedConfig}' > my-dgd.yaml
+# Extract generated DGD from DGDR status
+kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedDeployment}' | kubectl apply -f -
 
-# Review and modify if needed
+# Or save to file first for review/modification
+kubectl get dgdr sla-aic -n $NAMESPACE -o jsonpath='{.status.generatedDeployment}' > my-dgd.yaml
+
 vi my-dgd.yaml
-
-# Deploy manually
 kubectl apply -f my-dgd.yaml -n $NAMESPACE
 ```
+
+The generated DGD includes optimized configurations and the SLA planner component. The required `planner-profile-data` ConfigMap is automatically created when profiling completes, so the DGD will deploy successfully.
+
+#### Option 2: Use Standalone Planner Templates (Advanced)
+
+For advanced use cases, you can manually deploy using the standalone planner templates in `examples/backends/*/deploy/disagg_planner.yaml`:
+
+```bash
+# After profiling completes, profiling data is automatically stored in ConfigMaps
+
+# OPTIONAL: Inspect profiling results stored in ConfigMaps
+# View the generated DGD configuration
+kubectl get configmap dgdr-output-<dgdr-name> -n $NAMESPACE -o yaml
+
+# View the planner profiling data (JSON format)
+kubectl get configmap planner-profile-data -n $NAMESPACE -o yaml
+
+# Update the PROMETHEUS_ENDPOINT environment variable in the planner template
+# to match your cluster's Prometheus service location (see comments in the template)
+
+# Update backend planner manifest as needed, then deploy
+kubectl apply -f examples/backends/<backend>/deploy/disagg_planner.yaml -n $NAMESPACE
+```
+
+> **Note**: The standalone templates are provided as examples and may need customization for your model and requirements. The DGDR-generated configuration (Option 1) is recommended as it's automatically tuned to your profiling results and SLA targets.
+>
+> **Important - Prometheus Configuration**: The planner queries Prometheus to get frontend request metrics for scaling decisions. If you see errors like "Failed to resolve prometheus service", ensure the `PROMETHEUS_ENDPOINT` environment variable in your planner configuration correctly points to your Prometheus service. See the comments in the example templates for details.
 
 ### Relationship to DynamoGraphDeployment (DGD)
 
@@ -381,6 +412,46 @@ metadata:
   labels:
     dgdr.nvidia.com/name: sla-aic
     dgdr.nvidia.com/namespace: your-namespace
+```
+
+### Accessing Detailed Profiling Artifacts
+
+By default, profiling jobs save essential data to ConfigMaps for planner integration. For advanced users who need access to detailed artifacts (logs, performance plots, AIPerf results, etc), configure the DGDR to use `dynamo-pvc`. This is optional and will not affect the functionality of profiler or Planner.
+
+**What's available in ConfigMaps (always created):**
+- Generated DGD configuration
+- Profiling data for Planner (`.json` files)
+
+**What's available in PVC if attached to DGDR (optional):**
+- Performance plots (PNGs)
+- DGD configuration and logs of all services for each profiled deployment
+- AIPerf profiling artifacts for each AIPerf run
+- Raw profiling data (`.npz` files)
+- Profiler log
+
+**Setup:**
+
+1. Set up the benchmarking PVC:
+```bash
+export NAMESPACE=your-namespace
+deploy/utils/setup_benchmarking_resources.sh
+```
+
+2. Add `outputPVC` to your DGDR's `profilingConfig`:
+```yaml
+spec:
+  profilingConfig:
+    outputPVC: "dynamo-pvc"
+    config:
+      # ... rest of config
+```
+
+3. After profiling completes, access results:
+```bash
+kubectl apply -f deploy/utils/manifests/pvc-access-pod.yaml -n $NAMESPACE
+kubectl wait --for=condition=Ready pod/pvc-access-pod -n $NAMESPACE --timeout=60s
+kubectl cp $NAMESPACE/pvc-access-pod:/data ./profiling-results
+kubectl delete pod pvc-access-pod -n $NAMESPACE
 ```
 
 ## Troubleshooting
