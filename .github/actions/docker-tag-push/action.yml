@@ -1,3 +1,4 @@
+name: 'Docker Tag and Push'
 description: 'Tag and Push Docker Images'
 
 inputs:
@@ -48,47 +49,14 @@ runs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: ECR Login
-      shell: bash
-      if: ${{ inputs.aws_push == 'true' }}
-      env:
-        AWS_ACCOUNT_ID: ${{ inputs.aws_account_id || env.AWS_ACCOUNT_ID }}
-        AWS_DEFAULT_REGION: ${{ inputs.aws_default_region || env.AWS_DEFAULT_REGION }}
-        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id || env.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key || env.AWS_SECRET_ACCESS_KEY }}
-      run: |
-        retry=0
-        until [ $retry -ge 3 ]; do
-          if aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | \
-             docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"; then
-            break
-          fi
-          retry=$((retry+1))
-          echo "ECR login failed (attempt ${retry}/3). Retrying in 10s..."
-          sleep 10
-        done
-        if [ $retry -ge 3 ]; then
-          echo "ECR login failed after 3 attempts" >&2
-          exit 1
-        fi
-
-    - name: ACR Login
-      shell: bash
-      if: ${{ inputs.azure_push == 'true' }}
-      run: |
-        retry=0
-        until [ $retry -ge 3 ]; do
-          if echo "${{ inputs.azure_acr_password }}" | docker login ${{ inputs.azure_acr_hostname || env.AZURE_ACR_HOSTNAME }} --username ${{ inputs.azure_acr_user }} --password-stdin; then
-            break
-          fi
-          retry=$((retry+1))
-          echo "ACR login failed (attempt ${retry}/3). Retrying in 10s..."
-          sleep 10
-        done
-        if [ $retry -ge 3 ]; then
-          echo "ACR login failed after 3 attempts" >&2
-          exit 1
-        fi
+    - name: Login to Container Registries
+      uses: ./.github/actions/docker-login
+      with:
+        aws_default_region: ${{ inputs.aws_push == 'true' && inputs.aws_default_region || '' }}
+        aws_account_id: ${{ inputs.aws_push == 'true' && inputs.aws_account_id || '' }}
+        azure_acr_hostname: ${{ inputs.azure_push == 'true' && inputs.azure_acr_hostname || '' }}
+        azure_acr_user: ${{ inputs.azure_push == 'true' && inputs.azure_acr_user || '' }}
+        azure_acr_password: ${{ inputs.azure_push == 'true' && inputs.azure_acr_password || '' }}
 
     - name: ECR Tag and Push
       shell: bash
@@ -96,30 +64,16 @@ runs:
       env:
         LOCAL_IMAGE: ${{ inputs.local_image }}
         PUSH_TAGS: ${{ inputs.push_tags }}
-        AWS_ACCOUNT_ID: ${{ inputs.aws_account_id || env.AWS_ACCOUNT_ID }}
-        AWS_DEFAULT_REGION: ${{ inputs.aws_default_region || env.AWS_DEFAULT_REGION }}
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
-        ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-
+        set -euo pipefail
         while IFS= read -r TAG; do
           if [ -z "$TAG" ]; then
             continue
           fi
           echo "Tagging and pushing: ${ECR_HOSTNAME}/${TAG}"
           docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${TAG}"
-          retry=0
-          until [ $retry -ge 3 ]; do
-            if docker push "${ECR_HOSTNAME}/${TAG}"; then
-              break
-            fi
-            retry=$((retry+1))
-            echo "ECR push failed (attempt ${retry}/3). Retrying in 15s..."
-            sleep 15
-          done
-          if [ $retry -ge 3 ]; then
-            echo "ECR push failed after 3 attempts" >&2
-            exit 1
-          fi
+          docker push "${ECR_HOSTNAME}/${TAG}"
         done <<< "$PUSH_TAGS"
 
     - name: ACR Tag and Push
@@ -128,25 +82,14 @@ runs:
       env:
         LOCAL_IMAGE: ${{ inputs.local_image }}
         PUSH_TAGS: ${{ inputs.push_tags }}
-        AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname || env.AZURE_ACR_HOSTNAME }}
+        AZURE_ACR_HOSTNAME: ${{ inputs.azure_acr_hostname }}
       run: |
+        set -euo pipefail
         while IFS= read -r TAG; do
           if [ -z "$TAG" ]; then
             continue
           fi
           echo "Tagging and pushing: ${AZURE_ACR_HOSTNAME}/${TAG}"
           docker tag "${LOCAL_IMAGE}" "${AZURE_ACR_HOSTNAME}/${TAG}"
-          retry=0
-          until [ $retry -ge 3 ]; do
-            if docker push "${AZURE_ACR_HOSTNAME}/${TAG}"; then
-              break
-            fi
-            retry=$((retry+1))
-            echo "ACR push failed (attempt ${retry}/3). Retrying in 15s..."
-            sleep 15
-          done
-          if [ $retry -ge 3 ]; then
-            echo "ACR push failed after 3 attempts" >&2
-            exit 1
-          fi
+          docker push "${AZURE_ACR_HOSTNAME}/${TAG}"
         done <<< "$PUSH_TAGS"

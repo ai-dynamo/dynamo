@@ -67,9 +67,9 @@ runs:
         driver: docker
     - name: Login to NGC
       if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
-      shell: bash
-      run: |
-        echo "${{ inputs.ngc_ci_access_token }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+      uses: ./.github/actions/docker-login
+      with:
+        ngc_ci_access_token: ${{ inputs.ngc_ci_access_token }}
     - name: Cleanup
       if: always()
       shell: bash

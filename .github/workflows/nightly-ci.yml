@@ -40,10 +40,11 @@ jobs:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull existing framework image for cache
         shell: bash
         continue-on-error: true
@@ -115,10 +116,11 @@ jobs:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - uses: actions/checkout@v4
-      - name: Login to ECR
-        shell: bash
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull existing framework image for cache
         shell: bash
         continue-on-error: true
@@ -220,20 +222,19 @@ jobs:
           fi
 
           echo "Build succeeded. Proceeding with tests."
-      - name: Login to ECR
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull nightly image
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        uses: ./.github/actions/ecr-pull-image
-        with:
-          registry_image: ${{ env.REGISTRY_IMAGE }}
-          image_prefix: ${{ env.NIGHTLY_IMAGE_PREFIX }}
-          framework: ${{ matrix.framework }}
-          architecture: ${{ matrix.arch }}
-          ecr_hostname: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
@@ -291,20 +292,19 @@ jobs:
           fi
 
           echo "Build succeeded. Proceeding with tests."
-      - name: Login to ECR
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull nightly image
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        uses: ./.github/actions/ecr-pull-image
-        with:
-          registry_image: ${{ env.REGISTRY_IMAGE }}
-          image_prefix: ${{ env.NIGHTLY_IMAGE_PREFIX }}
-          framework: ${{ matrix.framework }}
-          architecture: ${{ matrix.arch }}
-          ecr_hostname: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
@@ -361,20 +361,19 @@ jobs:
           fi
 
           echo "Build succeeded. Proceeding with tests."
-      - name: Login to ECR
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull nightly image
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        uses: ./.github/actions/ecr-pull-image
-        with:
-          registry_image: ${{ env.REGISTRY_IMAGE }}
-          image_prefix: ${{ env.NIGHTLY_IMAGE_PREFIX }}
-          framework: ${{ matrix.framework }}
-          architecture: ${{ matrix.arch }}
-          ecr_hostname: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
@@ -431,20 +430,19 @@ jobs:
           fi
 
           echo "Build succeeded. Proceeding with tests."
-      - name: Login to ECR
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull nightly image
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        uses: ./.github/actions/ecr-pull-image
-        with:
-          registry_image: ${{ env.REGISTRY_IMAGE }}
-          image_prefix: ${{ env.NIGHTLY_IMAGE_PREFIX }}
-          framework: ${{ matrix.framework }}
-          architecture: ${{ matrix.arch }}
-          ecr_hostname: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
@@ -464,24 +462,44 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { framework: vllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
-          - { framework: vllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
-          - { framework: vllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and kvbm and not slow" }
-          - { framework: vllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
-          - { framework: vllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
-          - { framework: vllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
-          - { framework: trtllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
-          - { framework: trtllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
-          - { framework: trtllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and kvbm" }
-          - { framework: trtllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
-          - { framework: trtllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
-          - { framework: trtllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
-          - { framework: sglang, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
-          - { framework: sglang, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
-          - { framework: sglang, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and kvbm" }
-          - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
-          - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
-          - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
+        #TODO : revert this to use the below before merging.
+          # - { framework: vllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
+          # - { framework: vllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
+          # - { framework: vllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and kvbm and not slow" }
+          # - { framework: vllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
+          # - { framework: vllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
+          # - { framework: vllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
+          # - { framework: trtllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
+          # - { framework: trtllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
+          # - { framework: trtllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and kvbm" }
+          # - { framework: trtllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
+          # - { framework: trtllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
+          # - { framework: trtllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
+          # - { framework: sglang, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
+          # - { framework: sglang, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
+          # - { framework: sglang, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and kvbm" }
+          # - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
+          # - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
+          # - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
+          - { framework: vllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "router and not slow" }
+          - { framework: vllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "planner and not slow" }
+          - { framework: vllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "kvbm and not slow" }
+          - { framework: vllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "router and not slow" }
+          - { framework: vllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "planner and not slow" }
+          - { framework: vllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "kvbm and not slow" }
+          - { framework: trtllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "router and not slow" }
+          - { framework: trtllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "planner and not slow" }
+          - { framework: trtllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "kvbm and not slow" }
+          - { framework: trtllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "router and not slow" }
+          - { framework: trtllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "planner and not slow" }
+          - { framework: trtllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "kvbm and not slow" }
+          - { framework: sglang, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "router and not slow" }
+          - { framework: sglang, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "planner and not slow" }
+          - { framework: sglang, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "kvbm and not slow" }
+          - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "router and not slow" }
+          - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "planner and not slow" }
+          - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "kvbm and not slow" }
+
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
@@ -520,20 +538,19 @@ jobs:
           fi
 
           echo "Build succeeded. Proceeding with tests."
-      - name: Login to ECR
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull nightly image
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
         run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
-      - name: Pull nightly image
-        uses: ./.github/actions/ecr-pull-image
-        with:
-          registry_image: ${{ env.REGISTRY_IMAGE }}
-          image_prefix: ${{ env.NIGHTLY_IMAGE_PREFIX }}
-          framework: ${{ matrix.framework }}
-          architecture: ${{ matrix.arch }}
-          ecr_hostname: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Component Tests (${{ matrix.component }})
         uses: ./.github/actions/pytest
         with:
@@ -644,21 +661,48 @@ jobs:
 
           if [ "$FAILED_COUNT" -eq 0 ]; then
             STATUS="Success ✅"
+            STATUS_EMOJI=":white_check_mark:"
           else
             STATUS="Failed ❌"
+            STATUS_EMOJI=":x:"
           fi
 
-          MESSAGE="Nightly CI Pipeline - ${STATUS}"
-          MESSAGE="${MESSAGE}\n\nSummary: ${SUCCESS_COUNT}/${TOTAL_JOBS} jobs passed"
+          # Main message with summary
+          SUMMARY_TEXT="*Nightly CI Pipeline - ${STATUS}*"$'\n'"Summary: ${SUCCESS_COUNT}/${TOTAL_JOBS} jobs passed"$'\n'"<${RUN_URL}|View Workflow Summary>"
 
-          if [ "$FAILED_COUNT" -gt 0 ]; then
-            FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | "  - " + .name' "$JOBS_JSON")
-            MESSAGE="${MESSAGE}\n\nFailed Jobs (${FAILED_COUNT}):\n${FAILED_JOBS}"
+          if [ "$FAILED_COUNT" -eq 0 ]; then
+            # Success - simple message
+            PAYLOAD=$(jq -n \
+              --arg text "$SUMMARY_TEXT" \
+              '{text: $text}')
+          else
+            # Failed - message with blocks
+            FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | "• " + .name' "$JOBS_JSON")
+            FAILED_JOBS_TEXT="*Failed Jobs (${FAILED_COUNT}):*"$'\n'"${FAILED_JOBS}"
+
+            PAYLOAD=$(jq -n \
+              --arg summary "$SUMMARY_TEXT" \
+              --arg failed "$FAILED_JOBS_TEXT" \
+              '{
+                text: $summary,
+                blocks: [
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: $summary
+                    }
+                  },
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: $failed
+                    }
+                  }
+                ]
+              }')
           fi
-
-          MESSAGE="${MESSAGE}\n\nView Workflow Summary: ${RUN_URL}"
-
-          PAYLOAD=$(jq -n --arg text "$MESSAGE" '{text: $text}')
 
           if curl -sSf -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$SLACK_WEBHOOK_URL"; then
             echo "Slack notification sent successfully"
