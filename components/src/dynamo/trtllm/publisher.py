@@ -457,9 +457,9 @@ class Publisher:
             if data["type"] == "stored":
                 self.processing_initial_created_events = False
                 parent_hash = _to_signed_i64(data["parent_hash"])
-                token_ids = []
-                num_block_tokens = []
-                block_hashes = []
+                token_ids: list[int] = []
+                num_block_tokens: list[int] = []
+                block_hashes: list[int] = []
                 for block in data["blocks"]:
                     token_num_in_block = len(block["tokens"])
                     block_hash = _to_signed_i64(block["block_hash"])
