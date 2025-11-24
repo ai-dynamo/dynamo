@@ -24,7 +24,7 @@ Dynamo supports multimodal models with vLLM v1. In general, multimodal models ca
 
 > [!IMPORTANT]
 > **Security Requirement**: All multimodal workers require the `--enable-multimodal` flag to be explicitly set at startup. This is a security feature to prevent unintended processing of multimodal data from untrusted sources. Workers will fail at startup if multimodal flags (e.g., `--multimodal-worker`, `--multimodal-processor`) are used without `--enable-multimodal`.
-This flag is analogus to `--enable-mm-embeds` in vllm serve.
+This flag is analogus to `--enable-mm-embeds` in vllm serve but also extends it to all multimodal content (url, embeddings, b64).
 
 # Multimodal EPD Deployment Examples
 
