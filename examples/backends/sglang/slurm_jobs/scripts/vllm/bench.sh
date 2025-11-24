@@ -27,7 +27,7 @@ chosen_req_rate=$8
 
 echo "Config ${chosen_isl}; ${chosen_osl}; ${chosen_concurrencies[@]}; ${chosen_req_rate}"
 
-wait_for_model_timeout=1500
+wait_for_model_timeout=3000
 wait_for_model_check_interval=5
 wait_for_model_report_interval=60
 
