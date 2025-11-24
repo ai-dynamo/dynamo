@@ -107,11 +107,11 @@ impl AmSyncBuilder {
         self
     }
 
-    pub fn send(self) -> impl Future<Output = Result<()>> {
+    pub fn send(self) -> SyncResult {
         self.inner.sync()
     }
 
-    pub fn send_to(self, target: InstanceId) -> impl Future<Output = Result<()>> {
+    pub fn send_to(self, target: InstanceId) -> SyncResult {
         self.inner.instance(target).sync()
     }
 }
@@ -153,11 +153,11 @@ impl UnaryBuilder {
         self
     }
 
-    pub fn send(self) -> impl Future<Output = Result<Bytes>> {
+    pub fn send(self) -> UnaryResult {
         self.inner.unary()
     }
 
-    pub fn send_to(self, target: InstanceId) -> impl Future<Output = Result<Bytes>> {
+    pub fn send_to(self, target: InstanceId) -> UnaryResult {
         self.inner.instance(target).unary()
     }
 }
@@ -204,11 +204,11 @@ where
         self
     }
 
-    pub fn send(self) -> impl Future<Output = Result<R>> {
+    pub fn send(self) -> TypedUnaryResult<R> {
         self.inner.typed()
     }
 
-    pub fn send_to(self, target: InstanceId) -> impl Future<Output = Result<R>> {
+    pub fn send_to(self, target: InstanceId) -> TypedUnaryResult<R> {
         self.inner.instance(target).typed()
     }
 }

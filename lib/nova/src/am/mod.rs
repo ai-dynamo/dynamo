@@ -27,8 +27,7 @@ use crate::am::handlers::events::EventMessenger;
 use crate::events::EventHandle;
 use tracing::warn;
 
-// Response result types are implementation details (returned as impl Future)
-// and don't need to be publicly exported
+pub use client::builders::{SyncResult, TypedUnaryResult, UnaryResult};
 
 #[derive(Clone)]
 pub struct Nova {
