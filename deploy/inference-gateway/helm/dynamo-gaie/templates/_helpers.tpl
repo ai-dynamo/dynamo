@@ -66,6 +66,21 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Resolve the fully qualified Dynamo namespace as "<release namespace>-<dynamoGraphDeploymentName>"
+*/}}
+{{- define "dynamo-gaie.dynamoNamespace" -}}
+{{- $dgdName := (.Values.dynamoGraphDeploymentName | default "") | trim -}}
+{{- if not $dgdName }}
+{{- fail "set dynamoGraphDeploymentName to derive the Dynamo namespace" }}
+{{- end }}
+{{- $releaseNamespace := (.Release.Namespace | default "") | trim -}}
+{{- if not $releaseNamespace }}
+{{- fail "Release.Namespace must be set to derive the Dynamo namespace" }}
+{{- end }}
+{{- printf "%s-%s" $releaseNamespace $dgdName }}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "dynamo-gaie.serviceAccountName" -}}

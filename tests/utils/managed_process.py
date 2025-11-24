@@ -568,6 +568,41 @@ class ManagedProcess:
             return []
 
 
+class DynamoFrontendProcess(ManagedProcess):
+    """Process manager for Dynamo frontend"""
+
+    _logger = logging.getLogger()
+
+    def __init__(self, request):
+        command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
+
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
+        env = os.environ.copy()
+        env.pop("DYN_SYSTEM_PORT", None)
+
+        log_dir = f"{request.node.name}_frontend"
+
+        # Clean up any existing log directory from previous runs
+        try:
+            shutil.rmtree(log_dir)
+            self._logger.info(f"Cleaned up existing log directory: {log_dir}")
+        except FileNotFoundError:
+            # Directory doesn't exist, which is fine
+            pass
+
+        super().__init__(
+            command=command,
+            env=env,
+            display_output=True,
+            terminate_existing=True,
+            log_dir=log_dir,
+        )
+
+    def get_pid(self) -> int | None:
+        """Get the PID of the worker process"""
+        return self.proc.pid if self.proc else None
+
+
 def main():
     with ManagedProcess(
         command=[

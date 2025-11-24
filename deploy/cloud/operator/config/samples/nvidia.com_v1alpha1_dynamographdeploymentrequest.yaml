@@ -18,11 +18,18 @@ kind: DynamoGraphDeploymentRequest
 metadata:
   name: example-llm-sla
 spec:
-  # ModelName is a high-level identifier for the model being deployed
-  modelName: Qwen/Qwen3-0.6B
+  # Model is a high-level identifier for the model being deployed (required - injected into profilingConfig.config.deployment.model)
+  model: Qwen/Qwen3-0.6B
+
+  # Backend to use for profiling (required - injected into profilingConfig.config.engine.backend)
+  backend: trtllm
+
+  # ProfilerImage is the container image to use for profiling jobs (required)
+  profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.1"
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   # See benchmarks/profiler/utils/profiler_argparse.py for complete schema
+  # Note: deployment.model and engine.backend are automatically set from model and backend above
   profilingConfig:
     config:
       # Optional: Output directory for profiling results (defaults to /data in the Job)
@@ -30,9 +37,7 @@ spec:
 
       # Engine configuration
       engine:
-        backend: trtllm  # Inference backend: vllm, sglang, or trtllm
-        max_context_length: 16384  # Maximum context length supported by the model
-        is_moe_model: false  # Enable MoE model support (uses TEP/DEP instead of TP)
+        max_context_length: 16384  # will override max context length of the model if provided
 
       # Hardware configuration
       hardware:
@@ -42,14 +47,13 @@ spec:
 
       # Sweep/profiling configuration
       sweep:
-        skip_existing_results: true  # Skip configurations that already have results
         prefill_interpolation_granularity: 16  # Samples for TTFT interpolation
         decode_interpolation_granularity: 6  # Samples for ITL interpolation
 
         # AI Configurator mode (fast simulation-based profiling, 20-30 seconds)
         use_ai_configurator: false  # Set to false for online profiling (2-4 hours)
         aic_system: h200_sxm  # Target GPU system for AI Configurator
-        aic_model_name: QWEN3_0.6B  # Model name for AI Configurator
+        aic_hf_id: Qwen/Qwen3-0.6B  # HuggingFace model ID for AI Configurator
         aic_backend_version: "0.20.0"  # Backend version for AI Configurator
 
       # SLA targets for profiling

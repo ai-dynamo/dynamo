@@ -5,11 +5,12 @@ use anyhow::Context as _;
 use dynamo_llm::entrypoint::EngineConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
-use dynamo_runtime::distributed::DistributedConfig;
+use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
+use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
+use dynamo_runtime::transports::nats;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 mod flags;
-use either::Either;
 pub use flags::Flags;
 mod opt;
 pub use dynamo_llm::request_template::RequestTemplate;
@@ -29,6 +30,10 @@ pub async fn run(
         .model_path_pos
         .clone()
         .or_else(|| flags.model_path_flag.clone());
+
+    // Preserve the original model identifier before downloading (for default model name)
+    let original_model_identifier = maybe_remote_repo.as_ref().map(|p| p.display().to_string());
+
     let model_path = match maybe_remote_repo {
         None => None,
         Some(p) if p.exists() => {
@@ -49,7 +54,7 @@ pub async fn run(
 
     let mut builder = LocalModelBuilder::default();
     builder
-        .model_name(flags.model_name.clone())
+        .model_name(flags.model_name.clone().or(original_model_identifier))
         .kv_cache_block_size(flags.kv_cache_block_size)
         // Only set if user provides. Usually loaded from tokenizer_config.json
         .context_length(flags.context_length)
@@ -69,18 +74,22 @@ pub async fn run(
     // TODO: old, address this later:
     // If `in=dyn` we want the trtllm/sglang/vllm subprocess to listen on that endpoint.
     // If not, then the endpoint isn't exposed so we let LocalModel invent one.
-    let mut rt = Either::Left(runtime.clone());
     if let Input::Endpoint(path) = &in_opt {
         builder.endpoint_id(Some(path.parse().with_context(|| path.clone())?));
-
-        let dst_config = DistributedConfig::from_settings(flags.static_worker);
-        let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
-        rt = Either::Right(distributed_runtime);
-    };
-    if let Some(Output::Static(path)) = &out_opt {
-        builder.endpoint_id(Some(path.parse().with_context(|| path.clone())?));
     }
-
+    let selected_store: KeyValueStoreSelect = flags.store_kv.parse()?;
+    let request_plane: RequestPlaneMode = flags.request_plane.parse()?;
+    let dst_config = DistributedConfig {
+        store_backend: selected_store,
+        // We only need NATS here to monitor it's metrics, so only if it's our request plane.
+        nats_config: if request_plane.is_nats() {
+            Some(nats::ClientOptions::default())
+        } else {
+            None
+        },
+        request_plane,
+    };
+    let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
     let local_model = builder.build().await?;
 
     //
@@ -91,13 +100,19 @@ pub async fn run(
     print_cuda(&out_opt);
 
     // Now that we know the output we're targeting, check if we expect it to work
-    flags.validate(&in_opt, &out_opt)?;
+    flags.validate(&out_opt)?;
 
     // Make an engine from the local_model, flags and output.
-    let engine_config = engine_for(out_opt, flags.clone(), local_model, rt.clone()).await?;
+    let engine_config = engine_for(
+        out_opt,
+        flags.clone(),
+        local_model,
+        distributed_runtime.clone(),
+    )
+    .await?;
 
     // Run it from an input
-    dynamo_llm::entrypoint::input::run_input(rt, in_opt, engine_config).await?;
+    dynamo_llm::entrypoint::input::run_input(distributed_runtime, in_opt, engine_config).await?;
 
     Ok(())
 }
@@ -108,33 +123,23 @@ async fn engine_for(
     out_opt: Output,
     flags: Flags,
     local_model: LocalModel,
-    rt: Either<Runtime, DistributedRuntime>,
+    drt: DistributedRuntime,
 ) -> anyhow::Result<EngineConfig> {
     match out_opt {
         Output::Auto => {
             // Auto-discover backends
             Ok(EngineConfig::Dynamic(Box::new(local_model)))
         }
-        Output::Static(_) => {
-            // A single static backend, no etcd
-            Ok(EngineConfig::StaticRemote(Box::new(local_model)))
-        }
         Output::Echo => Ok(EngineConfig::StaticFull {
             model: Box::new(local_model),
             engine: dynamo_llm::engines::make_echo_engine(),
-            is_static: flags.static_worker,
         }),
         #[cfg(feature = "mistralrs")]
         Output::MistralRs => Ok(EngineConfig::StaticFull {
             engine: dynamo_engine_mistralrs::make_engine(&local_model).await?,
             model: Box::new(local_model),
-            is_static: flags.static_worker,
         }),
         Output::Mocker => {
-            let Either::Right(drt) = rt else {
-                panic!("Mocker requires a distributed runtime to run.");
-            };
-
             let args = flags.mocker_config();
             let endpoint = local_model.endpoint_id().clone();
 
@@ -144,7 +149,6 @@ async fn engine_for(
             Ok(EngineConfig::StaticCore {
                 engine,
                 model: Box::new(local_model),
-                is_static: flags.static_worker,
                 is_prefill: false,
             })
         }

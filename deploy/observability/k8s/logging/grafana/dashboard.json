@@ -1,0 +1,214 @@
+{
+    "annotations": {
+      "list": [
+        {
+          "builtIn": 1,
+          "datasource": {
+            "type": "grafana",
+            "uid": "-- Grafana --"
+          },
+          "enable": true,
+          "hide": true,
+          "iconColor": "rgba(0, 211, 255, 1)",
+          "name": "Annotations & Alerts",
+          "type": "dashboard"
+        }
+      ]
+    },
+    "editable": true,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 0,
+    "links": [],
+    "panels": [
+      {
+        "datasource": {
+          "type": "loki",
+          "uid": "$datasource"
+        },
+        "fieldConfig": {
+          "defaults": {},
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 21,
+          "w": 24,
+          "x": 0,
+          "y": 0
+        },
+        "id": 1,
+        "options": {
+          "dedupStrategy": "none",
+          "enableInfiniteScrolling": false,
+          "enableLogDetails": true,
+          "prettifyLogMessage": false,
+          "showCommonLabels": false,
+          "showLabels": false,
+          "showTime": false,
+          "sortOrder": "Descending",
+          "wrapLogMessage": false
+        },
+        "pluginVersion": "12.1.0",
+        "targets": [
+          {
+            "datasource": {
+              "type": "loki",
+              "uid": "$datasource"
+            },
+            "direction": "backward",
+            "editorMode": "builder",
+            "expr": "{namespace=~\"$namespace\", nvidia_com_dynamo_graph_deployment_name=~\"$dynamographdeployment\", nvidia_com_dynamo_component_type=~\"$component\"} |= \"$search\" |= \"$trace_id\"",
+            "queryType": "range",
+            "refId": "A"
+          }
+        ],
+        "title": "DynamoGraph Logs",
+        "type": "logs"
+      }
+    ],
+    "preload": false,
+    "schemaVersion": 41,
+    "tags": ["dynamograph", "logs"],
+    "templating": {
+      "list": [
+        {
+          "current": {
+            "selected": true,
+            "text": "Loki",
+            "value": "Loki"
+          },
+          "hide": 0,
+          "includeAll": false,
+          "label": "Datasource",
+          "multi": false,
+          "name": "datasource",
+          "options": [],
+          "query": "loki",
+          "queryValue": "",
+          "refresh": 1,
+          "regex": "",
+          "skipUrlSync": false,
+          "type": "datasource"
+        },
+        {
+          "allValue": ".+",
+          "current": {
+            "selected": true,
+            "text": ["All"],
+            "value": ["$__all"]
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "definition": "label_values(namespace)",
+          "hide": 0,
+          "includeAll": true,
+          "label": "Namespace",
+          "multi": true,
+          "name": "namespace",
+          "options": [],
+          "query": "label_values(namespace)",
+          "refresh": 1,
+          "regex": ".+",
+          "skipUrlSync": false,
+          "sort": 1,
+          "type": "query"
+        },
+        {
+          "allValue": ".+",
+          "current": {
+            "selected": true,
+            "text": ["All"],
+            "value": ["$__all"]
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "definition": "label_values(nvidia_com_dynamo_graph_deployment_name)",
+          "hide": 0,
+          "includeAll": true,
+          "label": "DynamoGraph Deployment",
+          "multi": true,
+          "name": "dynamographdeployment",
+          "options": [],
+          "query": "label_values(nvidia_com_dynamo_graph_deployment_name)",
+          "refresh": 1,
+          "regex": "",
+          "skipUrlSync": false,
+          "sort": 1,
+          "type": "query"
+        },
+        {
+          "allValue": ".+",
+          "current": {
+            "selected": true,
+            "text": ["All"],
+            "value": ["$__all"]
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "$datasource"
+          },
+          "definition": "label_values(nvidia_com_dynamo_component_type)",
+          "hide": 0,
+          "includeAll": true,
+          "label": "Component",
+          "multi": true,
+          "name": "component",
+          "options": [],
+          "query": "label_values(nvidia_com_dynamo_component_type)",
+          "refresh": 1,
+          "regex": "",
+          "skipUrlSync": false,
+          "sort": 1,
+          "type": "query"
+        },
+        {
+          "current": {
+            "selected": true,
+            "text": "",
+            "value": ""
+          },
+          "label": "Trace ID",
+          "name": "trace_id",
+          "options": [
+            {
+              "selected": true,
+              "text": "",
+              "value": ""
+            }
+          ],
+          "query": "",
+          "type": "textbox"
+        },
+        {
+          "current": {
+            "selected": true,
+            "text": "",
+            "value": ""
+          },
+          "label": "Search",
+          "name": "search",
+          "options": [
+            {
+              "selected": true,
+              "text": "",
+              "value": ""
+            }
+          ],
+          "query": "",
+          "type": "textbox"
+        }
+      ]
+    },
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "timepicker": {},
+    "timezone": "browser",
+    "title": "DynamoGraph Logs",
+    "description": "Dashboard for viewing DynamoGraph deployment logs across components and namespaces",
+    "version": 1
+  }

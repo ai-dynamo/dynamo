@@ -27,38 +27,38 @@ VSWA is a mechanism in which a model’s layers alternate between multiple slidi
 
 ## Aggregated Serving
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 export MODEL_PATH=google/gemma-3-1b-it
 export SERVED_MODEL_NAME=$MODEL_PATH
-export AGG_ENGINE_ARGS=$DYNAMO_HOME/recipes/gemma3/trtllm/vswa_agg.yaml
+export AGG_ENGINE_ARGS=$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gemma3/vswa_agg.yaml
 ./launch/agg.sh
 ```
 
 ## Aggregated Serving with KV Routing
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 export MODEL_PATH=google/gemma-3-1b-it
 export SERVED_MODEL_NAME=$MODEL_PATH
-export AGG_ENGINE_ARGS=$DYNAMO_HOME/recipes/gemma3/trtllm/vswa_agg.yaml
+export AGG_ENGINE_ARGS=$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gemma3/vswa_agg.yaml
 ./launch/agg_router.sh
 ```
 
 ## Disaggregated Serving
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 export MODEL_PATH=google/gemma-3-1b-it
 export SERVED_MODEL_NAME=$MODEL_PATH
-export PREFILL_ENGINE_ARGS=$DYNAMO_HOME/recipes/gemma3/trtllm/vswa_prefill.yaml
-export DECODE_ENGINE_ARGS=$DYNAMO_HOME/recipes/gemma3/trtllm/vswa_decode.yaml
+export PREFILL_ENGINE_ARGS=$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gemma3/vswa_prefill.yaml
+export DECODE_ENGINE_ARGS=$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gemma3/vswa_decode.yaml
 ./launch/disagg.sh
 ```
 
 ## Disaggregated Serving with KV Routing
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 export MODEL_PATH=google/gemma-3-1b-it
 export SERVED_MODEL_NAME=$MODEL_PATH
-export PREFILL_ENGINE_ARGS=$DYNAMO_HOME/recipes/gemma3/trtllm/vswa_prefill.yaml
-export DECODE_ENGINE_ARGS=$DYNAMO_HOME/recipes/gemma3/trtllm/vswa_decode.yaml
+export PREFILL_ENGINE_ARGS=$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gemma3/vswa_prefill.yaml
+export DECODE_ENGINE_ARGS=$DYNAMO_HOME/examples/backends/trtllm/engine_configs/gemma3/vswa_decode.yaml
 ./launch/disagg_router.sh
 ```

@@ -37,6 +37,10 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+const (
+	defaultNamespace = "default"
+)
+
 // MockRBACManager implements RBACManager for testing
 type MockRBACManager struct {
 	EnsureServiceAccountWithRBACFunc func(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error
@@ -72,9 +76,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 	BeforeEach(func() {
 		recorder = record.NewFakeRecorder(100)
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
-			Client:        k8sClient,
-			Recorder:      recorder,
-			ProfilerImage: "test-profiler:latest",
+			Client:   k8sClient,
+			Recorder: recorder,
 			Config: commonController.Config{
 				RestrictedNamespace: "",
 				RBAC: commonController.RBACConfig{
@@ -89,7 +92,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 		It("Should validate spec and transition to Pending", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-initial"
-			namespace := "default"
+			namespace := defaultNamespace
 
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -97,11 +100,13 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -119,7 +124,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
-			defer k8sClient.Delete(ctx, dgdr)
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// First reconcile: Empty -> Pending
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
@@ -133,20 +138,20 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			// Check status
 			Eventually(func() string {
 				var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
-				k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
+				_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
 				return updated.Status.State
 			}, timeout, interval).Should(Equal(StatePending))
 
 			// Verify observedGeneration is set
 			var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
-			k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
+			_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
 			Expect(updated.Status.ObservedGeneration).Should(Equal(updated.Generation))
 		})
 
-		It("Should fail validation with missing config", func() {
+		It("Should pass validation with minimal config", func() {
 			ctx := context.Background()
-			dgdrName := "test-dgdr-invalid"
-			namespace := "default"
+			dgdrName := "test-dgdr-minimal"
+			namespace := defaultNamespace
 
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -154,16 +159,24 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
-						Config: createTestConfig(map[string]interface{}{}),
+						ProfilerImage: "test-profiler:latest",
+						Config: createTestConfig(map[string]interface{}{
+							"sla": map[string]interface{}{
+								"ttft": 100.0,
+								"itl":  1500.0,
+							},
+						}),
 					},
 				},
 			}
 
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
-			defer k8sClient.Delete(ctx, dgdr)
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
-			// Reconcile
+			// Reconcile - should succeed with minimal config
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Name:      dgdrName,
@@ -172,12 +185,12 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Check status transitions to Failed
+			// Check status transitions to Pending (not Failed)
 			Eventually(func() string {
 				var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
-				k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
+				_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
 				return updated.Status.State
-			}, timeout, interval).Should(Equal(StateFailed))
+			}, timeout, interval).Should(Equal(StatePending))
 		})
 	})
 
@@ -185,7 +198,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 		It("Should create online profiling job", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-profiling-online"
-			namespace := "default"
+			namespace := defaultNamespace
 
 			// Create ConfigMap for DGD base config
 			configMap := &corev1.ConfigMap{
@@ -198,7 +211,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, configMap)).Should(Succeed())
-			defer k8sClient.Delete(ctx, configMap)
+			defer func() { _ = k8sClient.Delete(ctx, configMap) }()
 
 			// Create ServiceAccount
 			sa := &corev1.ServiceAccount{
@@ -208,7 +221,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, sa)).Should(Succeed())
-			defer k8sClient.Delete(ctx, sa)
+			defer func() { _ = k8sClient.Delete(ctx, sa) }()
 
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -216,10 +229,12 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend":        "vllm",
 								"profiler_image": "test-profiler:latest",
 							},
 							"sla": map[string]interface{}{
@@ -242,7 +257,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
-			defer k8sClient.Delete(ctx, dgdr)
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Reconcile multiple times to move through states
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
@@ -267,7 +282,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			// Verify job has correct labels
 			jobName := getProfilingJobName(dgdr)
 			job := &batchv1.Job{}
-			k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)
+			_ = k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)
 			Expect(job.Labels[LabelApp]).Should(Equal(LabelValueDynamoProfiler))
 			Expect(job.Labels[LabelDGDR]).Should(Equal(dgdrName))
 
@@ -276,26 +291,24 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(job.Spec.Template.Spec.Containers[0].Name).Should(Equal(ContainerNameProfiler))
 			Expect(job.Spec.Template.Spec.Containers[1].Name).Should(Equal(ContainerNameOutputCopier))
 
-			// Verify PVC volume mount
+			// Verify emptyDir volume (not PVC)
 			Expect(job.Spec.Template.Spec.Volumes).Should(ContainElement(
 				corev1.Volume{
 					Name: VolumeNameProfilingOutput,
 					VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "dynamo-pvc",
-						},
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
 					},
 				},
 			))
 
 			// Clean up job
-			k8sClient.Delete(ctx, job)
+			_ = k8sClient.Delete(ctx, job)
 		})
 
 		It("Should create offline (AIC) profiling job", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-profiling-aic"
-			namespace := "default"
+			namespace := defaultNamespace
 
 			// Create ServiceAccount
 			sa := &corev1.ServiceAccount{
@@ -304,8 +317,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 			}
-			_ = k8sClient.Create(ctx, sa)
-			defer k8sClient.Delete(ctx, sa)
+			Expect(k8sClient.Create(ctx, sa)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sa) }()
 
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -313,10 +326,12 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "trtllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend":        "trtllm",
 								"config":         "/tmp/test-config.yaml",
 								"profiler_image": "test-profiler:latest",
 							},
@@ -333,7 +348,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 							"sweep": map[string]interface{}{
 								"use_ai_configurator": true,
 								"aic_system":          "h200_sxm",
-								"aic_model_name":      "QWEN3_32B",
+								"aic_hf_id":           "Qwen/Qwen3-32B",
 								"aic_backend_version": "0.20.0",
 							},
 						}),
@@ -342,7 +357,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
-			defer k8sClient.Delete(ctx, dgdr)
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Reconcile
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
@@ -369,7 +384,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			jobName := getProfilingJobName(dgdr)
 			job := &batchv1.Job{}
 			if err := k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job); err == nil {
-				k8sClient.Delete(ctx, job)
+				_ = k8sClient.Delete(ctx, job)
 			}
 		})
 	})
@@ -378,7 +393,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 		It("Should generate DGD spec from ConfigMap", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-profiling-complete"
-			namespace := "default"
+			namespace := defaultNamespace
 
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -386,11 +401,13 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -404,7 +421,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
-			defer k8sClient.Delete(ctx, dgdr)
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Update status to Profiling using Status subresource
 			dgdr.Status.State = StateProfiling
@@ -436,7 +453,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, job)).Should(Succeed())
-			defer k8sClient.Delete(ctx, job)
+			defer func() { _ = k8sClient.Delete(ctx, job) }()
 
 			// Update job status to completed using Status subresource
 			job.Status.Conditions = []batchv1.JobCondition{{
@@ -466,7 +483,7 @@ spec:
 				},
 			}
 			Expect(k8sClient.Create(ctx, cm)).Should(Succeed())
-			defer k8sClient.Delete(ctx, cm)
+			defer func() { _ = k8sClient.Delete(ctx, cm) }()
 
 			// Reconcile to process the profiling completion
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
@@ -490,7 +507,7 @@ spec:
 		It("Should create DGD after profiling", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-autoapply"
-			namespace := "default"
+			namespace := defaultNamespace
 
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -498,11 +515,13 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -517,7 +536,7 @@ spec:
 			}
 
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
-			defer k8sClient.Delete(ctx, dgdr)
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Update status to Profiling using Status subresource
 			dgdr.Status.State = StateProfiling
@@ -549,7 +568,7 @@ spec:
 				},
 			}
 			Expect(k8sClient.Create(ctx, job)).Should(Succeed())
-			defer k8sClient.Delete(ctx, job)
+			defer func() { _ = k8sClient.Delete(ctx, job) }()
 
 			// Update job status to completed using Status subresource
 			job.Status.Conditions = []batchv1.JobCondition{{
@@ -579,7 +598,7 @@ spec:
 				},
 			}
 			Expect(k8sClient.Create(ctx, cm)).Should(Succeed())
-			defer k8sClient.Delete(ctx, cm)
+			defer func() { _ = k8sClient.Delete(ctx, cm) }()
 
 			// Reconcile to generate spec (transitions to Deploying because autoApply=true)
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
@@ -603,14 +622,14 @@ spec:
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "test-dgd-auto", Namespace: namespace}, dgd)).Should(Succeed())
 
 			// Get final DGDR status
-			k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 			Expect(updated.Status.Deployment).NotTo(BeNil())
 			Expect(updated.Status.Deployment.Created).Should(BeTrue())
 			Expect(updated.Status.Deployment.Name).Should(Equal("test-dgd-auto"))
 
 			// Clean up DGD
-			k8sClient.Get(ctx, types.NamespacedName{Name: "test-dgd-auto", Namespace: namespace}, dgd)
-			k8sClient.Delete(ctx, dgd)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "test-dgd-auto", Namespace: namespace}, dgd)).Should(Succeed())
+			_ = k8sClient.Delete(ctx, dgd)
 		})
 	})
 
@@ -618,7 +637,7 @@ spec:
 		It("Should reject spec changes after profiling starts", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-immutable"
-			namespace := "default"
+			namespace := defaultNamespace
 
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -626,11 +645,13 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -644,7 +665,7 @@ spec:
 			}
 
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
-			defer k8sClient.Delete(ctx, dgdr)
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Reconcile to initialize
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
@@ -654,22 +675,22 @@ spec:
 
 			// Get current generation
 			var current nvidiacomv1alpha1.DynamoGraphDeploymentRequest
-			k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			initialGeneration := current.Generation
 			observedGeneration := current.Status.ObservedGeneration
 
 			// Manually set state to Profiling to simulate in-progress profiling
 			current.Status.State = StateProfiling
-			k8sClient.Status().Update(ctx, &current)
+			Expect(k8sClient.Status().Update(ctx, &current)).Should(Succeed())
 
 			// Try to modify spec
-			k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			// Unmarshal config, modify it, and marshal back
 			var config map[string]interface{}
-			yaml.Unmarshal(current.Spec.ProfilingConfig.Config.Raw, &config)
+			Expect(yaml.Unmarshal(current.Spec.ProfilingConfig.Config.Raw, &config)).Should(Succeed())
 			config["sla"].(map[string]interface{})["ttft"] = 200.0
 			current.Spec.ProfilingConfig.Config = createTestConfig(config)
-			k8sClient.Update(ctx, &current)
+			Expect(k8sClient.Update(ctx, &current)).Should(Succeed())
 
 			// Reconcile
 			_, err = reconciler.Reconcile(ctx, reconcile.Request{
@@ -678,7 +699,7 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify generation changed but observedGeneration stayed the same
-			k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			Expect(current.Generation).Should(BeNumerically(">", initialGeneration))
 			Expect(current.Status.ObservedGeneration).Should(Equal(observedGeneration))
 			Expect(current.Status.State).Should(Equal(StateProfiling)) // State unchanged
@@ -699,7 +720,7 @@ spec:
 		It("Should transition to DeploymentDeleted state", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-dgd-deleted"
-			namespace := "default"
+			namespace := defaultNamespace
 
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -707,11 +728,13 @@ spec:
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -726,7 +749,7 @@ spec:
 			}
 
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
-			defer k8sClient.Delete(ctx, dgdr)
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Update status to Ready with Deployment info using Status subresource
 			dgdr.Status.State = StateReady
@@ -827,7 +850,7 @@ var _ = Describe("DGDR Helper Functions", func() {
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
 						Config: createTestConfig(map[string]interface{}{
 							"sweep": map[string]interface{}{
-								"force_rerun": true,
+								"prefill_interpolation_granularity": 16,
 							},
 						}),
 					},
@@ -852,11 +875,13 @@ var _ = Describe("DGDR Validation", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -873,26 +898,14 @@ var _ = Describe("DGDR Validation", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("Should fail validation when config is empty", func() {
+		It("Should pass validation with minimal config", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
-						Config: createTestConfig(map[string]interface{}{}),
-					},
-				},
-			}
-
-			err := reconciler.validateSpec(ctx, dgdr)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("config"))
-		})
-
-		It("Should fail validation when engine section is missing", func() {
-			ctx := context.Background()
-			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
 						Config: createTestConfig(map[string]interface{}{
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -903,32 +916,9 @@ var _ = Describe("DGDR Validation", func() {
 				},
 			}
 
+			// Validation should pass - profiler will auto-generate missing config
 			err := reconciler.validateSpec(ctx, dgdr)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("engine"))
-		})
-
-		It("Should fail validation when engine.config and configMapRef are both missing", func() {
-			ctx := context.Background()
-			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
-					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
-						Config: createTestConfig(map[string]interface{}{
-							"engine": map[string]interface{}{
-								"backend": "vllm",
-							},
-							"sla": map[string]interface{}{
-								"ttft": 100.0,
-								"itl":  1500.0,
-							},
-						}),
-					},
-				},
-			}
-
-			err := reconciler.validateSpec(ctx, dgdr)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).Should(ContainSubstring("engine.config"))
+			Expect(err).NotTo(HaveOccurred())
 		})
 	})
 })
@@ -938,9 +928,8 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 
 	BeforeEach(func() {
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
-			Client:        k8sClient,
-			Recorder:      record.NewFakeRecorder(100),
-			ProfilerImage: "test-profiler:latest",
+			Client:   k8sClient,
+			Recorder: record.NewFakeRecorder(100),
 			Config: commonController.Config{
 				RestrictedNamespace: "",
 			},
@@ -961,8 +950,8 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 					Namespace: namespace,
 				},
 			}
-			_ = k8sClient.Create(ctx, sa)
-			defer k8sClient.Delete(ctx, sa)
+			Expect(k8sClient.Create(ctx, sa)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sa) }()
 
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -970,10 +959,12 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "trtllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend":        "trtllm",
 								"config":         "/tmp/test-config.yaml",
 								"profiler_image": "test-profiler:latest",
 							},
@@ -997,7 +988,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
-			defer k8sClient.Delete(ctx, dgdr)
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Re-fetch DGDR to get proper metadata from API server
 			var fetchedDGDR nvidiacomv1alpha1.DynamoGraphDeploymentRequest
@@ -1020,12 +1011,12 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			Expect(args).Should(ContainElement("--profile-config"))
 
 			// Clean up
-			k8sClient.Delete(ctx, job)
+			_ = k8sClient.Delete(ctx, job)
 		})
 
 		It("Should pass config with AI Configurator settings for offline profiling", func() {
 			ctx := context.Background()
-			namespace := "default"
+			namespace := defaultNamespace
 			dgdrName := "test-args-offline"
 
 			// Create ServiceAccount
@@ -1035,8 +1026,8 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 					Namespace: namespace,
 				},
 			}
-			_ = k8sClient.Create(ctx, sa)
-			defer k8sClient.Delete(ctx, sa)
+			Expect(k8sClient.Create(ctx, sa)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sa) }()
 
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1044,10 +1035,12 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "trtllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend":        "trtllm",
 								"config":         "/tmp/test-config.yaml",
 								"profiler_image": "test-profiler:latest",
 							},
@@ -1065,7 +1058,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 							"sweep": map[string]interface{}{
 								"use_ai_configurator": true,
 								"aic_system":          "h200_sxm",
-								"aic_model_name":      "QWEN3_32B",
+								"aic_hf_id":           "Qwen/Qwen3-32B",
 								"aic_backend_version": "0.20.0",
 							},
 						}),
@@ -1074,7 +1067,7 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
-			defer k8sClient.Delete(ctx, dgdr)
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Re-fetch DGDR to get proper metadata from API server
 			var fetchedDGDR nvidiacomv1alpha1.DynamoGraphDeploymentRequest
@@ -1097,7 +1090,76 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			Expect(args).Should(ContainElement("--profile-config"))
 
 			// Clean up
-			k8sClient.Delete(ctx, job)
+			_ = k8sClient.Delete(ctx, job)
+		})
+
+		It("Should set fsGroup in pod security context for volume permissions", func() {
+			ctx := context.Background()
+			namespace := "default"
+			dgdrName := "test-fsgroup"
+
+			// Create ServiceAccount
+			sa := &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      ServiceAccountProfilingJob,
+					Namespace: namespace,
+				},
+			}
+			Expect(k8sClient.Create(ctx, sa)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sa) }()
+
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "trtllm",
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
+						Config: createTestConfig(map[string]interface{}{
+							"sla": map[string]interface{}{
+								"ttft": 50.0,
+								"itl":  10.0,
+								"isl":  3000,
+								"osl":  500,
+							},
+						}),
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			// Re-fetch DGDR to get proper metadata from API server
+			var fetchedDGDR nvidiacomv1alpha1.DynamoGraphDeploymentRequest
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &fetchedDGDR)).Should(Succeed())
+
+			// Create profiling job with properly initialized DGDR
+			err := reconciler.createProfilingJob(ctx, &fetchedDGDR)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify job was created
+			jobName := getProfilingJobName(&fetchedDGDR)
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)).Should(Succeed())
+
+			// Verify security context has all security fields set correctly
+			podSecurityContext := job.Spec.Template.Spec.SecurityContext
+			Expect(podSecurityContext).NotTo(BeNil())
+			Expect(podSecurityContext.RunAsNonRoot).NotTo(BeNil())
+			Expect(*podSecurityContext.RunAsNonRoot).To(BeTrue())
+			Expect(podSecurityContext.RunAsUser).NotTo(BeNil())
+			Expect(*podSecurityContext.RunAsUser).To(Equal(int64(1000)))
+			Expect(podSecurityContext.RunAsGroup).NotTo(BeNil())
+			Expect(*podSecurityContext.RunAsGroup).To(Equal(int64(1000)))
+			Expect(podSecurityContext.FSGroup).NotTo(BeNil())
+			Expect(*podSecurityContext.FSGroup).To(Equal(int64(1000)))
+
+			// Clean up
+			_ = k8sClient.Delete(ctx, job)
 		})
 	})
 })
@@ -1109,9 +1171,8 @@ var _ = Describe("DGDR Error Handling", func() {
 	BeforeEach(func() {
 		recorder = record.NewFakeRecorder(100)
 		reconciler = &DynamoGraphDeploymentRequestReconciler{
-			Client:        k8sClient,
-			Recorder:      recorder,
-			ProfilerImage: "test-profiler:latest",
+			Client:   k8sClient,
+			Recorder: recorder,
 			Config: commonController.Config{
 				RestrictedNamespace: "",
 			},
@@ -1122,7 +1183,7 @@ var _ = Describe("DGDR Error Handling", func() {
 	Context("When profiling job fails", func() {
 		It("Should capture detailed error from pod termination state", func() {
 			ctx := context.Background()
-			namespace := "default"
+			namespace := defaultNamespace
 			dgdrName := "test-error-capture"
 
 			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
@@ -1131,11 +1192,13 @@ var _ = Describe("DGDR Error Handling", func() {
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
 					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						ProfilerImage: "test-profiler:latest",
 						Config: createTestConfig(map[string]interface{}{
 							"engine": map[string]interface{}{
-								"backend": "vllm",
-								"config":  "/tmp/test-config.yaml",
+								"config": "/tmp/test-config.yaml",
 							},
 							"sla": map[string]interface{}{
 								"ttft": 100.0,
@@ -1153,7 +1216,7 @@ var _ = Describe("DGDR Error Handling", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
-			defer k8sClient.Delete(ctx, dgdr)
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Set status to Profiling
 			dgdr.Status.State = StateProfiling
@@ -1186,7 +1249,7 @@ var _ = Describe("DGDR Error Handling", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, job)).Should(Succeed())
-			defer k8sClient.Delete(ctx, job)
+			defer func() { _ = k8sClient.Delete(ctx, job) }()
 
 			// Update job status
 			job.Status.Conditions = []batchv1.JobCondition{{
@@ -1227,7 +1290,7 @@ var _ = Describe("DGDR Error Handling", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, pod)).Should(Succeed())
-			defer k8sClient.Delete(ctx, pod)
+			defer func() { _ = k8sClient.Delete(ctx, pod) }()
 
 			// Reconcile - should capture error details
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
@@ -1245,6 +1308,177 @@ var _ = Describe("DGDR Error Handling", func() {
 			Expect(condition).NotTo(BeNil())
 			Expect(condition.Status).Should(Equal(metav1.ConditionFalse))
 			Expect(condition.Message).Should(ContainSubstring("profiling job failed"))
+		})
+	})
+
+	Context("When parsing multi-document YAML", func() {
+		It("Should extract DGD from ConfigMap + DGD YAML", func() {
+			// Multi-document YAML with ConfigMap first, then DGD
+			multiDocYAML := `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-config
+  namespace: default
+data:
+  some-data: "value"
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgd
+  namespace: default
+spec:
+  backendFramework: vllm
+  services: {}`
+
+			dgd, err := reconciler.extractDGDFromYAML([]byte(multiDocYAML))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dgd).NotTo(BeNil())
+			Expect(dgd.Kind).Should(Equal("DynamoGraphDeployment"))
+			Expect(dgd.Name).Should(Equal("test-dgd"))
+			Expect(dgd.Spec.BackendFramework).Should(Equal("vllm"))
+		})
+
+		It("Should extract DGD from single-document YAML", func() {
+			// Single document YAML without separator
+			singleDocYAML := `apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgd-single
+  namespace: default
+spec:
+  backendFramework: vllm
+  services: {}`
+
+			dgd, err := reconciler.extractDGDFromYAML([]byte(singleDocYAML))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dgd).NotTo(BeNil())
+			Expect(dgd.Kind).Should(Equal("DynamoGraphDeployment"))
+			Expect(dgd.Name).Should(Equal("test-dgd-single"))
+		})
+
+		It("Should handle DGD + ConfigMap order (DGD first)", func() {
+			// Multi-document YAML with DGD first, then ConfigMap
+			multiDocYAML := `---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgd-first
+  namespace: default
+spec:
+  backendFramework: vllm
+  services: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-config
+  namespace: default
+data:
+  some-data: "value"`
+
+			dgd, err := reconciler.extractDGDFromYAML([]byte(multiDocYAML))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dgd).NotTo(BeNil())
+			Expect(dgd.Kind).Should(Equal("DynamoGraphDeployment"))
+			Expect(dgd.Name).Should(Equal("test-dgd-first"))
+		})
+
+		It("Should return error when no DGD found", func() {
+			// YAML with only ConfigMap
+			configMapOnlyYAML := `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-config
+  namespace: default
+data:
+  some-data: "value"`
+
+			_, err := reconciler.extractDGDFromYAML([]byte(configMapOnlyYAML))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).Should(ContainSubstring("no DynamoGraphDeployment found"))
+		})
+
+		It("Should handle YAML with leading separator", func() {
+			// YAML starting with --- separator
+			yamlWithLeadingSeparator := `---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgd-leading
+  namespace: default
+spec:
+  backendFramework: vllm
+  services: {}`
+
+			dgd, err := reconciler.extractDGDFromYAML([]byte(yamlWithLeadingSeparator))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dgd).NotTo(BeNil())
+			Expect(dgd.Name).Should(Equal("test-dgd-leading"))
+		})
+
+		It("Should extract DGD and additional resources correctly", func() {
+			// Multi-document YAML with ConfigMap and DGD
+			multiDocYAML := `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-config
+  namespace: default
+data:
+  model.json: '{"name": "test-model"}'
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgd
+  namespace: default
+spec:
+  backendFramework: vllm
+  services: {}`
+
+			dgd, additionalResources, err := reconciler.extractResourcesFromYAML([]byte(multiDocYAML))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dgd).NotTo(BeNil())
+			Expect(dgd.Name).Should(Equal("test-dgd"))
+			Expect(additionalResources).To(HaveLen(1))
+			Expect(additionalResources[0].GetKind()).Should(Equal("ConfigMap"))
+			Expect(additionalResources[0].GetName()).Should(Equal("model-config"))
+		})
+
+		It("Should handle multiple additional resources", func() {
+			// Multi-document YAML with multiple ConfigMaps and DGD
+			multiDocYAML := `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config1
+data:
+  key1: value1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config2
+data:
+  key2: value2
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgd
+spec:
+  backendFramework: vllm
+  services: {}`
+
+			dgd, additionalResources, err := reconciler.extractResourcesFromYAML([]byte(multiDocYAML))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dgd).NotTo(BeNil())
+			Expect(additionalResources).To(HaveLen(2))
+			Expect(additionalResources[0].GetName()).Should(Equal("config1"))
+			Expect(additionalResources[1].GetName()).Should(Equal("config2"))
 		})
 	})
 })

@@ -53,26 +53,7 @@ b. Install the Inference Extension CRDs (Inference Model and Inference Pool CRDs
 
 ```bash
 INFERENCE_EXTENSION_VERSION=v0.5.1
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$INFERENCE_EXTENSION_VERSION/manifests.yaml -n  my-model
-```
-
-c. Install `kgateway` CRDs and kgateway.
-
-```bash
-KGATEWAY_VERSION=v2.0.3
-
-# Install the Kgateway CRDs
-helm upgrade -i --create-namespace --namespace kgateway-system --version $KGATEWAY_VERSION kgateway-crds oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds
-
-# Install Kgateway
-helm upgrade -i --namespace kgateway-system --version $KGATEWAY_VERSION kgateway oci://cr.kgateway.dev/kgateway-dev/charts/kgateway --set inferenceExtension.enabled=true
-```
-
-d. Deploy the Gateway Instance
-
-```bash
-kubectl create namespace my-model
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/raw/main/config/manifests/gateway/kgateway/gateway.yaml -n  my-model
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$INFERENCE_EXTENSION_VERSION/manifests.yaml
 ```
 
 ```bash
@@ -85,12 +66,12 @@ kubectl get gateway inference-gateway -n my-model
 
 ### 3. Deploy Your Model ###
 
-Follow the steps in [model deployment](../../components/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../components/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
+Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
 
 Sample commands to deploy model:
 
 ```bash
-cd <dynamo-source-root>/components/backends/vllm/deploy
+cd <dynamo-source-root>/examples/backends/vllm/deploy
 kubectl apply -f agg.yaml -n my-model
 ```
 
@@ -116,7 +97,7 @@ kubectl create secret generic hf-token-secret \
 ```
 
 Create a model configuration file similar to the vllm_agg_qwen.yaml for your model.
-This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../components/backends/vllm/deploy/agg.yaml)
+This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml)
 Take a note of the model's block size provided in the model card.
 
 ### 4. Install Dynamo GAIE helm chart ###
@@ -130,13 +111,12 @@ cd deploy/inference-gateway
 
 # Export the Dynamo image you have used when deploying your model in Step 3.
 export DYNAMO_IMAGE=<the-dynamo-image-you-have-used-when-deploying-the-model>
-# Export the image tag provided by Dynamo (nvcr.io/nvstaging/ai-dynamo/epp-inference-extension-dynamo:v0.6.0-1) or you can build the Dynamo EPP image by following the commands later in this README.
+# Export the FrontEnd image tag provided by Dynamo (recommended) or build the Dynamo EPP image by following the commands later in this README.
 export EPP_IMAGE=<the-epp-image-you-built>
 ```
 
 ```bash
 helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE
-# do not include --set-string extension.image=$EPP_IMAGE to use the default images
 ```
 
 Key configurations include:
@@ -145,7 +125,7 @@ Key configurations include:
 - A service for the inference gateway
 - Required RBAC roles and bindings
 - RBAC permissions
-- values-dynamo-epp.yaml sets epp.dynamo.namespace=vllm-agg for the bundled example. Point it at your actual Dynamo namespace by editing that file or adding --set epp.dynamo.namespace=<namespace> (and likewise for epp.dynamo.component, epp.dynamo.kvBlockSize if they differ).
+- dynamoGraphDeploymentName - the name of the Dynamo Graph where your model is deployed.
 
 
 **Configuration**
@@ -166,7 +146,7 @@ You can configure the plugin by setting environment vars in your [values-dynamo-
 
 Dynamo provides a custom routing plugin `pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go` to perform efficient kv routing.
 The Dynamo router is built as a static library, the EPP router will call to provide fast inference.
-You can either use the image `nvcr.io/nvstaging/ai-dynamo/epp-inference-extension-dynamo:v0.6.0-1` for the EPP_IMAGE in the Helm deployment command and proceed to the step 2 or you can build the image yourself following the steps below.
+You can either use the special FrontEnd image for the EPP_IMAGE in the Helm deployment command and proceed to the step 2 or you can build the image yourself following the steps below.
 
 ##### 1. Build the custom EPP image #####
 

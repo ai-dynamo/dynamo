@@ -17,7 +17,7 @@ use super::{KeyValueBucket, KeyValueStore, StoreError, StoreOutcome};
 
 #[derive(Clone, Debug)]
 enum MemoryEvent {
-    Put { key: String, value: String },
+    Put { key: String, value: bytes::Bytes },
     Delete { key: String },
 }
 
@@ -45,7 +45,7 @@ pub struct MemoryBucketRef {
 }
 
 struct MemoryBucket {
-    data: HashMap<String, (u64, String)>,
+    data: HashMap<String, (u64, bytes::Bytes)>,
 }
 
 impl MemoryBucket {
@@ -57,7 +57,7 @@ impl MemoryBucket {
 }
 
 impl MemoryStore {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         MemoryStore {
             inner: Arc::new(MemoryStoreInner {
@@ -107,6 +107,8 @@ impl KeyValueStore for MemoryStore {
     fn connection_id(&self) -> u64 {
         self.connection_id
     }
+
+    fn shutdown(&self) {}
 }
 
 #[async_trait]
@@ -114,7 +116,7 @@ impl KeyValueBucket for MemoryBucketRef {
     async fn insert(
         &self,
         key: &Key,
-        value: &str,
+        value: bytes::Bytes,
         revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
         let mut locked_data = self.inner.data.lock();
@@ -124,10 +126,10 @@ impl KeyValueBucket for MemoryBucketRef {
         };
         let outcome = match bucket.data.entry(key.to_string()) {
             Entry::Vacant(e) => {
-                e.insert((revision, value.to_string()));
+                e.insert((revision, value.clone()));
                 let _ = self.inner.change_sender.send(MemoryEvent::Put {
                     key: key.to_string(),
-                    value: value.to_string(),
+                    value,
                 });
                 StoreOutcome::Created(revision)
             }
@@ -136,7 +138,7 @@ impl KeyValueBucket for MemoryBucketRef {
                 if *rev == revision {
                     StoreOutcome::Exists(revision)
                 } else {
-                    entry.insert((revision, value.to_string()));
+                    entry.insert((revision, value));
                     StoreOutcome::Created(revision)
                 }
             }
@@ -149,10 +151,7 @@ impl KeyValueBucket for MemoryBucketRef {
         let Some(bucket) = locked_data.get(&self.name) else {
             return Ok(None);
         };
-        Ok(bucket
-            .data
-            .get(&key.0)
-            .map(|(_, v)| bytes::Bytes::from(v.clone())))
+        Ok(bucket.data.get(&key.0).map(|(_, v)| v.clone()))
     }
 
     async fn delete(&self, key: &Key) -> Result<(), StoreError> {
@@ -183,7 +182,7 @@ impl KeyValueBucket for MemoryBucketRef {
         };
         for (key, (_rev, v)) in &bucket.data {
             seen_keys.insert(key.clone());
-            let item = KeyValue::new(key.clone(), bytes::Bytes::from(v.clone().into_bytes()));
+            let item = KeyValue::new(Key::new(key.clone()), v.clone());
             existing_items.push(WatchEvent::Put(item));
         }
         drop(data_lock);
@@ -204,27 +203,57 @@ impl KeyValueBucket for MemoryBucketRef {
                         if seen_keys.contains(&key) {
                             continue;
                         }
-                        let item = KeyValue::new(key, bytes::Bytes::from(value));
+                        let item = KeyValue::new(Key::new(key), value);
                         yield WatchEvent::Put(item);
                     },
                     Some(MemoryEvent::Delete { key }) => {
-                        let item = KeyValue::new(key, bytes::Bytes::new());
-                        yield WatchEvent::Delete(item);
+                        yield WatchEvent::Delete(Key::new(key));
                     }
                 }
             }
         }))
     }
 
-    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError> {
+    async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
         let locked_data = self.inner.data.lock();
         match locked_data.get(&self.name) {
-            Some(bucket) => Ok(bucket
-                .data
-                .iter()
-                .map(|(k, (_rev, v))| (k.to_string(), bytes::Bytes::from(v.clone())))
-                .collect()),
+            Some(bucket) => {
+                let mut out = HashMap::new();
+                for (k, (_rev, v)) in bucket.data.iter() {
+                    let key = Key::new([self.name.clone(), k.to_string()].join("/"));
+                    let value = v.clone();
+                    out.insert(key, value);
+                }
+                Ok(out)
+            }
             None => Err(StoreError::MissingBucket(self.name.clone())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use crate::storage::key_value_store::{
+        Key, KeyValueBucket as _, KeyValueStore as _, MemoryStore,
+    };
+
+    #[tokio::test]
+    async fn test_entries_full_path() {
+        let m = MemoryStore::new();
+        let bucket = m.get_or_create_bucket("bucket1", None).await.unwrap();
+        let _ = bucket
+            .insert(&Key::new("key1".to_string()), "value1".into(), 0)
+            .await
+            .unwrap();
+        let _ = bucket
+            .insert(&Key::new("key2".to_string()), "value2".into(), 0)
+            .await
+            .unwrap();
+        let entries = bucket.entries().await.unwrap();
+        let keys: HashSet<Key> = entries.into_keys().collect();
+        assert!(keys.contains(&Key::new("bucket1/key1".to_string())));
+        assert!(keys.contains(&Key::new("bucket1/key2".to_string())));
     }
 }

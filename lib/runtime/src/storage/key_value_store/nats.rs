@@ -52,6 +52,11 @@ impl KeyValueStore for NATSStore {
     fn connection_id(&self) -> u64 {
         self.client.client().server_info().client_id
     }
+
+    fn shutdown(&self) {
+        // TODO: Track and delete any owned keys
+        // The TTL should ensure NATS does it, but best we do it immediately
+    }
 }
 
 impl NATSStore {
@@ -119,7 +124,7 @@ impl KeyValueBucket for NATSBucket {
     async fn insert(
         &self,
         key: &Key,
-        value: &str,
+        value: bytes::Bytes,
         revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
         if revision == 0 {
@@ -160,12 +165,15 @@ impl KeyValueBucket for NATSBucket {
                 >| async move {
                     match maybe_entry {
                         Ok(entry) => {
-                            let item = KeyValue::new(entry.key, entry.value);
+                            let key = Key::new(entry.key);
                             Some(match entry.operation {
-                                Operation::Put => WatchEvent::Put(item),
-                                Operation::Delete => WatchEvent::Delete(item),
+                                Operation::Put => {
+                                    let item = KeyValue::new(key, entry.value);
+                                    WatchEvent::Put(item)
+                                }
+                                Operation::Delete => WatchEvent::Delete(key),
                                 // TODO: What is Purge? Not urgent, NATS impl not used
-                                Operation::Purge => WatchEvent::Delete(item),
+                                Operation::Purge => WatchEvent::Delete(key),
                             })
                         }
                         Err(e) => {
@@ -178,7 +186,7 @@ impl KeyValueBucket for NATSBucket {
         ))
     }
 
-    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError> {
+    async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
         let mut key_stream = self
             .nats_store
             .keys()
@@ -187,7 +195,7 @@ impl KeyValueBucket for NATSBucket {
         let mut out = HashMap::new();
         while let Some(Ok(key)) = key_stream.next().await {
             if let Ok(Some(entry)) = self.nats_store.entry(&key).await {
-                out.insert(key, entry.value);
+                out.insert(Key::new(key), entry.value);
             }
         }
         Ok(out)
@@ -195,8 +203,8 @@ impl KeyValueBucket for NATSBucket {
 }
 
 impl NATSBucket {
-    async fn create(&self, key: &Key, value: &str) -> Result<StoreOutcome, StoreError> {
-        match self.nats_store.create(&key, value.to_string().into()).await {
+    async fn create(&self, key: &Key, value: bytes::Bytes) -> Result<StoreOutcome, StoreError> {
+        match self.nats_store.create(&key, value).await {
             Ok(revision) => Ok(StoreOutcome::Created(revision)),
             Err(err) if err.kind() == async_nats::jetstream::kv::CreateErrorKind::AlreadyExists => {
                 // key exists, get the revsion
@@ -219,14 +227,10 @@ impl NATSBucket {
     async fn update(
         &self,
         key: &Key,
-        value: &str,
+        value: bytes::Bytes,
         revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
-        match self
-            .nats_store
-            .update(key, value.to_string().into(), revision)
-            .await
-        {
+        match self.nats_store.update(key, value.clone(), revision).await {
             Ok(revision) => Ok(StoreOutcome::Created(revision)),
             Err(err)
                 if err.kind() == async_nats::jetstream::kv::UpdateErrorKind::WrongLastRevision =>
@@ -240,16 +244,16 @@ impl NATSBucket {
 
     /// We have the wrong revision for a key. Fetch it's entry to get the correct revision,
     /// and try the update again.
-    async fn resync_update(&self, key: &Key, value: &str) -> Result<StoreOutcome, StoreError> {
+    async fn resync_update(
+        &self,
+        key: &Key,
+        value: bytes::Bytes,
+    ) -> Result<StoreOutcome, StoreError> {
         match self.nats_store.entry(key).await {
             Ok(Some(entry)) => {
                 // Re-try the update with new version number
                 let next_rev = entry.revision + 1;
-                match self
-                    .nats_store
-                    .update(key, value.to_string().into(), next_rev)
-                    .await
-                {
+                match self.nats_store.update(key, value, next_rev).await {
                     Ok(correct_revision) => Ok(StoreOutcome::Created(correct_revision)),
                     Err(err) => Err(StoreError::NATSError(format!(
                         "Error during update of key {key} after resync: {err}"

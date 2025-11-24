@@ -3,57 +3,133 @@
 
 //! Background processes for the KV Router including event consumption and snapshot uploads.
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use dynamo_runtime::{
     component::Component,
+    config::environment_names::nats as env_nats,
+    discovery::DiscoveryQuery,
     prelude::*,
+    storage::key_value_store::WatchEvent,
     traits::events::EventPublisher,
-    transports::{
-        etcd::{Client as EtcdClient, DistributedRWLock, WatchEvent},
-        nats::{NatsQueue, Slug},
-    },
+    transports::nats::{NatsQueue, Slug},
 };
+use futures::StreamExt;
+use rand::Rng;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     discovery::KV_ROUTERS_ROOT_PATH,
     kv_router::{
-        KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE, ROUTER_CLEANUP_LOCK,
-        ROUTER_SNAPSHOT_LOCK,
+        KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
         indexer::{DumpRequest, GetWorkersRequest, RouterEvent},
         protocols::WorkerId,
     },
 };
+
+/// Delay between snapshot reads to verify stability
+const SNAPSHOT_STABILITY_DELAY: Duration = Duration::from_millis(100);
+const MAX_SNAPSHOT_STABILITY_ATTEMPTS: usize = 10;
+
+const CHECK_INTERVAL_BASE: Duration = Duration::from_secs(1);
+const CHECK_INTERVAL_JITTER_MS: i64 = 100;
+
+/// Download a stable snapshot from object store and send events to the indexer.
+/// Retries until two consecutive reads match or max attempts is reached.
+async fn download_stable_snapshot(
+    nats_client: &dynamo_runtime::transports::nats::Client,
+    bucket_name: &str,
+    kv_events_tx: &mpsc::Sender<RouterEvent>,
+) -> Result<()> {
+    let url = url::Url::parse(&format!(
+        "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
+        nats_client.addr()
+    ))?;
+
+    // Try to get initial snapshot
+    let Ok(mut prev_events) = nats_client
+        .object_store_download_data::<Vec<RouterEvent>>(&url)
+        .await
+    else {
+        tracing::debug!(
+            "Failed to download snapshots. This is normal for freshly started Router replicas."
+        );
+        return Ok(());
+    };
+
+    // Keep trying until we get two consecutive stable reads
+    for attempt in 1..=MAX_SNAPSHOT_STABILITY_ATTEMPTS {
+        tokio::time::sleep(SNAPSHOT_STABILITY_DELAY).await;
+
+        let curr_events = match nats_client
+            .object_store_download_data::<Vec<RouterEvent>>(&url)
+            .await
+        {
+            Ok(events) => events,
+            Err(e) => {
+                tracing::warn!(
+                    "Snapshot read failed on attempt {attempt}, using previous snapshot with {} events: {e:?}",
+                    prev_events.len()
+                );
+                break;
+            }
+        };
+
+        // Check if snapshot is stable (two consecutive reads match)
+        if prev_events == curr_events {
+            tracing::info!(
+                "Successfully downloaded stable snapshot with {} events from object store (stable after {attempt} attempts)",
+                curr_events.len()
+            );
+            prev_events = curr_events;
+            break;
+        }
+
+        tracing::debug!(
+            "Snapshot changed between reads on attempt {attempt} ({} -> {} events), retrying",
+            prev_events.len(),
+            curr_events.len()
+        );
+        prev_events = curr_events;
+
+        if attempt == MAX_SNAPSHOT_STABILITY_ATTEMPTS {
+            tracing::warn!(
+                "Max stability attempts reached, using latest snapshot with {} events",
+                prev_events.len()
+            );
+        }
+    }
+
+    // Send all events to the indexer
+    for event in prev_events {
+        if let Err(e) = kv_events_tx.send(event).await {
+            tracing::warn!("Failed to send initial event to indexer: {e:?}");
+        }
+    }
+    tracing::info!("Successfully sent all initial events to indexer");
+
+    Ok(())
+}
 
 /// Resources required for snapshot operations
 #[derive(Clone)]
 struct SnapshotResources {
     nats_client: dynamo_runtime::transports::nats::Client,
     bucket_name: String,
-    rwlock: DistributedRWLock,
     instances_rx: tokio::sync::watch::Receiver<Vec<dynamo_runtime::component::Instance>>,
     get_workers_tx: mpsc::Sender<GetWorkersRequest>,
     snapshot_tx: mpsc::Sender<DumpRequest>,
 }
 
 impl SnapshotResources {
-    /// Perform snapshot upload and purge operations with write lock
+    /// Perform snapshot upload and purge operations
     async fn purge_then_snapshot(
         &self,
-        etcd_client: &EtcdClient,
         nats_queue: &mut NatsQueue,
         remove_worker_tx: &mpsc::Sender<WorkerId>,
     ) -> anyhow::Result<()> {
-        // Try to acquire write lock (non-blocking)
-        let Some(_write_guard) = self.rwlock.try_write_lock(etcd_client).await else {
-            tracing::debug!(
-                "Could not acquire write lock for snapshot (readers active or lock held)"
-            );
-            anyhow::bail!("Write lock unavailable");
-        };
         // Purge before snapshot ensures new/warm-restarted routers won't replay already-acknowledged messages.
         // Since KV events are idempotent, this ordering reduces unnecessary reprocessing while maintaining
         // at-least-once delivery guarantees. The snapshot will capture the clean state after purge.
@@ -154,8 +230,8 @@ pub async fn start_kv_router_background(
     let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
         .to_string()
         .replace("_", "-");
-    let nats_server =
-        std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    let nats_server = std::env::var(env_nats::NATS_SERVER)
+        .unwrap_or_else(|_| "nats://localhost:4222".to_string());
 
     // Create NatsQueue for event consumption
     let mut nats_queue = NatsQueue::new_with_consumer(
@@ -172,95 +248,46 @@ pub async fn start_kv_router_background(
         .build()?;
     let nats_client = client_options.connect().await?;
 
-    // Get etcd client (needed for both snapshots and router watching)
-    let etcd_client = component
-        .drt()
-        .etcd_client()
-        .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
-
     // Create bucket name for snapshots/state
     let bucket_name = Slug::slugify(&format!("{}-{RADIX_STATE_BUCKET}", component.subject()))
         .to_string()
         .replace("_", "-");
 
-    // Create RWLock for snapshot coordination
-    let lock_prefix = format!("{}/{}", ROUTER_SNAPSHOT_LOCK, component.subject());
-    let snapshot_rwlock = DistributedRWLock::new(lock_prefix);
-
     // Handle initial state based on router_reset_states flag
-    if router_reset_states {
+    if !router_reset_states {
+        // Try to download initial state from object store with stability check
+        download_stable_snapshot(&nats_client, &bucket_name, &kv_events_tx).await?;
+    } else {
         // Delete the bucket to reset state
         tracing::info!("Resetting router state, deleting bucket: {bucket_name}");
         if let Err(e) = nats_client.object_store_delete_bucket(&bucket_name).await {
             tracing::warn!("Failed to delete bucket (may not exist): {e:?}");
         }
-    } else {
-        // Try to download initial state from object store with read lock
-        let url = url::Url::parse(&format!(
-            "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
-            nats_client.addr()
-        ))?;
-
-        // Acquire read lock with default timeout
-        if let Ok(_read_guard) = snapshot_rwlock
-            .read_lock_with_wait(&etcd_client, &consumer_uuid, None)
-            .await
-        {
-            tracing::debug!("Acquired read lock for snapshot download");
-
-            // Download snapshot while holding read lock
-            match nats_client
-                .object_store_download_data::<Vec<RouterEvent>>(&url)
-                .await
-            {
-                Ok(events) => {
-                    tracing::info!(
-                        "Successfully downloaded {} events from object store",
-                        events.len()
-                    );
-                    // Send all events to the indexer
-                    for event in events {
-                        if let Err(e) = kv_events_tx.send(event).await {
-                            tracing::warn!("Failed to send initial event to indexer: {e:?}");
-                        }
-                    }
-                    tracing::info!("Successfully sent all initial events to indexer");
-                }
-                Err(e) => {
-                    tracing::info!(
-                        "Did not initialize radix state from NATS object store (likely no snapshots yet): {e:?}"
-                    );
-                }
-            }
-        } else {
-            tracing::warn!("Could not acquire read lock for snapshot download (timeout or error)");
-        }
     }
 
     // Cleanup orphaned consumers on startup
-    cleanup_orphaned_consumers(&mut nats_queue, &etcd_client, &component, &consumer_uuid).await;
+    cleanup_orphaned_consumers(&mut nats_queue, &component, &consumer_uuid).await;
 
     // Watch for router deletions to clean up orphaned consumers
-    let (_prefix_str, _watcher, mut router_replicas_rx) = etcd_client
-        .kv_get_and_watch_prefix(&format!("{}/", KV_ROUTERS_ROOT_PATH))
-        .await?
-        .dissolve();
+    let store = component.drt().store();
+    let (_watch_handle, mut router_replicas_rx) =
+        Arc::new(store.clone()).watch(KV_ROUTERS_ROOT_PATH, None, cancellation_token.clone());
 
     // Get the generate endpoint and watch for instance deletions
     let generate_endpoint = component.endpoint("generate");
-    let (_instance_prefix, _instance_watcher, mut instance_event_rx) = etcd_client
-        .kv_get_and_watch_prefix(generate_endpoint.etcd_root())
-        .await?
-        .dissolve();
+    let discovery_client = component.drt().discovery();
+    let discovery_key = DiscoveryQuery::Endpoint {
+        namespace: component.namespace().name().to_string(),
+        component: component.name().to_string(),
+        endpoint: "generate".to_string(),
+    };
+    let mut instance_event_stream = discovery_client
+        .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+        .await?;
 
     // Get instances_rx for tracking current workers
     let client = generate_endpoint.client().await?;
-    let instances_rx = match client.instance_source.as_ref() {
-        dynamo_runtime::component::InstanceSource::Dynamic(rx) => rx.clone(),
-        dynamo_runtime::component::InstanceSource::Static => {
-            anyhow::bail!("Expected dynamic instance source for KV routing");
-        }
-    };
+    let instances_rx = client.instance_source.as_ref().clone();
 
     // Only set up snapshot-related resources if snapshot_tx, get_workers_tx, and threshold are provided
     let snapshot_resources = if let (Some(get_workers_tx), Some(snapshot_tx), Some(_)) = (
@@ -271,7 +298,6 @@ pub async fn start_kv_router_background(
         Some(SnapshotResources {
             nats_client,
             bucket_name,
-            rwlock: snapshot_rwlock.clone(),
             instances_rx,
             get_workers_tx,
             snapshot_tx,
@@ -281,7 +307,13 @@ pub async fn start_kv_router_background(
     };
 
     tokio::spawn(async move {
-        let mut check_interval = tokio::time::interval(Duration::from_secs(1));
+        // Create interval with jitter
+        let jitter_ms =
+            rand::rng().random_range(-CHECK_INTERVAL_JITTER_MS..=CHECK_INTERVAL_JITTER_MS);
+        let interval_duration = Duration::from_millis(
+            (CHECK_INTERVAL_BASE.as_millis() as i64 + jitter_ms).max(1) as u64,
+        );
+        let mut check_interval = tokio::time::interval(interval_duration);
         check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -299,25 +331,20 @@ pub async fn start_kv_router_background(
                 }
 
                 // Handle generate endpoint instance deletion events
-                Some(event) = instance_event_rx.recv() => {
-                    let WatchEvent::Delete(kv) = event else {
+                Some(discovery_event_result) = instance_event_stream.next() => {
+                    let Ok(discovery_event) = discovery_event_result else {
                         continue;
                     };
 
-                    let key = String::from_utf8_lossy(kv.key());
-
-                    let Some(worker_id_str) = key.split(&['/', ':'][..]).next_back() else {
-                        tracing::warn!("Could not extract worker ID from instance key: {key}");
+                    let dynamo_runtime::discovery::DiscoveryEvent::Removed(worker_id) = discovery_event else {
                         continue;
                     };
 
-                    // Parse as hexadecimal (base 16)
-                    let Ok(worker_id) = u64::from_str_radix(worker_id_str, 16) else {
-                        tracing::warn!("Could not parse worker ID from instance key: {key}");
-                        continue;
-                    };
+                    tracing::warn!(
+                        worker_id = worker_id,
+                        "DISCOVERY: Generate endpoint instance removed, removing worker"
+                    );
 
-                    tracing::info!("Generate endpoint instance deleted, removing worker {worker_id}");
                     if let Err(e) = remove_worker_tx.send(worker_id).await {
                         tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
                     }
@@ -365,17 +392,15 @@ pub async fn start_kv_router_background(
                         continue;
                     };
 
-                    // Guard clause: skip if message count is too low
                     let threshold = router_snapshot_threshold.unwrap_or(u32::MAX) as u64;
+
                     if message_count <= threshold {
                         continue;
                     }
 
-                    tracing::info!("Stream has {message_count} messages, attempting to acquire write lock for purge and snapshot");
+                    tracing::info!("Stream has {message_count} messages (threshold: {threshold}), performing purge and snapshot");
 
-                    // Perform snapshot upload and purge (acquires write lock internally)
                     match resources.purge_then_snapshot(
-                        &etcd_client,
                         &mut nats_queue,
                         &remove_worker_tx,
                     ).await {
@@ -391,7 +416,7 @@ pub async fn start_kv_router_background(
                         continue;
                     };
 
-                    let key = String::from_utf8_lossy(kv.key());
+                    let key = kv.as_ref();
                     tracing::info!("Detected router replica deletion: {key}");
 
                     // Only process deletions for routers on the same component
@@ -414,28 +439,11 @@ pub async fn start_kv_router_background(
 
                     tracing::info!("Attempting to delete orphaned consumer: {consumer_to_delete}");
 
-                    // Create a unique cleanup lock for this specific consumer
-                    let cleanup_lock_name = format!("{}/{}/{}", ROUTER_CLEANUP_LOCK, component.subject(), consumer_to_delete);
-                    let cleanup_rwlock = DistributedRWLock::new(cleanup_lock_name);
-
-                    // Try to acquire cleanup write lock (non-blocking) before deleting consumer
-                    if let Some(_cleanup_guard) = cleanup_rwlock.try_write_lock(&etcd_client).await {
-                        tracing::debug!(
-                            "Acquired cleanup lock for deleting consumer: {consumer_to_delete}"
-                        );
-
-                        // Delete the consumer
-                        if let Err(e) = nats_queue.shutdown(Some(consumer_to_delete.clone())).await {
-                            tracing::warn!("Failed to delete consumer {consumer_to_delete}: {e}");
-                        } else {
-                            tracing::info!("Successfully deleted orphaned consumer: {consumer_to_delete}");
-                        }
-
-                        // Cleanup lock is automatically released when _cleanup_guard goes out of scope
+                    // Delete the consumer (allow race condition if multiple routers try to delete)
+                    if let Err(e) = nats_queue.shutdown(Some(consumer_to_delete.clone())).await {
+                        tracing::warn!("Failed to delete consumer {consumer_to_delete}: {e}");
                     } else {
-                        tracing::debug!(
-                            "Could not acquire cleanup lock for consumer {consumer_to_delete}"
-                        );
+                        tracing::info!("Successfully deleted orphaned consumer: {consumer_to_delete}");
                     }
                 }
             }
@@ -450,10 +458,9 @@ pub async fn start_kv_router_background(
     Ok(())
 }
 
-/// Cleanup orphaned NATS consumers that no longer have corresponding etcd router entries
+/// Cleanup orphaned NATS consumers that no longer have corresponding router entries
 async fn cleanup_orphaned_consumers(
     nats_queue: &mut NatsQueue,
-    etcd_client: &EtcdClient,
     component: &Component,
     consumer_uuid: &str,
 ) {
@@ -461,18 +468,28 @@ async fn cleanup_orphaned_consumers(
         return;
     };
 
-    let router_prefix = format!("{}/{}/", KV_ROUTERS_ROOT_PATH, component.path());
-    let Ok(router_entries) = etcd_client.kv_get_prefix(&router_prefix).await else {
+    // Get active routers from store
+    let store = component.drt().store();
+    let Ok(Some(router_bucket)) = store.get_bucket(KV_ROUTERS_ROOT_PATH).await else {
+        tracing::debug!("No router bucket found, skipping cleanup");
         return;
     };
 
-    let active_uuids: HashSet<String> = router_entries
+    let Ok(entries) = router_bucket.entries().await else {
+        return;
+    };
+
+    // Filter to only routers for this component
+    let component_path = component.path();
+    let active_uuids: HashSet<String> = entries
         .iter()
-        .filter_map(|kv| {
-            String::from_utf8_lossy(kv.key())
-                .split('/')
-                .next_back()
-                .map(str::to_string)
+        .filter_map(|(key, _)| {
+            // Check if key contains this component's path
+            if !key.as_ref().contains(&component_path) {
+                return None;
+            }
+            // Extract the last part (should be the UUID)
+            key.as_ref().split('/').next_back().map(str::to_string)
         })
         .collect();
 

@@ -230,7 +230,7 @@ pub struct KvCacheEvents {
 }
 
 /// Represents a single cache event with an ID and associated data.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KvCacheEvent {
     /// The unique identifier of the event.
     pub event_id: u64,
@@ -244,7 +244,7 @@ pub struct KvCacheEvent {
 /// Represents the data associated with a cache event.
 ///
 /// Data is either stored or removed.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum KvCacheEventData {
     Stored(KvCacheStoreData),
@@ -253,7 +253,7 @@ pub enum KvCacheEventData {
 }
 
 /// Represents the data associated with a stored cache event.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KvCacheStoreData {
     /// The optional hash of the parent block.
     pub parent_hash: Option<ExternalSequenceBlockHash>,
@@ -262,7 +262,7 @@ pub struct KvCacheStoreData {
 }
 
 /// Represents data for a stored block.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KvCacheStoredBlockData {
     /// The hash of the block.
     pub block_hash: ExternalSequenceBlockHash,
@@ -271,7 +271,7 @@ pub struct KvCacheStoredBlockData {
 }
 
 /// Represents the data associated with a removed cache event.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KvCacheRemoveData {
     /// A list of block hashes to remove.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,

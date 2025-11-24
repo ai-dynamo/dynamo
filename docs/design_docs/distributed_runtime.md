@@ -28,7 +28,7 @@ Dynamo's `DistributedRuntime` is the core infrastructure in the framework that e
 
 While theoretically each `DistributedRuntime` can have multiple `Namespace`s as long as their names are unique (similar logic also applies to `Component/Namespace` and `Endpoint/Component`), in practice, each dynamo components typically are deployed with its own process and thus has its own `DistributedRuntime` object. However, they share the same namespace to discover each other.
 
-For example, a typical deployment configuration (like `components/backends/vllm/deploy/agg.yaml` or `components/backends/sglang/deploy/agg.yaml`) has multiple workers:
+For example, a typical deployment configuration (like `examples/backends/vllm/deploy/agg.yaml` or `examples/backends/sglang/deploy/agg.yaml`) has multiple workers:
 
 - `Frontend`: Starts an HTTP server and handles incoming requests. The HTTP server routes all requests to the `Processor`.
 - `Processor`: When a new request arrives, `Processor` applies the chat template and performs the tokenization.
@@ -53,7 +53,7 @@ The hierarchy and naming in etcd and NATS may change over time, and this documen
 
   For etcd, it also creates a primary lease and spin up a background task to keep the lease alive. All objects registered under this `DistributedRuntime` use this lease_id to maintain their life cycle. There is also a cancellation token that is tied to the primary lease. When the cancellation token is triggered or the background task failed, the primary lease is revoked or expired and the kv pairs stored with this lease_id is removed.
 - `Namespace`: `Namespace`s are primarily a logical grouping mechanism and is not registered in etcd. It provides the root path for all components under this `Namespace`.
-- `Component`: When a `Component` object is created, similar to `Namespace`, it isn't be registered in etcd. When `create_service` is called, it creates a NATS service group using `{namespace_name}.{service_name}` and registers a service in the registry of the `Component`, where the registry is an internal data structure that tracks all services and endpoints within the `DistributedRuntime`.
+- `Component`: When a `Component` object is created, similar to `Namespace`, it isn't be registered in etcd. When `create_service` is called, it creates a NATS service group using `{namespace_name}.{service_name}` for metrics and registers a service in the registry of the `Component`, where the registry is an internal data structure that tracks all services and endpoints within the `DistributedRuntime`.
 - `Endpoint`: When an Endpoint object is created and started, it performs two key registrations:
   - NATS Registration: The endpoint is registered with the NATS service group created during service creation. The endpoint is assigned a unique subject following the naming: `{namespace_name}.{service_name}.{endpoint_name}-{lease_id_hex}`.
   - etcd Registration: The endpoint information is stored in etcd at a path following the naming: `/services/{namespace}/{component}/{endpoint}-{lease_id}`. Note that the endpoints of different workers of the same type (i.e., two `VllmPrefillWorker`s in one deployment) share the same `Namespace`, `Component`, and `Endpoint` name. They are distinguished by their different primary `lease_id` of their `DistributedRuntime`.
@@ -75,6 +75,6 @@ After selecting which endpoint to hit, the `Client` sends the serialized request
 We provide native rust and python (through binding) examples for basic usage of `DistributedRuntime`:
 
 - Rust: `/lib/runtime/examples/`
-- Python: We also provide complete examples of using `DistributedRuntime`. Please refer to the engines in `/components/backends` for full implementation details.
+- Python: We also provide complete examples of using `DistributedRuntime`. Please refer to the engines in `components/src/dynamo` for full implementation details.
 
 

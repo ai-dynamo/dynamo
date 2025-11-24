@@ -5,6 +5,31 @@ use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{protocols::common, types::TokenIdType};
 
 impl NvCreateCompletionRequest {
+    /// Enables usage tracking for non-streaming requests to comply with OpenAI API specification.
+    ///
+    /// According to OpenAI API spec, non-streaming completion responses (stream=false)
+    /// must always include usage statistics. This method ensures `stream_options.include_usage`
+    /// is set to `true` for non-streaming requests.
+    ///
+    /// Reference: https://platform.openai.com/docs/api-reference/completions/create
+    ///
+    /// # Arguments
+    /// * `original_stream_flag` - The original value of the `stream` field before any internal processing
+    pub fn enable_usage_for_nonstreaming(&mut self, original_stream_flag: bool) {
+        if !original_stream_flag {
+            // For non-streaming requests (stream=false), enable usage by default
+            if self.inner.stream_options.is_none() {
+                self.inner.stream_options =
+                    Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                        include_usage: true,
+                    });
+            } else if let Some(ref mut opts) = self.inner.stream_options {
+                // If stream_options exists, ensure include_usage is true for non-streaming
+                opts.include_usage = true;
+            }
+        }
+    }
+
     // put this method on the request
     // inspect the request to extract options
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
@@ -164,6 +189,7 @@ impl DeltaGenerator {
                 logprobs,
             }],
             usage: None, // Always None for chunks with content/choices
+            nvext: None, // Will be populated by router layer if needed
         };
 
         NvCreateCompletionResponse { inner }
@@ -186,6 +212,7 @@ impl DeltaGenerator {
             system_fingerprint: self.system_fingerprint.clone(),
             choices: vec![], // Empty choices for usage-only chunk
             usage: Some(usage),
+            nvext: None, // Will be populated by router layer if needed
         };
 
         NvCreateCompletionResponse { inner }
@@ -213,6 +240,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
                 .expect("token_ids length exceeds u32::MAX");
 
             self.usage.completion_tokens += token_length;
+
+            // If backend provides completion_usage with prompt token details,
+            // propagate the entire details struct to usage tracking
+            if let Some(prompt_details) = delta
+                .completion_usage
+                .as_ref()
+                .and_then(|usage| usage.prompt_tokens_details.as_ref())
+            {
+                self.usage.prompt_tokens_details = Some(prompt_details.clone());
+            }
         }
 
         let logprobs = self.create_logprobs(
@@ -226,7 +263,42 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
         // create choice
         let index = delta.index.unwrap_or(0);
-        let response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
+        let mut response = self.create_choice(index, delta.text.clone(), finish_reason, logprobs);
+
+        // Extract worker_id from disaggregated_params and inject into nvext if present
+        if let Some(worker_id_json) = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("worker_id"))
+        {
+            use crate::protocols::openai::nvext::{NvExtResponse, WorkerIdInfo};
+
+            let prefill_worker_id = worker_id_json
+                .get("prefill_worker_id")
+                .and_then(|v| v.as_u64());
+            let decode_worker_id = worker_id_json
+                .get("decode_worker_id")
+                .and_then(|v| v.as_u64());
+
+            let worker_id_info = WorkerIdInfo {
+                prefill_worker_id,
+                decode_worker_id,
+            };
+
+            let nvext_response = NvExtResponse {
+                worker_id: Some(worker_id_info),
+            };
+
+            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+                response.inner.nvext = Some(nvext_json);
+                tracing::debug!(
+                    "Injected worker_id into completions nvext: prefill={:?}, decode={:?}",
+                    prefill_worker_id,
+                    decode_worker_id
+                );
+            }
+        }
+
         Ok(response)
     }
 

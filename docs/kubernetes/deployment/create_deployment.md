@@ -1,7 +1,7 @@
 # Creating Kubernetes Deployments
 
-The scripts in the `components/<backend>/launch` folder like [agg.sh](../../../components/backends/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
-The corresponding YAML files like [agg.yaml](../../../components/backends/vllm/deploy/agg.yaml) show you how you could create a Kubernetes deployment for your inference graph.
+The scripts in the `examples/<backend>/launch` folder like [agg.sh](../../../examples/backends/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
+The corresponding YAML files like [agg.yaml](../../../examples/backends/vllm/deploy/agg.yaml) show you how you could create a Kubernetes deployment for your inference graph.
 
 This guide explains how to create your own deployment files.
 
@@ -25,7 +25,7 @@ Before choosing a template, understand the different architecture patterns:
 - GPU utilization may not be optimal (prefill and decode compete for resources)
 - Lower throughput ceiling compared to disaggregated
 
-**Example**: [`agg.yaml`](../../../components/backends/vllm/deploy/agg.yaml)
+**Example**: [`agg.yaml`](../../../examples/backends/vllm/deploy/agg.yaml)
 
 ### Aggregated + Router (agg_router.yaml)
 
@@ -42,7 +42,7 @@ Before choosing a template, understand the different architecture patterns:
 - Still has GPU underutilization issues of aggregated serving
 - More complex than plain aggregated but simpler than disaggregated
 
-**Example**: [`agg_router.yaml`](../../../components/backends/vllm/deploy/agg_router.yaml)
+**Example**: [`agg_router.yaml`](../../../examples/backends/vllm/deploy/agg_router.yaml)
 
 ### Disaggregated Serving (disagg_router.yaml)
 
@@ -61,7 +61,7 @@ Before choosing a template, understand the different architecture patterns:
 - More complex setup and debugging
 - Requires understanding of prefill/decode separation
 
-**Example**: [`disagg_router.yaml`](../../../components/backends/vllm/deploy/disagg_router.yaml)
+**Example**: [`disagg_router.yaml`](../../../examples/backends/vllm/deploy/disagg_router.yaml)
 
 ### Quick Selection Guide
 
@@ -69,11 +69,11 @@ Select the architecture pattern as your template that best fits your use case.
 
 For example, when using the `vLLM` backend:
 
-- **Development / Testing**: Use [`agg.yaml`](../../../components/backends/vllm/deploy/agg.yaml) as the base configuration.
+- **Development / Testing**: Use [`agg.yaml`](../../../examples/backends/vllm/deploy/agg.yaml) as the base configuration.
 
-- **Production with Load Balancing**: Use [`agg_router.yaml`](../../../components/backends/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
+- **Production with Load Balancing**: Use [`agg_router.yaml`](../../../examples/backends/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
 
-- **High Performance / Disaggregated Deployment**: Use [`disagg_router.yaml`](../../../components/backends/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
+- **High Performance / Disaggregated Deployment**: Use [`disagg_router.yaml`](../../../examples/backends/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
 
 
 ## Step 2: Customize the Template
@@ -219,3 +219,41 @@ When disabled, you can manually specify secrets as you would for a normal pod sp
 ```
 
 This automatic discovery eliminates the need to manually configure image pull secrets for each deployment.
+
+## Step 6: Deploy LoRA Adapters (Optional)
+
+After your base model deployment is running, you can deploy LoRA adapters using the `DynamoModel` custom resource. This allows you to fine-tune and extend your models without modifying the base deployment.
+
+To add a LoRA adapter to your deployment, link it using `modelRef` in your worker configuration:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-deployment
+spec:
+  services:
+    Worker:
+      modelRef:
+        name: Qwen/Qwen3-0.6B  # Base model identifier
+      componentType: worker
+      # ... rest of worker config
+```
+
+Then create a `DynamoModel` resource for your LoRA:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoModel
+metadata:
+  name: my-lora
+spec:
+  modelName: my-custom-lora
+  baseModelName: Qwen/Qwen3-0.6B  # Must match modelRef.name above
+  modelType: lora
+  source:
+    uri: s3://my-bucket/loras/my-lora
+```
+
+**For complete details on managing models and LoRA adapters, see:**
+📖 **[Managing Models with DynamoModel Guide](./dynamomodel-guide.md)**

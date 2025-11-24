@@ -4,26 +4,24 @@
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash,
-};
+use crate::mocker::perf_model::PerfModel;
 use crate::tokens::blocks::UniqueBlock;
 use crate::tokens::{BlockHash, SequenceHash, Token};
 
 pub type NumBlocks = usize;
 
 /// Represents different block movement operations in the cache
-/// For Use and Promote variants, parent hash is the second field
+/// For Use and Promote variants, block hashes are included for KV event publishing
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MoveBlock {
-    Use(Vec<UniqueBlock>),
+    Use(Vec<UniqueBlock>, Vec<BlockHash>),
     Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
-    Promote(Uuid, SequenceHash, Option<u64>),
+    Promote(Uuid, SequenceHash, Option<u64>, BlockHash),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,9 +46,13 @@ pub struct PrefillCost {
 }
 
 impl PrefillCost {
-    pub fn predict_prefill_compute(&self, new_tokens: Option<usize>) -> f64 {
+    pub fn predict_prefill_compute(
+        &self,
+        new_tokens: Option<usize>,
+        perf_model: &PerfModel,
+    ) -> f64 {
         let tokens = new_tokens.unwrap_or(self.new_tokens);
-        1.25e-6 * (tokens as f64).powi(2) + 7.41e-2 * (tokens as f64) + 2.62e1
+        perf_model.predict_prefill_time(tokens)
     }
 }
 
@@ -113,6 +115,11 @@ pub struct MockEngineArgs {
     /// Worker type for disaggregated serving (Aggregated, Prefill, or Decode)
     #[builder(default = "WorkerType::Aggregated")]
     pub worker_type: WorkerType,
+
+    /// Performance model for timing predictions (not serialized, loaded from planner_profile_data)
+    #[serde(skip)]
+    #[builder(default = "Arc::new(PerfModel::default())")]
+    pub perf_model: Arc<PerfModel>,
 }
 
 impl Default for MockEngineArgs {
@@ -150,6 +157,7 @@ impl MockEngineArgs {
             "startup_time",
             "is_prefill",
             "is_decode",
+            "planner_profile_data",
         ]
         .iter()
         .cloned()
@@ -253,53 +261,34 @@ impl MockEngineArgs {
         };
         builder = builder.worker_type(worker_type);
 
+        // Load performance model from NPZ file if provided
+        let perf_model = if let Some(path_str) = extra_args.get("planner_profile_data")
+            && let Some(path_str) = path_str.as_str()
+        {
+            let npz_path = PathBuf::from(path_str);
+            match PerfModel::from_npz(&npz_path) {
+                Ok(model) => {
+                    tracing::info!("Successfully loaded performance model from: {:?}", npz_path);
+                    Arc::new(model)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to load performance model from {:?}: {}. Falling back to polynomial model.",
+                        npz_path,
+                        e
+                    );
+                    Arc::new(PerfModel::default())
+                }
+            }
+        } else {
+            Arc::new(PerfModel::default())
+        };
+        builder = builder.perf_model(perf_model);
+
         // Build the MockEngineArgs with either defaults or overridden values
         builder
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build MockEngineArgs: {}", e))
-    }
-}
-
-/// Converts a MoveBlockResponse from the mocker backend into a KvCacheEventData.
-///
-/// This function assumes that the stored sequence hashes in the response always
-/// correspond to the tail part of the local hashes array. This is the expected
-/// behavior of KV block storage, where blocks are stored sequentially and the
-/// response contains the most recent blocks that were stored.
-///
-/// # Panics
-/// Panics if the number of blocks in the Store response exceeds the length
-/// of local_hashes.
-pub fn block_response_to_kv_event(
-    response: MoveBlockResponse,
-    local_hashes: &[BlockHash],
-) -> KvCacheEventData {
-    match response {
-        MoveBlockResponse::Store(full_blocks, parent_hash) => {
-            let num_blocks = full_blocks.len();
-            let local_hashes_slice = &local_hashes[local_hashes
-                .len()
-                .checked_sub(num_blocks)
-                .expect("local hashes fewer than block response signal")..];
-
-            KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
-                blocks: full_blocks
-                    .into_iter()
-                    .zip(local_hashes_slice.iter())
-                    .map(|(global_hash, local_hash)| KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(global_hash),
-                        tokens_hash: LocalBlockHash(*local_hash),
-                    })
-                    .collect(),
-            })
-        }
-        MoveBlockResponse::Remove(full_blocks) => KvCacheEventData::Removed(KvCacheRemoveData {
-            block_hashes: full_blocks
-                .into_iter()
-                .map(ExternalSequenceBlockHash)
-                .collect(),
-        }),
     }
 }
 
