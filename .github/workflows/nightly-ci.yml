@@ -166,7 +166,7 @@ jobs:
 ############################## TEST JOBS ##############################
 
   unit-tests:
-    name: ${{ matrix.framework }}-${{ matrix.arch }}
+    name: ${{ matrix.framework }}-${{ matrix.arch }}-unit
     needs: [build-amd64, build-arm64]
     if: always()
     runs-on: ${{ matrix.runner }}
@@ -238,14 +238,14 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "${{ matrix.framework }} and unit and (nightly or post_merge or pre_merge)"
+          pytest_marks: "unit and (nightly or post_merge or pre_merge)"  # Old: "${{ matrix.framework }} and unit and (nightly or post_merge or pre_merge)"
           framework: ${{ matrix.framework }}
           test_type: unit
           platform_arch: ${{ matrix.arch }}
           cpu_limit: '8'
 
   integration-tests:
-    name: ${{ matrix.framework }}-${{ matrix.arch }}
+    name: ${{ matrix.framework }}-${{ matrix.arch }}-integ
     needs: [build-amd64, build-arm64]
     if: always()
     runs-on: ${{ matrix.runner }}
@@ -309,13 +309,13 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "${{ matrix.framework }} and integration and (nightly or post_merge or pre_merge)"
+          pytest_marks: "integration and (nightly or post_merge or pre_merge)"  # Old: "${{ matrix.framework }} and integration and (nightly or post_merge or pre_merge)"
           framework: ${{ matrix.framework }}
           test_type: integration
           platform_arch: ${{ matrix.arch }}
 
   e2e-single-gpu-tests:
-    name: ${{ matrix.framework }}-${{ matrix.arch }}
+    name: ${{ matrix.framework }}-${{ matrix.arch }}-1gpu-e2e
     needs: [build-amd64, build-arm64]
     if: always()
     runs-on: ${{ matrix.runner }}
@@ -379,13 +379,13 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "(nightly or post_merge or pre_merge) and ${{ matrix.framework }} and e2e and gpu_1"
+          pytest_marks: "${{ matrix.framework }} and e2e and gpu_1"  # Old: "(nightly or post_merge or pre_merge) and ${{ matrix.framework }} and e2e and gpu_1"
           framework: ${{ matrix.framework }}
-          test_type: e2e
+          test_type: e2e-single-gpu
           platform_arch: ${{ matrix.arch }}
 
   e2e-multi-gpu-tests:
-    name: ${{ matrix.framework }}-${{ matrix.arch }}
+    name: ${{ matrix.framework }}-${{ matrix.arch }}-2gpu-e2e
     needs: [build-amd64, build-arm64]
     if: always()
     runs-on: ${{ matrix.runner }}
@@ -449,9 +449,9 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "(nightly or post_merge or pre_merge) and ${{ matrix.framework }} and e2e and gpu_2"
+          pytest_marks: "(nightly or post_merge or pre_merge) and e2e and gpu_2"  # Old: "(nightly or post_merge or pre_merge) and ${{ matrix.framework }} and e2e and gpu_2"
           framework: ${{ matrix.framework }}
-          test_type: e2e
+          test_type: e2e-multi-gpu
           platform_arch: ${{ matrix.arch }}
 
   component-tests:
@@ -538,9 +538,9 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "(${matrix.marks} or (post_merge or pre_merge or nightly))"
+          pytest_marks: "${{ matrix.marks }}"
           framework: ${{ matrix.framework }}
-          test_type: component
+          test_type: component-${{ matrix.component }}
           platform_arch: ${{ matrix.arch }}
 
   ############################## RESULTS SUMMARY ##############################
@@ -604,7 +604,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: cpu-amd-m5-4xlarge
-    if: always() && github.event_name == 'schedule' && !github.event.repository.fork
+    if: always() && !github.event.repository.fork #TODO add this && github.event_name == 'schedule'
     needs: results-summary
     permissions:
       contents: read
