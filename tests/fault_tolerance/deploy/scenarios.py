@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Dict, List, Optional, Pattern
 
-from typing_extensions import TypedDict
+from typing_extensions import Required, TypedDict
 
 from tests.utils.managed_deployment import DeploymentSpec
 
@@ -54,8 +54,8 @@ class DeploymentInfo(TypedDict, total=False):
         is_moe: Optional flag indicating if this is a Mixture-of-Experts model
     """
 
-    spec: DeploymentSpec
-    backend: str
+    spec: Required[DeploymentSpec]
+    backend: Required[str]
     model: str
     is_moe: bool
 
@@ -166,8 +166,9 @@ class Failure:
     service_names: list[str]
     command: str
     signal: str = "SIGINT"
-    replicas: int = 1
-    end_condition: Optional[str] = None  # End condition for failure (e.g., "dgd_ready")
+
+    # End condition for failure (e.g., "dgd_ready")
+    end_condition: Optional[str] = None
 
 
 @dataclass
@@ -246,7 +247,7 @@ def _set_replicas(deployment_spec, backend, deploy_type, replicas):
 
 
 def _set_tensor_parallel(
-    deployment_spec: DeploymentSpec, backend: str, deploy_type: str, tp_size: int
+    deployment_spec: DeploymentInfo, backend: str, deploy_type: str, tp_size: int
 ):
     """Set tensor parallel size for worker components."""
     spec = deployment_spec["spec"]
@@ -755,8 +756,6 @@ def add_rolling_upgrade_scenarios():
 
             service_names: list[str] = []
 
-            ## TODO: vllm disagg has both decode workers restart at same time but the prefill does one at a time, it also looks like the test exits when the first prefill worker is ready but the second is recreated
-            ## (Bug in operator?)
             ## TODO: maybe add a bit of buffer time after the rolling upgrade is completed (after the DGD is ready again)
 
             # setting replicas to 2 so we have availability of 1 replica at a time
