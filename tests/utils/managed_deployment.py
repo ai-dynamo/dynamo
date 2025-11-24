@@ -712,32 +712,36 @@ class ManagedDeployment:
         This is a dummy update - sets an env var on the service
         """
 
+        if not service_names:
+            raise ValueError(
+                "service_names cannot be empty for trigger_rolling_upgrade"
+            )
+
+        patch_body = {"spec": {"services": {}}}
+
         for service_name in service_names:
             self.deployment_spec.set_service_env_var(
                 service_name, "TEST_ROLLING_UPDATE_TRIGGER", secrets.token_hex(8)
             )
 
             updated_envs = self.deployment_spec.get_service_env_vars(service_name)
+            patch_body["spec"]["services"][service_name] = {"envs": updated_envs}
 
-            try:
-                patch_body = {
-                    "spec": {"services": {service_name: {"envs": updated_envs}}}
-                }
-
-                await self._custom_api.patch_namespaced_custom_object(
-                    group="nvidia.com",
-                    version="v1alpha1",
-                    namespace=self.namespace,
-                    plural="dynamographdeployments",
-                    name=self._deployment_name,
-                    body=patch_body,
-                    _content_type="application/merge-patch+json",
-                )
-            except kubernetes.client.rest.ApiException as e:
-                self._logger.info(
-                    f"Failed to patch deployment {self._deployment_name}: {e}"
-                )
-                raise
+        try:
+            await self._custom_api.patch_namespaced_custom_object(
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=self.namespace,
+                plural="dynamographdeployments",
+                name=self._deployment_name,
+                body=patch_body,
+                _content_type="application/merge-patch+json",
+            )
+        except kubernetes.client.rest.ApiException as e:
+            self._logger.info(
+                f"Failed to patch deployment {self._deployment_name}: {e}"
+            )
+            raise
 
     def get_processes(self, pod: Pod) -> list[PodProcess]:
         """Get list of processes in the given pod"""
