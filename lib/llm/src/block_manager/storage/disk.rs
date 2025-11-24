@@ -498,17 +498,17 @@ mod tests {
             let size = buf.len();
 
             // Enforce Lustre-like O_DIRECT requirements
-            if addr % PAGE_SIZE != 0 {
+            if !addr.is_multiple_of(PAGE_SIZE) {
                 eprintln!(
-                    "❌ EINVAL: Buffer address {:#x} not aligned to {} bytes",
+                    "EINVAL: Buffer address {:#x} not aligned to {} bytes",
                     addr, PAGE_SIZE
                 );
                 return Err(std::io::Error::from_raw_os_error(22)); // EINVAL
             }
 
-            if size % PAGE_SIZE != 0 {
+            if !size.is_multiple_of(PAGE_SIZE) {
                 eprintln!(
-                    "❌ EINVAL: Write size {} not aligned to {} bytes",
+                    "EINVAL: Write size {} not aligned to {} bytes",
                     size, PAGE_SIZE
                 );
                 return Err(std::io::Error::from_raw_os_error(22)); // EINVAL
@@ -570,17 +570,16 @@ mod tests {
 
         // This may fail with EINVAL if vec! didn't happen to allocate aligned memory
         // (which is common but not guaranteed)
-        if result.is_err() {
-            let err = result.unwrap_err();
+        if let Err(err) = result {
             assert_eq!(
                 err.raw_os_error(),
                 Some(22),
                 "Expected EINVAL (22), got {:?}",
                 err
             );
-            eprintln!("✓ Confirmed: vec! buffer failed strict alignment check (as expected)");
+            eprintln!("Confirmed: vec! buffer failed strict alignment check (as expected)");
         } else {
-            eprintln!("⚠ vec! happened to be aligned this time (lucky!), but not guaranteed");
+            eprintln!("Note: vec! happened to be aligned this time (lucky!), but not guaranteed");
         }
     }
 
@@ -605,13 +604,13 @@ mod tests {
                 let to_write = if remaining >= buf.len() as u64 {
                     buf.len()
                 } else {
-                    let aligned = ((remaining as usize + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+                    let aligned = (remaining as usize).div_ceil(PAGE_SIZE) * PAGE_SIZE;
                     std::cmp::min(aligned, buf.len())
                 };
 
                 // This should always succeed with our aligned buffer
                 writer
-                    .write(&buf.as_slice()[..to_write])
+                    .write_all(&buf.as_slice()[..to_write])
                     .unwrap_or_else(|e| {
                         panic!(
                             "Write failed at offset {} for total size {}: {:?}",
@@ -629,7 +628,7 @@ mod tests {
             );
 
             eprintln!(
-                "✓ Size {} passed: {} writes, {} total bytes",
+                "Size {} passed: {} writes, {} total bytes",
                 total_size,
                 writer.writes.len(),
                 writer.bytes_written
@@ -673,7 +672,7 @@ mod tests {
             let fd = storage.fd() as RawFd;
             let mut buf = vec![0u8; std::cmp::min(size, 4096)];
 
-            let bytes_read = unsafe { nix::sys::uio::pread(fd, &mut buf, 0) }
+            let bytes_read = nix::sys::uio::pread(fd, &mut buf, 0)
                 .unwrap_or_else(|e| panic!("Failed to read back data for {}: {:?}", name, e));
 
             assert!(bytes_read > 0, "No data read back for {}", name);
@@ -683,7 +682,7 @@ mod tests {
                 name
             );
 
-            eprintln!("✓ {} passed", name);
+            eprintln!("{} passed", name);
         }
 
         unsafe {
