@@ -447,6 +447,18 @@ impl DistributedConfig {
             request_plane,
         }
     }
+
+    /// A DistributedConfig that isn't distributed, for when the frontend and backend are in the
+    /// same process.
+    pub fn process_local() -> DistributedConfig {
+        DistributedConfig {
+            store_backend: KeyValueStoreSelect::Memory,
+            nats_config: None,
+            // This won't be used in process local, so we likely need a "none" option to
+            // communicate that and avoid opening the ports.
+            request_plane: RequestPlaneMode::Tcp,
+        }
+    }
 }
 
 /// Request plane transport mode configuration
