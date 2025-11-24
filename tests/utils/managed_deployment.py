@@ -12,11 +12,11 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 import kr8s
-import kubernetes
 import requests
 import yaml
 from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
+from kubernetes_asyncio.client import exceptions
 
 
 def _get_workspace_dir() -> str:
@@ -483,7 +483,9 @@ class ManagedDeployment:
     log_dir: str
     deployment_spec: DeploymentSpec
     namespace: str
-    frontend_service_name: Optional[str] = "Frontend"
+    # TODO: this should be determined by the deployment_spec
+    # the service containing component_type: Frontend determines what is actually the frontend service
+    frontend_service_name: str = "Frontend"
     skip_restart_services: bool = False
 
     _custom_api: Optional[client.CustomObjectsApi] = None
@@ -502,7 +504,7 @@ class ManagedDeployment:
         """Initialize kubernetes client"""
         try:
             # Try in-cluster config first (for pods with service accounts)
-            await config.load_incluster_config()
+            config.load_incluster_config()
             self._in_cluster = True
         except Exception:
             # Fallback to kube config file (for local development)
@@ -598,7 +600,7 @@ class ManagedDeployment:
             try:
                 attempt += 1
                 assert self._custom_api is not None, "Kubernetes API not initialized"
-                status = await self._custom_api.get_namespaced_custom_object(
+                status = await self._custom_api.get_namespaced_custom_object(  # type: ignore[awaitable-is-not-coroutine]
                     group="nvidia.com",
                     version="v1alpha1",
                     namespace=self.namespace,
@@ -608,9 +610,9 @@ class ManagedDeployment:
                 # Check both conditions:
                 # 1. Ready condition is True
                 # 2. State is successful
-                status_obj = status.get("status", {})
-                conditions = status_obj.get("conditions", [])
-                current_state = status_obj.get("state", "unknown")
+                status_obj = status.get("status", {})  # type: ignore[attr-defined]
+                conditions = status_obj.get("conditions", [])  # type: ignore[attr-defined]
+                current_state = status_obj.get("state", "unknown")  # type: ignore[attr-defined]
 
                 observed_ready_condition_val = ""
                 for condition in conditions:
@@ -619,7 +621,7 @@ class ManagedDeployment:
                         if observed_ready_condition_val == str(ready_condition_val):
                             break
 
-                observed_state_val = status_obj.get("state")
+                observed_state_val = status_obj.get("state")  # type: ignore[attr-defined]
 
                 if (
                     observed_ready_condition_val == str(ready_condition_val)
@@ -646,7 +648,7 @@ class ManagedDeployment:
                             f"Deployment has Ready condition {observed_ready_condition_val} and state {observed_state_val}, desired condition {ready_condition_val} and state {state_val}"
                         )
 
-            except kubernetes.client.rest.ApiException as e:
+            except exceptions.ApiException as e:
                 self._logger.info(
                     f"API Exception while checking deployment status: {e}"
                 )
@@ -697,7 +699,7 @@ class ManagedDeployment:
             )
             self._logger.info(self.deployment_spec.spec())
             self._logger.info(f"Deployment Started {self._deployment_name}")
-        except kubernetes.client.rest.ApiException as e:
+        except exceptions.ApiException as e:
             if e.status == 409:  # Already exists
                 self._logger.info(f"Deployment {self._deployment_name} already exists")
             else:
@@ -728,6 +730,7 @@ class ManagedDeployment:
             patch_body["spec"]["services"][service_name] = {"envs": updated_envs}
 
         try:
+            assert self._custom_api is not None, "Kubernetes API not initialized"
             await self._custom_api.patch_namespaced_custom_object(
                 group="nvidia.com",
                 version="v1alpha1",
@@ -737,7 +740,7 @@ class ManagedDeployment:
                 body=patch_body,
                 _content_type="application/merge-patch+json",
             )
-        except kubernetes.client.rest.ApiException as e:
+        except exceptions.ApiException as e:
             self._logger.info(
                 f"Failed to patch deployment {self._deployment_name}: {e}"
             )
@@ -776,7 +779,7 @@ class ManagedDeployment:
             for pod in kr8s.get(
                 "pods", namespace=self.namespace, label_selector=label_selector
             ):
-                pods.append(pod)
+                pods.append(pod)  # type: ignore[arg-type]
 
             result[service_name] = pods
 
@@ -867,7 +870,7 @@ class ManagedDeployment:
                     plural="dynamographdeployments",
                     name=self._deployment_name,
                 )
-        except client.exceptions.ApiException as e:
+        except exceptions.ApiException as e:
             if e.status != 404:  # Ignore if already deleted
                 raise
 

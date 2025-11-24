@@ -207,8 +207,11 @@ def _terminate_client_processes(
         for proc in client_procs:
             if proc.is_alive():
                 try:
-                    logger.debug(f"Sending SIGINT to client process {proc.pid}")
-                    os.kill(proc.pid, signal.SIGINT)
+                    if proc.pid is not None:
+                        logger.debug(f"Sending SIGINT to client process {proc.pid}")
+                        os.kill(proc.pid, signal.SIGINT)
+                    else:
+                        raise ValueError(f"Process {proc} has no PID")
                 except ProcessLookupError:
                     logger.debug(f"Process {proc.pid} already terminated")
                 except Exception as e:
@@ -246,11 +249,6 @@ async def _inject_failures(
             logger.warning(f"No pods found for {failure.service_names}")
             continue
 
-        replicas = failure.replicas
-
-        if not replicas:
-            replicas = len(pods)
-
         logger.info(f"Injecting failure for: {failure}")
 
         # Track which pods were affected by this failure
@@ -286,23 +284,21 @@ async def _inject_failures(
             # Need to wait for the deployment to be unready so we know the rolling upgrade has started
             await deployment.wait_for_unready(timeout=60, log_interval=10)
         else:
-            ## TODO: need to refactor this for service_names being a list
-            for x in range(replicas):
-                pod = pods[x % len(pods)]
-
-                if failure.command == "delete_pod":
-                    deployment.get_pod_manifest_logs_metrics(
-                        failure.service_names, pod, ".before_delete"
-                    )
-                    pod.delete(force=True)  # force means no graceful termination
-                else:
-                    processes = deployment.get_processes(pod)
-                    for process in processes:
-                        if failure.command in process.command:
-                            logger.info(
-                                f"Terminating {failure.service_names} Pid {process.pid} Command {process.command}"
-                            )
-                            process.kill(failure.signal)
+            for service_name, pods in service_pod_dict.items():
+                for pod in pods:
+                    if failure.command == "delete_pod":
+                        deployment.get_pod_manifest_logs_metrics(
+                            service_name, pod, ".before_delete"
+                        )
+                        pod.delete(force=True)  # force means no graceful termination
+                    else:
+                        processes = deployment.get_processes(pod)
+                        for process in processes:
+                            if failure.command in process.command:
+                                logger.info(
+                                    f"Terminating {failure.service_names} Pid {process.pid} Command {process.command}"
+                                )
+                                process.kill(failure.signal)
 
         # Wait until DGD is ready (this means the rolling upgrade is complete)
         if failure.end_condition == "dgd_ready":
