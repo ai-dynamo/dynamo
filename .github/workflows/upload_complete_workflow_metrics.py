@@ -78,15 +78,6 @@ FIELD_TEST_CLASSNAME = (
 FIELD_TEST_DURATION = "l_test_duration_ms"
 FIELD_TEST_STATUS = "s_test_status"  # Test status (passed, failed, error, skipped)
 
-# BuildKit step-specific fields (for BUILDKIT_STEP_INDEX)
-FIELD_BUILDKIT_STEP_NUMBER = "l_buildkit_step_number"
-FIELD_BUILDKIT_STEP_NAME = "s_buildkit_step_name"
-FIELD_BUILDKIT_STEP_COMMAND = "s_buildkit_step_command"
-FIELD_BUILDKIT_STEP_STATUS = "s_buildkit_step_status"
-FIELD_BUILDKIT_STEP_CACHED = "b_buildkit_step_cached"
-FIELD_BUILDKIT_STEP_DURATION_SEC = "l_buildkit_step_duration_sec"
-FIELD_BUILDKIT_STEP_SIZE_BYTES = "l_buildkit_step_size_bytes"
-
 
 class BuildMetricsReader:
     """Reader for build metrics from environment variables and artifacts"""
@@ -294,7 +285,6 @@ class WorkflowMetricsUploader:
         self.workflow_index = os.getenv("WORKFLOW_INDEX", "")
         self.jobs_index = os.getenv("JOB_INDEX", "")
         self.steps_index = os.getenv("STEPS_INDEX", "")
-        self.buildkit_step_index = os.getenv("BUILDKIT_STEP_INDEX", "")
 
         # Validate that database URLs are provided
         if not self.workflow_index or not self.jobs_index or not self.steps_index:
@@ -654,8 +644,6 @@ class WorkflowMetricsUploader:
             self._upload_container_metrics(job_data)
             # Also upload test metrics if available for this framework job
             self._upload_test_metrics(job_data)
-            # Also upload BuildKit step metrics if available
-            self._upload_buildkit_step_metrics(job_data)
 
     def _upload_job_step_metrics(self, job_data: Dict[str, Any]) -> int:
         """Extract and post metrics for all steps in a job"""
@@ -1044,151 +1032,6 @@ class WorkflowMetricsUploader:
                 print(f"❌ Failed to process metadata file {metadata_file}: {e}")
 
         print(f"📊 Processed {total_tests_processed} individual tests total")
-        print("   " + "=" * 50)
-
-    def _upload_buildkit_step_metrics(self, job_data: Dict[str, Any]) -> None:
-        """Upload BuildKit step-level metrics for detailed build analysis"""
-        buildkit_index = self.buildkit_step_index
-        if not buildkit_index:
-            print("⚠️  BUILDKIT_STEP_INDEX not configured, skipping BuildKit step metrics upload")
-            return
-
-        job_name = job_data.get("name", "")
-        job_id = str(job_data["id"])
-
-        print(f"🔨 Looking for BuildKit step metrics for job '{job_name}'")
-
-        # Determine framework and architecture from job name
-        framework = None
-        job_name_lower = job_name.lower()
-        if "vllm" in job_name_lower:
-            framework = "vllm"
-        elif "sglang" in job_name_lower:
-            framework = "sglang"
-        elif "trtllm" in job_name_lower:
-            framework = "trtllm"
-
-        if not framework:
-            print(f"⚠️  Could not determine framework from job name: {job_name}")
-            return
-
-        # Determine platform architecture
-        platform_arch = "amd64"  # default
-        if "(amd64)" in job_name_lower or "amd64" in job_name_lower:
-            platform_arch = "amd64"
-        elif "(arm64)" in job_name_lower or "arm64" in job_name_lower:
-            platform_arch = "arm64"
-
-        print(f"📦 Job framework: {framework}, platform_arch: {platform_arch}")
-
-        # Look for BuildKit reports directory
-        buildkit_reports_dir = "buildkit-reports"
-        if not os.path.exists(buildkit_reports_dir):
-            print(f"⚠️  BuildKit reports directory not found: {buildkit_reports_dir}")
-            return
-
-        # Look for BuildKit JSON data files - updated pattern to match new naming
-        # Files now named like: {framework}-{target}-{arch}-data.json
-        buildkit_files = glob.glob(
-            f"{buildkit_reports_dir}/{framework}-*-{platform_arch}-data.json"
-        )
-
-        if not buildkit_files:
-            print(
-                f"⚠️  No BuildKit data files found for framework '{framework}' with arch '{platform_arch}'"
-            )
-            return
-
-        print(f"📄 Found {len(buildkit_files)} BuildKit data file(s)")
-
-        total_steps_processed = 0
-
-        # Process each BuildKit data file
-        for buildkit_file in buildkit_files:
-            try:
-                with open(buildkit_file, "r") as f:
-                    buildkit_data = json.load(f)
-
-                steps = buildkit_data.get("steps", [])
-
-                print(f"📋 Processing BuildKit data from: {buildkit_file}")
-                print(f"   Total steps: {len(steps)}")
-
-                # Upload each step as a separate document
-                for step in steps:
-                    step_metric = {}
-
-                    # Generate unique ID for this step
-                    step_num = step.get("step_number", 0)
-                    step_metric[
-                        FIELD_ID
-                    ] = f"github-buildkit-step-{job_id}-{framework}-{step_num}"
-
-                    # Job context
-                    step_metric[FIELD_JOB_ID] = job_id
-                    step_metric[FIELD_JOB_NAME] = job_name
-
-                    # Find the "Build Container" step ID
-                    build_step_id = None
-                    job_steps = job_data.get("steps", [])
-                    for js in job_steps:
-                        if (
-                            "build" in js.get("name", "").lower()
-                            and "container" in js.get("name", "").lower()
-                        ):
-                            build_step_id = f"{job_id}_{js.get('number', 1)}"
-                            break
-                    step_metric[FIELD_STEP_ID] = build_step_id or f"{job_id}_build"
-
-                    # Framework and platform
-                    step_metric[FIELD_BUILD_FRAMEWORK] = framework
-
-                    # BuildKit step-specific fields
-                    step_metric[FIELD_BUILDKIT_STEP_NUMBER] = step.get("step_number", 0)
-                    step_metric[FIELD_BUILDKIT_STEP_NAME] = step.get("step_name", "")[:200]
-                    
-                    # Truncate command if too long
-                    command = step.get("command", "")
-                    if len(command) > 500:
-                        command = command[:497] + "..."
-                    step_metric[FIELD_BUILDKIT_STEP_COMMAND] = command
-                    
-                    step_metric[FIELD_BUILDKIT_STEP_STATUS] = step.get("status", "unknown")
-                    step_metric[FIELD_BUILDKIT_STEP_CACHED] = step.get("cached", False)
-                    step_metric[FIELD_BUILDKIT_STEP_DURATION_SEC] = float(
-                        step.get("duration_sec", 0)
-                    )
-                    step_metric[FIELD_BUILDKIT_STEP_SIZE_BYTES] = step.get(
-                        "size_transferred", 0
-                    )
-
-                    # Add timestamp
-                    job_completed_at = job_data.get("completed_at")
-                    if job_completed_at:
-                        step_metric["@timestamp"] = job_completed_at
-                    else:
-                        step_metric["@timestamp"] = datetime.now(
-                            timezone.utc
-                        ).isoformat()
-
-                    # Add common context fields
-                    self.add_common_context_fields(step_metric)
-
-                    # Upload step metric
-                    try:
-                        self.post_to_db(buildkit_index, step_metric)
-                        status_icon = "⚡" if step.get("cached") else "✅"
-                        print(
-                            f"{status_icon} Uploaded step {step_num}: {step.get('step_name', 'unknown')[:50]}"
-                        )
-                        total_steps_processed += 1
-                    except Exception as e:
-                        print(f"❌ Failed to upload step {step_num}: {e}")
-
-            except Exception as e:
-                print(f"❌ Failed to process BuildKit data file {buildkit_file}: {e}")
-
-        print(f"📊 Processed {total_steps_processed} BuildKit steps total")
         print("   " + "=" * 50)
 
 

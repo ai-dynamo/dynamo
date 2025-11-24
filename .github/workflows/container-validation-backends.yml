@@ -504,14 +504,6 @@ jobs:
           merge-multiple: true
         continue-on-error: true  # Don't fail if artifacts don't exist
 
-      - name: Download BuildKit reports
-        uses: actions/download-artifact@v4
-        with:
-          pattern: buildkit-reports-*
-          path: buildkit-reports/
-          merge-multiple: true
-        continue-on-error: true  # Don't fail if artifacts don't exist
-
       - name: Download test results
         uses: actions/download-artifact@v4
         with:
@@ -529,7 +521,6 @@ jobs:
           # Container and test index configuration
           CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
           TEST_INDEX: ${{ secrets.TEST_INDEX }}
-          BUILDKIT_STEP_INDEX: ${{ secrets.BUILDKIT_STEP_INDEX }}
         run: |
           # Upload complete workflow metrics including container metrics
           python3 .github/workflows/upload_complete_workflow_metrics.py
