@@ -76,7 +76,7 @@ python -m dynamo.frontend --http-port=8000 &
 
 # Start processor
 echo "Starting processor..."
-python -m dynamo.vllm --multimodal-processor --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
+python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
 
 # Configure GPU memory optimization for specific models
 EXTRA_ARGS=""

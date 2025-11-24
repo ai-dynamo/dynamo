@@ -48,15 +48,15 @@ if [[ $HEAD_NODE -eq 1 ]]; then
     python -m dynamo.frontend --http-port=8000 &
 
     # run processor
-    python -m dynamo.vllm --multimodal-processor --model $MODEL_NAME --mm-prompt-template "<|image|>\n<prompt>" &
+    python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME --mm-prompt-template "<|image|>\n<prompt>" &
 
     # Llama 4 doesn't support image embedding input, so the prefill worker will also
     # handle image encoding inline.
     # run prefill worker
-    VLLM_NIXL_SIDE_CHANNEL_PORT=20097 python -m dynamo.vllm --multimodal-encode-prefill-worker --is-prefill-worker --model $MODEL_NAME --tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization 0.80 --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
+    VLLM_NIXL_SIDE_CHANNEL_PORT=20097 python -m dynamo.vllm --multimodal-encode-prefill-worker --is-prefill-worker --enable-multimodal --model $MODEL_NAME --tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization 0.80 --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
 else
     # run decode worker on non-head node
-    VLLM_NIXL_SIDE_CHANNEL_PORT=20098 python -m dynamo.vllm --multimodal-decode-worker --model $MODEL_NAME --tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization 0.80 --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
+    VLLM_NIXL_SIDE_CHANNEL_PORT=20098 python -m dynamo.vllm --multimodal-decode-worker --enable-multimodal --model $MODEL_NAME --tensor-parallel-size=8 --max-model-len=208960 --gpu-memory-utilization 0.80 --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
 fi
 
 # Wait for all background processes to complete
