@@ -56,7 +56,7 @@ pub struct ModelManager {
 
     // These are Mutex because we read and write rarely and equally
     cards: Mutex<HashMap<String, ModelDeploymentCard>>,
-    kv_choosers: Mutex<HashMap<EndpointId, Arc<KvRouter>>>, // Key: component service_name
+    kv_choosers: Mutex<HashMap<EndpointId, Arc<KvRouter>>>,
     prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
 }
 
@@ -315,7 +315,14 @@ impl ModelManager {
             .get_or_create_bucket(KV_ROUTERS_ROOT_PATH, None)
             .await?;
         let router_uuid = uuid::Uuid::new_v4();
-        let router_key = Key::new(format!("{}/{router_uuid}", endpoint.id()));
+        // In lib/llm/src/kv_router/subscriber.rs we filter on component.service_name() so this
+        // must have that prefix.
+        let router_key = Key::new(format!(
+            "{}/{}/{}",
+            endpoint.component().service_name(),
+            endpoint.name(),
+            router_uuid,
+        ));
         let json_router_config = serde_json::to_vec_pretty(&kv_router_config.unwrap_or_default())?;
         router_bucket
             .insert(&router_key, json_router_config.into(), 0)

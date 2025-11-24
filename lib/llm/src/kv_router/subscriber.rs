@@ -420,6 +420,7 @@ pub async fn start_kv_router_background(
                     tracing::info!("Detected router replica deletion: {key}");
 
                     // Only process deletions for routers on the same component
+                    // Must match model_manager.rs kv_chooser_for
                     if !key.contains(&component.service_name()) {
                         tracing::trace!(
                             "Skipping router deletion from different component (key: {key}, subscriber component: {})",
