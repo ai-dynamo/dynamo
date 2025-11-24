@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use dynamo_async_openai::types::{
-    ChatChoiceStream, ChatCompletionStreamResponseDelta, FinishReason, Role,
+    ChatChoiceStream, ChatCompletionStreamResponseDelta, CompletionUsage, FinishReason, Role,
 };
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
@@ -1631,6 +1631,55 @@ mod tests {
                 run
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_usage_chunk_preserved() {
+        // Create one chunk with choices (content) and one chunk with only usage/no choices.
+        let content_chunk = create_mock_response_chunk("Hello, world!".to_string(), 0);
+        let mut usage_chunk = content_chunk.clone();
+
+        // Modify the inner data to be a usage-only chunk
+        if let Some(ref mut data) = usage_chunk.data {
+            data.choices.clear();
+            data.usage = Some(CompletionUsage {
+                prompt_tokens: 11,
+                completion_tokens: 3,
+                total_tokens: 14,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+        }
+
+        let input_chunks = vec![content_chunk, usage_chunk];
+        let input_stream = stream::iter(input_chunks);
+        let jail = JailedStream::builder().build();
+
+        let results: Vec<_> = jail.apply(input_stream).collect().await;
+
+        // Validate we have exactly 2 chunks
+        assert_eq!(results.len(), 2, "Should have exactly 2 chunks");
+
+        // First chunk should be content chunk
+        let content = results[0].data.as_ref().unwrap().choices[0]
+            .delta
+            .content
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            content, "Hello, world!",
+            "Content chunk should have 'Hello, world!'"
+        );
+
+        // Second chunk should be usage-only chunk
+        assert!(
+            results[1].data.as_ref().unwrap().choices.is_empty(),
+            "Usage chunk should have no choices"
+        );
+        let usage = results[1].data.as_ref().unwrap().usage.as_ref().unwrap();
+        assert_eq!(usage.prompt_tokens, 11);
+        assert_eq!(usage.completion_tokens, 3);
+        assert_eq!(usage.total_tokens, 14);
     }
 
     #[tokio::test]
