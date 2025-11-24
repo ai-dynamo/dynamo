@@ -269,7 +269,6 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     """
 
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
 

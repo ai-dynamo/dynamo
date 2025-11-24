@@ -20,7 +20,6 @@ package controller
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"text/template"
@@ -29,7 +28,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,6 +46,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
+	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook/validation"
 )
 
 const (
@@ -798,22 +797,26 @@ func isOnlineProfiling(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) boo
 
 // validateSpec validates the DGDR spec
 func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Context, dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) error {
-	// Validate profiler image is specified in the new location
-	if dgdr.Spec.ProfilingConfig.ProfilerImage == "" {
-		return errors.New("profilingConfig.profilerImage is required")
-	}
+	// Use the validator for simple validation (defense in depth - only when webhooks are disabled)
+	if !r.Config.WebhooksEnabled {
+		isClusterWide := r.Config.RestrictedNamespace == ""
+		validator := webhookvalidation.NewDynamoGraphDeploymentRequestValidator(dgdr, isClusterWide)
+		warnings, err := validator.Validate()
+		if err != nil {
+			return err
+		}
 
-	// Basic validation - check that profilingConfig.config is provided
-	if dgdr.Spec.ProfilingConfig.Config == nil || len(dgdr.Spec.ProfilingConfig.Config.Raw) == 0 {
-		return errors.New("profilingConfig.config is required and must not be empty")
-	}
-
-	// Validate enableGpuDiscovery is only true for cluster-wide operators
-	if dgdr.Spec.EnableGpuDiscovery && r.Config.RestrictedNamespace != "" {
-		return errors.New("enableGpuDiscovery can only be set to true for cluster-wide operators. Namespace-restricted operators cannot access cluster nodes for GPU discovery. Please set enableGpuDiscovery to false and provide hardware configuration (hardware.min_num_gpus_per_engine, hardware.max_num_gpus_per_engine, hardware.num_gpus_per_node) in profilingConfig.config")
+		// Log warnings if any
+		if len(warnings) > 0 {
+			logger := log.FromContext(ctx)
+			for _, warning := range warnings {
+				logger.Info("Validation warning", "warning", warning)
+			}
+		}
 	}
 
 	// Validate ConfigMap if provided (for the DGD base config)
+	// This requires cluster access and cannot be done in the stateless validator
 	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
 		cm := &corev1.ConfigMap{}
 		err := r.Get(ctx, types.NamespacedName{
@@ -837,28 +840,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 
 		if _, exists := cm.Data[key]; !exists {
 			return fmt.Errorf(MessageConfigMapKeyNotFound, key, cm.Name)
-		}
-	}
-
-	// Parse config to validate structure
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
-		return fmt.Errorf("failed to parse profilingConfig.config: %w", err)
-	}
-
-	// Warn if deployment.model or engine.backend are specified in config (they will be overwritten by spec fields)
-	if engineConfig, ok := config["engine"].(map[string]interface{}); ok {
-		if backend, ok := engineConfig["backend"].(string); ok && backend != "" && backend != dgdr.Spec.Backend {
-			logger := log.FromContext(ctx)
-			logger.Info("Warning: profilingConfig.config.engine.backend will be overwritten by spec.backend",
-				"configBackend", backend, "specBackend", dgdr.Spec.Backend)
-		}
-	}
-	if deployment, ok := config["deployment"].(map[string]interface{}); ok {
-		if model, ok := deployment["model"].(string); ok && model != "" && model != dgdr.Spec.Model {
-			logger := log.FromContext(ctx)
-			logger.Info("Warning: profilingConfig.config.deployment.model will be overwritten by spec.model",
-				"configModel", model, "specModel", dgdr.Spec.Model)
 		}
 	}
 
@@ -910,66 +891,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		jobName := getProfilingJobName(dgdr)
 		outputConfigMapName := getOutputConfigMapName(dgdr)
 
-		// Parse the profiling config from JSON
-		var config map[string]interface{}
-		if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
-			return nil, false, fmt.Errorf("failed to parse profiling config: %w", err)
-		}
-
-		// Set deployment.namespace if not already set
-		deploymentVal, hasDeployment := config["deployment"]
-		var deploymentConfig map[string]interface{}
-		if !hasDeployment || deploymentVal == nil {
-			deploymentConfig = make(map[string]interface{})
-			config["deployment"] = deploymentConfig
-		} else {
-			var ok bool
-			deploymentConfig, ok = deploymentVal.(map[string]interface{})
-			if !ok {
-				return nil, false, fmt.Errorf("profilingConfig.config.deployment must be an object, got %T", deploymentVal)
-			}
-		}
-		if _, hasNamespace := deploymentConfig["namespace"]; !hasNamespace {
-			deploymentConfig["namespace"] = dgdr.Namespace
-		}
-
-		// Set deployment.model from spec.model
-		deploymentConfig["model"] = dgdr.Spec.Model
-
-		// Set deployment.dgd_image from deploymentOverrides.workersImage if provided
-		if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.WorkersImage != "" {
-			deploymentConfig["dgd_image"] = dgdr.Spec.DeploymentOverrides.WorkersImage
-		}
-
-		// Set output_dir if not already set
-		if _, hasOutputDir := config["output_dir"]; !hasOutputDir {
-			config["output_dir"] = ProfilingOutputPath
-		}
-
-		// Set engine.backend from spec.backend
-		engineVal, hasEngine := config["engine"]
-		var engineConfig map[string]interface{}
-		if !hasEngine || engineVal == nil {
-			engineConfig = make(map[string]interface{})
-			config["engine"] = engineConfig
-		} else {
-			var ok bool
-			engineConfig, ok = engineVal.(map[string]interface{})
-			if !ok {
-				return nil, false, fmt.Errorf("profilingConfig.config.engine must be an object, got %T", engineVal)
-			}
-		}
-		engineConfig["backend"] = dgdr.Spec.Backend
-
-		// If ConfigMapRef is provided, set engine.config path
-		if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
-			engineConfig["config"] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
-		}
-
-		// Serialize config to YAML for passing to profiler
-		configYAML, err := sigsyaml.Marshal(config)
+		// Parse and prepare profiling config
+		configYAML, err := r.prepareProfilingConfig(dgdr)
 		if err != nil {
-			return nil, false, fmt.Errorf("failed to marshal profiling config to YAML: %w", err)
+			return nil, false, err
 		}
 
 		// Common environment variables
@@ -1041,18 +966,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		logger.Info("Using profiler image", "image", imageName)
 
 		profilerContainer := corev1.Container{
-			Name:    ContainerNameProfiler,
-			Image:   imageName,
-			Command: []string{"python", "-m", "benchmarks.profiler.profile_sla"},
-			Args:    profilerArgs,
-			Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("16"),
-					corev1.ResourceMemory: resource.MustParse("10Gi"),
-				},
-			},
+			Name:         ContainerNameProfiler,
+			Image:        imageName,
+			Command:      []string{"python", "-m", "benchmarks.profiler.profile_sla"},
+			Args:         profilerArgs,
 			Env:          profilerEnv,
 			VolumeMounts: volumeMounts,
+		}
+
+		// Apply resource requirements if specified in the DGDR
+		if dgdr.Spec.ProfilingConfig.Resources != nil {
+			profilerContainer.Resources = *dgdr.Spec.ProfilingConfig.Resources
 		}
 
 		// Generate sidecar script from template
@@ -1085,14 +1009,27 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			}},
 		}
 
-		// Build volumes - use emptyDir for profiling output
-		// The sidecar saves all needed data to ConfigMaps, so persistence is not needed
-		volumes := []corev1.Volume{{
-			Name: VolumeNameProfilingOutput,
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
-		}}
+		// Use PVC if specified, otherwise use emptyDir for profiling output
+		var profilingOutputVolume corev1.Volume
+		if dgdr.Spec.ProfilingConfig.OutputPVC != "" {
+			logger.Info("Using PVC for profiling output", "pvc", dgdr.Spec.ProfilingConfig.OutputPVC)
+			profilingOutputVolume = corev1.Volume{
+				Name: VolumeNameProfilingOutput,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: dgdr.Spec.ProfilingConfig.OutputPVC,
+					},
+				},
+			}
+		} else {
+			profilingOutputVolume = corev1.Volume{
+				Name: VolumeNameProfilingOutput,
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			}
+		}
+		volumes := []corev1.Volume{profilingOutputVolume}
 
 		// Add ConfigMap volume if provided
 		if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
@@ -1126,6 +1063,27 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			labelValue = LabelValueAICProfiler
 		}
 
+		podSpec := corev1.PodSpec{
+			ServiceAccountName: ServiceAccountProfilingJob,
+			RestartPolicy:      corev1.RestartPolicyNever,
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: ptr.To(true),        // Enforces that container cannot run as root
+				RunAsUser:    ptr.To[int64](1000), // Run as UID 1000 (non-privileged user)
+				RunAsGroup:   ptr.To[int64](1000), // Run with GID 1000 (non-privileged group)
+				FSGroup:      ptr.To[int64](1000), // Volume files owned by GID 1000
+			},
+			Containers: []corev1.Container{profilerContainer, sidecarContainer},
+			Volumes:    volumes,
+			ImagePullSecrets: []corev1.LocalObjectReference{
+				{Name: "nvcr-imagepullsecret"},
+			},
+		}
+
+		// Apply tolerations if specified in the DGDR
+		if len(dgdr.Spec.ProfilingConfig.Tolerations) > 0 {
+			podSpec.Tolerations = dgdr.Spec.ProfilingConfig.Tolerations
+		}
+
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      jobName,
@@ -1139,20 +1097,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			Spec: batchv1.JobSpec{
 				BackoffLimit: &backoffLimit,
 				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						ServiceAccountName: ServiceAccountProfilingJob,
-						RestartPolicy:      corev1.RestartPolicyNever, SecurityContext: &corev1.PodSecurityContext{
-							RunAsNonRoot: ptr.To(true),        // Enforces that container cannot run as root
-							RunAsUser:    ptr.To[int64](1000), // Run as UID 1000 (non-privileged user)
-							RunAsGroup:   ptr.To[int64](1000), // Run with GID 1000 (non-privileged group)
-							FSGroup:      ptr.To[int64](1000), // Volume files owned by GID 1000
-						},
-						Containers: []corev1.Container{profilerContainer, sidecarContainer},
-						Volumes:    volumes,
-						ImagePullSecrets: []corev1.LocalObjectReference{
-							{Name: "nvcr-imagepullsecret"},
-						},
-					},
+					Spec: podSpec,
 				},
 			},
 		}
@@ -1169,6 +1114,73 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	}
 
 	return nil
+}
+
+// prepareProfilingConfig parses and modifies the profiling config
+func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) ([]byte, error) {
+	// Parse the profiling config from JSON
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse profiling config: %w", err)
+	}
+
+	// Set deployment.namespace if not already set
+	deploymentVal, hasDeployment := config["deployment"]
+	var deploymentConfig map[string]interface{}
+	if !hasDeployment || deploymentVal == nil {
+		deploymentConfig = make(map[string]interface{})
+		config["deployment"] = deploymentConfig
+	} else {
+		var ok bool
+		deploymentConfig, ok = deploymentVal.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("profilingConfig.config.deployment must be an object, got %T", deploymentVal)
+		}
+	}
+	if _, hasNamespace := deploymentConfig["namespace"]; !hasNamespace {
+		deploymentConfig["namespace"] = dgdr.Namespace
+	}
+
+	// Set deployment.model from spec.model
+	deploymentConfig["model"] = dgdr.Spec.Model
+
+	// Set deployment.dgd_image from deploymentOverrides.workersImage if provided
+	if dgdr.Spec.DeploymentOverrides != nil && dgdr.Spec.DeploymentOverrides.WorkersImage != "" {
+		deploymentConfig["dgd_image"] = dgdr.Spec.DeploymentOverrides.WorkersImage
+	}
+
+	// Set output_dir if not already set
+	if _, hasOutputDir := config["output_dir"]; !hasOutputDir {
+		config["output_dir"] = ProfilingOutputPath
+	}
+
+	// Set engine.backend from spec.backend
+	engineVal, hasEngine := config["engine"]
+	var engineConfig map[string]interface{}
+	if !hasEngine || engineVal == nil {
+		engineConfig = make(map[string]interface{})
+		config["engine"] = engineConfig
+	} else {
+		var ok bool
+		engineConfig, ok = engineVal.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("profilingConfig.config.engine must be an object, got %T", engineVal)
+		}
+	}
+	engineConfig["backend"] = dgdr.Spec.Backend
+
+	// If ConfigMapRef is provided, set engine.config path
+	if dgdr.Spec.ProfilingConfig.ConfigMapRef != nil {
+		engineConfig["config"] = fmt.Sprintf("%s/%s", ProfilingConfigPath, ProfilingConfigFile)
+	}
+
+	// Serialize config to YAML for passing to profiler
+	configYAML, err := sigsyaml.Marshal(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal profiling config to YAML: %w", err)
+	}
+
+	return configYAML, nil
 }
 
 // checkProfilingJobStatus checks if the profiling job has completed

@@ -299,7 +299,6 @@ mod integration_tests {
     };
     use dynamo_runtime::DistributedRuntime;
     use dynamo_runtime::discovery::DiscoveryQuery;
-    use dynamo_runtime::pipeline::RouterMode;
     use std::sync::Arc;
 
     #[tokio::test]

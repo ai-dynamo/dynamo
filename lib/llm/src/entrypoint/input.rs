@@ -117,7 +117,7 @@ pub async fn run_input(
             .and_then(|v| v.parse().ok())
             .unwrap_or(1024);
         crate::audit::bus::init(cap);
-        crate::audit::sink::spawn_workers_from_env(&drt);
+        crate::audit::sink::spawn_workers_from_env().await?;
         tracing::info!(cap, "Audit initialized");
     }
 

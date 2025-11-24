@@ -78,7 +78,10 @@ def parse_args():
         "-i", "--interactive", action="store_true", help="Interactive text chat"
     )
     parser.add_argument(
-        "--kv-cache-block-size", type=int, help="KV cache block size (u32)."
+        "--kv-cache-block-size",
+        type=int,
+        default=os.environ.get("DYN_KV_CACHE_BLOCK_SIZE"),
+        help="KV cache block size (u32). Can be set via DYN_KV_CACHE_BLOCK_SIZE env var.",
     )
     parser.add_argument(
         "--http-host",
@@ -114,21 +117,39 @@ def parse_args():
     parser.add_argument(
         "--kv-overlap-score-weight",
         type=float,
-        default=1.0,
+        default=float(os.environ.get("DYN_KV_OVERLAP_SCORE_WEIGHT", "1.0")),
         help="KV Router: Weight for overlap score in worker selection. Higher values prioritize KV cache reuse.",
     )
     parser.add_argument(
         "--router-temperature",
         type=float,
-        default=0.0,
+        default=float(os.environ.get("DYN_ROUTER_TEMPERATURE", "0.0")),
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
         "--no-kv-events",
         action="store_false",
         dest="use_kv_events",
-        default=True,
-        help="KV Router: Disable KV events. When set, uses ApproxKvRouter for predicting block creation/deletion based only on incoming requests at a timer. By default, KV events are enabled.",
+        default=os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
+        help="KV Router: Disable KV events. When set, the router predicts cache state based on routing decisions with TTL-based expiration and pruning, rather than receiving events from workers. By default, KV events are enabled.",
+    )
+    parser.add_argument(
+        "--router-ttl",
+        type=float,
+        default=float(os.environ.get("DYN_ROUTER_TTL", "120.0")),
+        help="KV Router: Time-to-live in seconds for blocks when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_TTL env var (default: 120.0).",
+    )
+    parser.add_argument(
+        "--router-max-tree-size",
+        type=int,
+        default=int(os.environ.get("DYN_ROUTER_MAX_TREE_SIZE", str(2**10))),
+        help="KV Router: Maximum tree size before pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1024).",
+    )
+    parser.add_argument(
+        "--router-prune-target-ratio",
+        type=float,
+        default=float(os.environ.get("DYN_ROUTER_PRUNE_TARGET_RATIO", "0.8")),
+        help="KV Router: Target size ratio after pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_PRUNE_TARGET_RATIO env var (default: 0.8).",
     )
     parser.add_argument(
         "--namespace",
@@ -216,8 +237,16 @@ def parse_args():
     parser.add_argument(
         "--store-kv",
         type=str,
+        choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
         help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
+    parser.add_argument(
+        "--request-plane",
+        type=str,
+        choices=["nats", "http", "tcp"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
 
     flags = parser.parse_args()
@@ -253,7 +282,7 @@ async def async_main():
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.store_kv)
+    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -271,6 +300,9 @@ async def async_main():
             router_snapshot_threshold=flags.router_snapshot_threshold,
             router_reset_states=flags.router_reset_states,
             router_track_active_blocks=flags.router_track_active_blocks,
+            router_ttl_secs=flags.router_ttl,
+            router_max_tree_size=flags.router_max_tree_size,
+            router_prune_target_ratio=flags.router_prune_target_ratio,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random

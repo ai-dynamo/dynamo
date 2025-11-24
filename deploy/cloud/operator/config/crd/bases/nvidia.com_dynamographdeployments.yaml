@@ -10328,6 +10328,7 @@ spec:
                           GPUs/devices, and any runtime-specific resources.
                         properties:
                           claims:
+                            description: Claims specifies resource claims for dynamic resource allocation
                             items:
                               description: ResourceClaim references one entry in PodSpec.ResourceClaims.
                               properties:
@@ -10348,35 +10349,53 @@ spec:
                               type: object
                             type: array
                           limits:
+                            description: Limits specifies the maximum resources allowed for the component
                             properties:
                               cpu:
+                                description: CPU specifies the CPU resource request/limit (e.g., "1000m", "2")
                                 type: string
                               custom:
                                 additionalProperties:
                                   type: string
+                                description: Custom specifies additional custom resource requests/limits
                                 type: object
                               gpu:
                                 description: |-
-                                  Indicates the number of GPUs to request.
-                                  total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                                  GPU indicates the number of GPUs to request.
+                                  Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                                type: string
+                              gpuType:
+                                description: |-
+                                  GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"
+                                  By default if not specified, the GPU type is "nvidia.com/gpu"
                                 type: string
                               memory:
+                                description: Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
                                 type: string
                             type: object
                           requests:
+                            description: Requests specifies the minimum resources required by the component
                             properties:
                               cpu:
+                                description: CPU specifies the CPU resource request/limit (e.g., "1000m", "2")
                                 type: string
                               custom:
                                 additionalProperties:
                                   type: string
+                                description: Custom specifies additional custom resource requests/limits
                                 type: object
                               gpu:
                                 description: |-
-                                  Indicates the number of GPUs to request.
-                                  total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                                  GPU indicates the number of GPUs to request.
+                                  Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                                type: string
+                              gpuType:
+                                description: |-
+                                  GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"
+                                  By default if not specified, the GPU type is "nvidia.com/gpu"
                                 type: string
                               memory:
+                                description: Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
                                 type: string
                             type: object
                         type: object

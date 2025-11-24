@@ -38,7 +38,7 @@ ARG SCCACHE_REGION=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF=v1.19.0
-ARG NIXL_REF=0.7.0
+ARG NIXL_REF=0.7.1
 ARG NIXL_GDRCOPY_REF=v2.5.1
 
 # Python configuration
@@ -319,7 +319,14 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     maturin build --release --out /opt/dynamo/dist && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
-        maturin build --release --out /opt/dynamo/dist; \
+        maturin build --release --out target/wheels && \
+        auditwheel repair \
+            --exclude libnixl.so \
+            --exclude libnixl_build.so \
+            --exclude libnixl_common.so \
+            --plat manylinux_2_28_${ARCH_ALT} \
+            --wheel-dir /opt/dynamo/dist \
+            target/wheels/*.whl; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
@@ -396,6 +403,7 @@ COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_L
 
 # Copy built artifacts
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 COPY --chown=dynamo: --from=wheel_builder $CARGO_HOME $CARGO_HOME
@@ -413,7 +421,7 @@ RUN uv pip install \
     && UV_GIT_LFS=1 uv pip install --no-cache .
 
 # Setup launch banner in common directory accessible to all users
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
+RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
 
 # Setup environment for all users

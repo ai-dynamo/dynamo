@@ -6,7 +6,7 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: dynamo
-  labels:
+  annotations:
     nvidia.com/dynamo-discovery-backend: kubernetes
 spec:
   envs:
@@ -22,7 +22,7 @@ spec:
           image: ${IMAGE}
     VllmDecodeWorker:
       dynamoNamespace: vllm-disagg
-      componentType: backend
+      componentType: decode
       replicas: 1
       resources:
         limits:

@@ -32,5 +32,5 @@ sleep 2
 echo "🔧 Starting dynamo worker with LMCache enabled..."
 
 python -m dynamo.frontend &
-ENABLE_LMCACHE=1 \
-  python3 -m dynamo.vllm --model $MODEL_URL
+
+python3 -m dynamo.vllm --model $MODEL_URL --connector lmcache

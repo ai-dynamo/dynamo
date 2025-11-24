@@ -69,7 +69,9 @@ async def worker():
     dump_config(config.dynamo_args.dump_config_to, config)
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.dynamo_args.store_kv)
+    runtime = DistributedRuntime(
+        loop, config.dynamo_args.store_kv, config.dynamo_args.request_plane
+    )
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -100,15 +102,17 @@ async def init(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     # Prevent SGLang from blocking on non-leader nodes
+    # We can switch this to 0 and leverage our own metrics
+    # after https://github.com/sgl-project/sglang/pull/13686
+    # is merged in
     if server_args.node_rank >= 1:
-        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
 
     engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -187,15 +191,17 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     # Prevent SGLang from blocking on non-leader nodes
+    # We can switch this to 0 and leverage our own metrics
+    # after https://github.com/sgl-project/sglang/pull/13686
+    # is merged in
     if server_args.node_rank >= 1:
-        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
 
     engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -255,7 +261,6 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -313,7 +318,6 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -362,7 +366,6 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -403,7 +406,6 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -445,7 +447,6 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
