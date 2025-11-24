@@ -13,7 +13,6 @@ use crate::{
     discovery::Discovery,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
-    service::ServiceClient,
     transports::{etcd, nats, tcp},
 };
 use crate::{discovery, system_status_server, transports};
@@ -136,8 +135,6 @@ impl DistributedRuntime {
             live_endpoint_path,
         )));
 
-        let nats_client_for_metrics = nats_client.clone();
-
         // Initialize discovery client based on backend configuration
         let discovery_backend =
             std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "kv_store".to_string());
@@ -170,6 +167,8 @@ impl DistributedRuntime {
                 )
             }
         };
+
+        let nats_client_for_metrics = nats_client.clone();
 
         let distributed_runtime = Self {
             runtime,
@@ -325,10 +324,6 @@ impl DistributedRuntime {
         self.discovery_client.clone()
     }
 
-    pub(crate) fn service_client(&self) -> Option<ServiceClient> {
-        self.nats_client().map(|nc| ServiceClient::new(nc.clone()))
-    }
-
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
         Ok(self
             .tcp_server
@@ -380,35 +375,7 @@ impl DistributedRuntime {
         manager.server().await
     }
 
-    /// DEPRECATED: Use network_manager().server() instead
-    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
-    pub async fn http_server(
-        &self,
-    ) -> Result<Arc<crate::pipeline::network::ingress::http_endpoint::SharedHttpServer>> {
-        // For backward compatibility, try to downcast
-        let _server = self.request_plane_server().await?;
-        // This will only work if we're actually in HTTP mode
-        // For now, just return an error suggesting the new API
-        anyhow::bail!(
-            "http_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
-        )
-    }
-
-    /// DEPRECATED: Use network_manager().server() instead
-    #[deprecated(note = "Use request_plane_server() or network_manager().server() instead")]
-    pub async fn shared_tcp_server(
-        &self,
-    ) -> Result<Arc<crate::pipeline::network::ingress::shared_tcp_endpoint::SharedTcpServer>> {
-        // For backward compatibility, try to downcast
-        let _server = self.request_plane_server().await?;
-        // This will only work if we're actually in TCP mode
-        // For now, just return an error suggesting the new API
-        anyhow::bail!(
-            "shared_tcp_server() is deprecated. Use request_plane_server() instead, which returns a trait object that works with all transport types."
-        )
-    }
-
-    pub fn nats_client(&self) -> Option<&nats::Client> {
+    pub(crate) fn nats_client(&self) -> Option<&nats::Client> {
         self.nats_client.as_ref()
     }
 
