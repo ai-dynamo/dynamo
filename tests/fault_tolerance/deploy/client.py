@@ -289,7 +289,7 @@ def run_aiperf(
         logger: Logger instance
         max_retries: Maximum number of retry attempts (default: 1)
         retry_delay: Delay in seconds between retries (default: 1)
-        continous_load: If True, use continuous load instead of fixed request count
+        continuous_load: If True, use continuous load instead of fixed request count
 
     Returns:
         True if successful, False otherwise
@@ -339,17 +339,12 @@ def run_aiperf(
         "100",  # For reproducible results
     ]
 
-    # Add request parameters based on continuous load mode
     if continuous_load:
-        # Use benchmark duration for continuous load
         cmd.extend(["--benchmark-duration", "1800"])  # 30 minutes for continuous load
         logger.info("Using continuous load with duration: 30 minutes")
-        # Set a very long timeout for duration-based tests
         timeout = 1860  # 31 minutes default for duration-based tests (30 minutes + 1 minute buffer)
     else:
-        # Normal mode - use requests_per_client
         cmd.extend(["--request-count", str(requests_per_client)])
-        # Calculate timeout (same as legacy would for all requests)
         timeout = max(requests_per_client * 2 + 60, 300)  # At least 5 minutes
 
     # Log execution
@@ -390,17 +385,7 @@ def run_aiperf(
         cmd_attempt[artifact_dir_idx] = str(attempt_dir)
 
         try:
-            if continuous_load:
-                result = run_continuous_load_process(cmd_attempt, logger, timeout)
-            else:
-                # Normal mode - use subprocess.run
-                result = subprocess.run(
-                    cmd_attempt,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    stdin=subprocess.DEVNULL,  # Prevent stdin reading which can cause process suspension
-                )
+            result = run_aiperf_with_signal_handling(cmd_attempt, logger, timeout)
 
             # Save logs for this attempt
             with open(attempt_dir / "genai_perf.log", "w") as f:
@@ -418,7 +403,7 @@ def run_aiperf(
                 }
             )
 
-            # Even with continous load, with SIGINT, aiperf should return 0 and create the profile_export_aiperf.json file
+            # Even with continuous load, with SIGINT, aiperf should return 0 and create the profile_export_aiperf.json file
             if result.returncode == 0:
                 # AI-Perf returns 0 even if all requests failed, so we need to check the output
                 json_path = attempt_dir / "profile_export_aiperf.json"
@@ -475,15 +460,17 @@ def run_aiperf(
     return success
 
 
-def run_continuous_load_process(
+def run_aiperf_with_signal_handling(
     cmd_attempt: List[str],
     logger: logging.Logger,
     timeout: int,
 ) -> subprocess.CompletedProcess:
     """
-    Run aiperf in continuous load mode and return the result.
+    Run aiperf with signal handling for graceful shutdown.
 
-    Handles SIGINT and timeout when running with subprocess.Popen.
+    Handles SIGINT forwarding and timeout when running with subprocess.Popen.
+    This ensures that Ctrl-C and SIGINT are properly forwarded to the subprocess
+    so it can clean up gracefully and write results files.
     """
     proc = subprocess.Popen(
         cmd_attempt,
