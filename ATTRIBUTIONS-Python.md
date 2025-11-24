@@ -1183,7 +1183,7 @@ License: `Apache License Version 2.0`
 ## kvbm (0.7.0)
 
 ### Licenses
-License: `None`
+License: `Apache-2.0`
 
   - `licenses/LICENSE`:
 ```
@@ -1656,7 +1656,7 @@ NetworkX is distributed with the 3-clause BSD license.
 ## nixl (0.7.0)
 
 ### Licenses
-License: `None`
+License: `Apache-2.0`
 
   - `LICENSE`:
 ```
