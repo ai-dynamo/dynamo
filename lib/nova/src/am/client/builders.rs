@@ -240,13 +240,13 @@ impl From<ResolveError> for anyhow::Error {
 
 /// Result wrapper for sync operations (acknowledgment only)
 pub struct SyncResult {
-    inner: Pin<Box<dyn Future<Output = Result<Option<Bytes>, String>> + Send>>,
+    awaiter: Option<crate::am::common::responses::ResponseAwaiter>,
 }
 
 impl SyncResult {
-    fn new(mut awaiter: crate::am::common::responses::ResponseAwaiter) -> Self {
+    fn new(awaiter: crate::am::common::responses::ResponseAwaiter) -> Self {
         Self {
-            inner: Box::pin(async move { awaiter.recv().await }),
+            awaiter: Some(awaiter),
         }
     }
 }
@@ -255,11 +255,19 @@ impl Future for SyncResult {
     type Output = Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.inner.as_mut().poll(cx) {
-            Poll::Ready(result) => match result {
-                Ok(None) | Ok(Some(_)) => Poll::Ready(Ok(())),
-                Err(err) => Poll::Ready(Err(anyhow!(err))),
-            },
+        let awaiter = self
+            .awaiter
+            .as_mut()
+            .expect("SyncResult polled after completion");
+
+        match awaiter.poll_recv(cx) {
+            Poll::Ready(result) => {
+                self.awaiter = None;
+                Poll::Ready(match result {
+                    Ok(None) | Ok(Some(_)) => Ok(()),
+                    Err(err) => Err(anyhow!(err)),
+                })
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -267,13 +275,13 @@ impl Future for SyncResult {
 
 /// Result wrapper for unary operations returning raw bytes
 pub struct UnaryResult {
-    inner: Pin<Box<dyn Future<Output = Result<Option<Bytes>, String>> + Send>>,
+    awaiter: Option<crate::am::common::responses::ResponseAwaiter>,
 }
 
 impl UnaryResult {
-    fn new(mut awaiter: crate::am::common::responses::ResponseAwaiter) -> Self {
+    fn new(awaiter: crate::am::common::responses::ResponseAwaiter) -> Self {
         Self {
-            inner: Box::pin(async move { awaiter.recv().await }),
+            awaiter: Some(awaiter),
         }
     }
 }
@@ -282,12 +290,20 @@ impl Future for UnaryResult {
     type Output = Result<Bytes>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.inner.as_mut().poll(cx) {
-            Poll::Ready(result) => match result {
-                Ok(Some(bytes)) => Poll::Ready(Ok(bytes)),
-                Ok(None) => Poll::Ready(Ok(Bytes::new())),
-                Err(err) => Poll::Ready(Err(anyhow!(err))),
-            },
+        let awaiter = self
+            .awaiter
+            .as_mut()
+            .expect("UnaryResult polled after completion");
+
+        match awaiter.poll_recv(cx) {
+            Poll::Ready(result) => {
+                self.awaiter = None;
+                Poll::Ready(match result {
+                    Ok(Some(bytes)) => Ok(bytes),
+                    Ok(None) => Ok(Bytes::new()),
+                    Err(err) => Err(anyhow!(err)),
+                })
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -295,14 +311,14 @@ impl Future for UnaryResult {
 
 /// Result wrapper for typed unary operations with deserialization
 pub struct TypedUnaryResult<R> {
-    inner: Pin<Box<dyn Future<Output = Result<Option<Bytes>, String>> + Send>>,
+    awaiter: Option<crate::am::common::responses::ResponseAwaiter>,
     _marker: std::marker::PhantomData<R>,
 }
 
 impl<R> TypedUnaryResult<R> {
-    fn new(mut awaiter: crate::am::common::responses::ResponseAwaiter) -> Self {
+    fn new(awaiter: crate::am::common::responses::ResponseAwaiter) -> Self {
         Self {
-            inner: Box::pin(async move { awaiter.recv().await }),
+            awaiter: Some(awaiter),
             _marker: std::marker::PhantomData,
         }
     }
@@ -312,16 +328,25 @@ impl<R: DeserializeOwned> Future for TypedUnaryResult<R> {
     type Output = Result<R>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: TypedUnaryResult is Unpin because ResponseAwaiter and PhantomData are both Unpin
         let this = unsafe { self.get_unchecked_mut() };
-        match this.inner.as_mut().poll(cx) {
-            Poll::Ready(result) => match result {
-                Ok(Some(bytes)) => match serde_json::from_slice(&bytes) {
-                    Ok(value) => Poll::Ready(Ok(value)),
-                    Err(e) => Poll::Ready(Err(anyhow!("Failed to deserialize response: {}", e))),
-                },
-                Ok(None) => Poll::Ready(Err(anyhow!("Expected response data, got empty"))),
-                Err(err) => Poll::Ready(Err(anyhow!(err))),
-            },
+        let awaiter = this
+            .awaiter
+            .as_mut()
+            .expect("TypedUnaryResult polled after completion");
+
+        match awaiter.poll_recv(cx) {
+            Poll::Ready(result) => {
+                this.awaiter = None;
+                Poll::Ready(match result {
+                    Ok(Some(bytes)) => match serde_json::from_slice(&bytes) {
+                        Ok(value) => Ok(value),
+                        Err(e) => Err(anyhow!("Failed to deserialize response: {}", e)),
+                    },
+                    Ok(None) => Err(anyhow!("Expected response data, got empty")),
+                    Err(err) => Err(anyhow!(err)),
+                })
+            }
             Poll::Pending => Poll::Pending,
         }
     }

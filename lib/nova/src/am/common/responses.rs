@@ -44,6 +44,7 @@
 
 use bytes::{Buf, Bytes, BytesMut};
 use dashmap::DashSet;
+use futures::task::AtomicWaker;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -53,7 +54,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use thiserror::Error;
-use tokio::sync::Notify;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -248,6 +248,34 @@ impl ResponseAwaiter {
         match result {
             Some(outcome) => outcome,
             None => Err("response awaiter dropped before completion".to_string()),
+        }
+    }
+
+    /// Poll-based version of recv that can be used in manual Future implementations.
+    ///
+    /// This avoids heap allocation by using stack-pinning internally.
+    /// Returns `Poll::Pending` if the response isn't ready yet, registering the waker
+    /// to be notified when it becomes available.
+    pub fn poll_recv(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Option<Bytes>, String>> {
+        use std::task::Poll;
+
+        if self.consumed {
+            return Poll::Ready(Err("response awaiter already consumed".to_string()));
+        }
+
+        match self.slot.poll_wait(cx) {
+            Poll::Ready(result) => {
+                self.consumed = true;
+                self.recycle();
+                Poll::Ready(match result {
+                    Some(outcome) => outcome,
+                    None => Err("response awaiter dropped before completion".to_string()),
+                })
+            }
+            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -548,14 +576,15 @@ impl<T, E> SlotState<T, E> {
 }
 
 struct Slot<T, E> {
-    notify: Notify,
+    /// Waker for async waiting (supports both poll-based and async APIs)
+    waker: AtomicWaker,
     state: Mutex<SlotState<T, E>>,
 }
 
 impl<T, E> Slot<T, E> {
     pub fn new() -> Self {
         Self {
-            notify: Notify::new(),
+            waker: AtomicWaker::new(),
             state: Mutex::new(SlotState::new(0)),
         }
     }
@@ -578,9 +607,9 @@ impl<T, E> Slot<T, E> {
         if success {
             debug!("Slot.finish() - value set, dropping lock");
             drop(guard);
-            debug!("Slot.finish() - calling notify_one()");
-            self.notify.notify_one();
-            debug!("Slot.finish() - notify_one() called, returning true");
+            debug!("Slot.finish() - waking waiter");
+            self.waker.wake();
+            debug!("Slot.finish() - waiter woken, returning true");
         } else {
             debug!("Slot.finish() - generation mismatch or already completed, returning false");
         }
@@ -589,28 +618,34 @@ impl<T, E> Slot<T, E> {
 
     /// Waits for completion; consumes and returns the result.
     ///
-    /// IMPORTANT: Creates the notified future BEFORE checking the value to avoid lost wakeups.
-    /// See: https://docs.rs/tokio/latest/tokio/sync/struct.Notify.html#avoiding-lost-wakeups
+    /// Uses `poll_wait` internally via `poll_fn` for a unified implementation.
     pub async fn wait_and_take(&self) -> Option<Result<T, E>> {
-        use tracing::debug;
-        debug!("Slot.wait_and_take() called - entering loop");
-        loop {
-            // Create listener FIRST to avoid lost wakeup race condition
-            debug!("Slot.wait_and_take() - creating notified future");
-            let notified = self.notify.notified();
+        std::future::poll_fn(|cx| self.poll_wait(cx)).await
+    }
 
-            // Then check value
-            debug!("Slot.wait_and_take() - checking value");
-            if let Some(val) = self.state.lock().take_value() {
-                debug!("Slot.wait_and_take() - value present, returning");
-                return Some(val);
-            }
+    /// Poll-based waiting that registers the provided waker.
+    ///
+    /// Uses `AtomicWaker` to properly persist the waker registration across poll calls,
+    /// avoiding heap allocation while ensuring no lost wakeups.
+    ///
+    /// The caller's waker will be woken when `finish()` is called on this slot.
+    pub fn poll_wait(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<T, E>>> {
+        use std::task::Poll;
 
-            debug!("Slot.wait_and_take() - value not present, awaiting notification");
-            // Wait for notification (will catch notifications sent between check and wait)
-            notified.await;
-            debug!("Slot.wait_and_take() - notification received, looping again");
+        // Register waker FIRST to avoid lost wakeup race condition
+        // AtomicWaker persists the registration across poll calls
+        self.waker.register(cx.waker());
+
+        // Then check if value is ready
+        if let Some(val) = self.state.lock().take_value() {
+            return Poll::Ready(Some(val));
         }
+
+        // Value not ready, waker is registered, return Pending
+        Poll::Pending
     }
 
     // TODO: add polling/query to public api waiters

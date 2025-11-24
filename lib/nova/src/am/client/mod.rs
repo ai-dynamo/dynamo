@@ -3,7 +3,7 @@
 
 //! # Dynamo Active Message Client
 
-pub mod builders;
+pub(crate) mod builders;
 mod peer_registry;
 
 use anyhow::Result;
@@ -17,7 +17,7 @@ use crate::am::{
 use dynamo_nova_backend::{NovaBackend, TransportErrorHandler};
 use peer_registry::PeerRegistry;
 
-pub struct ActiveMessageClient {
+pub(crate) struct ActiveMessageClient {
     response_manager: ResponseManager,
     backend: Arc<NovaBackend>,
     error_handler: Arc<dyn TransportErrorHandler>,

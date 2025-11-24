@@ -120,6 +120,11 @@ struct RemoteEvent {
 
 impl RemoteEvent {
     fn new(local_system: Arc<LocalEventSystem>) -> Self {
+        assert_ne!(
+            local_system.worker_id(),
+            0,
+            "Local event system must be a local-only system"
+        );
         Self {
             local_system,
             known_triggered: AtomicU32::new(0),
@@ -333,7 +338,6 @@ pub struct NovaEvents {
 
 impl NovaEvents {
     pub(crate) fn new(
-        worker_id: WorkerId,
         instance_id: InstanceId,
         local: Arc<LocalEventSystem>,
         backend: Arc<dynamo_nova_backend::NovaBackend>,
@@ -341,6 +345,17 @@ impl NovaEvents {
         discovery: Arc<PeerDiscoveryManager>,
     ) -> Arc<Self> {
         const DEFAULT_COMPLETED_CACHE_SIZE: usize = 1000;
+
+        let worker_id = instance_id.worker_id();
+        assert_eq!(
+            worker_id.as_u64(),
+            local.worker_id(),
+            "Worker ID must match local event system: {} != {}",
+            worker_id.as_u64(),
+            local.worker_id()
+        );
+
+        assert_ne!(worker_id.as_u64(), 0, "Worker ID must be non-zero");
 
         Arc::new(Self {
             local,
@@ -364,8 +379,7 @@ impl NovaEvents {
         self.worker_id
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn local(&self) -> &Arc<LocalEventSystem> {
+    pub fn local(&self) -> &Arc<LocalEventSystem> {
         &self.local
     }
 
@@ -423,7 +437,13 @@ impl NovaEvents {
         self: &Arc<Self>,
         handle: EventHandle,
     ) -> Result<crate::events::LocalEventWaiter> {
-        if handle.owner_worker() == self.worker_id {
+        let owner_worker = handle.owner_worker();
+        assert_ne!(
+            owner_worker.as_u64(),
+            0,
+            "Invalid event; local-only events can not be used as nova events"
+        );
+        if owner_worker == self.worker_id {
             self.local.awaiter(handle)
         } else {
             self.wait_remote(handle)
@@ -431,7 +451,13 @@ impl NovaEvents {
     }
 
     pub fn poll(self: &Arc<Self>, handle: EventHandle) -> Result<EventStatus> {
-        if handle.owner_worker() == self.worker_id {
+        let owner_worker = handle.owner_worker();
+        assert_ne!(
+            owner_worker.as_u64(),
+            0,
+            "Invalid event; local-only events can not be used as nova events"
+        );
+        if owner_worker == self.worker_id {
             self.local.poll(handle)
         } else {
             self.poll_remote(handle)
@@ -439,7 +465,13 @@ impl NovaEvents {
     }
 
     pub async fn trigger(self: &Arc<Self>, handle: EventHandle) -> Result<()> {
-        if handle.owner_worker() == self.worker_id {
+        let owner_worker = handle.owner_worker();
+        assert_ne!(
+            owner_worker.as_u64(),
+            0,
+            "Invalid event; local-only events can not be used as nova events"
+        );
+        if owner_worker == self.worker_id {
             self.local.trigger(handle)
         } else {
             let mut awaiter = self.trigger_remote(handle)?;
@@ -453,7 +485,13 @@ impl NovaEvents {
         handle: EventHandle,
         reason: impl Into<String>,
     ) -> Result<()> {
-        if handle.owner_worker() == self.worker_id {
+        let owner_worker = handle.owner_worker();
+        assert_ne!(
+            owner_worker.as_u64(),
+            0,
+            "Invalid event; local-only events can not be used as nova events"
+        );
+        if owner_worker == self.worker_id {
             self.local.poison(handle, reason)
         } else {
             let mut awaiter = self.poison_remote(handle, reason.into())?;
@@ -464,7 +502,13 @@ impl NovaEvents {
 
     pub fn merge_events(self: &Arc<Self>, inputs: Vec<EventHandle>) -> Result<EventHandle> {
         for handle in &inputs {
-            if handle.owner_worker() != self.worker_id {
+            let owner_worker = handle.owner_worker();
+            assert_ne!(
+                owner_worker.as_u64(),
+                0,
+                "Invalid event; local-only events can not be used as nova events"
+            );
+            if owner_worker != self.worker_id {
                 bail!("Merge only supports local events; got {}", handle);
             }
         }
@@ -475,7 +519,13 @@ impl NovaEvents {
     pub(crate) fn handle_subscribe(self: &Arc<Self>, payload: Bytes) -> Result<()> {
         let message: EventSubscribeMessage = serde_json::from_slice(&payload)?;
         let handle = EventHandle::from_raw(message.handle);
-        if handle.owner_worker() != self.worker_id {
+        let owner_worker = handle.owner_worker();
+        assert_ne!(
+            owner_worker.as_u64(),
+            0,
+            "Invalid event; local-only events can not be used as nova events"
+        );
+        if owner_worker != self.worker_id {
             bail!("Subscribe for non-local event {}", handle);
         }
 

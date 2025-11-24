@@ -27,6 +27,9 @@ use crate::am::handlers::events::EventMessenger;
 use crate::events::EventHandle;
 use tracing::warn;
 
+// Response result types are implementation details (returned as impl Future)
+// and don't need to be publicly exported
+
 #[derive(Clone)]
 pub struct Nova {
     instance_id: InstanceId,
@@ -134,7 +137,6 @@ impl Nova {
         let discovery = Arc::new(discovery);
 
         let event_manager = handlers::NovaEvents::new(
-            worker_id,
             instance_id,
             local_events.clone(),
             backend.clone(),

@@ -73,7 +73,7 @@ impl Display for EventKey {
 pub struct EventHandle(u128);
 
 impl EventHandle {
-    pub fn new(owner_worker: u64, local_index: u32, generation: Generation) -> Result<Self> {
+    pub(crate) fn new(owner_worker: u64, local_index: u32, generation: Generation) -> Result<Self> {
         // Note: MAX_LOCAL_INDEX is u32::MAX and MAX_GENERATION is u32::MAX
         // so overflow checks are not needed for these u32 parameters
 
@@ -83,7 +83,7 @@ impl EventHandle {
         Ok(Self(raw))
     }
 
-    pub fn from_raw(raw: u128) -> Self {
+    pub(crate) fn from_raw(raw: u128) -> Self {
         Self(raw)
     }
 

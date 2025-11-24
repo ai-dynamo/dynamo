@@ -48,6 +48,14 @@ impl LocalEvent {
             .system
             .trigger_local_entry(self.inner.entry.clone(), self.inner.handle)
     }
+
+    pub fn poison(&self, reason: impl Into<String>) -> Result<()> {
+        self.inner.system.poison_local_entry(
+            self.inner.entry.clone(),
+            self.inner.handle,
+            Arc::new(EventPoison::new(self.inner.handle, reason)),
+        )
+    }
 }
 
 /// Local-only event system with reusable event entries.
@@ -61,9 +69,20 @@ pub struct LocalEventSystem {
 }
 
 impl LocalEventSystem {
-    pub fn new(worker_id: u64) -> Arc<Self> {
+    pub(crate) fn new(worker_id: u64) -> Arc<Self> {
         Arc::new(Self {
             worker_id,
+            events: DashMap::new(),
+            free_lists: ParkingMutex::new(VecDeque::new()),
+            next_local_index: AtomicU32::new(0),
+            tasks: TaskTracker::new(),
+            shutdown: AtomicBool::new(false),
+        })
+    }
+
+    pub fn new_local_only() -> Arc<Self> {
+        Arc::new(Self {
+            worker_id: 0,
             events: DashMap::new(),
             free_lists: ParkingMutex::new(VecDeque::new()),
             next_local_index: AtomicU32::new(0),
