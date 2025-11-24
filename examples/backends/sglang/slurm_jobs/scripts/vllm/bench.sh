@@ -27,19 +27,42 @@ chosen_req_rate=$8
 
 echo "Config ${chosen_isl}; ${chosen_osl}; ${chosen_concurrencies[@]}; ${chosen_req_rate}"
 
-wait_for_model_timeout=1500 # 25 minutes
-wait_for_model_check_interval=5 # check interval -> 5s
-wait_for_model_report_interval=60 # wait_for_model report interval -> 60s
+wait_for_model_timeout=1500
+wait_for_model_check_interval=5
+wait_for_model_report_interval=60
 
-wait_for_model $head_node $head_port $n_prefill $n_decode $wait_for_model_check_interval $wait_for_model_timeout $wait_for_model_report_interval
+wait_for_model $head_node $head_port $n_prefill $n_decode \
+    $wait_for_model_check_interval $wait_for_model_timeout $wait_for_model_report_interval
 
 set -e
-# Warmup the model with a sweep of concurrencies
+
+# Warmup defaults
 warmup_isl=$chosen_isl
 warmup_osl=$chosen_osl
 warmup_req_rate=250
-warmup_concurrency_list=(1 4 8 32 64 128 256 512 1024 4096)
+warmup_concurrency_list=(1 4 8 32 64 128 256 512 1024)
 
+# Ensure all chosen concurrencies are in warmup list
+for c in "${chosen_concurrencies[@]}"; do
+    found=false
+    for w in "${warmup_concurrency_list[@]}"; do
+        if [[ "$c" == "$w" ]]; then
+            found=true
+            break
+        fi
+    done
+    if [[ "$found" == false ]]; then
+        warmup_concurrency_list+=("$c")
+    fi
+done
+
+# Optional: sort warmup list numerically
+IFS=$'\n' warmup_concurrency_list=($(sort -n <<<"${warmup_concurrency_list[*]}"))
+unset IFS
+
+echo "Final warmup list: ${warmup_concurrency_list[@]}"
+
+# Warmup
 for warmup_concurrency in "${warmup_concurrency_list[@]}"
 do
     echo "Warming up model with concurrency $warmup_concurrency"
@@ -98,4 +121,3 @@ do
     echo "Completed benchmark with concurrency: $concurrency"
     echo "-----------------------------------------"
 done
-set +e
