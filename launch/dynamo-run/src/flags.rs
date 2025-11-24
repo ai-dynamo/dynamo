@@ -31,7 +31,7 @@ pub struct Flags {
 
     /// HTTP port. `in=http` only
     /// If tls_cert_path and tls_key_path are provided, this will be TLS/HTTPS.
-    #[arg(long, default_value = "8080")]
+    #[arg(long, default_value = "8000")]
     pub http_port: u16,
 
     /// TLS certificate file
