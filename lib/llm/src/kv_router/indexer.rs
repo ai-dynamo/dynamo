@@ -1033,10 +1033,10 @@ impl Drop for KvIndexer {
 ///
 pub struct LocalKvIndexer {
     /// The underlying indexer
-    indexer: Arc<KvIndexer>,
+    indexer: KvIndexer,
     /// Circular buffer of recent events
     /// Stores (worker_id, event) tuples
-    event_buffer: Arc<std::sync::Mutex<std::collections::VecDeque<(WorkerId, KvCacheEvent)>>>,
+    event_buffer: std::sync::Mutex<std::collections::VecDeque<(WorkerId, KvCacheEvent)>>,
     /// Maximum number of events to keep in buffer
     max_buffer_size: usize,
 }
@@ -1050,17 +1050,12 @@ impl LocalKvIndexer {
         max_buffer_size: usize,
     ) -> Self {
         Self {
-            indexer: Arc::new(KvIndexer::new(token, kv_block_size, metrics)),
-            event_buffer: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::with_capacity(
+            indexer: KvIndexer::new(token, kv_block_size, metrics),
+            event_buffer: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(
                 max_buffer_size,
-            ))),  // circular buffer for O(1) pop
+            )),  // circular buffer for O(1) pop
             max_buffer_size,
         }
-    }
-
-    /// get the underlying indexer reference.
-    pub fn indexer(&self) -> &Arc<KvIndexer> {
-        &self.indexer
     }
 
     /// get the N most recent events (returned in oldest->newest order)
@@ -1121,14 +1116,31 @@ impl LocalKvIndexer {
         let buffer = self.event_buffer.lock().unwrap();
         buffer.len()
     }
-}
 
-// Implement Deref to allow transparent access to KvIndexer methods
-impl std::ops::Deref for LocalKvIndexer {
-    type Target = Arc<KvIndexer>;
+    // Delegation methods to underlying KvIndexer
+    /// Get a sender for `RouterEvent`s.
+    pub fn event_sender(&self) -> mpsc::Sender<RouterEvent> {
+        self.indexer.event_sender()
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.indexer
+    /// Get a sender for dump requests (snapshot events).
+    pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
+        self.indexer.snapshot_event_sender()
+    }
+
+    /// Get a sender for worker removal requests.
+    pub fn remove_worker_sender(&self) -> mpsc::Sender<WorkerId> {
+        self.indexer.remove_worker_sender()
+    }
+
+    /// Get a sender for get workers requests.
+    pub fn get_workers_sender(&self) -> mpsc::Sender<GetWorkersRequest> {
+        self.indexer.get_workers_sender()
+    }
+
+    /// Get the KV block size.
+    pub fn block_size(&self) -> u32 {
+        self.indexer.block_size()
     }
 }
 

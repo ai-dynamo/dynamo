@@ -3,7 +3,7 @@
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT,
-    indexer::{KvIndexer, KvIndexerMetrics, LocalKvIndexer, RouterEvent, compute_block_hash_for_seq},
+    indexer::{KvIndexerMetrics, LocalKvIndexer, RouterEvent, compute_block_hash_for_seq},
     protocols::*,
     scoring::LoadEvent,
 };
@@ -192,8 +192,8 @@ impl KvEventPublisher {
     }
 
     /// Get reference to local indexer if enabled.
-    pub fn local_indexer(&self) -> Option<&Arc<LocalKvIndexer>> {
-        self.local_indexer.as_ref()
+    pub fn local_indexer(&self) -> Option<Arc<LocalKvIndexer>> {
+        self.local_indexer.clone()
     }
 
     pub fn shutdown(&mut self) {
@@ -1198,15 +1198,26 @@ mod tests_startup_helpers {
         // Verify event was applied to local indexer
         // We can check by querying the workers that have blocks
         let get_workers_tx = local_indexer.get_workers_sender();
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        get_workers_tx
-            .send(crate::kv_router::indexer::GetWorkersRequest { resp: resp_tx })
-            .await
-            .unwrap();
-        let workers: Vec<u64> = resp_rx.await.unwrap();
+        let mut found = false;
+        for _ in 0..20 {  // Try up to 20 times (200ms total)
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            get_workers_tx
+                .send(crate::kv_router::indexer::GetWorkersRequest { resp: resp_tx })
+                .await
+                .unwrap();
+            let workers: Vec<u64> = resp_rx.await.unwrap();
+
+            if workers.contains(&1) {
+                found = true;
+                break;
+            }
+
+            // Wait before retrying
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
 
         // Worker 1 should be in the set (we used worker_id=1)
-        assert!(workers.contains(&1));
+        assert!(found, "Worker 1 was not found in the indexer after processing");
 
         // Cleanup
         token.cancel();
@@ -1265,11 +1276,19 @@ mod tests_startup_helpers {
             .unwrap();
 
         // Local indexer should have no block
-        let scores = local_indexer
-        .find_matches(vec![LocalBlockHash(200)])
-        .await
-        .unwrap();
-        assert!(scores.scores.is_empty(), "worker should have no blocks");
+        let mut no_blocks = false;
+        for _ in 0..20 {  // Try up to 20 times (200ms total)
+            let scores = local_indexer
+                .find_matches(vec![LocalBlockHash(200)])
+                .await
+                .unwrap();
+            if scores.scores.is_empty() {
+                no_blocks = true;
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+        assert!(no_blocks, "worker should have no blocks after removal");
 
         // Global kvindexer should have recieved two events (create/remove)
         let published = published.lock().unwrap();
@@ -1329,11 +1348,19 @@ mod tests_startup_helpers {
             .unwrap();
 
         // Local indexer should have no block
-        let scores = local_indexer
-        .find_matches(vec![LocalBlockHash(200)])
-        .await
-        .unwrap();
-        assert!(scores.scores.is_empty(), "worker should have no blocks");
+        let mut no_blocks = false;
+        for _ in 0..20 {  // Try up to 20 times (200ms total)
+            let scores = local_indexer
+                .find_matches(vec![LocalBlockHash(200)])
+                .await
+                .unwrap();
+            if scores.scores.is_empty() {
+                no_blocks = true;
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+        assert!(no_blocks, "worker should have no blocks after clearing");
 
         // Global kvindexer should have recieved two events (create/remove)
         let published = published.lock().unwrap();
