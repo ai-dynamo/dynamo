@@ -77,17 +77,23 @@ pub async fn run(
     if let Input::Endpoint(path) = &in_opt {
         builder.endpoint_id(Some(path.parse().with_context(|| path.clone())?));
     }
-    let selected_store: KeyValueStoreSelect = flags.store_kv.parse()?;
-    let request_plane: RequestPlaneMode = flags.request_plane.parse()?;
-    let dst_config = DistributedConfig {
-        store_backend: selected_store,
-        // We only need NATS here to monitor it's metrics, so only if it's our request plane.
-        nats_config: if request_plane.is_nats() {
-            Some(nats::ClientOptions::default())
-        } else {
-            None
-        },
-        request_plane,
+    let dst_config = if is_process_local(&in_opt, &out_opt) {
+        // We are both the frontend and backend, no networking
+        DistributedConfig::process_local()
+    } else {
+        // Normal case
+        let selected_store: KeyValueStoreSelect = flags.store_kv.parse()?;
+        let request_plane: RequestPlaneMode = flags.request_plane.parse()?;
+        DistributedConfig {
+            store_backend: selected_store,
+            // We only need NATS here to monitor it's metrics, so only if it's our request plane.
+            nats_config: if request_plane.is_nats() {
+                Some(nats::ClientOptions::default())
+            } else {
+                None
+            },
+            request_plane,
+        }
     };
     let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
     let local_model = builder.build().await?;
@@ -115,6 +121,18 @@ pub async fn run(
     dynamo_llm::entrypoint::input::run_input(distributed_runtime, in_opt, engine_config).await?;
 
     Ok(())
+}
+
+pub fn is_in_dynamic(in_opt: &Input) -> bool {
+    matches!(in_opt, Input::Endpoint(_))
+}
+
+pub fn is_out_dynamic(out_opt: &Option<Output>) -> bool {
+    matches!(out_opt, Some(Output::Auto))
+}
+
+fn is_process_local(in_opt: &Input, out_opt: &Option<Output>) -> bool {
+    !is_in_dynamic(in_opt) && !is_out_dynamic(out_opt)
 }
 
 /// Create the engine matching `out_opt`
