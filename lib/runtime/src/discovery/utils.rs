@@ -26,7 +26,7 @@ use super::{DiscoveryEvent, DiscoveryInstance, DiscoveryStream};
 ///
 /// # Example
 /// ```ignore
-/// let stream = discovery.list_and_watch(DiscoveryKey::ComponentModelCards { ... }).await?;
+/// let stream = discovery.list_and_watch(DiscoveryQuery::ComponentModels { ... }, None).await?;
 /// let runtime_configs_rx = watch_and_extract_field(
 ///     stream,
 ///     |card: ModelDeploymentCard| card.runtime_config,
@@ -62,7 +62,7 @@ where
                     let instance_id = instance.instance_id();
 
                     // Deserialize the full instance into type T
-                    let deserialized: T = match instance.deserialize_model_card() {
+                    let deserialized: T = match instance.deserialize_model() {
                         Ok(d) => d,
                         Err(e) => {
                             tracing::warn!(

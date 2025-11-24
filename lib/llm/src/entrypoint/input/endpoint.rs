@@ -32,33 +32,21 @@ pub async fn run(
     let cancel_token = distributed_runtime.primary_token().clone();
     let endpoint_id: EndpointId = path.parse()?;
 
-    let mut component = distributed_runtime
+    let component = distributed_runtime
         .namespace(&endpoint_id.namespace)?
         .component(&endpoint_id.component)?;
-
-    // We can only make the NATS service if we have NATS
-    if distributed_runtime.nats_client().is_some() {
-        component.add_stats_service().await?;
-    }
     let endpoint = component.endpoint(&endpoint_id.name);
 
     let rt_fut: Pin<Box<dyn Future<Output = _> + Send + 'static>> = match engine_config {
-        EngineConfig::StaticFull {
-            engine,
-            mut model,
-            is_static,
-        } => {
+        EngineConfig::StaticFull { engine, mut model } => {
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let ingress_chat = Ingress::<
                 Context<NvCreateChatCompletionRequest>,
                 Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
             >::for_engine(engine)?;
-
-            if !is_static {
-                model
-                    .attach(&endpoint, ModelType::Chat, ModelInput::Text)
-                    .await?;
-            }
+            model
+                .attach(&endpoint, ModelType::Chat, ModelInput::Text)
+                .await?;
             let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
             Box::pin(fut_chat)
@@ -66,7 +54,6 @@ pub async fn run(
         EngineConfig::StaticCore {
             engine: inner_engine,
             mut model,
-            is_static,
             is_prefill,
         } => {
             // Pre-processing is done ingress-side, so it should be already done.
@@ -83,23 +70,17 @@ pub async fn run(
                 .link(frontend)?;
             let ingress = Ingress::for_pipeline(pipeline)?;
 
-            if !is_static {
-                let model_type = if is_prefill {
-                    ModelType::Prefill
-                } else {
-                    ModelType::Chat | ModelType::Completions
-                };
-                model
-                    .attach(&endpoint, model_type, ModelInput::Tokens)
-                    .await?;
-            }
+            let model_type = if is_prefill {
+                ModelType::Prefill
+            } else {
+                ModelType::Chat | ModelType::Completions
+            };
+            model
+                .attach(&endpoint, model_type, ModelInput::Tokens)
+                .await?;
 
             let fut = endpoint.endpoint_builder().handler(ingress).start();
-
             Box::pin(fut)
-        }
-        EngineConfig::StaticRemote(_) => {
-            panic!("StaticRemote definitions are only for the frontend end node.");
         }
         EngineConfig::Dynamic(_) => {
             unreachable!("An endpoint input will never have a Dynamic engine");
@@ -155,7 +136,6 @@ mod integration_tests {
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to build LocalModel: {}", e))?,
             ),
-            is_static: false,
         };
 
         Ok((distributed_runtime, engine_config))

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ctypes
 import logging
 import socket
 import uuid
@@ -770,7 +771,7 @@ class Descriptor:
             raise ValueError("Argument `data` cannot be `None`.")
         if not (
             isinstance(data, torch.Tensor)
-            or isinstance(data, bytes)
+            or isinstance(data, (bytes, bytearray))
             or isinstance(data, tuple)
         ):
             raise TypeError(TYPE_ERROR_MESSAGE)
@@ -827,9 +828,8 @@ class Descriptor:
             )
 
         # Data is `bytes`.
-        elif isinstance(data, bytes):
-            self._data_ptr = id(data)
-            self._data_size = len(data)
+        elif isinstance(data, (bytes, bytearray)):
+            (self._data_ptr, self._data_size) = self._buffer_to_ptr_size(data)
             self._data_ref = data
 
             logger.debug(
@@ -971,6 +971,52 @@ class Descriptor:
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Registered {self.__repr__()} with NIXL."
         )
+
+    def _buffer_to_ptr_size(
+        self,  # Adding a comment here to satisfy the character requirements.
+        data: bytes | bytearray,
+    ) -> tuple[int, int]:
+        """
+        Returns the memory address of the underlying data of a bytes or bytearray object as well as its size.
+
+        Parameters
+        ----------
+        data : bytes | bytearray
+            The bytes or bytearray object to get the data pointer and size from.
+
+        Returns
+        -------
+        tuple[int, int]
+            A tuple containing the memory address of the underlying data and its size.
+        """
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError("Argument `data` must be `bytes` or `bytearray`.")
+
+        cptr = ctypes.c_char_p()
+        size = ctypes.c_size_t()
+
+        # Request the pointer to the underlying data and the buffer's size from ctypes.
+        try:
+            ret = ctypes.pythonapi.PyObject_AsCharBuffer(
+                ctypes.py_object(data),
+                ctypes.byref(cptr),
+                ctypes.byref(size),
+            )
+            # Ensure the call was successful and the pointer is valid.
+            if ret != 0 or cptr.value is None:
+                raise RuntimeError(
+                    f"ctypes.pythonapi.PyObject_AsCharBuffer failed (error: {ret})."
+                )
+            # The resulting pointer is a `char*`, cast it to a `void*` to that ctypes will provide the address.
+            # `c_char_p.value` returns a `bytes`` object instead of the pointer address;
+            # whereas `c_void_p.value` returns the actual pointer address as an `int`.
+            vptr = ctypes.cast(cptr, ctypes.c_void_p)
+
+            return (0, 0) if vptr.value is None else (vptr.value, size.value)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to get memory address of the underlying data and size of `{type(data).__name__}` object via ctypes inspection."
+            ) from e
 
 
 class Device:

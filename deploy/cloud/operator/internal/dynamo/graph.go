@@ -34,10 +34,10 @@ import (
 	"k8s.io/utils/ptr"
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/discovery"
 	"github.com/imdario/mergo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
@@ -62,15 +62,15 @@ type Autoscaling struct {
 }
 
 type Config struct {
-	Dynamo       *DynamoConfig        `yaml:"dynamo,omitempty"`
-	Resources    *Resources           `yaml:"resources,omitempty"`
-	Traffic      *Traffic             `yaml:"traffic,omitempty"`
-	Autoscaling  *Autoscaling         `yaml:"autoscaling,omitempty"`
-	HttpExposed  bool                 `yaml:"http_exposed,omitempty"`
-	ApiEndpoints []string             `yaml:"api_endpoints,omitempty"`
-	Workers      *int32               `yaml:"workers,omitempty"`
-	TotalGpus    *int32               `yaml:"total_gpus,omitempty"`
-	ExtraPodSpec *common.ExtraPodSpec `yaml:"extraPodSpec,omitempty"`
+	Dynamo       *DynamoConfig          `yaml:"dynamo,omitempty"`
+	Resources    *Resources             `yaml:"resources,omitempty"`
+	Traffic      *Traffic               `yaml:"traffic,omitempty"`
+	Autoscaling  *Autoscaling           `yaml:"autoscaling,omitempty"`
+	HttpExposed  bool                   `yaml:"http_exposed,omitempty"`
+	ApiEndpoints []string               `yaml:"api_endpoints,omitempty"`
+	Workers      *int32                 `yaml:"workers,omitempty"`
+	TotalGpus    *int32                 `yaml:"total_gpus,omitempty"`
+	ExtraPodSpec *v1alpha1.ExtraPodSpec `yaml:"extraPodSpec,omitempty"`
 }
 
 type ServiceConfig struct {
@@ -135,18 +135,21 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 
 		// Propagate metrics annotation from parent deployment if present
 		if parentDynamoGraphDeployment.Annotations != nil {
+			if deployment.Spec.Annotations == nil {
+				deployment.Spec.Annotations = make(map[string]string)
+			}
 			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationEnableMetrics]; exists {
-				if deployment.Spec.Annotations == nil {
-					deployment.Spec.Annotations = make(map[string]string)
-				}
 				deployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics] = val
+			}
+			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
+				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = val
 			}
 		}
 
 		if component.ComponentType == commonconsts.ComponentTypePlanner {
 			// ensure that the extraPodSpec is not nil
 			if deployment.Spec.ExtraPodSpec == nil {
-				deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{}
+				deployment.Spec.ExtraPodSpec = &v1alpha1.ExtraPodSpec{}
 			}
 			// ensure that the embedded PodSpec struct is not nil
 			if deployment.Spec.ExtraPodSpec.PodSpec == nil {
@@ -227,10 +230,10 @@ func overrideWithDynDeploymentConfig(ctx context.Context, dynamoDeploymentCompon
 			dynamoDeploymentComponent.Spec.Replicas = componentDynConfig.ServiceArgs.Workers
 		}
 		if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Resources != nil {
-			requests := &common.ResourceItem{}
-			limits := &common.ResourceItem{}
+			requests := &v1alpha1.ResourceItem{}
+			limits := &v1alpha1.ResourceItem{}
 			if dynamoDeploymentComponent.Spec.Resources == nil {
-				dynamoDeploymentComponent.Spec.Resources = &common.Resources{
+				dynamoDeploymentComponent.Spec.Resources = &v1alpha1.Resources{
 					Requests: requests,
 					Limits:   limits,
 				}
@@ -392,25 +395,49 @@ func getCliqueStartupDependencies(
 	return nil
 }
 
-func GenerateComponentService(ctx context.Context, componentName, componentNamespace string) (*corev1.Service, error) {
+func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec, componentName string, isK8sDiscoveryEnabled bool) (*corev1.Service, error) {
+	if component.DynamoNamespace == nil {
+		return nil, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", componentName)
+	}
+	componentName = GetDynamoComponentName(dynamoDeployment, componentName)
+
+	var servicePort corev1.ServicePort
+	if component.ComponentType == commonconsts.ComponentTypeFrontend {
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.DynamoServicePortName,
+			Port:       commonconsts.DynamoServicePort,
+			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	} else {
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.DynamoSystemPortName,
+			Port:       commonconsts.DynamoSystemPort,
+			TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	}
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      componentName,
-			Namespace: componentNamespace,
+			Namespace: dynamoDeployment.Namespace,
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
-				commonconsts.KubeLabelDynamoSelector: componentName,
+				commonconsts.KubeLabelDynamoComponentType: component.ComponentType,
+				commonconsts.KubeLabelDynamoNamespace:     *component.DynamoNamespace,
 			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       commonconsts.DynamoServicePortName,
-					Port:       commonconsts.DynamoServicePort,
-					TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
+			Ports: []corev1.ServicePort{servicePort},
 		},
+	}
+	if isK8sDiscoveryEnabled {
+		service.Labels = map[string]string{
+			commonconsts.KubeLabelDynamoDiscoveryBackend: "kubernetes",
+		}
+		// Discovery is enabled for non frontend components
+		if component.ComponentType != commonconsts.ComponentTypeFrontend {
+			service.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+		}
 	}
 	return service, nil
 }
@@ -598,6 +625,7 @@ type MultinodeDeployer interface {
 	GetLeaderHostname(serviceName string) string
 	GetHostNames(serviceName string, numberOfNodes int32) []string
 	GetNodeRank() (string, bool) // returns (rank, needsShellInterpretation)
+	NeedsDNSWait() bool          // returns true if DNS wait is needed to launch multinode components
 }
 
 // BackendFactory creates backend instances based on the framework type
@@ -631,7 +659,9 @@ func MultinodeDeployerFactory(multinodeDeploymentType commonconsts.MultinodeDepl
 
 // isWorkerComponent checks if a component is a worker that needs backend framework detection
 func isWorkerComponent(componentType string) bool {
-	return componentType == commonconsts.ComponentTypeWorker
+	return componentType == commonconsts.ComponentTypeWorker ||
+		componentType == commonconsts.ComponentTypePrefill ||
+		componentType == commonconsts.ComponentTypeDecode
 }
 
 // addStandardEnvVars adds the standard environment variables that are common to both Grove and Controller
@@ -667,6 +697,25 @@ func addStandardEnvVars(container *corev1.Container, controllerConfig controller
 	container.Env = MergeEnvs(standardEnvVars, container.Env)
 }
 
+// applyDefaultSecurityContext sets secure defaults for pod security context.
+// Currently only sets fsGroup to solve volume permission issues.
+// Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
+// with images that may expect to run as root.
+// User-provided security context values (via extraPodSpec) will override these defaults.
+func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
+	// Initialize SecurityContext if not present
+	if podSpec.SecurityContext == nil {
+		podSpec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+
+	// Only set fsGroup by default
+	// This fixes volume permission issues without forcing a specific UID/GID
+	// which maintains compatibility with both root and non-root images
+	if podSpec.SecurityContext.FSGroup == nil {
+		podSpec.SecurityContext.FSGroup = ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup))
+	}
+}
+
 // GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
 // Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS)
 // Deployment-specific environment merging should be handled by the caller
@@ -685,7 +734,7 @@ func GenerateBasePodSpec(
 	serviceName string,
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
-	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes)
+	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controllerConfig.GetDiscoveryBackend(component.Annotations))
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
@@ -826,6 +875,11 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("failed to get base podspec: %w", err)
 	}
 
+	// Check if user provided their own security context before merging
+	userProvidedSecurityContext := component.ExtraPodSpec != nil &&
+		component.ExtraPodSpec.PodSpec != nil &&
+		component.ExtraPodSpec.PodSpec.SecurityContext != nil
+
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
 		// merge extraPodSpec PodSpec with base podspec
 		err := mergo.Merge(&podSpec, component.ExtraPodSpec.PodSpec.DeepCopy(), mergo.WithOverride)
@@ -833,6 +887,20 @@ func GenerateBasePodSpec(
 			return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 		}
 	}
+
+	// Apply default security context ONLY if user didn't provide any security context
+	// If user provides ANY securityContext (even partial), they get full control with no defaults injected
+	// This allows users to intentionally set fields to nil (e.g., to run as root)
+	if !userProvidedSecurityContext {
+		applyDefaultSecurityContext(&podSpec)
+	}
+
+	if controllerConfig.IsK8sDiscoveryEnabled(component.Annotations) {
+		if podSpec.ServiceAccountName == "" {
+			podSpec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(parentGraphDeploymentName)
+		}
+	}
+
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
@@ -852,11 +920,13 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32) ComponentContext {
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend string) ComponentContext {
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
+		ComponentType:                  component.ComponentType,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
+		DiscoveryBackend:               discoveryBackend,
 	}
 	if component.DynamoNamespace != nil {
 		componentContext.DynamoNamespace = *component.DynamoNamespace
@@ -915,6 +985,8 @@ func GenerateGrovePodCliqueSet(
 		}
 	}
 
+	discoveryBackend := controllerConfig.GetDiscoveryBackend(dynamoDeployment.Annotations)
+
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
 		dynamoNamespace := getDynamoNamespace(dynamoDeployment, component)
@@ -923,6 +995,13 @@ func GenerateGrovePodCliqueSet(
 		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
 		if err != nil {
 			return nil, fmt.Errorf("failed to determine backend framework for service %s: %w", serviceName, err)
+		}
+
+		if discoveryBackend != "" {
+			if component.Annotations == nil {
+				component.Annotations = make(map[string]string)
+			}
+			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = discoveryBackend
 		}
 
 		numberOfNodes := component.GetNumberOfNodes()
@@ -1005,6 +1084,8 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dyn
 	if component.SubComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoSubComponentType] = component.SubComponentType
 	}
+	// Add base model label if modelRef is specified
+	AddBaseModelLabel(labels, component.ModelRef)
 	setMetricsLabels(labels, dynamoDeployment)
 	if component.Labels != nil {
 		err := mergo.Merge(&labels, component.Labels, mergo.WithOverride)

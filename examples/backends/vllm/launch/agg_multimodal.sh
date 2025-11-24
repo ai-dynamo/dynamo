@@ -39,12 +39,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Use TCP transport (instead of default NATS)
+# TCP is preferred for multimodal workloads because it overcomes:
+# - NATS default 1MB max payload limit (multimodal base64 images can exceed this)
+export DYN_REQUEST_PLANE=tcp
+
 # Start frontend with Rust OpenAIPreprocessor
 python -m dynamo.frontend --http-port=8000 &
 
 # Configure GPU memory optimization for specific models
 EXTRA_ARGS=""
 if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
+    EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
+elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
     EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 2048"
 fi
 
@@ -52,7 +59,7 @@ fi
 # Multimodal data (images) are decoded in the backend worker using ImageLoader
 # --enforce-eager: Quick deployment (remove for production)
 # --connector none: No KV transfer needed for aggregated serving
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=8081 \
     python -m dynamo.vllm --model $MODEL_NAME --enforce-eager --connector none $EXTRA_ARGS
 
 # Wait for all background processes to complete

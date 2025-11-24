@@ -38,6 +38,9 @@ def create_temp_engine_args_file(args) -> Path:
         "speedup_ratio": getattr(args, "speedup_ratio", None),
         "dp_size": getattr(args, "dp_size", None),
         "startup_time": getattr(args, "startup_time", None),
+        "planner_profile_data": str(getattr(args, "planner_profile_data", None))
+        if getattr(args, "planner_profile_data", None)
+        else None,
         "is_prefill": getattr(args, "is_prefill_worker", None),
         "is_decode": getattr(args, "is_decode_worker", None),
     }
@@ -176,6 +179,12 @@ def parse_args():
         help="Simulated engine startup time in seconds (default: None)",
     )
     parser.add_argument(
+        "--planner-profile-data",
+        type=Path,
+        default=None,
+        help="Path to JSON configmap or NPZ file containing performance profiling data from planner_profiler_perf_data_converter.py (default: None, uses hardcoded polynomials)",
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=1,
@@ -203,6 +212,20 @@ def parse_args():
         action="store_true",
         default=False,
         help="Mark this as a decode worker which does not publish KV events and skips prefill cost estimation (default: False)",
+    )
+    parser.add_argument(
+        "--store-kv",
+        type=str,
+        choices=["etcd", "file", "mem"],
+        default=os.environ.get("DYN_STORE_KV", "etcd"),
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
+    parser.add_argument(
+        "--request-plane",
+        type=str,
+        choices=["nats", "http", "tcp"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
 
     args = parser.parse_args()

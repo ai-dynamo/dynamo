@@ -5,7 +5,8 @@ use crate::request_template::RequestTemplate;
 use crate::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
-use dynamo_runtime::{Runtime, pipeline::Context, runtime::CancellationToken};
+use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::pipeline::Context;
 use futures::StreamExt;
 use std::io::{ErrorKind, Write};
 
@@ -17,15 +18,15 @@ use crate::entrypoint::input::common;
 const MAX_TOKENS: u32 = 8192;
 
 pub async fn run(
-    runtime: Runtime,
+    distributed_runtime: DistributedRuntime,
     single_prompt: Option<String>,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
-    let cancel_token = runtime.primary_token();
-    let prepared_engine = common::prepare_engine(runtime, engine_config).await?;
+    let prepared_engine =
+        common::prepare_engine(distributed_runtime.clone(), engine_config).await?;
     // TODO: Pass prepared_engine directly
     main_loop(
-        cancel_token,
+        distributed_runtime,
         &prepared_engine.service_name,
         prepared_engine.engine,
         single_prompt,
@@ -36,13 +37,14 @@ pub async fn run(
 }
 
 async fn main_loop(
-    cancel_token: CancellationToken,
+    distributed_runtime: DistributedRuntime,
     service_name: &str,
     engine: OpenAIChatCompletionsStreamingEngine,
     mut initial_prompt: Option<String>,
     _inspect_template: bool,
     template: Option<RequestTemplate>,
 ) -> anyhow::Result<()> {
+    let cancel_token = distributed_runtime.primary_token();
     if initial_prompt.is_none() {
         tracing::info!("Ctrl-c to exit");
     }
@@ -179,7 +181,11 @@ async fn main_loop(
             break;
         }
     }
-    cancel_token.cancel(); // stop everything else
     println!();
+
+    // Stop the runtime and wait for it to stop
+    distributed_runtime.shutdown();
+    cancel_token.cancelled().await;
+
     Ok(())
 }

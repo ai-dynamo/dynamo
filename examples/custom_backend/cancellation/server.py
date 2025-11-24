@@ -31,11 +31,10 @@ class DemoServer:
 async def main():
     """Start the demo server"""
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, True)
+    runtime = DistributedRuntime(loop, "file", "nats")
 
     # Create server component
     component = runtime.namespace("demo").component("server")
-    await component.create_service()
 
     endpoint = component.endpoint("generate")
     handler = DemoServer()

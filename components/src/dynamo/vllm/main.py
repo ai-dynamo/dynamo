@@ -5,17 +5,16 @@ import asyncio
 import logging
 import os
 import signal
+import tempfile
 from typing import Optional
 
 import uvloop
-from prometheus_client import REGISTRY
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
-from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -25,37 +24,22 @@ from dynamo.llm import (
     fetch_llm,
     register_llm,
 )
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_handlers import (
     EncodeWorkerHandler,
+    MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
     ProcessorHandler,
 )
 
-from .args import ENABLE_LMCACHE, Config, configure_ports, overwrite_args, parse_args
+from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
 from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-def setup_lmcache_environment():
-    """Setup LMCache environment variables for KV cache offloading"""
-    # LMCache configuration for matching logic
-    lmcache_config = {
-        "LMCACHE_CHUNK_SIZE": "256",  # Token chunk size
-        "LMCACHE_LOCAL_CPU": "True",  # Enable CPU memory backend
-        "LMCACHE_MAX_LOCAL_CPU_SIZE": "20",  # CPU memory limit in GB
-    }
-
-    # Set environment variables
-    for key, value in lmcache_config.items():
-        if key not in os.environ:  # Only set if not already configured
-            os.environ[key] = value
-            logger.info(f"Set LMCache environment variable: {key}={value}")
 
 
 async def graceful_shutdown(runtime):
@@ -70,16 +54,15 @@ async def graceful_shutdown(runtime):
     logging.info("DistributedRuntime shutdown complete")
 
 
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
+async def worker():
     config = parse_args()
 
-    await configure_ports(config)
+    loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
+
     overwrite_args(config)
 
     # Set up signal handler for graceful shutdown
-    loop = asyncio.get_running_loop()
-
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
 
@@ -105,7 +88,11 @@ async def worker(runtime: DistributedRuntime):
     elif config.multimodal_encode_worker:
         await init_multimodal_encode_worker(runtime, config)
         logger.debug("init_multimodal_encode_worker completed")
-    elif config.multimodal_worker or config.multimodal_encode_prefill_worker:
+    elif (
+        config.multimodal_worker
+        or config.multimodal_decode_worker
+        or config.multimodal_encode_prefill_worker
+    ):
         await init_multimodal_worker(runtime, config)
         logger.debug("init_multimodal_worker completed")
     elif config.is_prefill_worker:
@@ -129,7 +116,6 @@ def setup_kv_event_publisher(
     """
     Set up KV event publishers for prefix caching if enabled.
     Creates one publisher per dp_rank since each dp_rank publishes to a different port.
-
     Args:
         config: Worker configuration
         component: Component for runtime integration
@@ -147,6 +133,9 @@ def setup_kv_event_publisher(
     # Skip KV event publishing for decode workers
     if config.is_decode_worker:
         logger.info("Skipping KV event publisher setup for decode worker")
+        return None
+
+    if config.engine_args.kv_events_config is None:
         return None
 
     # Get data_parallel_size to create publishers for all dp_ranks
@@ -186,7 +175,20 @@ def setup_kv_event_publisher(
 
 
 def setup_vllm_engine(config, stat_logger=None):
-    setup_multiprocess_prometheus()
+    # Existing vLLM v0.11.0 bug: vllm/v1/metrics/prometheus.py:79 passes TemporaryDirectory object instead of
+    # the .name string, causing a false error message when vLLM exits. Therefore, always set
+    # PROMETHEUS_MULTIPROC_DIR first, and we'll do the path cleanup.
+
+    # This vLLM bug causes a false error message when vLLM exits.
+    prometheus_temp_dir = None
+    if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+        prometheus_temp_dir = tempfile.TemporaryDirectory(prefix="vllm_prometheus_")
+        os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_temp_dir.name
+        logger.debug(
+            f"Created PROMETHEUS_MULTIPROC_DIR at: {os.environ['PROMETHEUS_MULTIPROC_DIR']}"
+        )
+
+    setup_multiprocess_prometheus()  # call vLLM's library's function to setup multiprocess prometheus
     logger.debug(
         f"Prometheus multiproc dir set to: {os.environ.get('PROMETHEUS_MULTIPROC_DIR')}"
     )
@@ -195,13 +197,6 @@ def setup_vllm_engine(config, stat_logger=None):
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     engine_args = config.engine_args
-
-    # KV transfer config is now handled by args.py based on ENABLE_LMCACHE env var
-    if ENABLE_LMCACHE:
-        setup_lmcache_environment()
-        logger.info("LMCache enabled for VllmWorker")
-    else:
-        logger.debug("LMCache is disabled")
 
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
@@ -240,14 +235,10 @@ def setup_vllm_engine(config, stat_logger=None):
         disable_log_requests=engine_args.disable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
-    if ENABLE_LMCACHE:
-        logger.info(
-            f"VllmWorker for {config.served_model_name} has been initialized with LMCache"
-        )
-    else:
-        logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 
-    return engine_client, vllm_config, default_sampling_params
+    logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
+
+    return engine_client, vllm_config, default_sampling_params, prometheus_temp_dir
 
 
 async def register_vllm_model(
@@ -309,16 +300,25 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     Instantiate and serve
     """
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
+    (
+        engine_client,
+        vllm_config,
+        default_sampling_params,
+        prometheus_temp_dir,
+    ) = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
-        runtime, component, engine_client, default_sampling_params
+        runtime,
+        component,
+        engine_client,
+        default_sampling_params,
+        getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
     )
+    handler.add_temp_dir(prometheus_temp_dir)
 
     # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
     consolidator_enabled = False
@@ -348,8 +348,29 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         handler.kv_publishers = kv_publishers
 
     if config.engine_args.disable_log_stats is False:
+        # vLLM v1 registers its metrics with 'vllm:' prefix
+        from prometheus_client import REGISTRY, multiprocess
+
+        from dynamo.common.utils.prometheus import register_engine_metrics_callback
+
+        # Option 1: Try adding MultiProcessCollector to the global REGISTRY
+        # This would make REGISTRY collect from both its registered metrics AND multiprocess files
+        if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+            try:
+                # Add MultiProcessCollector to global REGISTRY
+                # This makes REGISTRY collect from .db files in addition to its own metrics
+                multiprocess.MultiProcessCollector(REGISTRY)
+                logger.info("Added MultiProcessCollector to global REGISTRY")
+            except ValueError as e:
+                # Might already be registered or directory issues
+                logger.warning(f"Could not add MultiProcessCollector to REGISTRY: {e}")
+
+        # Register callback with the global REGISTRY
+        # Now it should collect both its own metrics AND multiprocess metrics
         register_engine_metrics_callback(
-            endpoint=generate_endpoint, registry=REGISTRY, metric_prefix_filter="vllm:"
+            endpoint=generate_endpoint,
+            registry=REGISTRY,
+            metric_prefix_filters=["vllm:", "lmcache:"],
         )
 
     # Register prefill model with ModelType.Prefill
@@ -400,7 +421,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     """
 
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
@@ -410,9 +430,12 @@ async def init(runtime: DistributedRuntime, config: Config):
         config.engine_args.data_parallel_rank or 0,
         metrics_labels=[("model", config.served_model_name or config.model)],
     )
-    engine_client, vllm_config, default_sampling_params = setup_vllm_engine(
-        config, factory
-    )
+    (
+        engine_client,
+        vllm_config,
+        default_sampling_params,
+        prometheus_temp_dir,
+    ) = setup_vllm_engine(config, factory)
 
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
@@ -424,7 +447,9 @@ async def init(runtime: DistributedRuntime, config: Config):
         component,
         engine_client,
         default_sampling_params,
+        getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
     )
+    handler.add_temp_dir(prometheus_temp_dir)
 
     # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
     consolidator_enabled = False
@@ -454,8 +479,29 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.kv_publishers = kv_publishers
 
     if config.engine_args.disable_log_stats is False:
+        # vLLM v1 registers its metrics with 'vllm:' prefix
+        from prometheus_client import REGISTRY, multiprocess
+
+        from dynamo.common.utils.prometheus import register_engine_metrics_callback
+
+        # Option 1: Try adding MultiProcessCollector to the global REGISTRY
+        # This would make REGISTRY collect from both its registered metrics AND multiprocess files
+        if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+            try:
+                # Add MultiProcessCollector to global REGISTRY
+                # This makes REGISTRY collect from .db files in addition to its own metrics
+                multiprocess.MultiProcessCollector(REGISTRY)
+                logger.info("Added MultiProcessCollector to global REGISTRY")
+            except ValueError as e:
+                # Might already be registered or directory issues
+                logger.warning(f"Could not add MultiProcessCollector to REGISTRY: {e}")
+
+        # Register callback with the global REGISTRY
+        # Now it should collect both its own metrics AND multiprocess metrics
         register_engine_metrics_callback(
-            endpoint=generate_endpoint, registry=REGISTRY, metric_prefix_filter="vllm:"
+            endpoint=generate_endpoint,
+            registry=REGISTRY,
+            metric_prefix_filters=["vllm:", "lmcache:"],
         )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
@@ -526,7 +572,6 @@ def get_engine_cache_info(engine: AsyncLLM):
 async def init_multimodal_processor(runtime: DistributedRuntime, config: Config):
     """Initialize multimodal processor component"""
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
 
@@ -578,7 +623,6 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
 async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Config):
     """Initialize multimodal encode worker component"""
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
 
@@ -625,20 +669,40 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     Both can operate in aggregated (P+D) or disaggregated (P→D) mode.
     """
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
+    (
+        engine_client,
+        vllm_config,
+        default_sampling_params,
+        prometheus_temp_dir,
+    ) = setup_vllm_engine(config)
 
-    # For aggregated mode, no downstream client is needed
-    # TODO: Implement disaggregated mode with proper decode worker client
-    downstream_client = None
+    # Set up decode worker client for disaggregated mode
+    decode_worker_client = None
+    if config.is_prefill_worker:
+        # Prefill worker needs to connect to decode worker
+        decode_worker_client = (
+            await runtime.namespace(config.namespace)
+            .component("decoder")
+            .endpoint("generate")
+            .client()
+        )
+        await decode_worker_client.wait_for_instances()
+        logger.info("Connected to decode worker for disaggregated mode")
 
-    handler = MultimodalPDWorkerHandler(
-        runtime, component, engine_client, config, downstream_client
-    )
+    # Choose handler based on worker type
+    if config.multimodal_decode_worker:
+        handler = MultimodalDecodeWorkerHandler(
+            runtime, component, engine_client, config
+        )
+    else:
+        handler = MultimodalPDWorkerHandler(
+            runtime, component, engine_client, config, decode_worker_client
+        )
+    handler.add_temp_dir(prometheus_temp_dir)
 
     await handler.async_init(runtime)
 

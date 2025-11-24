@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use futures::{Stream, TryStreamExt};
+use serde::Deserialize;
+use serde::Serialize;
 
-use super::*;
+use crate::component::Namespace;
 use crate::metrics::{MetricsHierarchy, MetricsRegistry};
+use crate::traits::DistributedRuntimeProvider;
 use crate::traits::events::{EventPublisher, EventSubscriber};
 
 #[async_trait]
@@ -99,6 +103,8 @@ impl MetricsHierarchy for Namespace {
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod tests {
+    use crate::{DistributedRuntime, Runtime};
+
     use super::*;
 
     // todo - make a distributed runtime fixture

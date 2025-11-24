@@ -6,9 +6,6 @@ kind: DynamoGraphDeployment
 metadata:
   name: sglang-disagg-planner
 spec:
-  pvcs:
-    - name: dynamo-pvc
-      create: false # Must be pre-created before deployment and SLA profiler must have been run
   services:
     Frontend:
       dynamoNamespace: dynamo
@@ -22,9 +19,6 @@ spec:
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
-      volumeMounts:
-        - name: dynamo-pvc
-          mountPoint: /data
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
@@ -37,7 +31,17 @@ spec:
             - --environment=kubernetes
             - --backend=sglang
             - --adjustment-interval=60
-            - --profile-results-dir=/data
+            - --profile-results-dir=/workspace/profiling_results
+          volumeMounts:
+            - name: planner-profile-data
+              mountPath: /workspace/profiling_results
+              readOnly: true
+        volumes:
+          - name: planner-profile-data
+            configMap:
+              # Must be pre-created before deployment by the profiler
+              # See docs/planner/sla_planner_quickstart.md for more details
+              name: planner-profile-data
     decode:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret

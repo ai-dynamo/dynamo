@@ -19,7 +19,7 @@ use crate::pipeline::network::{
     codec::{TwoPartCodec, TwoPartMessage},
     tcp::StreamType,
 };
-use crate::{ErrorContext, Result, error}; // Import SinkExt to use the `send` method
+use anyhow::{Context, Result, anyhow as error}; // Import SinkExt to use the `send` method
 
 #[allow(dead_code)]
 pub struct TcpClient {

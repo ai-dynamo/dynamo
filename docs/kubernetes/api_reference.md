@@ -37,6 +37,7 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 - [DynamoComponentDeployment](#dynamocomponentdeployment)
 - [DynamoGraphDeployment](#dynamographdeployment)
 - [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
+- [DynamoModel](#dynamomodel)
 
 
 
@@ -122,6 +123,8 @@ _Appears in:_
 | `created` _boolean_ | Created indicates whether the DGD has been successfully created.<br />Used to prevent recreation if the DGD is manually deleted by users. |  |  |
 
 
+
+
 #### DynamoComponentDeployment
 
 
@@ -167,6 +170,7 @@ _Appears in:_
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
+| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  |  |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
 | `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
@@ -203,6 +207,7 @@ _Appears in:_
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
 | `volumeMounts` _[VolumeMount](#volumemount) array_ | VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component. |  |  |
 | `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
+| `modelRef` _[ModelReference](#modelreference)_ | ModelRef references a model that this component serves<br />When specified, a headless service will be created for endpoint discovery |  |  |
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
 | `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
@@ -345,6 +350,116 @@ _Appears in:_
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
 
 
+#### DynamoModel
+
+
+
+DynamoModel is the Schema for the dynamo models API
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `DynamoModel` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoModelSpec](#dynamomodelspec)_ |  |  |  |
+| `status` _[DynamoModelStatus](#dynamomodelstatus)_ |  |  |  |
+
+
+#### DynamoModelSpec
+
+
+
+DynamoModelSpec defines the desired state of DynamoModel
+
+
+
+_Appears in:_
+- [DynamoModel](#dynamomodel)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `modelName` _string_ | ModelName is the full model identifier (e.g., "meta-llama/Llama-3.3-70B-Instruct-lora") |  | Required: \{\} <br /> |
+| `baseModelName` _string_ | BaseModelName is the base model identifier that matches the service label<br />This is used to discover endpoints via headless services |  | Required: \{\} <br /> |
+| `modelType` _string_ | ModelType specifies the type of model (e.g., "base", "lora", "adapter") | base | Enum: [base lora adapter] <br /> |
+| `source` _[ModelSource](#modelsource)_ | Source specifies the model source location (only applicable for lora model type) |  |  |
+
+
+#### DynamoModelStatus
+
+
+
+DynamoModelStatus defines the observed state of DynamoModel
+
+
+
+_Appears in:_
+- [DynamoModel](#dynamomodel)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `endpoints` _[EndpointInfo](#endpointinfo) array_ | Endpoints is the current list of all endpoints for this model |  |  |
+| `readyEndpoints` _integer_ | ReadyEndpoints is the count of endpoints that are ready |  |  |
+| `totalEndpoints` _integer_ | TotalEndpoints is the total count of endpoints |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represents the latest available observations of the model's state |  |  |
+
+
+#### EndpointInfo
+
+
+
+EndpointInfo represents a single endpoint (pod) serving the model
+
+
+
+_Appears in:_
+- [DynamoModelStatus](#dynamomodelstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `address` _string_ | Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090") |  |  |
+| `podName` _string_ | PodName is the name of the pod serving this endpoint |  |  |
+| `ready` _boolean_ | Ready indicates whether the endpoint is ready to serve traffic<br />For LoRA models: true if the POST /loras request succeeded with a 2xx status code<br />For base models: always false (no probing performed) |  |  |
+
+
+#### ExtraPodMetadata
+
+
+
+
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `annotations` _object (keys:string, values:string)_ |  |  |  |
+| `labels` _object (keys:string, values:string)_ |  |  |  |
+
+
+#### ExtraPodSpec
+
+
+
+
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `mainContainer` _[Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core)_ |  |  |  |
+
+
 #### IngressSpec
 
 
@@ -385,6 +500,42 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `secretName` _string_ | SecretName is the name of a Kubernetes Secret containing the TLS certificate and key. |  |  |
+
+
+
+
+#### ModelReference
+
+
+
+ModelReference identifies a model served by this component
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the base model identifier (e.g., "llama-3-70b-instruct-v1") |  | Required: \{\} <br /> |
+| `revision` _string_ | Revision is the model revision/version (optional) |  |  |
+
+
+#### ModelSource
+
+
+
+ModelSource defines the source location of a model
+
+
+
+_Appears in:_
+- [DynamoModelSpec](#dynamomodelspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `uri` _string_ | URI is the model source URI<br />Supported formats:<br />- S3: s3://bucket/path/to/model<br />- HuggingFace: hf://org/model@revision_sha |  | Required: \{\} <br /> |
 
 
 #### MultinodeSpec
@@ -442,6 +593,49 @@ _Appears in:_
 | `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Optional: \{\} <br />Type: object <br /> |
 | `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment<br />base config file (disagg.yaml). This is separate from the profiling config above.<br />The path to this config will be set as engine.config in the profiling config. |  | Optional: \{\} <br /> |
 | `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1" |  | Required: \{\} <br /> |
+| `outputPVC` _string_ | OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.<br />If specified, all profiling artifacts (logs, plots, configs, raw data) will be written<br />to this PVC instead of an ephemeral emptyDir volume. This allows users to access<br />complete profiling results after the job completes by mounting the PVC.<br />The PVC must exist in the same namespace as the DGDR.<br />If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.<br />Note: ConfigMaps are still created regardless of this setting for planner integration. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core)_ | Resources specifies the compute resource requirements for the profiling job container.<br />If not specified, no resource requests or limits are set. |  | Optional: \{\} <br /> |
+| `tolerations` _[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core) array_ | Tolerations allows the profiling job to be scheduled on nodes with matching taints.<br />For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint. |  | Optional: \{\} <br /> |
+
+
+#### ResourceItem
+
+
+
+
+
+
+
+_Appears in:_
+- [Resources](#resources)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `cpu` _string_ | CPU specifies the CPU resource request/limit (e.g., "1000m", "2") |  |  |
+| `memory` _string_ | Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi") |  |  |
+| `gpu` _string_ | GPU indicates the number of GPUs to request.<br />Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment. |  |  |
+| `gpuType` _string_ | GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"<br />By default if not specified, the GPU type is "nvidia.com/gpu" |  |  |
+| `custom` _object (keys:string, values:string)_ | Custom specifies additional custom resource requests/limits |  |  |
+
+
+#### Resources
+
+
+
+Resources defines requested and limits for a component, including CPU, memory,
+GPUs/devices, and any runtime-specific resources.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `requests` _[ResourceItem](#resourceitem)_ | Requests specifies the minimum resources required by the component |  |  |
+| `limits` _[ResourceItem](#resourceitem)_ | Limits specifies the maximum resources allowed for the component |  |  |
+| `claims` _[ResourceClaim](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourceclaim-v1-core) array_ | Claims specifies resource claims for dynamic resource allocation |  |  |
 
 
 #### SharedMemorySpec
@@ -487,6 +681,8 @@ The Dynamo operator automatically applies default values to various fields when 
 
 - **Health Probes**: Startup, liveness, and readiness probes are configured differently for frontend, worker, and planner components. For example, worker components receive a startup probe with a 2-hour timeout (720 failures × 10 seconds) to accommodate long model loading times.
 
+- **Security Context**: All components receive `fsGroup: 1000` by default to ensure proper file permissions for mounted volumes. This can be overridden via the `extraPodSpec.securityContext` field.
+
 - **Shared Memory**: All components receive an 8Gi shared memory volume mounted at `/dev/shm` by default (can be disabled or resized via the `sharedMemory` field).
 
 - **Environment Variables**: Components automatically receive environment variables like `DYN_NAMESPACE`, `DYN_PARENT_DGD_K8S_NAME`, `DYNAMO_PORT`, and backend-specific variables.
@@ -503,6 +699,50 @@ All components receive the following pod-level defaults unless overridden:
 
 - **`terminationGracePeriodSeconds`**: `60` seconds
 - **`restartPolicy`**: `Always`
+
+## Security Context
+
+The operator automatically applies default security context settings to all components to ensure proper file permissions, particularly for mounted volumes:
+
+- **`fsGroup`**: `1000` - Sets the group ownership of mounted volumes and any files created in those volumes
+
+This default ensures that non-root containers can write to mounted volumes (like model caches or persistent storage) without permission issues. The `fsGroup` setting is particularly important for:
+- Model downloads and caching
+- Compilation cache directories
+- Persistent volume claims (PVCs)
+- SSH key generation in multinode deployments
+
+### Overriding Security Context
+
+To override the default security context, specify your own `securityContext` in the `extraPodSpec` of your component:
+
+```yaml
+services:
+  YourWorker:
+    extraPodSpec:
+      securityContext:
+        fsGroup: 2000  # Custom group ID
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+```
+
+**Important**: When you provide *any* `securityContext` object in `extraPodSpec`, the operator will not inject any defaults. This gives you complete control over the security context, including the ability to run as root (by omitting `runAsNonRoot` or setting it to `false`).
+
+### OpenShift and Security Context Constraints
+
+In OpenShift environments with Security Context Constraints (SCCs), you may need to omit explicit UID/GID values to allow OpenShift's admission controllers to assign them dynamically:
+
+```yaml
+services:
+  YourWorker:
+    extraPodSpec:
+      securityContext:
+        # Omit fsGroup to let OpenShift assign it based on SCC
+        # OpenShift will inject the appropriate UID range
+```
+
+Alternatively, if you want to keep the default `fsGroup: 1000` behavior and are certain your cluster allows it, you don't need to specify anything - the operator defaults will work.
 
 ## Shared Memory Configuration
 
@@ -618,9 +858,9 @@ The operator automatically injects environment variables based on component type
 
 ### Worker Components
 
-- **`DYN_SYSTEM_ENABLED`**: `true`
+- **`DYN_SYSTEM_PORT`**: `9090` (automatically enables the system metrics server)
 - **`DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS`**: `["generate"]`
-- **`DYN_SYSTEM_PORT`**: `9090`
+- **`DYN_SYSTEM_ENABLED`**: `true` (needed for runtime images 0.6.1 and older)
 
 ### Planner Components
 
@@ -698,7 +938,7 @@ Default container ports are configured based on component type:
 
 For users who want to understand the implementation details or contribute to the operator, the default values described in this document are set in the following source files:
 
-- **Health Probes & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, environment variables, shared memory, and pod configurations
+- **Health Probes, Security Context & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, security context, environment variables, shared memory, and pod configurations
 - **Component-Specific Defaults**:
   - [`internal/dynamo/component_frontend.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_frontend.go)
   - [`internal/dynamo/component_worker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_worker.go)
@@ -714,5 +954,6 @@ For users who want to understand the implementation details or contribute to the
 
 - All these defaults can be overridden by explicitly specifying values in your DynamoComponentDeployment or DynamoGraphDeployment resources
 - User-specified probes (via `livenessProbe`, `readinessProbe`, or `startupProbe` fields) take precedence over operator defaults
+- For security context, if you provide *any* `securityContext` in `extraPodSpec`, no defaults will be injected, giving you full control
 - For multinode deployments, some defaults are modified or removed as described above to accommodate distributed execution patterns
 - The `extraPodSpec.mainContainer` field can be used to override probe configurations set by the operator

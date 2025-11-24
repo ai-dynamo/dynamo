@@ -26,6 +26,7 @@
 
    kubernetes/api_reference.md
    kubernetes/deployment/create_deployment.md
+   kubernetes/deployment/dynamomodel-guide.md
 
    kubernetes/fluxcd.md
    kubernetes/grove.md
@@ -37,6 +38,7 @@
    kvbm/trtllm-setup.md
    agents/tool-calling.md
    guides/jail_stream_readme.md
+   guides/request_plane.md
 
    router/kv_cache_routing.md
    planner/load_planner.md
@@ -72,6 +74,7 @@
    backends/vllm/deepseek-r1.md
    backends/vllm/gpt-oss.md
    backends/vllm/multi-node.md
+   backends/vllm/multimodal.md
    backends/vllm/prometheus.md
 
    benchmarks/kv-router-ab-testing.md

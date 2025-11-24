@@ -78,6 +78,39 @@ pub fn prompt_to_string(prompt: &dynamo_async_openai::types::Prompt) -> String {
     }
 }
 
+/// Get the batch size from a prompt (1 for single prompts, array length for batch prompts)
+pub fn get_prompt_batch_size(prompt: &dynamo_async_openai::types::Prompt) -> usize {
+    match prompt {
+        dynamo_async_openai::types::Prompt::String(_) => 1,
+        dynamo_async_openai::types::Prompt::IntegerArray(_) => 1,
+        dynamo_async_openai::types::Prompt::StringArray(arr) => arr.len(),
+        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => arr.len(),
+    }
+}
+
+/// Extract a single prompt from a batch at the given index.
+/// For single prompts, returns a clone regardless of index.
+/// For batch prompts, returns the prompt at the specified index.
+pub fn extract_single_prompt(
+    prompt: &dynamo_async_openai::types::Prompt,
+    index: usize,
+) -> dynamo_async_openai::types::Prompt {
+    match prompt {
+        dynamo_async_openai::types::Prompt::String(s) => {
+            dynamo_async_openai::types::Prompt::String(s.clone())
+        }
+        dynamo_async_openai::types::Prompt::IntegerArray(arr) => {
+            dynamo_async_openai::types::Prompt::IntegerArray(arr.clone())
+        }
+        dynamo_async_openai::types::Prompt::StringArray(arr) => {
+            dynamo_async_openai::types::Prompt::String(arr[index].clone())
+        }
+        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
+            dynamo_async_openai::types::Prompt::IntegerArray(arr[index].clone())
+        }
+    }
+}
+
 impl NvExtProvider for NvCreateCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
@@ -189,6 +222,10 @@ impl CommonExtProvider for NvCreateCompletionRequest {
     fn get_include_stop_str_in_output(&self) -> Option<bool> {
         self.common.include_stop_str_in_output
     }
+
+    fn get_skip_special_tokens(&self) -> Option<bool> {
+        self.common.skip_special_tokens
+    }
 }
 
 impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
@@ -254,6 +291,7 @@ impl ResponseFactory {
             choices: vec![choice],
             system_fingerprint: self.system_fingerprint.clone(),
             usage,
+            nvext: None, // Will be populated by router layer if needed
         };
         NvCreateCompletionResponse { inner }
     }
@@ -364,7 +402,7 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
-        None
+        CommonExtProvider::get_skip_special_tokens(self)
     }
 
     fn get_formatted_prompt(&self) -> Option<bool> {
@@ -403,7 +441,57 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_top_k(self.get_top_k())?;
         // Cross-field validation
         validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
-
+        // total choices validation for completions batch requests
+        validate::validate_total_choices(
+            get_prompt_batch_size(&self.inner.prompt),
+            self.inner.n.unwrap_or(1),
+        )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::common::OutputOptionsProvider;
+    use serde_json::json;
+
+    #[test]
+    fn test_skip_special_tokens_none() {
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "Hello, world!"
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert_eq!(request.common.skip_special_tokens, None);
+
+        let output_options = request
+            .extract_output_options()
+            .expect("Failed to extract output options");
+
+        assert_eq!(output_options.skip_special_tokens, None);
+    }
+
+    #[test]
+    fn test_skip_special_tokens_propagates() {
+        for skip_value in [true, false] {
+            let json_str = json!({
+                "model": "test-model",
+                "prompt": "Hello, world!",
+                "skip_special_tokens": skip_value
+            });
+
+            let request: NvCreateCompletionRequest =
+                serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+            let output_options = request
+                .extract_output_options()
+                .expect("Failed to extract output options");
+
+            assert_eq!(output_options.skip_special_tokens, Some(skip_value));
+        }
     }
 }

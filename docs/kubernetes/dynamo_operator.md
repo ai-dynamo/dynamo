@@ -12,6 +12,7 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 - **Controllers:**
   - `DynamoGraphDeploymentController`: Watches `DynamoGraphDeployment` CRs and orchestrates graph deployments.
   - `DynamoComponentDeploymentController`: Watches `DynamoComponentDeployment` CRs and handles individual component deployments.
+  - `DynamoModelController`: Watches `DynamoModel` CRs and manages model lifecycle (e.g., loading LoRA adapters).
 
 - **Workflow:**
   1. A custom resource is created by the user or API server.
@@ -100,9 +101,34 @@ kubectl get lease -n my-namespace dynamo-operator-namespace-scope \
 
 ## Custom Resource Definitions (CRDs)
 
+Dynamo provides the following Custom Resources:
+
+- **DynamoGraphDeployment (DGD)**: Deploys complete inference pipelines
+- **DynamoComponentDeployment (DCD)**: Deploys individual components
+- **DynamoModel**: Manages model lifecycle (e.g., loading LoRA adapters)
+
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
 **📖 [Dynamo CRD API Reference](./api_reference.md)**
+
+For a user-focused guide on deploying and managing models with DynamoModel, see:
+
+**📖 [Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
+
+## Webhooks
+
+The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validation of custom resources before they are persisted to the cluster. Webhooks are **enabled by default** and ensure that invalid configurations are rejected immediately at the API server level.
+
+**Key Features:**
+- ✅ Shared certificate infrastructure across all webhook types
+- ✅ Automatic certificate generation (for testing/development)
+- ✅ cert-manager integration (for production)
+- ✅ Multi-operator support with lease-based coordination
+- ✅ Immutability enforcement for critical fields
+
+For complete documentation on webhooks, certificate management, and troubleshooting, see:
+
+**📖 [Webhooks Guide](./webhooks.md)**
 
 ## Installation
 

@@ -7,4 +7,4 @@ mod loader;
 
 pub use common::EncodedMediaData;
 pub use decoders::{Decoder, ImageDecoder, MediaDecoder};
-pub use loader::MediaLoader;
+pub use loader::{MediaFetcher, MediaLoader};

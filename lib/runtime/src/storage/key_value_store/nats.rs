@@ -52,6 +52,11 @@ impl KeyValueStore for NATSStore {
     fn connection_id(&self) -> u64 {
         self.client.client().server_info().client_id
     }
+
+    fn shutdown(&self) {
+        // TODO: Track and delete any owned keys
+        // The TTL should ensure NATS does it, but best we do it immediately
+    }
 }
 
 impl NATSStore {
@@ -160,12 +165,15 @@ impl KeyValueBucket for NATSBucket {
                 >| async move {
                     match maybe_entry {
                         Ok(entry) => {
-                            let item = KeyValue::new(entry.key, entry.value);
+                            let key = Key::new(entry.key);
                             Some(match entry.operation {
-                                Operation::Put => WatchEvent::Put(item),
-                                Operation::Delete => WatchEvent::Delete(item),
+                                Operation::Put => {
+                                    let item = KeyValue::new(key, entry.value);
+                                    WatchEvent::Put(item)
+                                }
+                                Operation::Delete => WatchEvent::Delete(key),
                                 // TODO: What is Purge? Not urgent, NATS impl not used
-                                Operation::Purge => WatchEvent::Delete(item),
+                                Operation::Purge => WatchEvent::Delete(key),
                             })
                         }
                         Err(e) => {
@@ -178,7 +186,7 @@ impl KeyValueBucket for NATSBucket {
         ))
     }
 
-    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError> {
+    async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
         let mut key_stream = self
             .nats_store
             .keys()
@@ -187,7 +195,7 @@ impl KeyValueBucket for NATSBucket {
         let mut out = HashMap::new();
         while let Some(Ok(key)) = key_stream.next().await {
             if let Ok(Some(entry)) = self.nats_store.entry(&key).await {
-                out.insert(key, entry.value);
+                out.insert(Key::new(key), entry.value);
             }
         }
         Ok(out)

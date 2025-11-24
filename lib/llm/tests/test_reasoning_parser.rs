@@ -36,6 +36,7 @@ fn create_mock_response_chunk(
         object: "chat.completion.chunk".to_string(),
         usage: None,
         service_tier: None,
+        nvext: None,
     };
 
     Annotated {

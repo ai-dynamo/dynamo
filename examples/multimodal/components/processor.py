@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import argparse
 import asyncio
@@ -250,9 +238,20 @@ class Processor(ProcessMixIn):
                     if multimodal_input.image_url is not None:
                         raise ValueError("Cannot provide both image and video URLs")
                     multimodal_input.video_url = item.video_url.url
+                elif item.type == "audio_url":
+                    if (
+                        multimodal_input.image_url is not None
+                        or multimodal_input.video_url is not None
+                    ):
+                        raise ValueError("Cannot mix image, video and audio URLs")
+                    multimodal_input.audio_url = item.audio_url.url
 
-        if multimodal_input.image_url is None and multimodal_input.video_url is None:
-            raise ValueError("Either image URL or video URL is required")
+        if (
+            multimodal_input.image_url is None
+            and multimodal_input.video_url is None
+            and multimodal_input.audio_url is None
+        ):
+            raise ValueError("Either image URL or video URL or audio URL is required")
 
         async for response in self._generate(
             chat_request, multimodal_input, RequestType.CHAT
@@ -279,7 +278,7 @@ async def graceful_shutdown(runtime):
     logging.info("DistributedRuntime shutdown complete")
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     # Runtime setup
     # Set up signal handler for graceful shutdown
@@ -304,7 +303,6 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     """
 
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
 
