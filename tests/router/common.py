@@ -1513,6 +1513,7 @@ def _test_router_disagg_decisions(
     2. Sends 4 progressive requests where each extends the previous tokens by block_size
     3. Extracts prefill_worker_id and decode_worker_id from response nvext
     4. Verifies all prefill_worker_ids are the same (due to prefix reuse routing)
+    5. Verifies prefill_worker_id is NOT in the set of decode_worker_ids (true disagg)
 
     Args:
         prefill_workers: Prefill workers already initialized with __enter__()
@@ -1525,6 +1526,7 @@ def _test_router_disagg_decisions(
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
+        AssertionError: If prefill_worker_id is in decode_worker_ids (not true disagg)
     """
     try:
         # Start KV router frontend - uses decode_workers namespace for discovery
@@ -1662,9 +1664,19 @@ def _test_router_disagg_decisions(
             f"Full list: {prefill_ids}"
         )
 
+        # Verify prefill_worker_id is NOT in decode_worker_ids (true disagg)
+        unique_decode_ids = set(decode_ids)
+        prefill_id = prefill_ids[0]
+        assert prefill_id not in unique_decode_ids, (
+            f"Prefill worker {prefill_id} should NOT be in decode workers {unique_decode_ids}. "
+            f"This suggests disaggregated mode is not working correctly - "
+            f"prefill and decode should use separate worker pools."
+        )
+
         logger.info(
-            f"Successfully verified: All 4 requests routed to prefill_worker_id={prefill_ids[0]} "
-            f"due to KV cache prefix reuse. Decode workers: {set(decode_ids)}"
+            f"Successfully verified disaggregated routing:\n"
+            f"  - All 4 requests routed to same prefill_worker_id={prefill_id} (prefix reuse)\n"
+            f"  - Prefill worker is NOT in decode worker set {unique_decode_ids} (true disagg)"
         )
 
     finally:
