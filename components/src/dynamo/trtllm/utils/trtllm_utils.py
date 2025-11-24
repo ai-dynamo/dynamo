@@ -41,11 +41,11 @@ class Config:
         self.kv_block_size: int = 32
         self.migration_limit: int = 0
         self.gpus_per_node: Optional[int] = None
-        self.max_batch_size: int = BuildConfig.max_batch_size
-        self.max_num_tokens: int = BuildConfig.max_num_tokens
-        self.max_seq_len: int = BuildConfig.max_seq_len
-        self.max_beam_width: int = BuildConfig.max_beam_width
-        self.free_gpu_memory_fraction: Optional[float] = None
+        self.max_batch_size: int = BuildConfig.model_fields["max_batch_size"].default
+        self.max_num_tokens: int = BuildConfig.model_fields["max_num_tokens"].default
+        self.max_seq_len: int = BuildConfig.model_fields["max_seq_len"].default
+        self.max_beam_width: int = BuildConfig.model_fields["max_beam_width"].default
+        self.free_gpu_memory_fraction: float = 0.9
         self.extra_engine_args: str = ""
         self.override_engine_args: str = ""
         self.publish_events_and_metrics: bool = False
@@ -59,6 +59,7 @@ class Config:
         self.dump_config_to: Optional[str] = None
         self.custom_jinja_template: Optional[str] = None
         self.store_kv: str = ""
+        self.request_plane: str = ""
 
     def __str__(self) -> str:
         return (
@@ -90,7 +91,8 @@ class Config:
             f"tool_call_parser={self.tool_call_parser}, "
             f"dump_config_to={self.dump_config_to}, "
             f"custom_jinja_template={self.custom_jinja_template}, "
-            f"store_kv={self.store_kv}"
+            f"store_kv={self.store_kv}, "
+            f"request_plane={self.request_plane}"
         )
 
 
@@ -174,26 +176,26 @@ def cmd_line_args():
     parser.add_argument(
         "--max-batch-size",
         type=int,
-        default=BuildConfig.max_batch_size,
+        default=BuildConfig.model_fields["max_batch_size"].default,
         help="Maximum number of requests that the engine can schedule.",
     )
     parser.add_argument(
         "--max-num-tokens",
         type=int,
-        default=BuildConfig.max_num_tokens,
+        default=BuildConfig.model_fields["max_num_tokens"].default,
         help="Maximum number of batched input tokens after padding is removed in each batch.",
     )
     parser.add_argument(
         "--max-seq-len",
         type=int,
-        default=BuildConfig.max_seq_len,
+        default=BuildConfig.model_fields["max_seq_len"].default,
         help="Maximum total length of one request, including prompt and outputs. "
         "If unspecified, the value is deduced from the model config.",
     )
     parser.add_argument(
         "--max-beam-width",
         type=int,
-        default=BuildConfig.max_beam_width,
+        default=BuildConfig.model_fields["max_beam_width"].default,
         help="Maximum number of beams for beam search decoding.",
     )
     parser.add_argument(
@@ -283,8 +285,16 @@ def cmd_line_args():
     parser.add_argument(
         "--store-kv",
         type=str,
+        choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
         help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
+    parser.add_argument(
+        "--request-plane",
+        type=str,
+        choices=["nats", "http", "tcp"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
 
     args = parser.parse_args()
@@ -346,6 +356,7 @@ def cmd_line_args():
     config.tool_call_parser = args.dyn_tool_call_parser
     config.dump_config_to = args.dump_config_to
     config.store_kv = args.store_kv
+    config.request_plane = args.request_plane
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:

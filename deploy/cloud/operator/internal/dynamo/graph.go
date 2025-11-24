@@ -34,7 +34,6 @@ import (
 	"k8s.io/utils/ptr"
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -63,15 +62,15 @@ type Autoscaling struct {
 }
 
 type Config struct {
-	Dynamo       *DynamoConfig        `yaml:"dynamo,omitempty"`
-	Resources    *Resources           `yaml:"resources,omitempty"`
-	Traffic      *Traffic             `yaml:"traffic,omitempty"`
-	Autoscaling  *Autoscaling         `yaml:"autoscaling,omitempty"`
-	HttpExposed  bool                 `yaml:"http_exposed,omitempty"`
-	ApiEndpoints []string             `yaml:"api_endpoints,omitempty"`
-	Workers      *int32               `yaml:"workers,omitempty"`
-	TotalGpus    *int32               `yaml:"total_gpus,omitempty"`
-	ExtraPodSpec *common.ExtraPodSpec `yaml:"extraPodSpec,omitempty"`
+	Dynamo       *DynamoConfig          `yaml:"dynamo,omitempty"`
+	Resources    *Resources             `yaml:"resources,omitempty"`
+	Traffic      *Traffic               `yaml:"traffic,omitempty"`
+	Autoscaling  *Autoscaling           `yaml:"autoscaling,omitempty"`
+	HttpExposed  bool                   `yaml:"http_exposed,omitempty"`
+	ApiEndpoints []string               `yaml:"api_endpoints,omitempty"`
+	Workers      *int32                 `yaml:"workers,omitempty"`
+	TotalGpus    *int32                 `yaml:"total_gpus,omitempty"`
+	ExtraPodSpec *v1alpha1.ExtraPodSpec `yaml:"extraPodSpec,omitempty"`
 }
 
 type ServiceConfig struct {
@@ -150,7 +149,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		if component.ComponentType == commonconsts.ComponentTypePlanner {
 			// ensure that the extraPodSpec is not nil
 			if deployment.Spec.ExtraPodSpec == nil {
-				deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{}
+				deployment.Spec.ExtraPodSpec = &v1alpha1.ExtraPodSpec{}
 			}
 			// ensure that the embedded PodSpec struct is not nil
 			if deployment.Spec.ExtraPodSpec.PodSpec == nil {
@@ -231,10 +230,10 @@ func overrideWithDynDeploymentConfig(ctx context.Context, dynamoDeploymentCompon
 			dynamoDeploymentComponent.Spec.Replicas = componentDynConfig.ServiceArgs.Workers
 		}
 		if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Resources != nil {
-			requests := &common.ResourceItem{}
-			limits := &common.ResourceItem{}
+			requests := &v1alpha1.ResourceItem{}
+			limits := &v1alpha1.ResourceItem{}
 			if dynamoDeploymentComponent.Spec.Resources == nil {
-				dynamoDeploymentComponent.Spec.Resources = &common.Resources{
+				dynamoDeploymentComponent.Spec.Resources = &v1alpha1.Resources{
 					Requests: requests,
 					Limits:   limits,
 				}
@@ -396,7 +395,7 @@ func getCliqueStartupDependencies(
 	return nil
 }
 
-func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec, componentName string) (*corev1.Service, error) {
+func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, component *v1alpha1.DynamoComponentDeploymentSharedSpec, componentName string, isK8sDiscoveryEnabled bool) (*corev1.Service, error) {
 	if component.DynamoNamespace == nil {
 		return nil, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", componentName)
 	}
@@ -430,6 +429,15 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 			},
 			Ports: []corev1.ServicePort{servicePort},
 		},
+	}
+	if isK8sDiscoveryEnabled {
+		service.Labels = map[string]string{
+			commonconsts.KubeLabelDynamoDiscoveryBackend: "kubernetes",
+		}
+		// Discovery is enabled for non frontend components
+		if component.ComponentType != commonconsts.ComponentTypeFrontend {
+			service.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+		}
 	}
 	return service, nil
 }
@@ -617,6 +625,7 @@ type MultinodeDeployer interface {
 	GetLeaderHostname(serviceName string) string
 	GetHostNames(serviceName string, numberOfNodes int32) []string
 	GetNodeRank() (string, bool) // returns (rank, needsShellInterpretation)
+	NeedsDNSWait() bool          // returns true if DNS wait is needed to launch multinode components
 }
 
 // BackendFactory creates backend instances based on the framework type
@@ -686,6 +695,25 @@ func addStandardEnvVars(container *corev1.Container, controllerConfig controller
 	}
 	// merge the env vars to allow users to override the standard env vars
 	container.Env = MergeEnvs(standardEnvVars, container.Env)
+}
+
+// applyDefaultSecurityContext sets secure defaults for pod security context.
+// Currently only sets fsGroup to solve volume permission issues.
+// Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
+// with images that may expect to run as root.
+// User-provided security context values (via extraPodSpec) will override these defaults.
+func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
+	// Initialize SecurityContext if not present
+	if podSpec.SecurityContext == nil {
+		podSpec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+
+	// Only set fsGroup by default
+	// This fixes volume permission issues without forcing a specific UID/GID
+	// which maintains compatibility with both root and non-root images
+	if podSpec.SecurityContext.FSGroup == nil {
+		podSpec.SecurityContext.FSGroup = ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup))
+	}
 }
 
 // GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
@@ -847,6 +875,11 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("failed to get base podspec: %w", err)
 	}
 
+	// Check if user provided their own security context before merging
+	userProvidedSecurityContext := component.ExtraPodSpec != nil &&
+		component.ExtraPodSpec.PodSpec != nil &&
+		component.ExtraPodSpec.PodSpec.SecurityContext != nil
+
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
 		// merge extraPodSpec PodSpec with base podspec
 		err := mergo.Merge(&podSpec, component.ExtraPodSpec.PodSpec.DeepCopy(), mergo.WithOverride)
@@ -855,8 +888,17 @@ func GenerateBasePodSpec(
 		}
 	}
 
+	// Apply default security context ONLY if user didn't provide any security context
+	// If user provides ANY securityContext (even partial), they get full control with no defaults injected
+	// This allows users to intentionally set fields to nil (e.g., to run as root)
+	if !userProvidedSecurityContext {
+		applyDefaultSecurityContext(&podSpec)
+	}
+
 	if controllerConfig.IsK8sDiscoveryEnabled(component.Annotations) {
-		podSpec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(parentGraphDeploymentName)
+		if podSpec.ServiceAccountName == "" {
+			podSpec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(parentGraphDeploymentName)
+		}
 	}
 
 	podSpec.Containers = append(podSpec.Containers, container)

@@ -7,11 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Overview
 
-When running TensorRT-LLM through Dynamo, TensorRT-LLM's Prometheus metrics are automatically passed through and exposed on Dynamo's `/metrics` endpoint (default port 8081). This allows you to access both TensorRT-LLM engine metrics (prefixed with `trtllm:`) and Dynamo runtime metrics (prefixed with `dynamo_*`) from a single worker backend endpoint.
-
-As of the date of this documentation, the included TensorRT-LLM version 1.1.0rc5 exposes **5 basic Prometheus metrics**. Note that the `trtllm:` prefix is added by Dynamo.
+When running TensorRT-LLM through Dynamo, TensorRT-LLM's Prometheus metrics are automatically passed through and exposed on Dynamo's `/metrics` endpoint (default port 8081). This allows you to access both TensorRT-LLM engine metrics (prefixed with `trtllm_`) and Dynamo runtime metrics (prefixed with `dynamo_*`) from a single worker backend endpoint.
 
 Additional performance metrics are available via non-Prometheus APIs (see [Non-Prometheus Performance Metrics](#non-prometheus-performance-metrics) below).
+
+As of the date of this documentation, the included TensorRT-LLM version 1.1.0rc5 exposes **5 basic Prometheus metrics**. Note that the `trtllm_` prefix is added by Dynamo.
 
 **For Dynamo runtime metrics**, see the [Dynamo Metrics Guide](../../observability/metrics.md).
 
@@ -58,42 +58,54 @@ curl -H 'Content-Type: application/json' \
 http://localhost:8000/v1/chat/completions
 
 # Check metrics from the worker
-curl -s localhost:8081/metrics | grep "^trtllm:"
+curl -s localhost:8081/metrics | grep "^trtllm_"
 ```
 
 ## Exposed Metrics
 
-TensorRT-LLM exposes metrics in Prometheus Exposition Format text at the `/metrics` HTTP endpoint. All TensorRT-LLM engine metrics use the `trtllm:` prefix and include labels (e.g., `model_name`, `engine_type`, `finished_reason`) to identify the source.
+TensorRT-LLM exposes metrics in Prometheus Exposition Format text at the `/metrics` HTTP endpoint. All TensorRT-LLM engine metrics use the `trtllm_` prefix and include labels (e.g., `model_name`, `engine_type`, `finished_reason`) to identify the source.
 
 **Note:** TensorRT-LLM uses `model_name` instead of Dynamo's standard `model` label convention.
 
 **Example Prometheus Exposition Format text:**
 
 ```
-# HELP trtllm:request_success_total Count of successfully processed requests.
-# TYPE trtllm:request_success_total counter
-trtllm:request_success_total{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm",finished_reason="stop"} 150.0
-trtllm:request_success_total{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm",finished_reason="length"} 5.0
+# HELP trtllm_request_success_total Count of successfully processed requests.
+# TYPE trtllm_request_success_total counter
+trtllm_request_success_total{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm",finished_reason="stop"} 150.0
+trtllm_request_success_total{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm",finished_reason="length"} 5.0
 
-# HELP trtllm:time_to_first_token_seconds Histogram of time to first token in seconds.
-# TYPE trtllm:time_to_first_token_seconds histogram
-trtllm:time_to_first_token_seconds_bucket{le="0.01",model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 0.0
-trtllm:time_to_first_token_seconds_bucket{le="0.05",model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 12.0
-trtllm:time_to_first_token_seconds_count{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 150.0
-trtllm:time_to_first_token_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 8.75
+# HELP trtllm_time_to_first_token_seconds Histogram of time to first token in seconds.
+# TYPE trtllm_time_to_first_token_seconds histogram
+trtllm_time_to_first_token_seconds_bucket{le="0.01",model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 0.0
+trtllm_time_to_first_token_seconds_bucket{le="0.05",model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 12.0
+trtllm_time_to_first_token_seconds_count{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 150.0
+trtllm_time_to_first_token_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 8.75
 
-# HELP trtllm:e2e_request_latency_seconds Histogram of end to end request latency in seconds.
-# TYPE trtllm:e2e_request_latency_seconds histogram
-trtllm:e2e_request_latency_seconds_bucket{le="0.5",model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 25.0
-trtllm:e2e_request_latency_seconds_count{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 150.0
-trtllm:e2e_request_latency_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 45.2
+# HELP trtllm_e2e_request_latency_seconds Histogram of end to end request latency in seconds.
+# TYPE trtllm_e2e_request_latency_seconds histogram
+trtllm_e2e_request_latency_seconds_bucket{le="0.5",model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 25.0
+trtllm_e2e_request_latency_seconds_count{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 150.0
+trtllm_e2e_request_latency_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 45.2
+
+# HELP trtllm_time_per_output_token_seconds Histogram of time per output token in seconds.
+# TYPE trtllm_time_per_output_token_seconds histogram
+trtllm_time_per_output_token_seconds_bucket{le="0.1",model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 120.0
+trtllm_time_per_output_token_seconds_count{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 150.0
+trtllm_time_per_output_token_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 12.5
+
+# HELP trtllm_request_queue_time_seconds Histogram of time spent in WAITING phase for request.
+# TYPE trtllm_request_queue_time_seconds histogram
+trtllm_request_queue_time_seconds_bucket{le="1.0",model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 140.0
+trtllm_request_queue_time_seconds_count{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 150.0
+trtllm_request_queue_time_seconds_sum{model_name="Qwen/Qwen3-0.6B",engine_type="trtllm"} 32.1
 ```
 
 **Note:** The specific metrics shown above are examples and may vary depending on your TensorRT-LLM version. Always inspect your actual `/metrics` endpoint for the current list.
 
 ### Metric Categories
 
-TensorRT-LLM provides metrics in the following categories (all prefixed with `trtllm:`):
+TensorRT-LLM provides metrics in the following categories (all prefixed with `trtllm_`):
 
 - **Request metrics** - Request success tracking and latency measurements
 - **Performance metrics** - Time to first token (TTFT), time per output token (TPOT), and queue time
@@ -102,17 +114,17 @@ TensorRT-LLM provides metrics in the following categories (all prefixed with `tr
 
 ## Available Metrics
 
-The following metrics are exposed via Dynamo's `/metrics` endpoint (with the `trtllm:` prefix added by Dynamo) for TensorRT-LLM version 1.1.0rc5:
+The following metrics are exposed via Dynamo's `/metrics` endpoint (with the `trtllm_` prefix added by Dynamo) for TensorRT-LLM version 1.1.0rc5:
 
-- `trtllm:request_success_total` (Counter) — Count of successfully processed requests by finish reason
+- `trtllm_request_success_total` (Counter) — Count of successfully processed requests by finish reason
   - Labels: `model_name`, `engine_type`, `finished_reason`
-- `trtllm:e2e_request_latency_seconds` (Histogram) — End-to-end request latency (seconds)
+- `trtllm_e2e_request_latency_seconds` (Histogram) — End-to-end request latency (seconds)
   - Labels: `model_name`, `engine_type`
-- `trtllm:time_to_first_token_seconds` (Histogram) — Time to first token, TTFT (seconds)
+- `trtllm_time_to_first_token_seconds` (Histogram) — Time to first token, TTFT (seconds)
   - Labels: `model_name`, `engine_type`
-- `trtllm:time_per_output_token_seconds` (Histogram) — Time per output token, TPOT (seconds)
+- `trtllm_time_per_output_token_seconds` (Histogram) — Time per output token, TPOT (seconds)
   - Labels: `model_name`, `engine_type`
-- `trtllm:request_queue_time_seconds` (Histogram) — Time a request spends waiting in the queue (seconds)
+- `trtllm_request_queue_time_seconds` (Histogram) — Time a request spends waiting in the queue (seconds)
   - Labels: `model_name`, `engine_type`
 
 These metric names and availability are subject to change with TensorRT-LLM version updates.
@@ -161,7 +173,7 @@ TensorRT-LLM provides extensive performance data beyond the basic Prometheus met
 ## Implementation Details
 
 - **Prometheus Integration**: Uses the `MetricsCollector` class from `tensorrt_llm.metrics` (see [collector.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py))
-- **Dynamo Integration**: Uses `register_engine_metrics_callback()` function with `add_prefix="trtllm:"`
+- **Dynamo Integration**: Uses `register_engine_metrics_callback()` function with `add_prefix="trtllm_"`
 - **Engine Configuration**: `return_perf_metrics` set to `True` when `--publish-events-and-metrics` is enabled
 - **Initialization**: Metrics appear after TensorRT-LLM engine initialization completes
 - **Metadata**: `MetricsCollector` initialized with model metadata (model name, engine type)

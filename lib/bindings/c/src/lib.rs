@@ -452,9 +452,12 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                 (router_temperature >= 0.0).then_some(router_temperature),
                 Some(use_kv_events),
                 Some(router_replica_sync),
-                None,
-                None,
-                None,
+                None, // track_active_blocks
+                None, // router_snapshot_threshold
+                None, // router_reset_states
+                None, // router_ttl_secs
+                None, // router_max_tree_size
+                None, // router_prune_target_ratio
             ))
         } else {
             None
@@ -959,12 +962,16 @@ pub async fn create_worker_selection_pipeline_chat(
 
     use dynamo_llm::discovery::ModelWatcher;
     let model_manager = std::sync::Arc::new(ModelManager::new());
+    let router_config = dynamo_llm::entrypoint::RouterConfig {
+        router_mode,
+        kv_router_config: kv_router_config.unwrap_or_default(),
+        busy_threshold,
+        enforce_disagg: false,
+    };
     let watcher = ModelWatcher::new(
         component.drt().clone(),
         model_manager.clone(),
-        router_mode,
-        kv_router_config,
-        busy_threshold,
+        router_config,
     );
     let cards = watcher
         .cards_for_model(model_name, Some(namespace), false)
@@ -1031,7 +1038,8 @@ pub async fn create_worker_selection_pipeline_chat(
         busy_threshold,
         chooser,
         hf_tokenizer,
-        None,
+        None,  // prefill_chooser
+        false, // enforce_disagg
     )
     .await?;
 

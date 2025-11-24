@@ -104,24 +104,6 @@ Alternatively, can use `vllm serve` directly to use KVBM for aggregated serving:
 vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}' Qwen/Qwen3-0.6B
 ```
 
-## Troubleshooting
-
-1. Allocating large memory and disk storage can take some time and lead to KVBM worker initialization timeout.
-To avoid it, please set a longer timeout (default 1800 seconds) for leader–worker initialization.
-
-```bash
-# 3600 means 3600 seconds timeout
-export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=3600
-```
-
-2. When offloading to disk is enabled, KVBM could fail to start up if fallocate is not supported to create the files.
-To bypass the issue, please use disk zerofill fallback.
-
-```bash
-# Set to true to enable fallback behavior when disk operations fail (e.g. fallocate not available)
-export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true
-```
-
 ## Enable and View KVBM Metrics
 
 Follow below steps to enable metrics collection and view via Grafana dashboard:
@@ -145,6 +127,39 @@ sudo ufw allow 6880/tcp
 
 View grafana metrics via http://localhost:3000 (default login: dynamo/dynamo) and look for KVBM Dashboard
 
+KVBM currently provides following types of metrics out of the box:
+- `kvbm_matched_tokens`: The number of matched tokens
+- `kvbm_offload_blocks_d2h`: The number of offload blocks from device to host
+- `kvbm_offload_blocks_h2d`: The number of offload blocks from host to disk
+- `kvbm_offload_blocks_d2d`: The number of offload blocks from device to disk (bypassing host memory)
+- `kvbm_onboard_blocks_d2d`: The number of onboard blocks from disk to device
+- `kvbm_onboard_blocks_h2d`: The number of onboard blocks from host to device
+- `kvbm_host_cache_hit_rate`: Host cache hit rate (0.0-1.0) from sliding window
+- `kvbm_disk_cache_hit_rate`: Disk cache hit rate (0.0-1.0) from sliding window
+
+## Troubleshooting
+
+1. If enabling KVBM does not show any TTFT perf gain or even perf degradation, one potential reason is not enough prefix cache hit on KVBM to reuse offloaded KV blocks.
+To confirm, please enable KVBM metrics as mentioned above and check the grafana dashboard `Onboard Blocks - Host to Device` and `Onboard Blocks - Disk to Device`.
+If observed large number of onboarded KV blocks as the example below, we can rule out this cause:
+![Grafana Example](kvbm_metrics_grafana.png)
+
+2. Allocating large memory and disk storage can take some time and lead to KVBM worker initialization timeout.
+To avoid it, please set a longer timeout (default 1800 seconds) for leader–worker initialization.
+
+```bash
+# 3600 means 3600 seconds timeout
+export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=3600
+```
+
+3. When offloading to disk is enabled, KVBM could fail to start up if fallocate is not supported to create the files.
+To bypass the issue, please use disk zerofill fallback.
+
+```bash
+# Set to true to enable fallback behavior when disk operations fail (e.g. fallocate not available)
+export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true
+```
+
 ## Benchmark KVBM
 
 Once the model is loaded ready, follow below steps to use LMBenchmark to benchmark KVBM performance:
@@ -167,3 +182,13 @@ More details about how to use LMBenchmark could be found [here](https://github.c
 `NOTE`: if metrics are enabled as mentioned in the above section, you can observe KV offloading, and KV onboarding in the grafana dashboard.
 
 To compare, you can run `vllm serve Qwen/Qwen3-0.6B` to turn KVBM off as the baseline.
+
+## Developing Locally
+
+Inside the Dynamo container, after changing KVBM related code (Rust and/or Python), to test or use it:
+```bash
+cd /workspace/lib/bindings/kvbm
+uv pip install maturin[patchelf]
+maturin build --release --out /workspace/dist
+uv pip install --upgrade --force-reinstall --no-deps /workspace/dist/kvbm*.whl
+```

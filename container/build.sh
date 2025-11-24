@@ -26,13 +26,13 @@ RUN_PREFIX=
 PLATFORM=linux/amd64
 
 # Get short commit hash
-commit_id=$(git rev-parse --short HEAD)
+commit_id=${commit_id:-$(git rev-parse --short HEAD)}
 
 # if COMMIT_ID matches a TAG use that
-current_tag=$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//') || true
+current_tag=${current_tag:-$($(git describe --tags --exact-match 2>/dev/null | sed 's/^v//') || true)}
 
 # Get latest TAG and add COMMIT_ID for dev
-latest_tag=$(git describe --tags --abbrev=0 "$(git rev-list --tags --max-count=1)" | sed 's/^v//') || true
+latest_tag=${latest_tag:-$(git describe --tags --abbrev=0 "$(git rev-list --tags --max-count=1)" | sed 's/^v//' || true)}
 if [[ -z ${latest_tag} ]]; then
     latest_tag="0.0.1"
     echo "No git release tag found, setting to unknown version: ${latest_tag}"
@@ -59,7 +59,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TRTLLM_BASE_IMAGE_TAG=25.06-py3
+TRTLLM_BASE_IMAGE_TAG=25.10-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -84,23 +84,22 @@ TRTLLM_BASE_IMAGE_TAG=25.06-py3
 # By default, we will use option 1. If you want to use option 2, you can set
 # TENSORRTLLM_PIP_WHEEL to the TensorRT-LLM wheel on artifactory.
 #
-# DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
+DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="0c9430e5a530ba958fc9dca561a3ad865ad9f492"
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="31116825b39f4e6a6a1e127001f5204b73d1dc32" # 1.2.0rc2
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
 
 # TensorRT-LLM PyPI index URL
-DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.1.0rc5"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc2"
 TENSORRTLLM_PIP_WHEEL=""
-
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # FIXME: NCCL will hang with 25.03, so use 25.01 for now
@@ -115,7 +114,7 @@ NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NIXL_REF=0.7.0
+NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
@@ -491,6 +490,10 @@ if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
 fi
 
+# Set the commit sha in the container so we can inspect what build this relates to
+DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA:-$(git rev-parse HEAD)}
+BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
+
 # Special handling for vLLM on ARM64 - set required defaults if not already specified by user
 if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     # Set base image tag to CUDA 12.9 if using the default value (user didn't override)
@@ -637,22 +640,29 @@ check_wheel_file() {
 }
 
 function determine_user_intention_trtllm() {
-    # The following options are grouped to be mutually exclusive.
-    # This function determines if the flags set are can be interpreted
-    # without ambiguity.
+    # The tensorrt llm installation flags are not quite mutually exclusive
+    # since the user should be able to point at a directory of their choosing
+    # for storing a trtllm wheel built from source.
+    #
+    # This function attempts to discern the intention of the user by
+    # applying checks, or rules, for each of the scenarios.
     #
     # /return: Calculated intention. One of "download", "install", "build".
     #
     # The three different methods of installing TRTLLM with build.sh are:
     # 1. Download
-    # --tensorrtllm-index-url
-    # --tensorrtllm-pip-wheel
+    # required: --tensorrtllm-pip-wheel
+    # optional: --tensorrtllm-index-url
+    # optional: --tensorrtllm-commit
     #
     # 2. Install from pre-built
-    # --tensorrtllm-pip-wheel-dir
+    # required: --tensorrtllm-pip-wheel-dir
+    # optional: --tensorrtllm-commit
     #
     # 3. Build from source
-    # --tensorrtllm-git-url
+    # required: --tensorrtllm-git-url
+    # optional: --tensorrtllm-commit
+    # optional: --tensorrtllm-pip-wheel-dir
     local intention_download="false"
     local intention_install="false"
     local intention_build="false"
@@ -660,7 +670,7 @@ function determine_user_intention_trtllm() {
     TRTLLM_INTENTION=${TRTLLM_INTENTION}
 
     # Install from pre-built
-    if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR" ]]; then
+    if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR"  && ! -n "$TRTLLM_GIT_URL" ]]; then
         intention_install="true";
         intention_count=$((intention_count+1))
         TRTLLM_INTENTION="install"
@@ -739,6 +749,8 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
         PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
     elif [[ "$TRTLLM_INTENTION" == "build" ]]; then
+        TENSORRTLLM_PIP_WHEEL_DIR=${TENSORRTLLM_PIP_WHEEL_DIR:=$DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR}
+        echo "TRTLLM pip wheel output directory is: ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if [ "$DRY_RUN" != "true" ]; then
             GIT_URL_ARG=""
             if [ -n "${TRTLLM_GIT_URL}" ]; then
@@ -747,6 +759,9 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
             if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
                 error "ERROR: Failed to build TensorRT-LLM wheel"
             fi
+            BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
+            BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
+            PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
         fi
     else
         echo 'No intention was set. This error should have been detected in "determine_user_intention_trtllm()". Exiting...'

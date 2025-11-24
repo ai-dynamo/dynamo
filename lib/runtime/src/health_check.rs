@@ -442,7 +442,7 @@ mod integration_tests {
                 endpoint: "test_endpoint".to_string(),
                 namespace: "test_namespace".to_string(),
                 instance_id: 12345,
-                transport: crate::component::TransportType::NatsTcp(endpoint.to_string()),
+                transport: crate::component::TransportType::Nats(endpoint.to_string()),
             },
             payload.clone(),
         );
@@ -477,7 +477,7 @@ mod integration_tests {
                     endpoint: format!("test_endpoint_{}", i),
                     namespace: "test_namespace".to_string(),
                     instance_id: i,
-                    transport: crate::component::TransportType::NatsTcp(endpoint.clone()),
+                    transport: crate::component::TransportType::Nats(endpoint.clone()),
                 },
                 payload,
             );
@@ -520,7 +520,7 @@ mod integration_tests {
                 endpoint: "test_endpoint_notifier".to_string(),
                 namespace: "test_namespace".to_string(),
                 instance_id: 999,
-                transport: crate::component::TransportType::NatsTcp(endpoint.to_string()),
+                transport: crate::component::TransportType::Nats(endpoint.to_string()),
             },
             payload.clone(),
         );

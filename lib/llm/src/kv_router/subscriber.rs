@@ -8,6 +8,7 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 use anyhow::Result;
 use dynamo_runtime::{
     component::Component,
+    config::environment_names::nats as env_nats,
     discovery::DiscoveryQuery,
     prelude::*,
     storage::key_value_store::WatchEvent,
@@ -229,8 +230,8 @@ pub async fn start_kv_router_background(
     let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
         .to_string()
         .replace("_", "-");
-    let nats_server =
-        std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    let nats_server = std::env::var(env_nats::NATS_SERVER)
+        .unwrap_or_else(|_| "nats://localhost:4222".to_string());
 
     // Create NatsQueue for event consumption
     let mut nats_queue = NatsQueue::new_with_consumer(
@@ -479,20 +480,16 @@ async fn cleanup_orphaned_consumers(
     };
 
     // Filter to only routers for this component
-    // Note: keys differ between storage backends:
-    // - FileStore: "namespace/component/uuid" (relative to bucket)
-    // - EtcdStore: "v1/kv_routers/namespace/component/uuid" (full path)
-    // Use contains() to handle both cases
     let component_path = component.path();
     let active_uuids: HashSet<String> = entries
         .iter()
         .filter_map(|(key, _)| {
             // Check if key contains this component's path
-            if !key.contains(&component_path) {
+            if !key.as_ref().contains(&component_path) {
                 return None;
             }
             // Extract the last part (should be the UUID)
-            key.split('/').next_back().map(str::to_string)
+            key.as_ref().split('/').next_back().map(str::to_string)
         })
         .collect();
 
