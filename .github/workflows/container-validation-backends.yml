@@ -504,14 +504,6 @@ jobs:
           merge-multiple: true
         continue-on-error: true  # Don't fail if artifacts don't exist
 
-      - name: Download build logs
-        uses: actions/download-artifact@v4
-        with:
-          pattern: build-logs-*
-          path: build-logs/
-          merge-multiple: true
-        continue-on-error: true  # Don't fail if artifacts don't exist
-
       - name: Download BuildKit reports
         uses: actions/download-artifact@v4
         with:

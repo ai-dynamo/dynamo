@@ -91,26 +91,15 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
       run: |
-        echo "=========================================="
-        echo "🚀 DOCKER BUILD - STARTING"
-        echo "=========================================="
-        
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
           IMAGE_TAG="${{ inputs.image_tag }}"
         else
           IMAGE_TAG="${{ inputs.framework }}:latest"
         fi
-        
-        echo "📦 Image Tag: ${IMAGE_TAG}"
-        echo "🔧 Framework: ${{ inputs.framework }}"
-        echo "🎯 Target: ${{ inputs.target }}"
-        echo "💻 Platform: ${{ inputs.platform }}"
-        echo "🔐 Using sccache: ${{ inputs.sccache_s3_bucket != '' && 'true' || 'false' }}"
 
         BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         BUILD_START_EPOCH=$(date +%s)
-        echo "🕐 Build started at: ${BUILD_START_TIME} (epoch: ${BUILD_START_EPOCH})"
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
         echo "BUILD_START_EPOCH=${BUILD_START_EPOCH}" >> $GITHUB_ENV
 
@@ -126,35 +115,16 @@ runs:
         EXTRA_ARGS=""
         if [ -n "${{ inputs.base_image_tag }}" ]; then
           EXTRA_ARGS+=" --base-image-tag ${{ inputs.base_image_tag }}"
-          echo "🔧 Base Image Tag Override: ${{ inputs.base_image_tag }}"
         fi
         if [ -n "${{ inputs.runtime_image_tag }}" ]; then
           EXTRA_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${{ inputs.runtime_image_tag }}"
-          echo "🔧 Runtime Image Tag Override: ${{ inputs.runtime_image_tag }}"
         fi
         if [ -n "${{ inputs.cuda_version }}" ]; then
           EXTRA_ARGS+=" --build-arg CUDA_VERSION=${{ inputs.cuda_version }}"
-          echo "🔧 CUDA Version Override: ${{ inputs.cuda_version }}"
         fi
         if [ -n "${{ inputs.torch_backend }}" ]; then
           EXTRA_ARGS+=" --build-arg TORCH_BACKEND=${{ inputs.torch_backend }}"
-          echo "🔧 Torch Backend Override: ${{ inputs.torch_backend }}"
         fi
-        
-        echo ""
-        echo "📋 Build command:"
-        echo "  ./container/build.sh --tag \"${IMAGE_TAG}\" \\"
-        echo "    --target ${{ inputs.target }} \\"
-        echo "    --vllm-max-jobs 10 \\"
-        echo "    --framework ${{ inputs.framework }} \\"
-        echo "    --platform ${{ inputs.platform }} \\"
-        echo "    --use-sccache \\"
-        echo "    --sccache-bucket \"${SCCACHE_S3_BUCKET}\" \\"
-        echo "    --sccache-region \"${AWS_DEFAULT_REGION}\" ${EXTRA_ARGS}"
-        echo ""
-        echo "=========================================="
-        echo "🏗️  EXECUTING BUILD"
-        echo "=========================================="
 
         # Execute build and capture output (show on console AND save to file)
         ./container/build.sh --tag "$IMAGE_TAG" \
@@ -170,17 +140,6 @@ runs:
         
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         BUILD_END_EPOCH=$(date +%s)
-        BUILD_DURATION=$((BUILD_END_EPOCH - BUILD_START_EPOCH))
-        
-        echo ""
-        echo "=========================================="
-        echo "✅ BUILD COMPLETED"
-        echo "=========================================="
-        echo "🕐 Build ended at: ${BUILD_END_TIME} (epoch: ${BUILD_END_EPOCH})"
-        echo "⏱️  Total build duration: ${BUILD_DURATION} seconds"
-        echo "📝 Build log saved to: ${BUILD_LOG_FILE}"
-        echo "📊 Build log size: $(wc -l < "${BUILD_LOG_FILE}") lines, $(du -h "${BUILD_LOG_FILE}" | cut -f1)"
-        echo "🎯 Exit code: ${BUILD_EXIT_CODE}"
         
         echo "BUILD_END_TIME=${BUILD_END_TIME}" >> $GITHUB_ENV
         echo "BUILD_END_EPOCH=${BUILD_END_EPOCH}" >> $GITHUB_ENV
@@ -287,19 +246,24 @@ runs:
         mkdir -p build-metrics/buildkit-reports
         
         PLATFORM_ARCH="${{ env.PLATFORM_ARCH }}"
-        REPORT_FILE="build-metrics/buildkit-reports/buildkit-report-${{ inputs.framework }}-${PLATFORM_ARCH}.txt"
-        JSON_FILE="build-metrics/buildkit-reports/buildkit-data-${{ inputs.framework }}-${PLATFORM_ARCH}.json"
         
-        # Determine image name from build context
-        IMAGE_NAME="${{ inputs.framework }} (${{ inputs.target }})"
+        # Determine image name and sanitize for filename
         if [ "${{ inputs.target }}" == "runtime" ]; then
-          IMAGE_NAME="${{ inputs.framework }} Runtime Image"
+          IMAGE_NAME="${{ inputs.framework }}-runtime"
+          IMAGE_DISPLAY="${{ inputs.framework }} Runtime Image"
         elif [ "${{ inputs.target }}" == "dev" ]; then
-          IMAGE_NAME="${{ inputs.framework }} Development Image"
+          IMAGE_NAME="${{ inputs.framework }}-dev"
+          IMAGE_DISPLAY="${{ inputs.framework }} Development Image"
+        else
+          IMAGE_NAME="${{ inputs.framework }}-${{ inputs.target }}"
+          IMAGE_DISPLAY="${{ inputs.framework }} (${{ inputs.target }})"
         fi
         
+        REPORT_FILE="build-metrics/buildkit-reports/${IMAGE_NAME}-${PLATFORM_ARCH}-report.txt"
+        JSON_FILE="build-metrics/buildkit-reports/${IMAGE_NAME}-${PLATFORM_ARCH}-data.json"
+        
         echo "🚀 Parsing BuildKit output..."
-        echo "Image: ${IMAGE_NAME}"
+        echo "Image: ${IMAGE_DISPLAY}"
         echo "Output report: ${REPORT_FILE}"
         echo "Output data: ${JSON_FILE}"
         echo ""
@@ -307,13 +271,13 @@ runs:
         # Make parser executable
         chmod +x .github/scripts/parse_buildkit_output.py
         
-        # Run parser with image name
+        # Run parser with image display name
         set +e
         python3 .github/scripts/parse_buildkit_output.py \
           "$BUILD_LOG_FILE" \
           "$JSON_FILE" \
           "$REPORT_FILE" \
-          "$IMAGE_NAME"
+          "$IMAGE_DISPLAY"
         PARSER_EXIT_CODE=$?
         set -e
         
@@ -346,15 +310,6 @@ runs:
       with:
         name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: build-metrics/metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
-        retention-days: 7
-
-    # Upload build logs as artifact for debugging and analysis
-    - name: Upload Build Logs
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: build-logs-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: build-logs/*.log
         retention-days: 7
 
     # Upload BuildKit reports as artifact

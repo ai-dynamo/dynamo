@@ -1087,9 +1087,10 @@ class WorkflowMetricsUploader:
             print(f"⚠️  BuildKit reports directory not found: {buildkit_reports_dir}")
             return
 
-        # Look for BuildKit JSON data files
+        # Look for BuildKit JSON data files - updated pattern to match new naming
+        # Files now named like: {framework}-{target}-{arch}-data.json
         buildkit_files = glob.glob(
-            f"{buildkit_reports_dir}/buildkit-data-{framework}-{platform_arch}.json"
+            f"{buildkit_reports_dir}/{framework}-*-{platform_arch}-data.json"
         )
 
         if not buildkit_files:
