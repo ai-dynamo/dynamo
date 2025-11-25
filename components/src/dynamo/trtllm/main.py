@@ -209,7 +209,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             sys.exit(1)
 
     # NIXL version shipped with dynamo is not supported by tensorrt-llm<=1.2.0rc2.
-    # so we override the cache_transceiver_config to use NIXL backend.
+    # so we override the cache_transceiver_config to use UCX backend.
     # This is a temporary workaround until we upgrade to tensorrt-llm>=1.2.0rc3.
     # You can disable this override by setting DYN_TRTLLM_UCX_OVERRIDE_DISABLE=1.
     # TODO: Remove this override once we upgrade to tensorrt-llm>=1.2.0rc3.
