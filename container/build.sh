@@ -111,8 +111,9 @@ VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+# For now, SGLang is using hardcoded framework image and tag (see the Dockerfile.sglang)
+#SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+#SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
