@@ -157,8 +157,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
     try:
-        # Start endpoint immediately and register model concurrently
-        # Requests queue until ready_event is set (TODO: Part of new PR)
+        # Start endpoint and register model concurrently
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -227,6 +226,21 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     handler = PrefillWorkerHandler(component, engine, config, publisher)
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
+
+    # Register Prefill to expose dp_size to Router
+    try:
+        await register_llm_with_readiness_gate(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=ModelInput.Tokens,
+            output_type=ModelType.Chat | ModelType.Completions,
+            readiness_gate=None,
+        )
+    except Exception as e:
+        logging.error(f"Failed to register prefill worker: {e}")
+        raise
 
     tasks = [
         generate_endpoint.serve_endpoint(
