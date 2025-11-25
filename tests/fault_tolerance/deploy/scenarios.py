@@ -13,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-import time
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Dict, List, Optional, Pattern
@@ -208,7 +208,7 @@ class RollingUpgradeFailure(Failure):
 
         await deployment._wait_for_ready(timeout=1800)  # 30 minute timeout
 
-        time.sleep(
+        await asyncio.sleep(
             self.time
         )  # have some requests processed after the rolling upgrade has completed
 
