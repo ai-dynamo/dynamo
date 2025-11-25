@@ -580,6 +580,7 @@ func main() {
 		Client:         mgr.GetClient(),
 		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
 		EndpointClient: modelendpoint.NewClient(),
+		Config:         ctrlConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoModel")
 		os.Exit(1)

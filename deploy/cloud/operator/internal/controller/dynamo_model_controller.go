@@ -69,6 +69,7 @@ type DynamoModelReconciler struct {
 	client.Client
 	Recorder       record.EventRecorder
 	EndpointClient *modelendpoint.Client
+	Config         commoncontroller.Config
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels,verbs=get;list;watch;create;update;patch;delete
