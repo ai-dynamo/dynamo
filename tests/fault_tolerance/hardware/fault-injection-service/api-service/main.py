@@ -22,6 +22,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
+from kubernetes.stream import stream
 from pydantic import BaseModel, Field
 
 # Configure logging
@@ -29,6 +30,10 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Constants
+FAULT_INJECTION_NAMESPACE = "fault-injection-system"
+DEFAULT_DYNAMO_NAMESPACE = "dynamo"
 
 
 # ============================================================================
@@ -50,8 +55,8 @@ class NetworkPartitionType(str, Enum):
     """Types of network partitions"""
 
     FRONTEND_WORKER = "frontend_worker"
-    WORKER_NATS = "worker_nats"
-    WORKER_WORKER = "worker_worker"
+    WORKER_NATS = "worker_nats"  # Partition between worker pods and NATS messaging service
+    WORKER_WORKER = "worker_worker"  # Partition between worker pods (inter-worker communication)
     CUSTOM = "custom"
 
 
@@ -76,8 +81,8 @@ class FaultStatus(str, Enum):
     """Status of injected fault"""
 
     PENDING = "pending"
-    INJECTED = "injected"
-    ACTIVE = "active"
+    INJECTED = "injected"  # Fault has been successfully injected into the system
+    ACTIVE = "active"  # Fault is currently affecting the system (actively monitored)
     RECOVERING = "recovering"
     RECOVERED = "recovered"
     FAILED = "failed"
@@ -131,10 +136,10 @@ class MetricsResponse(BaseModel):
 
     timestamp: str
     namespace: str
-    gpu_metrics: Optional[dict[str, Any]] = None
-    network_metrics: Optional[dict[str, Any]] = None
-    inference_metrics: Optional[dict[str, Any]] = None
-    node_health: Optional[dict[str, Any]] = None
+    gpu_metrics: Optional[dict[str, Any]] = None  # GPU utilization, memory, temperature, power
+    network_metrics: Optional[dict[str, Any]] = None  # Latency, packet loss, throughput
+    inference_metrics: Optional[dict[str, Any]] = None  # Inference latency, throughput, accuracy
+    node_health: Optional[dict[str, Any]] = None  # Node status, resource availability
 
 
 # ============================================================================
@@ -219,7 +224,7 @@ class KubernetesHelper:
         self.networking_v1 = client.NetworkingV1Api()
 
     async def cleanup_orphaned_network_policies(
-        self, namespace: str = "dynamo-oviya"
+        self, namespace: str = DEFAULT_DYNAMO_NAMESPACE
     ) -> tuple[int, list[str]]:
         """
         Clean up orphaned NetworkPolicies created by fault injection.
@@ -276,6 +281,10 @@ class KubernetesHelper:
                 label_selector=label_selector,
             )
             if pods.items:
+                if len(pods.items) > 1:
+                    logger.warning(
+                        f"Multiple pods ({len(pods.items)}) found for label '{label_selector}', using first: {pods.items[0].metadata.name}"
+                    )
                 return pods.items[0].metadata.name
             return None
         except ApiException as e:
@@ -285,10 +294,8 @@ class KubernetesHelper:
     async def exec_in_pod(
         self, namespace: str, pod_name: str, command: list[str]
     ) -> tuple[bool, str]:
-        """Execute command in pod"""
+        """Execute command in pod and return (success, output)"""
         try:
-            from kubernetes.stream import stream
-
             resp = stream(
                 self.core_v1.connect_get_namespaced_pod_exec,
                 pod_name,
@@ -315,6 +322,10 @@ class KubernetesHelper:
                 label_selector=pod_selector,
             )
             if pods.items:
+                if len(pods.items) > 1:
+                    logger.warning(
+                        f"Multiple pods ({len(pods.items)}) found for selector '{pod_selector}', using first: {pods.items[0].metadata.name}"
+                    )
                 return pods.items[0].spec.node_name
             return None
         except ApiException as e:
@@ -322,12 +333,16 @@ class KubernetesHelper:
             return None
 
     async def get_pod_by_prefix(self, namespace: str, pod_prefix: str) -> Optional[str]:
-        """Get full pod name by prefix"""
+        """Get full pod name by prefix. Returns first match if multiple pods found."""
         try:
             pods = await asyncio.to_thread(self.core_v1.list_namespaced_pod, namespace)
-            for pod in pods.items:
-                if pod.metadata.name.startswith(pod_prefix):
-                    return pod.metadata.name
+            matching_pods = [p for p in pods.items if p.metadata.name.startswith(pod_prefix)]
+            if matching_pods:
+                if len(matching_pods) > 1:
+                    logger.warning(
+                        f"Multiple pods ({len(matching_pods)}) found with prefix '{pod_prefix}', using first: {matching_pods[0].metadata.name}"
+                    )
+                return matching_pods[0].metadata.name
         except ApiException as e:
             logger.error(f"Error listing pods: {e}")
         return None
@@ -353,7 +368,7 @@ class GPUFaultInjectorClient:
     """Client for GPU Fault Injector DaemonSet"""
 
     def __init__(
-        self, k8s: KubernetesHelper, namespace: str = "fault-injection-system"
+        self, k8s: KubernetesHelper, namespace: str = FAULT_INJECTION_NAMESPACE
     ):
         self.k8s = k8s
         self.namespace = namespace
@@ -422,6 +437,7 @@ class GPUFaultInjectorClient:
             logger.error(f"[CLIENT-DEBUG] No agent pod found on {node_name}")
             return False, f"No GPU fault injector found on node {node_name}"
 
+        # We expect exactly one pod per node for DaemonSet
         pod_ip = pods.items[0].status.pod_ip
         pod_name = pods.items[0].metadata.name
         agent_url = f"http://{pod_ip}:{self.agent_port}"
@@ -487,18 +503,104 @@ class NetworkFaultInjectorClient:
     """Client for managing network faults via NetworkPolicy and ChaosMesh (no agents required)"""
 
     def __init__(
-        self, k8s: KubernetesHelper, namespace: str = "fault-injection-system"
+        self, k8s: KubernetesHelper, namespace: str = FAULT_INJECTION_NAMESPACE
     ):
         self.k8s = k8s
         self.namespace = namespace
-        self.active_policies: dict[str, dict] = {}  # Track NetworkPolicies for cleanup
-        self.active_chaos: dict[str, dict] = {}  # Track ChaosMesh resources for cleanup
+        # Track NetworkPolicies for cleanup: {fault_id: {"policy_name": str, "namespace": str}}
+        self.active_policies: dict[str, dict] = {}
+        # Track ChaosMesh resources for cleanup: {fault_id: {"chaos_name": str, "namespace": str, "action": str}}
+        self.active_chaos: dict[str, dict] = {}
 
         # Initialize Custom Object API for ChaosMesh
         try:
             self.custom_api = client.CustomObjectsApi()
         except Exception as e:
             logger.warning(f"Failed to initialize Custom Objects API: {e}")
+
+    async def _get_target_pod_details(
+        self, namespace: str, target_pod_prefix: str
+    ) -> tuple[bool, str | dict[str, str], str]:
+        """
+        Looks up target Pod name and labels.
+        Returns (success: bool, labels: dict[str, str] | error_msg: str, pod_name: str)
+        """
+        if not target_pod_prefix:
+            return False, "target_pod_prefix parameter is required", ""
+
+        target_pod_name = await self.k8s.get_pod_by_prefix(namespace, target_pod_prefix)
+        if not target_pod_name:
+            return (
+                False,
+                f"Could not find pod with prefix '{target_pod_prefix}' in namespace '{namespace}'",
+                "",
+            )
+
+        target_labels = await self.k8s.get_pod_labels(namespace, target_pod_name)
+        if not target_labels:
+            return False, f"Could not get labels for pod '{target_pod_name}'", ""
+
+        logger.info(f"Found target pod: {target_pod_name} with labels: {target_labels}")
+        return True, target_labels, target_pod_name
+
+    def _build_egress_match_expressions(
+        self, block_nats: bool, block_specific_pods: list[dict[str, Any]]
+    ) -> list:
+        """Build match expressions for egress rules"""
+        match_expressions = []
+
+        # Block NATS if requested
+        if block_nats:
+            match_expressions.append(
+                client.V1LabelSelectorRequirement(
+                    key="app.kubernetes.io/name",
+                    operator="NotIn",
+                    values=["nats", "dynamo-platform-nats"],
+                )
+            )
+
+        # Block specific pods if requested
+        for pod_label_selector in block_specific_pods:
+            for key, values in pod_label_selector.items():
+                if not isinstance(values, list):
+                    values = [values]
+                match_expressions.append(
+                    client.V1LabelSelectorRequirement(
+                        key=key, operator="NotIn", values=values
+                    )
+                )
+
+        return match_expressions
+
+    def _build_egress_peers(
+        self,
+        match_expressions: list,
+        allow_namespaces: list[str],
+    ) -> list:
+        """Build egress peers for NetworkPolicy"""
+        egress_peers = []
+
+        if match_expressions:
+            # Allow pods that don't match the blocked criteria
+            egress_peers.append(
+                client.V1NetworkPolicyPeer(
+                    pod_selector=client.V1LabelSelector(
+                        match_expressions=match_expressions
+                    )
+                )
+            )
+
+        if allow_namespaces:
+            for ns in allow_namespaces:
+                egress_peers.append(
+                    client.V1NetworkPolicyPeer(
+                        namespace_selector=client.V1LabelSelector(
+                            match_labels={"kubernetes.io/metadata.name": ns}
+                        )
+                    )
+                )
+
+        return egress_peers
 
     async def inject_partition(
         self,
@@ -539,6 +641,10 @@ class NetworkFaultInjectorClient:
         namespace = parameters.get("namespace", source)
         target_pod_prefix = parameters.get("target_pod_prefix", "")
 
+        # Validate target_pod_prefix early
+        if not target_pod_prefix:
+            return False, "target_pod_prefix parameter is required"
+
         # Network policy configuration
         block_nats = parameters.get("block_nats", True)
         block_all_egress = parameters.get("block_all_egress", False)
@@ -559,99 +665,46 @@ class NetworkFaultInjectorClient:
         fault_id = parameters.get("fault_id", policy_name)
 
         # Get the actual pod and its labels
-        if not target_pod_prefix:
-            return False, "target_pod_prefix parameter is required"
-
-        target_pod_name = await self.k8s.get_pod_by_prefix(namespace, target_pod_prefix)
-        if not target_pod_name:
-            return (
-                False,
-                f"Could not find pod with prefix '{target_pod_prefix}' in namespace '{namespace}'",
-            )
-
-        target_labels = await self.k8s.get_pod_labels(namespace, target_pod_name)
-        if not target_labels:
-            return False, f"Could not get labels for pod '{target_pod_name}'"
-
-        logger.info(f"Found target pod: {target_pod_name} with labels: {target_labels}")
+        success, labels_or_error, target_pod_name = await self._get_target_pod_details(
+            namespace, target_pod_prefix
+        )
+        if not success:
+            return False, labels_or_error  # type: ignore
+        target_labels = labels_or_error  # type: ignore
 
         try:
             # Build NetworkPolicy
-            from kubernetes import client as k8s_client
-
             policy_types: list[str] = []
-            egress_rules: list[k8s_client.V1NetworkPolicyEgressRule] = []
-            ingress_rules: list[k8s_client.V1NetworkPolicyIngressRule] = []
+            egress_rules: list[client.V1NetworkPolicyEgressRule] = []
+            ingress_rules: list[client.V1NetworkPolicyIngressRule] = []
 
             # === EGRESS RULES ===
             if not block_all_egress:
                 # Always allow DNS unless blocking all egress
-                dns_rule = k8s_client.V1NetworkPolicyEgressRule(
+                dns_rule = client.V1NetworkPolicyEgressRule(
                     to=[
-                        k8s_client.V1NetworkPolicyPeer(
-                            namespace_selector=k8s_client.V1LabelSelector(
+                        client.V1NetworkPolicyPeer(
+                            namespace_selector=client.V1LabelSelector(
                                 match_labels={
                                     "kubernetes.io/metadata.name": "kube-system"
                                 }
                             )
                         )
                     ],
-                    ports=[k8s_client.V1NetworkPolicyPort(protocol="UDP", port=53)],
+                    ports=[client.V1NetworkPolicyPort(protocol="UDP", port=53)],
                 )
                 egress_rules.append(dns_rule)
 
                 # Build egress rule based on configuration
-                match_expressions = []
-
-                # Block NATS if requested
-                if block_nats:
-                    match_expressions.append(
-                        k8s_client.V1LabelSelectorRequirement(
-                            key="app.kubernetes.io/name",
-                            operator="NotIn",
-                            values=["nats", "dynamo-platform-nats"],
-                        )
-                    )
-
-                # Block specific pods if requested
-                for pod_label_selector in block_specific_pods:
-                    for key, values in pod_label_selector.items():
-                        if not isinstance(values, list):
-                            values = [values]
-                        match_expressions.append(
-                            k8s_client.V1LabelSelectorRequirement(
-                                key=key, operator="NotIn", values=values
-                            )
-                        )
-
-                # Allow traffic to specific namespaces only
-                namespace_peers = []
-                if allow_namespaces:
-                    for ns in allow_namespaces:
-                        namespace_peers.append(
-                            k8s_client.V1NetworkPolicyPeer(
-                                namespace_selector=k8s_client.V1LabelSelector(
-                                    match_labels={"kubernetes.io/metadata.name": ns}
-                                )
-                            )
-                        )
+                match_expressions = self._build_egress_match_expressions(
+                    block_nats, block_specific_pods
+                )
 
                 # Build the main egress rule
                 if match_expressions or allow_namespaces:
-                    egress_peers = []
-
-                    if match_expressions:
-                        # Allow pods that don't match the blocked criteria
-                        egress_peers.append(
-                            k8s_client.V1NetworkPolicyPeer(
-                                pod_selector=k8s_client.V1LabelSelector(
-                                    match_expressions=match_expressions
-                                )
-                            )
-                        )
-
-                    if namespace_peers:
-                        egress_peers.extend(namespace_peers)
+                    egress_peers = self._build_egress_peers(
+                        match_expressions, allow_namespaces
+                    )
 
                     # Build egress rule with optional port restrictions
                     egress_ports = None
@@ -663,13 +716,13 @@ class NetworkFaultInjectorClient:
                             f"Port blocking requested but not fully supported: {block_ports}"
                         )
 
-                    allow_rule = k8s_client.V1NetworkPolicyEgressRule(
+                    allow_rule = client.V1NetworkPolicyEgressRule(
                         to=egress_peers, ports=egress_ports
                     )
                     egress_rules.append(allow_rule)
                 else:
                     # No restrictions - allow all egress
-                    egress_rules.append(k8s_client.V1NetworkPolicyEgressRule())
+                    egress_rules.append(client.V1NetworkPolicyEgressRule())
 
             if egress_rules or block_all_egress:
                 policy_types.append("Egress")
@@ -684,10 +737,10 @@ class NetworkFaultInjectorClient:
             # Note: For policy types in policy_types, we must provide the corresponding rules
             # - If we want to block all, pass empty list []
             # - If we don't have that policy type, pass None
-            policy = k8s_client.V1NetworkPolicy(
+            policy = client.V1NetworkPolicy(
                 api_version="networking.k8s.io/v1",
                 kind="NetworkPolicy",
-                metadata=k8s_client.V1ObjectMeta(
+                metadata=client.V1ObjectMeta(
                     name=policy_name,
                     namespace=namespace,
                     labels={
@@ -695,8 +748,8 @@ class NetworkFaultInjectorClient:
                         "fault-type": "network-partition",
                     },
                 ),
-                spec=k8s_client.V1NetworkPolicySpec(
-                    pod_selector=k8s_client.V1LabelSelector(match_labels=target_labels),
+                spec=client.V1NetworkPolicySpec(
+                    pod_selector=client.V1LabelSelector(match_labels=target_labels),
                     policy_types=policy_types,
                     egress=egress_rules if "Egress" in policy_types else None,
                     ingress=ingress_rules if "Ingress" in policy_types else None,
@@ -754,22 +807,13 @@ class NetworkFaultInjectorClient:
         )  # Target specific pod labels
         target_ports = parameters.get("target_ports", [])  # Target specific ports
 
-        if not target_pod_prefix:
-            return False, "target_pod_prefix parameter is required"
-
-        # Get the actual pod
-        target_pod_name = await self.k8s.get_pod_by_prefix(namespace, target_pod_prefix)
-        if not target_pod_name:
-            return (
-                False,
-                f"Could not find pod with prefix '{target_pod_prefix}' in namespace '{namespace}'",
-            )
-
-        target_labels = await self.k8s.get_pod_labels(namespace, target_pod_name)
-        if not target_labels:
-            return False, f"Could not get labels for pod '{target_pod_name}'"
-
-        logger.info(f"Found target pod: {target_pod_name} with labels: {target_labels}")
+        # Get the actual pod and its labels using helper
+        success, labels_or_error, target_pod_name = await self._get_target_pod_details(
+            namespace, target_pod_prefix
+        )
+        if not success:
+            return False, labels_or_error  # type: ignore
+        target_labels = labels_or_error  # type: ignore
 
         try:
             # Build the NetworkChaos spec
@@ -898,21 +942,15 @@ class NetworkFaultInjectorClient:
 
             # Add target if specified
             if target_spec:
-                spec_dict = chaos_resource["spec"]
-                if isinstance(spec_dict, dict):
-                    spec_dict["target"] = target_spec
+                chaos_resource["spec"]["target"] = target_spec
 
             # Add duration if specified
             if duration:
-                spec_dict = chaos_resource["spec"]
-                if isinstance(spec_dict, dict):
-                    spec_dict["duration"] = f"{duration}s"
+                chaos_resource["spec"]["duration"] = f"{duration}s"
 
             # Add port targeting if specified
             if target_ports:
-                spec_dict = chaos_resource["spec"]
-                if isinstance(spec_dict, dict):
-                    spec_dict["externalTargets"] = []
+                chaos_resource["spec"]["externalTargets"] = []
                 # Note: For port-specific targeting, you may need to adjust based on your requirements
 
             # Create the NetworkChaos resource
@@ -1030,7 +1068,7 @@ class MonitoringAgentClient:
     """Client for Monitoring Agent DaemonSet"""
 
     def __init__(
-        self, k8s: KubernetesHelper, namespace: str = "fault-injection-system"
+        self, k8s: KubernetesHelper, namespace: str = FAULT_INJECTION_NAMESPACE
     ):
         self.k8s = k8s
         self.namespace = namespace
@@ -1618,7 +1656,7 @@ async def _inject_xid_error(request: XIDFaultRequest, xid_code: int, xid_name: s
 
 
 @app.post("/api/v1/faults/network/cleanup")
-async def cleanup_network_policies(namespace: str = Query("dynamo-oviya")):
+async def cleanup_network_policies(namespace: str = Query(DEFAULT_DYNAMO_NAMESPACE)):
     """
     Clean up orphaned NetworkPolicies created by fault injection.
 
