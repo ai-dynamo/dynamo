@@ -6,7 +6,8 @@ ARG CUDA_VERSION=12.9.1
 
 # Runtime image and build-time configuration (aligned with other backends)
 # TODO: OPS-<number>: Use the same runtime image as the other backends
-ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
+# See build.sh's SGLANG_BASE_IMAGE and SGLANG_BASE_IMAGE_TAG for the actual values.
+#ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"  # This is not used for now because we use "FROM framework"
 ARG RUNTIME_IMAGE_TAG="12.9.1-cudnn-runtime-ubuntu24.04"
 
 ARG PYTHON_VERSION=3.10

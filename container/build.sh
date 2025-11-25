@@ -324,6 +324,9 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+        --no-tag-latest)
+            NO_TAG_LATEST=true
+            ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
             ;;
@@ -465,6 +468,7 @@ show_help() {
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
+    echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -825,9 +829,12 @@ if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
     # Add arguments required for sglang blackwell build
     BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=true --build-arg BUILD_TYPE=blackwell_aarch64"
 fi
-LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
-if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
-    LATEST_TAG="${LATEST_TAG}-${TARGET}"
+LATEST_TAG=""
+if [ -z "${NO_TAG_LATEST}" ]; then
+    LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
+    if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
+        LATEST_TAG="${LATEST_TAG}-${TARGET}"
+    fi
 fi
 
 show_image_options
@@ -841,8 +848,13 @@ fi
 if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
     # Follow 2-step build process for all frameworks
     if [[ $FRAMEWORK != "NONE" ]]; then
-        # Define base image tag before using it
-        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+        # Define base image tag with framework suffix to prevent clobbering
+        # Different frameworks require different base configurations:
+        # - VLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=cuda-dl-base
+        # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
+        # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
+        # Without unique tags, building different frameworks would overwrite each other's names
+        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}-${FRAMEWORK,,}"
         # Start base image build
         echo "======================================"
         echo "Starting Build 1: Base Image"
