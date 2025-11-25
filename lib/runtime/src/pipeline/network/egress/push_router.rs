@@ -90,7 +90,7 @@ impl RouterMode {
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     // Get network manager and create client (no mode checks!)
-    let manager = endpoint.drt().network_manager().await?;
+    let manager = endpoint.drt().network_manager();
     let req_client = manager.create_client()?;
     let resp_transport = endpoint.drt().tcp_server().await?;
 

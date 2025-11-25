@@ -3,6 +3,8 @@
 
 use crate::component::{Component, Instance};
 use crate::pipeline::PipelineError;
+use crate::pipeline::network::manager::NetworkManager;
+use crate::service::{ComponentNatsServerPrometheusMetrics, ServiceClient, ServiceSet};
 use crate::storage::key_value_store::{
     EtcdStore, KeyValueStore, KeyValueStoreEnum, KeyValueStoreManager, KeyValueStoreSelect,
     MemoryStore,
@@ -21,9 +23,12 @@ use super::utils::GracefulShutdownTracker;
 use crate::SystemHealth;
 use crate::runtime::Runtime;
 
+// Used instead of std::cell::OnceCell because get_or_try_init there is nightly
 use async_once_cell::OnceCell;
+
 use std::fmt;
 use std::sync::{Arc, OnceLock, Weak};
+use std::time::Duration;
 use tokio::sync::watch::Receiver;
 
 use anyhow::Result;
@@ -44,8 +49,8 @@ pub struct DistributedRuntime {
 
     nats_client: Option<transports::nats::Client>,
     store: KeyValueStoreManager,
+    network_manager: Arc<NetworkManager>,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
-    network_manager: Arc<OnceCell<Arc<crate::pipeline::network::manager::NetworkManager>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
     request_plane: RequestPlaneMode,
 
@@ -168,18 +173,27 @@ impl DistributedRuntime {
             }
         };
 
+        let component_registry = component::Registry::new();
         let nats_client_for_metrics = nats_client.clone();
+
+        // NetworkManager for request plane
+        let network_manager = NetworkManager::new(
+            runtime.child_token(),
+            nats_client.clone().map(|c| c.client().clone()),
+            component_registry.clone(),
+            request_plane,
+        );
 
         let distributed_runtime = Self {
             runtime,
             store,
+            network_manager: Arc::new(network_manager),
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
-            network_manager: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             discovery_metadata,
-            component_registry: component::Registry::new(),
+            component_registry,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
@@ -336,32 +350,12 @@ impl DistributedRuntime {
             .clone())
     }
 
-    /// Get the network manager (lazy initialization)
+    /// Get the network manager
     ///
     /// The network manager consolidates all network configuration and provides
     /// unified access to request plane servers and clients.
-    pub async fn network_manager(
-        &self,
-    ) -> Result<Arc<crate::pipeline::network::manager::NetworkManager>> {
-        use crate::pipeline::network::manager::NetworkManager;
-
-        let manager = self
-            .network_manager
-            .get_or_try_init(async {
-                // Get NATS client if available
-                let nats_client = self.nats_client().map(|c| c.client().clone());
-
-                // NetworkManager handles all config reading and mode selection
-                anyhow::Ok(NetworkManager::new(
-                    self.child_token(),
-                    nats_client,
-                    self.component_registry.clone(),
-                    self.request_plane,
-                ))
-            })
-            .await?;
-
-        Ok(manager.clone())
+    pub fn network_manager(&self) -> Arc<NetworkManager> {
+        self.network_manager.clone()
     }
 
     /// Get the request plane server (convenience method)
@@ -371,12 +365,7 @@ impl DistributedRuntime {
         &self,
     ) -> Result<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>>
     {
-        let manager = self.network_manager().await?;
-        manager.server().await
-    }
-
-    pub(crate) fn nats_client(&self) -> Option<&nats::Client> {
-        self.nats_client.as_ref()
+        self.network_manager().server().await
     }
 
     /// Get system status server information if available
@@ -407,6 +396,151 @@ impl DistributedRuntime {
 
     pub fn instance_sources(&self) -> Arc<Mutex<InstanceMap>> {
         self.instance_sources.clone()
+    }
+
+    /// TODO: This is a temporary KV router measure for component/component.rs EventPublisher impl for
+    /// Component, to allow it to publish to NATS. KV Router is the only user.
+    pub(crate) async fn kv_router_nats_publish(
+        &self,
+        subject: String,
+        payload: bytes::Bytes,
+    ) -> anyhow::Result<()> {
+        let Some(nats_client) = self.nats_client.as_ref() else {
+            anyhow::bail!("KV router's EventPublisher requires NATS");
+        };
+        Ok(nats_client.client().publish(subject, payload).await?)
+    }
+
+    /// TODO: This is a temporary KV router measure for component/component.rs EventSubscriber impl for
+    /// Component, to allow it to subscribe to NATS. KV Router is the only user.
+    pub(crate) async fn kv_router_nats_subscribe(
+        &self,
+        subject: String,
+    ) -> Result<async_nats::Subscriber> {
+        let Some(nats_client) = self.nats_client.as_ref() else {
+            anyhow::bail!("KV router's EventSubscriber requires NATS");
+        };
+        Ok(nats_client.client().subscribe(subject).await?)
+    }
+
+    /// Start NATS metrics service in the background to isolate the async,
+    /// and because we don't need it yet.
+    /// TODO: This and the things it calls should be in a nats module somewhere.
+    pub fn start_stats_service(&self, component: Component) {
+        let drt = self.clone();
+        self.runtime().secondary().spawn(async move {
+            let service_name = component.service_name();
+            if let Err(err) = drt.add_stats_service(component).await {
+                tracing::error!(error = %err, component = service_name, "Failed starting stats service");
+            }
+        });
+    }
+
+    /// Gather NATS metrics
+    async fn add_stats_service(&self, component: Component) -> anyhow::Result<()> {
+        let service_name = component.service_name();
+
+        // Pre-check to save cost of creating the service, but don't hold the lock
+        if self
+            .component_registry()
+            .inner
+            .lock()
+            .await
+            .services
+            .contains_key(&service_name)
+        {
+            // The NATS service is per component, but it is called from `serve_endpoint`, and there
+            // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
+            tracing::trace!("Service {service_name} already exists");
+            return Ok(());
+        }
+
+        let Some(nats_client) = self.nats_client.as_ref() else {
+            anyhow::bail!("Cannot create NATS service without NATS.");
+        };
+        let description = None;
+        let (nats_service, stats_reg) =
+            crate::component::service::build_nats_service(nats_client, &component, description)
+                .await?;
+
+        let mut guard = self.component_registry().inner.lock().await;
+        if !guard.services.contains_key(&service_name) {
+            // Normal case
+            guard.services.insert(service_name.clone(), nats_service);
+            guard.stats_handlers.insert(service_name.clone(), stats_reg);
+
+            tracing::info!("Added NATS / stats service {service_name}");
+
+            drop(guard);
+        } else {
+            drop(guard);
+            let _ = nats_service.stop().await;
+            // The NATS service is per component, but it is called from `serve_endpoint`, and there
+            // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
+            // TODO: Is this still true?
+            return Ok(());
+        }
+
+        let cancel_token = self.primary_token();
+        let service_client = self
+            .nats_client
+            .as_ref()
+            .map(|nc| ServiceClient::new(nc.clone()))
+            .ok_or_else(|| {
+                anyhow::anyhow!("Stats service requires NATS client to collect service metrics.")
+            })?;
+        // If there is another component with the same service name, this will fail.
+        let component_metrics = ComponentNatsServerPrometheusMetrics::new(&component)?;
+
+        self.runtime().secondary().spawn(nats_metrics_worker(
+            cancel_token,
+            service_client,
+            component_metrics,
+            component,
+        ));
+        Ok(())
+    }
+}
+
+/// Add Prometheus metrics for this component's NATS service stats.
+///
+/// Starts a background task that periodically requests service statistics from NATS
+/// and updates the corresponding Prometheus metrics. The first scrape happens immediately,
+/// then subsequent scrapes occur at a fixed interval of 9.8 seconds (MAX_WAIT_MS),
+/// which should be near or smaller than typical Prometheus scraping intervals to ensure
+/// metrics are fresh when Prometheus collects them.
+async fn nats_metrics_worker(
+    cancel_token: CancellationToken,
+    service_client: ServiceClient,
+    component_metrics: ComponentNatsServerPrometheusMetrics,
+    component: Component,
+) {
+    const MAX_WAIT_MS: Duration = Duration::from_millis(9800); // Should be <= Prometheus scrape interval
+    let timeout = Duration::from_millis(500);
+    let mut interval = tokio::time::interval(MAX_WAIT_MS);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let service_name = component.service_name();
+    loop {
+        tokio::select! {
+            result = service_client.collect_services(&service_name, timeout) => {
+                match result {
+                    Ok(service_set) => {
+                        component_metrics.update_from_service_set(&service_set);
+                    }
+                    Err(err) => {
+                        tracing::error!("Background scrape failed for {service_name}: {err}",);
+                        component_metrics.reset_to_zeros();
+                    }
+                }
+            }
+            _ = cancel_token.cancelled() => {
+                tracing::trace!("nats_metrics_worker stopped");
+                break;
+            }
+        }
+
+        interval.tick().await;
     }
 }
 
