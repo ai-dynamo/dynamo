@@ -477,17 +477,18 @@ impl DistributedRuntime {
             let _ = nats_service.stop().await;
             // The NATS service is per component, but it is called from `serve_endpoint`, and there
             // are often multiple endpoints for a component (e.g. `clear_kv_blocks` and `generate`).
+            // TODO: Is this still true?
             return Ok(());
         }
 
         let cancel_token = self.primary_token();
-        let Some(service_client) = self
+        let service_client = self
             .nats_client
             .as_ref()
             .map(|nc| ServiceClient::new(nc.clone()))
-        else {
-            anyhow::bail!("ServiceSet is gathered via NATS, do not call this in non-NATS setups.");
-        };
+            .ok_or_else(|| {
+                anyhow::anyhow!("Stats service requires NATS client to collect service metrics.")
+            })?;
         // If there is another component with the same service name, this will fail.
         let component_metrics = ComponentNatsServerPrometheusMetrics::new(&component)?;
 
