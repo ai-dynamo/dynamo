@@ -420,10 +420,11 @@ pub async fn start_kv_router_background(
                     tracing::info!("Detected router replica deletion: {key}");
 
                     // Only process deletions for routers on the same component
-                    if !key.contains(component.path().as_str()) {
+                    // Must match model_manager.rs kv_chooser_for
+                    if !key.contains(&component.service_name()) {
                         tracing::trace!(
                             "Skipping router deletion from different component (key: {key}, subscriber component: {})",
-                            component.path()
+                            component.service_name()
                         );
                         continue;
                     }
@@ -480,7 +481,7 @@ async fn cleanup_orphaned_consumers(
     };
 
     // Filter to only routers for this component
-    let component_path = component.path();
+    let component_path = component.service_name();
     let active_uuids: HashSet<String> = entries
         .iter()
         .filter_map(|(key, _)| {

@@ -51,14 +51,14 @@ pub enum EngineConfig {
     /// Remote networked engines that we discover via etcd
     Dynamic(Box<LocalModel>),
 
-    /// A Full service engine does it's own tokenization and prompt formatting.
-    StaticFull {
+    /// A Text engine receives text, does it's own tokenization and prompt formatting.
+    InProcessText {
         engine: Arc<dyn StreamingEngine>,
         model: Box<LocalModel>,
     },
 
-    /// A core engine expects to be wrapped with pre/post processors that handle tokenization.
-    StaticCore {
+    /// A Tokens engine receives tokens, expects to be wrapped with pre/post processors that handle tokenization.
+    InProcessTokens {
         engine: ExecutionContext,
         model: Box<LocalModel>,
         is_prefill: bool,
@@ -70,8 +70,8 @@ impl EngineConfig {
         use EngineConfig::*;
         match self {
             Dynamic(lm) => lm,
-            StaticFull { model, .. } => model,
-            StaticCore { model, .. } => model,
+            InProcessText { model, .. } => model,
+            InProcessTokens { model, .. } => model,
         }
     }
 }

@@ -34,4 +34,4 @@ spec:
       volumes:
       - name: model-cache
         persistentVolumeClaim:
-          claimName: model-cache-pvc
+          claimName: model-cache
