@@ -186,6 +186,8 @@ First, deploy the Dynamo Graph per instructions above.
 
 Then follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE.
 
+**⚠️ Warning:** The frontend Dynamo image (`nvcr.io/nvidia/ai-dynamo/frontend:<my-tag>`) will not be included in the 0.7.0 release. You must build your own Dynamo EPP image following the instructions in [Build the custom EPP image](../deploy/inference-gateway/README.md#1-build-the-custom-epp-image) section of the Inference Gateway README.
+
 Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml. It should match the release tag and be in the format `nvcr.io/nvidia/ai-dynamo/frontend:<my-tag>` i.e. `nvcr.io/nvstaging/ai-dynamo/dynamo-frontend:0.7.0rc2-amd64`
 
 ```bash

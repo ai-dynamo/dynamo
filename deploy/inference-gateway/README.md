@@ -111,7 +111,7 @@ cd deploy/inference-gateway
 
 # Export the Dynamo image you have used when deploying your model in Step 3.
 export DYNAMO_IMAGE=<the-dynamo-image-you-have-used-when-deploying-the-model>
-# Export the FrontEnd image tag provided by Dynamo (recommended) or build the Dynamo EPP image by following the commands later in this README.
+# ⚠️ Note: The frontend Dynamo image will not be included in the 0.7.0 release. You must build your own Dynamo EPP image by following the instructions in the "Build the custom EPP image" section below.
 export EPP_IMAGE=<the-epp-image-you-built>
 ```
 
@@ -146,11 +146,12 @@ You can configure the plugin by setting environment vars in your [values-dynamo-
 
 Dynamo provides a custom routing plugin `pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go` to perform efficient kv routing.
 The Dynamo router is built as a static library, the EPP router will call to provide fast inference.
-You can either use the special FrontEnd image for the EPP_IMAGE in the Helm deployment command and proceed to the step 2 or you can build the image yourself following the steps below.
+
+**⚠️ Important:** The frontend Dynamo image (`nvcr.io/nvidia/ai-dynamo/frontend:<my-tag>`) will not be included in the 0.7.0 release. You must build your own Dynamo EPP image following the steps below.
 
 ##### 1. Build the custom EPP image #####
 
-If you choose to build your own image use the steps below.
+Build your own Dynamo EPP image using the steps below.
 
 ##### 1.1 Clone the official GAIE repo in a separate folder #####
 
