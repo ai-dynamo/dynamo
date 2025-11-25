@@ -282,6 +282,26 @@ async def register_vllm_model(
     data_parallel_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
     runtime_config.data_parallel_size = data_parallel_size
 
+    # Conditionally enable frontend decoding if --frontend-decoding flag is set
+    media_decoder = None
+    media_fetcher = None
+    if config.frontend_decoding:
+        try:
+            from dynamo.llm import MediaDecoder, MediaFetcher
+
+            media_decoder = MediaDecoder()
+            media_fetcher = MediaFetcher()
+            logger.info(
+                "Frontend decoding enabled: images will be decoded in Rust frontend "
+                "and transferred via NIXL RDMA"
+            )
+        except ImportError as e:
+            raise RuntimeError(
+                "Frontend decoding (--frontend-decoding) requires building Dynamo's "
+                "Rust components with '--features media-nixl'. "
+                f"Import failed: {e}"
+            ) from e
+
     await register_llm(
         model_input,
         model_type,
@@ -292,6 +312,8 @@ async def register_vllm_model(
         migration_limit=migration_limit,
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
+        media_decoder=media_decoder,
+        media_fetcher=media_fetcher,
     )
 
 

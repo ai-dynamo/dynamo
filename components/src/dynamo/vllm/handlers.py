@@ -9,12 +9,16 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
 
+import PIL
+import torch
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+import dynamo.nixl_connect as connect
 from dynamo.llm import ZmqKvEventPublisher
+from dynamo.nixl_connect import OperationKind, RdmaMetadata, SerializedDescriptor
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
@@ -93,6 +97,7 @@ class BaseWorkerHandler(ABC):
         self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
         self.image_loader = ImageLoader()
+        self._connector = None  # Lazy-initialized on first Decoded variant
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
 
@@ -150,11 +155,63 @@ class BaseWorkerHandler(ABC):
             except Exception as e:
                 logger.warning(f"Failed to clean up temp directory: {e}")
 
+    async def _read_decoded_image_via_nixl(
+        self, decoded_meta: Dict[str, Any]
+    ) -> PIL.Image.Image:
+        """Read decoded image via NIXL RDMA and convert to PIL.Image."""
+        # Lazy-init connector
+        if self._connector is None:
+            self._connector = connect.Connector()
+            await self._connector.initialize()
+            logger.info("NIXL connector initialized for decoded media")
+
+        # Extract fields
+        meta_str = decoded_meta["nixl_metadata"]
+        desc = decoded_meta["nixl_descriptor"]
+        shape = decoded_meta["shape"]
+
+        # Create tensor to receive RDMA data
+        tensor = torch.empty(shape, dtype=torch.uint8)
+
+        # Build RdmaMetadata from frontend-provided descriptor
+        # Frontend sends compressed metadata (matches Python nixl_connect)
+        rdma_meta = RdmaMetadata(
+            descriptors=[
+                SerializedDescriptor(
+                    device="cpu"
+                    if desc.get("mem_type") == "Dram"
+                    else f"cuda:{desc.get('device_id', 0)}",
+                    ptr=desc["addr"],
+                    size=desc["size"],
+                )
+            ],
+            nixl_metadata=meta_str,
+            notification_key=f"img-{shape}",
+            operation_kind=int(OperationKind.READ),
+        )
+
+        # RDMA read
+        read_op = await self._connector.begin_read(
+            rdma_meta, connect.Descriptor(tensor)
+        )
+        await read_op.wait_for_completion()
+
+        # Convert to PIL.Image (assume RGB, handle RGBA/grayscale)
+        arr = tensor.numpy()
+        modes = {1: "L", 3: "RGB", 4: "RGBA"}
+        if modes[shape[2]] == "L":
+            arr = arr.squeeze(-1)
+        return PIL.Image.fromarray(arr, modes[shape[2]])
+
     async def _extract_multimodal_data(
         self, request: Dict[str, Any]
     ) -> Dict[str, Any] | None:
         """
         Extract and decode multimodal data from PreprocessedRequest.
+
+        Supports two variants:
+        1. Url: Frontend passes URL, backend decodes
+        2. Decoded: Frontend decoded, NIXL RDMA transfer
         """
         if "multi_modal_data" not in request or request["multi_modal_data"] is None:
             return None
@@ -165,22 +222,20 @@ class BaseWorkerHandler(ABC):
         # Process image_url entries
         images = []
         for item in mm_map.get(IMAGE_URL_KEY, []):
-            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+            if isinstance(item, dict) and DECODED_VARIANT_KEY in item:
+                decoded_meta = item[DECODED_VARIANT_KEY]
+                image = await self._read_decoded_image_via_nixl(decoded_meta)
+                images.append(image)
+                logger.info(
+                    f"Using DECODED path: Loaded image via NIXL RDMA "
+                    f"(shape={decoded_meta.get('shape')}, dtype={decoded_meta.get('dtype')})"
+                )
+            elif isinstance(item, dict) and URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
-                try:
-                    # ImageLoader supports both data: and http(s): URLs with caching
-                    image = await self.image_loader.load_image(url)
-                    images.append(image)
-                    logger.debug(f"Loaded image from URL: {url[:80]}...")
-                except Exception:
-                    logger.exception(f"Failed to load image from {url[:80]}...")
-                    raise
-            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                # Decoded support from PRs #3971/#3988 (frontend decoding + NIXL transfer)
-                # Will contain NIXL metadata for direct memory access
-                # TODO: Implement NIXL read when PRs merge
-                logger.warning(
-                    "Decoded multimodal data not yet supported in standard worker"
+                image = await self.image_loader.load_image(url)
+                images.append(image)
+                logger.info(
+                    f"Using URL path: Loaded image from URL (type={url.split(':')[0]})"
                 )
 
         if images:

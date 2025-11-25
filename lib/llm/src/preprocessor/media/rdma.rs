@@ -112,13 +112,24 @@ impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
 // TODO: pre-allocate a fixed NIXL-registered RAM pool so metadata can be cached on the target?
 #[cfg(feature = "media-nixl")]
 pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<String> {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+
     // WAR: Until https://github.com/ai-dynamo/nixl/pull/970 is merged, can't use get_local_partial_md
     let nixl_md = agent.raw_agent().get_local_md()?;
     // let mut reg_desc_list = RegDescList::new(MemType::Dram)?;
     // reg_desc_list.add_storage_desc(storage)?;
     // let nixl_partial_md = agent.raw_agent().get_local_partial_md(&reg_desc_list, None)?;
 
-    let b64_encoded = general_purpose::STANDARD.encode(&nixl_md);
+    // Compress metadata before base64 encoding (matches Python nixl_connect behavior)
+    // Backend expects: b64:<base64_of_compressed_bytes>
+    // Note: Python nixl_connect automatically decompresses when seeing "b64:" prefix
+    let mut zlib_encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
+    zlib_encoder.write_all(&nixl_md)?;
+    let compressed = zlib_encoder.finish()?;
+
+    let b64_encoded = general_purpose::STANDARD.encode(&compressed);
     Ok(format!("b64:{}", b64_encoded))
 }
 
