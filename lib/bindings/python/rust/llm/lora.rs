@@ -30,10 +30,7 @@ impl LoRADownloader {
         let cache = match cache_path {
             Some(path) => RsLoRACache::new(PathBuf::from(path)),
             None => RsLoRACache::from_env().map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to create cache: {}",
-                    e
-                ))
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create cache: {}", e))
             })?,
         };
 
@@ -62,9 +59,12 @@ impl LoRADownloader {
     ) -> PyResult<Bound<'p, PyAny>> {
         let downloader = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let path = downloader.download_if_needed(&lora_uri).await.map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("Download failed: {}", e))
-            })?;
+            let path = downloader
+                .download_if_needed(&lora_uri)
+                .await
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("Download failed: {}", e))
+                })?;
             Ok(path.display().to_string())
         })
     }
