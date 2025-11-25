@@ -14,6 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==0.7.0",
+    "transformers>=4.56.0,<=4.57.1",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
     "kubernetes>=32.0.1,<33.0.0",
@@ -55,7 +56,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.7.1",
-    "vllm[flashinfer]==0.10.2",
+    "vllm[flashinfer]==0.11.0",
 ]
 
 sglang = [
