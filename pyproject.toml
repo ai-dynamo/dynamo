@@ -50,18 +50,24 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 trtllm =[
     "uvloop",
     "tensorrt-llm==1.2.0rc2",
+    # Satisfies TensorRT-LLM 1.2.0rc2 and 1.2.0rc3
+    "transformers==4.56.0",
 ]
 
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.7.1",
-    "vllm[flashinfer]==0.10.2",
+    "vllm[flashinfer]==0.11.0",
+    # Satisfies vLLM 0.11.0 (>=4.55.2) and vLLM 0.11.2 (>=4.56.0, <5)
+    "transformers>=4.56.0",
 ]
 
 sglang = [
     "uvloop",
     "nixl[cu12]<=0.7.1",
     "sglang==0.5.4.post3",
+    # Satisfies SGLang 0.5.3
+    "transformers==4.57.0",
 ]
 
 [dependency-groups]
