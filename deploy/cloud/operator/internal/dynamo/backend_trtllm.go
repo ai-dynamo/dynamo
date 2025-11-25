@@ -102,8 +102,9 @@ func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
 
 // setupLeaderContainer configures the leader node with SSH setup and mpirun command
 func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, component *v1alpha1.DynamoComponentDeploymentSharedSpec, multinodeDeployer MultinodeDeployer) {
-	// Generate the list of worker hostnames
-	workerHosts := b.generateWorkerHostnames(numberOfNodes, serviceName, multinodeDeployer)
+	// Generate the list of all hostnames
+	hostNamesList := b.hostNamesList(numberOfNodes, serviceName, multinodeDeployer)
+	allHostnames := strings.Join(hostNamesList, ",")
 
 	// Store original command/args for later use
 	var originalCommand string
@@ -149,7 +150,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 
 	mpirunCmd := fmt.Sprintf("mpirun --allow-run-as-root --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s %s",
 		totalGPUs,
-		workerHosts,
+		allHostnames,
 		commonconsts.MpiRunSshPort,
 		envVarsStr,
 		wrappedCommand)
@@ -158,7 +159,9 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	var allCommands []string
 	if multinodeDeployer.NeedsDNSWait() {
 		// Wait for DNS resolution of all worker nodes (needed for LWS)
-		dnsWaitCmd := fmt.Sprintf(`TIMEOUT=300; START_TIME=$(date +%%s); for worker in $(echo "%s" | tr ',' ' '); do echo "Waiting for DNS: $worker"; until getent hosts $worker >/dev/null 2>&1; do CURRENT_TIME=$(date +%%s); if [ $((CURRENT_TIME - START_TIME)) -gt $TIMEOUT ]; then echo "ERROR: Timeout waiting for DNS: $worker"; exit 1; fi; echo "DNS not ready for $worker, retrying..."; sleep 2; done; echo "✓ DNS resolved: $worker"; done; echo "All workers DNS ready"`, workerHosts)
+		workerHosts := strings.Join(hostNamesList[1:], " ")
+		dnsWaitCmd := fmt.Sprintf(`TIMEOUT=300; START_TIME=$(date +%%s); for worker in %s; do echo "Waiting for DNS: $worker"; until getent hosts $worker >/dev/null 2>&1; do CURRENT_TIME=$(date +%%s); if [ $((CURRENT_TIME - START_TIME)) -gt $TIMEOUT ]; then echo "ERROR: Timeout waiting for DNS: $worker"; exit 1; fi; echo "DNS not ready for $worker, retrying..."; sleep 2; done; echo "✓ DNS resolved: $worker"; done; echo "All workers DNS ready"`, workerHosts)
+
 		allCommands = append(sshSetupCommands, dnsWaitCmd, mpirunCmd)
 	} else {
 		allCommands = append(sshSetupCommands, mpirunCmd)
@@ -198,9 +201,9 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 	container.Args = []string{fullCommand}
 }
 
-// generateWorkerHostnames creates a comma-separated list of worker hostnames
-func (b *TRTLLMBackend) generateWorkerHostnames(numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer) string {
-	return strings.Join(multinodeDeployer.GetHostNames(serviceName, numberOfNodes), ",")
+// hostNamesList generates the list of hostnames for all nodes in the multinode deployment
+func (b *TRTLLMBackend) hostNamesList(numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer) []string {
+	return multinodeDeployer.GetHostNames(serviceName, numberOfNodes)
 }
 
 // getGPUsPerNode extracts the number of GPUs per node from resources
