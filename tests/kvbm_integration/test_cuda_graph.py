@@ -146,7 +146,7 @@ def send_completion_request(
 
 
 @pytest.mark.kvbm
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.slow
@@ -185,7 +185,7 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
 
 
 @pytest.mark.kvbm
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.nightly
