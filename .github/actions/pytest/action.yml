@@ -54,12 +54,13 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
+        # -W ignore::DeprecationWarning suppresses DeprecationWarnings from SWIG/SciPy (vLLM dependency). Remove once vLLM updates to a SciPy version which uses SWIG 4.4.x.
         docker run --runtime=nvidia --gpus all -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --name ${{ env.CONTAINER_ID }}_pytest \
           ${{ inputs.image_tag }} \
-          bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -W ignore::DeprecationWarning -m \"${{ inputs.pytest_marks }}\""
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
