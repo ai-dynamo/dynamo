@@ -46,7 +46,7 @@ dependencies = [
     "pydantic>=2",
     "tabulate",
     "types-tabulate",
-    "transformers",
+    "transformers<=4.57.1",
     "pytest-mypy",
 ]
 
