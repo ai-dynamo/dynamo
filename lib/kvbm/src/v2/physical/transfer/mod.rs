@@ -64,15 +64,15 @@ pub use preferences::{NativeVsNixlPolicy, TransferPreferences};
 pub use strategy::{TransferPlan, TransferStrategy};
 pub use validation::BlockValidationError;
 
-// Internal - TransferContext is now managed by TransportManager
+// Internal - TransferContext is now managed by TransferManager
 pub(crate) use context::TransferContext;
 
 use crate::BlockId;
 
 pub use super::layout::PhysicalLayout;
 
-// Re-export manager types - TransportManager is the primary public API
-pub use super::manager::{LayoutHandle, SerializedLayout, TransportManager, WorkerAddress};
+// Re-export manager types - TransferManager is the primary public API
+pub use super::manager::{LayoutHandle, SerializedLayout, TransferManager, WorkerAddress};
 
 // #[cfg(test)]
 // pub use testing::{RoundTripTest, RoundTripTestResult};

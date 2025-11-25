@@ -292,6 +292,10 @@ impl OnboardSessionInner {
                 }])
             }
             OnboardMessage::DropPinnedBlocksAck { .. } => Ok(vec![]),
+            OnboardMessage::LocalMatches(_) => {
+                // LocalMatches should be consumed by the initiator, not handled here.
+                Ok(vec![])
+            }
         }
     }
 

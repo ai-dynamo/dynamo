@@ -17,10 +17,10 @@ pub(crate) use remote::RemoteLayout;
 
 use crate::BlockId;
 use crate::v2::physical::layout::PhysicalLayout;
+use crate::v2::physical::transfer::BounceBufferSpec;
 use crate::v2::physical::transfer::TransferContext;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
 use crate::v2::physical::transfer::options::TransferOptions;
-use crate::v2::physical::transfer::BounceBufferSpec;
 use anyhow::{Result, anyhow, bail};
 use dynamo_memory::StorageKind;
 use dynamo_memory::nixl::NixlAgent;
@@ -30,34 +30,34 @@ use std::sync::{Arc, RwLock};
 
 /// Public entry point for layout and transfer management.
 ///
-/// TransportManager combines layout registration/metadata management with
+/// TransferManager combines layout registration/metadata management with
 /// transfer execution capabilities, providing a unified API for:
 /// - Registering local layouts and obtaining handles
 /// - Exporting/importing layout metadata for remote workers
 /// - Executing transfers between layouts using handles
 /// - Managing CUDA, NIXL, and other execution resources
 #[derive(Clone)]
-pub struct TransportManager {
+pub struct TransferManager {
     registry: Arc<RwLock<LayoutRegistry>>,
     context: Arc<TransferContext>,
 }
 
-impl TransportManager {
-    /// Create a new TransportManager builder.
+impl TransferManager {
+    /// Create a new TransferManager builder.
     ///
     /// The builder configures the worker ID, NIXL agent, CUDA device,
     /// and other execution parameters before creating the manager.
     ///
     /// # Example
     /// ```ignore
-    /// let manager = TransportManager::builder()
+    /// let manager = TransferManager::builder()
     ///     .worker_id(0)  // NIXL agent name defaults to "worker-0"
     ///     .nixl_backend("ucx")  // Optional: defaults to UCX from env
     ///     .cuda_device_id(0)
     ///     .build()?;
     ///
     /// // Or with custom agent name:
-    /// let manager = TransportManager::builder()
+    /// let manager = TransferManager::builder()
     ///     .worker_id(0)
     ///     .nixl_agent_name("custom-agent")
     ///     .build()?;
@@ -66,7 +66,7 @@ impl TransportManager {
         TransferContext::builder()
     }
 
-    /// Create a TransportManager from a built TransferContext.
+    /// Create a TransferManager from a built TransferContext.
     ///
     /// This is used internally by the builder to wrap the context
     /// and create the associated registry.

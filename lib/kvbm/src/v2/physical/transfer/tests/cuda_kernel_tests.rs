@@ -60,7 +60,6 @@ fn create_lw_layout(agent: NixlAgent, storage: StorageKind) -> PhysicalLayout {
 fn test_kernel_incompatible_lw_to_lw() {
     let agent = create_test_agent("test_kernel_lw_lw");
     let ctx = TransferContext::builder()
-        .worker_id(0)
         .nixl_agent(agent.clone())
         .cuda_device_id(0)
         .build()
@@ -100,7 +99,6 @@ fn test_kernel_incompatible_lw_to_lw() {
 fn test_kernel_compatible_fc_to_lw() {
     let agent = create_test_agent("test_kernel_fc_lw");
     let ctx = TransferContext::builder()
-        .worker_id(0)
         .nixl_agent(agent.clone())
         .cuda_device_id(0)
         .build()
@@ -138,7 +136,6 @@ fn test_kernel_compatible_fc_to_lw() {
 fn test_kernel_compatible_lw_to_fc() {
     let agent = create_test_agent("test_kernel_lw_fc");
     let ctx = TransferContext::builder()
-        .worker_id(0)
         .nixl_agent(agent.clone())
         .cuda_device_id(0)
         .build()
@@ -176,7 +173,6 @@ fn test_kernel_compatible_lw_to_fc() {
 fn test_kernel_compatible_fc_to_fc() {
     let agent = create_test_agent("test_kernel_fc_fc");
     let ctx = TransferContext::builder()
-        .worker_id(0)
         .nixl_agent(agent.clone())
         .cuda_device_id(0)
         .build()

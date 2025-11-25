@@ -169,10 +169,9 @@ pub fn create_layout(agent: NixlAgent, spec: LayoutSpec, num_blocks: usize) -> P
 pub fn create_transfer_context(
     agent: NixlAgent,
     capabilities: Option<TransferCapabilities>,
-) -> Result<crate::v2::physical::manager::TransportManager> {
-    crate::v2::physical::manager::TransportManager::builder()
+) -> Result<crate::v2::physical::manager::TransferManager> {
+    crate::v2::physical::manager::TransferManager::builder()
         .capabilities(capabilities.unwrap_or_default())
-        .worker_id(0) // Default worker ID for local tests
         .nixl_agent(agent)
         .cuda_device_id(0)
         .build()

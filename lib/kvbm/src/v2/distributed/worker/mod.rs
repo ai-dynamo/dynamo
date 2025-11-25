@@ -5,15 +5,84 @@ mod direct;
 mod nova;
 
 use anyhow::Result;
+use futures::future::{Either, Ready, ready};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::{
-    physical::{manager::LayoutHandle, transfer::TransferCompleteNotification},
+    physical::{
+        manager::{LayoutHandle, SerializedLayout},
+        transfer::TransferCompleteNotification,
+    },
     v2::{BlockId, InstanceId, SequenceHash, logical::LogicalLayoutHandle},
 };
 
 pub use nova::{NovaWorkerClient, NovaWorkerService};
+
+pub type SerializedResponseAwaiter = dynamo_nova::am::TypedUnaryResult<SerializedLayout>;
+pub type ImportMetadataResponseAwaiter = dynamo_nova::am::TypedUnaryResult<Vec<LayoutHandle>>;
+
+pub struct SerializedLayoutResponse {
+    awaiter: Either<Ready<Result<SerializedLayout>>, SerializedResponseAwaiter>,
+}
+
+impl SerializedLayoutResponse {
+    pub fn ready(layout: SerializedLayout) -> Self {
+        Self {
+            awaiter: Either::Left(ready(Ok(layout))),
+        }
+    }
+
+    pub fn from_awaiter(awaiter: SerializedResponseAwaiter) -> Self {
+        Self {
+            awaiter: Either::Right(awaiter),
+        }
+    }
+
+    pub fn could_yield(&self) -> bool {
+        matches!(self.awaiter, Either::Right(_))
+    }
+}
+
+impl std::future::IntoFuture for SerializedLayoutResponse {
+    type Output = Result<SerializedLayout>;
+    type IntoFuture = Either<Ready<Result<SerializedLayout>>, SerializedResponseAwaiter>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        self.awaiter
+    }
+}
+
+pub struct ImportMetadataResponse {
+    awaiter: Either<Ready<Result<Vec<LayoutHandle>>>, ImportMetadataResponseAwaiter>,
+}
+
+impl ImportMetadataResponse {
+    pub fn ready(handles: Vec<LayoutHandle>) -> Self {
+        Self {
+            awaiter: Either::Left(ready(Ok(handles))),
+        }
+    }
+
+    pub fn from_awaiter(awaiter: ImportMetadataResponseAwaiter) -> Self {
+        Self {
+            awaiter: Either::Right(awaiter),
+        }
+    }
+
+    pub fn could_yield(&self) -> bool {
+        matches!(self.awaiter, Either::Right(_))
+    }
+}
+
+impl std::future::IntoFuture for ImportMetadataResponse {
+    type Output = Result<Vec<LayoutHandle>>;
+    type IntoFuture = Either<Ready<Result<Vec<LayoutHandle>>>, ImportMetadataResponseAwaiter>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        self.awaiter
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub enum RemoteDescriptor {
@@ -86,4 +155,19 @@ pub trait Worker: Send + Sync {
         src_block_ids: Vec<BlockId>,
         options: crate::physical::transfer::TransferOptions,
     ) -> Result<TransferCompleteNotification>;
+
+    /// Export the local metadata for this worker.
+    ///
+    /// # Returns
+    /// A [`crate::physical::manager::SerializedLayout`] containing the local metadata
+    fn export_metadata(&self) -> Result<SerializedLayoutResponse>;
+
+    /// Import the remote metadata for this worker.
+    ///
+    /// # Arguments
+    /// * `metadata` - A [`crate::physical::manager::SerializedLayout`] containing the remote metadata
+    ///
+    /// # Returns
+    /// A vector of [`crate::physical::manager::LayoutHandle`] for the imported remote layouts
+    fn import_metadata(&self, metadata: SerializedLayout) -> Result<ImportMetadataResponse>;
 }

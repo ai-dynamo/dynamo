@@ -1971,6 +1971,7 @@ dependencies = [
  "dynamo-kvbm-kernels",
  "dynamo-memory",
  "dynamo-nova",
+ "dynamo-nova-backend",
  "dynamo-tokens",
  "figment",
  "futures",

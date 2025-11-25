@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::physical::{
-    manager::TransportManager,
+    manager::{SerializedLayout, TransferManager},
     transfer::{TransferOptions, context::TransferCompleteNotification},
 };
 
@@ -10,12 +10,21 @@ use super::*;
 
 pub struct DirectWorker {
     g1_handle: Option<LayoutHandle>,
-    g2_handle: LayoutHandle,
+    g2_handle: Option<LayoutHandle>,
     g3_handle: Option<LayoutHandle>,
-    manager: TransportManager,
+    manager: TransferManager,
 }
 
 impl DirectWorker {
+    pub fn new(manager: TransferManager) -> Self {
+        Self {
+            g1_handle: None,
+            g2_handle: None,
+            g3_handle: None,
+            manager,
+        }
+    }
+
     /// Create a bounce buffer specification from a layout handle and block IDs.
     pub fn create_bounce_buffer(
         &self,
@@ -23,6 +32,16 @@ impl DirectWorker {
         block_ids: Vec<BlockId>,
     ) -> Result<std::sync::Arc<dyn crate::physical::transfer::BounceBufferSpec>> {
         self.manager.create_bounce_buffer(handle, block_ids)
+    }
+
+    /// Export serialized layout metadata from the transfer manager.
+    pub fn export_metadata(&self) -> Result<SerializedLayout> {
+        self.manager.export_metadata()
+    }
+
+    /// Import serialized layout metadata into the transfer manager.
+    pub fn import_metadata(&self, metadata: SerializedLayout) -> Result<Vec<LayoutHandle>> {
+        self.manager.import_metadata(metadata)
     }
 }
 
@@ -39,19 +58,19 @@ impl Worker for DirectWorker {
 
         let src_layout = match &src {
             G1 => self.g1_handle,
-            G2 => Some(self.g2_handle),
+            G2 => self.g2_handle,
             G3 => self.g3_handle,
             G4 => return Err(anyhow::anyhow!("G4 is not supported for local transfers")),
         }
-        .ok_or_else(|| anyhow::anyhow!("Invalid source layout"))?;
+        .ok_or_else(|| anyhow::anyhow!("Source layout not registered: {:?}", src))?;
 
         let dst_layout = match &dst {
             G1 => self.g1_handle,
-            G2 => Some(self.g2_handle),
+            G2 => self.g2_handle,
             G3 => self.g3_handle,
             G4 => return Err(anyhow::anyhow!("G4 is not supported for local transfers")),
         }
-        .ok_or_else(|| anyhow::anyhow!("Invalid destination layout"))?;
+        .ok_or_else(|| anyhow::anyhow!("Destination layout not registered: {:?}", dst))?;
 
         self.manager.execute_transfer(
             src_layout,
@@ -73,11 +92,11 @@ impl Worker for DirectWorker {
 
         let dst_layout = match &dst {
             G1 => self.g1_handle,
-            G2 => Some(self.g2_handle),
+            G2 => self.g2_handle,
             G3 => self.g3_handle,
             G4 => return Err(anyhow::anyhow!("G4 is not supported for remote transfers")),
         }
-        .ok_or_else(|| anyhow::anyhow!("Invalid destination layout"))?;
+        .ok_or_else(|| anyhow::anyhow!("Destination layout not registered: {:?}", dst))?;
 
         match src {
             RemoteDescriptor::Layout { handle, block_ids } => self.manager.execute_transfer(
@@ -101,5 +120,17 @@ impl Worker for DirectWorker {
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
         todo!("implement remote offload")
+    }
+
+    fn export_metadata(&self) -> Result<SerializedLayoutResponse> {
+        self.manager
+            .export_metadata()
+            .map(SerializedLayoutResponse::ready)
+    }
+
+    fn import_metadata(&self, metadata: SerializedLayout) -> Result<ImportMetadataResponse> {
+        self.manager
+            .import_metadata(metadata)
+            .map(ImportMetadataResponse::ready)
     }
 }

@@ -13,9 +13,7 @@ use crate::physical::transfer::TransferOptions;
 
 use bytes::Bytes;
 use dynamo_nova::Nova;
-use dynamo_nova::events::{EventHandle, LocalEvent};
 use serde::{Deserialize, Serialize};
-use tokio_util::task::TaskTracker;
 
 // Serializable transfer options for remote operations
 #[derive(Serialize, Deserialize, Clone)]

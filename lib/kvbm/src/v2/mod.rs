@@ -42,6 +42,10 @@ pub use types::{CacheDtype, CacheLayout, ModelExecutorBackend};
 #[cfg(test)]
 pub mod test_config;
 
+// Testing utilities (available for tests and when testing feature is enabled)
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
 pub use dynamo_identity::InstanceId;
 pub use dynamo_tokens::{PositionalSequenceHash, SequenceHash as SequenceHashV1};
 

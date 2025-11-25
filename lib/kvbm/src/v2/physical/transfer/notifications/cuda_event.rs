@@ -35,7 +35,7 @@ impl CompletionChecker for CudaEventChecker {
 
 #[cfg(test)]
 mod tests {
-    use crate::v2::physical::manager::TransportManager;
+    use crate::v2::physical::manager::TransferManager;
     use crate::v2::physical::transfer::tests::CudaSleep;
     use dynamo_memory::nixl::NixlAgent;
     use std::time::{Duration, Instant};
@@ -43,8 +43,7 @@ mod tests {
     #[tokio::test]
     async fn test_cuda_event_delayed_notification() {
         let agent = NixlAgent::new("test_agent").unwrap();
-        let manager = TransportManager::builder()
-            .worker_id(0)
+        let manager = TransferManager::builder()
             .cuda_device_id(0)
             .nixl_agent(agent)
             .build()

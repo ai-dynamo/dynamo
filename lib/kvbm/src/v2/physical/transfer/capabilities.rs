@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 
 use crate::physical::{
     layout::LayoutConfig,
-    transfer::{PhysicalLayout, TransferOptions, TransportManager, executor::execute_transfer},
+    transfer::{PhysicalLayout, TransferManager, TransferOptions, executor::execute_transfer},
 };
 use dynamo_memory::nixl::NixlAgent;
 
@@ -119,8 +119,7 @@ impl TransferCapabilities {
         let src_blocks = vec![0];
         let dst_blocks = vec![0];
 
-        let ctx = TransportManager::builder()
-            .worker_id(0)
+        let ctx = TransferManager::builder()
             .nixl_agent(agent)
             .cuda_device_id(0)
             .build()?;

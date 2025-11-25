@@ -36,17 +36,13 @@ impl InstanceId {
     /// This is exposed for testing and special cases. In production, use
     /// [`InstanceFactory::create()`] instead.
     pub fn new_v4() -> Self {
-        Self(Uuid::new_v4())
-    }
-
-    /// Create an InstanceId from a UUID.
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Self(uuid)
-    }
-
-    /// Create an InstanceId from raw bytes.
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(Uuid::from_bytes(bytes))
+        loop {
+            let instance_id = InstanceId(Uuid::new_v4());
+            let worker_id = WorkerId::from(&instance_id);
+            if worker_id.as_u64() != 0 {
+                return instance_id;
+            }
+        }
     }
 
     /// Derive the deterministic WorkerId from this InstanceId.
@@ -260,25 +256,6 @@ mod tests {
         // Deserialize back
         let deserialized: WorkerId = serde_json::from_str(&json).unwrap();
         assert_eq!(worker_id, deserialized);
-    }
-
-    #[test]
-    fn test_instance_id_as_methods() {
-        let uuid = Uuid::new_v4();
-        let instance_id = InstanceId::from_uuid(uuid);
-
-        assert_eq!(instance_id.as_uuid(), &uuid);
-        assert_eq!(instance_id.as_u128(), uuid.as_u128());
-        assert_eq!(instance_id.as_bytes(), uuid.as_bytes());
-    }
-
-    #[test]
-    fn test_instance_id_from_bytes() {
-        let uuid = Uuid::new_v4();
-        let bytes = *uuid.as_bytes();
-
-        let instance_id = InstanceId::from_bytes(bytes);
-        assert_eq!(instance_id.as_uuid(), &uuid);
     }
 
     #[test]

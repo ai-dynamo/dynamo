@@ -38,6 +38,8 @@ pub struct Nova {
     handlers: HandlerManager,
     events: Arc<handlers::NovaEvents>,
     _discovery: Arc<dynamo_discovery::peer::PeerDiscoveryManager>,
+    runtime: tokio::runtime::Handle,
+    tracker: tokio_util::task::TaskTracker,
 }
 
 /// Builder for Nova system allowing incremental configuration of transports and discovery backends.
@@ -127,6 +129,8 @@ impl Nova {
         let worker_id = instance_id.worker_id();
         let response_manager = common::responses::ResponseManager::new(worker_id.as_u64());
         let local_events = crate::events::LocalEventSystem::new(worker_id.as_u64());
+        let runtime = tokio::runtime::Handle::current();
+        let tracker = tokio_util::task::TaskTracker::new();
 
         // Create peer discovery manager with local peer info and provided backends
         let peer_info = backend.peer_info();
@@ -149,6 +153,7 @@ impl Nova {
             local_events.clone(),
             data_streams,
             backend.clone(),
+            tracker.clone(),
         )
         .await;
         let server = Arc::new(server);
@@ -181,6 +186,8 @@ impl Nova {
             handlers,
             events: event_manager.clone(),
             _discovery: discovery,
+            runtime,
+            tracker,
         });
 
         // 5. Initialize hub's system reference (OnceLock)
@@ -318,6 +325,14 @@ impl Nova {
     /// Get the list of handlers registered on this local instance.
     pub fn list_local_handlers(&self) -> Vec<String> {
         self.server.hub().list_handlers()
+    }
+
+    pub fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.runtime
+    }
+
+    pub fn tracker(&self) -> &tokio_util::task::TaskTracker {
+        &self.tracker
     }
 
     // /// Register a peer internally (used by system handlers)

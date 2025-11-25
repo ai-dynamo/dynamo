@@ -40,12 +40,17 @@ figment = { version = "0.10", features = ["env"] }
 lru = "0.16"
 oneshot = "0.1.11"
 
+dynamo-nova-backend = { workspace = true, optional = true }
+
 [features]
-default = []
+default = ["testing"]
 console = []
+testing = ["dynamo-nova-backend"]
+
 
 [dev-dependencies]
 dynamo-memory = {workspace=true, features = ["unsafe-slices"]}
+dynamo-nova-backend = { workspace = true }
 proptest = "1.5.0"
 tempfile = "3"
 rstest = "0.26"

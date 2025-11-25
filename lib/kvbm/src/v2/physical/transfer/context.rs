@@ -15,7 +15,7 @@ use uuid::Uuid;
 use dynamo_memory::nixl::{NixlAgent, NixlBackendConfig, XferRequest};
 use dynamo_nova::events::LocalEventSystem;
 
-use crate::v2::physical::manager::TransportManager;
+use crate::v2::physical::manager::TransferManager;
 
 // Notifications module is declared in ../mod.rs
 // Re-export for convenience
@@ -25,11 +25,12 @@ use notifications::RegisterPollingNotification;
 pub use super::notifications;
 pub use super::notifications::TransferCompleteNotification;
 
-#[derive(Debug, Clone, Builder)]
+#[derive(Clone, Builder)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"), public)]
 #[allow(dead_code)] // Fields are used in build() but derive macros confuse dead code analysis
 pub(crate) struct TransferConfig {
-    worker_id: u64,
+    #[builder(default = "LocalEventSystem::new_local_only()")]
+    event_system: Arc<LocalEventSystem>,
 
     /// Optional custom name for the NIXL agent. If not provided, defaults to "worker-{worker_id}"
     #[builder(default = "None", setter(strip_option))]
@@ -87,8 +88,10 @@ impl TransferConfigBuilder {
         Ok(self)
     }
 
-    pub fn build(self) -> Result<TransportManager> {
+    pub fn build(self) -> Result<TransferManager> {
         let mut config = self.build_internal()?;
+
+        let worker_id = config.event_system.worker_id();
 
         // Merge environment backends if not explicitly configured
         if config.nixl_backend_config.backends().is_empty() {
@@ -98,7 +101,7 @@ impl TransferConfigBuilder {
         // Derive agent name from worker_id if not provided
         let agent_name = config
             .nixl_agent_name
-            .unwrap_or_else(|| format!("worker-{}", config.worker_id));
+            .unwrap_or_else(|| format!("worker-{}", worker_id));
 
         // Create wrapped NIXL agent with configured backends
         let backend_names: Vec<&str> = config
@@ -118,14 +121,14 @@ impl TransferConfigBuilder {
 
         let cuda_context = CudaContext::new(config.cuda_device_id)?;
         let context = TransferContext::new(
-            config.worker_id,
             nixl_agent,
+            config.event_system,
             cuda_context,
             config.tokio_runtime,
             config.capabilities,
             config.operational_backend,
         )?;
-        Ok(TransportManager::from_context(context))
+        Ok(TransferManager::from_context(context))
     }
 }
 
@@ -139,25 +142,19 @@ pub struct TransferConfigBuilderWithAgent {
 }
 
 impl TransferConfigBuilderWithAgent {
-    /// Build the TransportManager using the pre-configured agent.
-    pub fn build(self) -> Result<TransportManager> {
+    /// Build the TransferManager using the pre-configured agent.
+    pub fn build(self) -> Result<TransferManager> {
         let config = self.builder.build_internal()?;
         let cuda_context = CudaContext::new(config.cuda_device_id)?;
         let context = TransferContext::new(
-            config.worker_id,
             self.agent,
+            config.event_system,
             cuda_context,
             config.tokio_runtime,
             config.capabilities,
             config.operational_backend,
         )?;
-        Ok(TransportManager::from_context(context))
-    }
-
-    // Proxy methods to allow configuring other builder fields
-    pub fn worker_id(mut self, worker_id: u64) -> Self {
-        self.builder = self.builder.worker_id(worker_id);
-        self
+        Ok(TransferManager::from_context(context))
     }
 
     pub fn cuda_device_id(mut self, cuda_device_id: usize) -> Self {
@@ -223,8 +220,8 @@ impl TransferContext {
     }
 
     pub(crate) fn new(
-        worker_id: u64,
         nixl_agent: NixlAgent,
+        event_system: Arc<LocalEventSystem>,
         cuda_context: Arc<CudaContext>,
         tokio_runtime: TokioRuntime,
         capabilities: TransferCapabilities,
@@ -239,8 +236,6 @@ impl TransferContext {
 
         // Spawn background handlers
         let handle = tokio_runtime.handle();
-
-        let event_system = LocalEventSystem::new(worker_id);
 
         // Spawn NIXL status polling handler
         handle.spawn(notifications::process_polling_notifications(
@@ -262,7 +257,7 @@ impl TransferContext {
         ));
 
         Ok(Self {
-            worker_id,
+            worker_id: event_system.worker_id(),
             nixl_agent,
             cuda_context: cuda_context.clone(),
             d2h_stream: cuda_context.new_stream()?,
