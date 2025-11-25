@@ -37,16 +37,9 @@ use crate::{
     metrics::{MetricsHierarchy, MetricsRegistry, prometheus_names},
     service::ServiceClient,
     service::ServiceSet,
-    transports::etcd::{ETCD_ROOT_PATH, EtcdPath},
 };
 
-use super::{
-    DistributedRuntime, Runtime,
-    traits::*,
-    transports::etcd::{COMPONENT_KEYWORD, ENDPOINT_KEYWORD},
-    transports::nats::Slug,
-    utils::Duration,
-};
+use super::{DistributedRuntime, Runtime, traits::*, transports::nats::Slug, utils::Duration};
 
 use crate::pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint};
 use crate::protocols::EndpointId;
@@ -72,10 +65,6 @@ mod registry;
 pub mod service;
 
 pub use client::Client;
-
-/// The root key-value path where each instance registers itself in.
-/// An instance is namespace+component+endpoint+lease_id and must be unique.
-pub const INSTANCE_ROOT_PATH: &str = "v1/instances";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -232,25 +221,9 @@ impl MetricsHierarchy for Component {
 }
 
 impl Component {
-    /// The component part of an instance path in key-value store.
-    pub fn instance_root(&self) -> String {
-        let ns = self.namespace.name();
-        let cp = &self.name;
-        format!("{INSTANCE_ROOT_PATH}/{ns}/{cp}")
-    }
-
     pub fn service_name(&self) -> String {
         let service_name = format!("{}_{}", self.namespace.name(), self.name);
         Slug::slugify(&service_name).to_string()
-    }
-
-    pub fn path(&self) -> String {
-        format!("{}/{}", self.namespace.name(), self.name)
-    }
-
-    pub fn etcd_path(&self) -> EtcdPath {
-        EtcdPath::new_component(&self.namespace.name(), &self.name)
-            .expect("Component name and namespace should be valid")
     }
 
     pub fn namespace(&self) -> &Namespace {
@@ -525,74 +498,6 @@ impl Endpoint {
         &self.component
     }
 
-    // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
-    pub fn path(&self) -> String {
-        format!(
-            "{}/{}/{}",
-            self.component.path(),
-            ENDPOINT_KEYWORD,
-            self.name
-        )
-    }
-
-    /// The endpoint part of an instance path in etcd
-    pub fn etcd_root(&self) -> String {
-        let component_path = self.component.instance_root();
-        let endpoint_name = &self.name;
-        format!("{component_path}/{endpoint_name}")
-    }
-
-    /// The endpoint as an EtcdPath object
-    pub fn etcd_path(&self) -> EtcdPath {
-        EtcdPath::new_endpoint(
-            &self.component.namespace().name(),
-            self.component.name(),
-            &self.name,
-        )
-        .expect("Endpoint name and component name should be valid")
-    }
-
-    /// The fully path of an instance in etcd
-    pub fn etcd_path_with_lease_id(&self, lease_id: u64) -> String {
-        format!("{INSTANCE_ROOT_PATH}/{}", self.unique_path(lease_id))
-    }
-
-    /// Full path of this endpoint with forward slash separators, including lease id
-    pub fn unique_path(&self, lease_id: u64) -> String {
-        let ns = self.component.namespace().name();
-        let cp = self.component.name();
-        let ep = self.name();
-        format!("{ns}/{cp}/{ep}/{lease_id:x}")
-    }
-
-    /// The endpoint as an EtcdPath object with instance ID
-    pub fn etcd_path_object_with_lease_id(&self, instance_id: i64) -> EtcdPath {
-        EtcdPath::new_endpoint_with_lease(
-            &self.component.namespace().name(),
-            self.component.name(),
-            &self.name,
-            instance_id,
-        )
-        .expect("Endpoint name and component name should be valid")
-    }
-
-    pub fn name_with_id(&self, instance_id: u64) -> String {
-        format!("{}-{:x}", self.name, instance_id)
-    }
-
-    pub fn subject(&self) -> String {
-        format!("{}.{}", self.component.service_name(), self.name)
-    }
-
-    /// Subject to an instance of the [Endpoint] with a specific lease id
-    pub fn subject_to(&self, lease_id: u64) -> String {
-        format!(
-            "{}.{}",
-            self.component.service_name(),
-            self.name_with_id(lease_id)
-        )
-    }
-
     pub async fn client(&self) -> anyhow::Result<client::Client> {
         client::Client::new(self.clone()).await
     }
@@ -674,10 +579,6 @@ impl Namespace {
             .name(name.into())
             .parent(Some(Arc::new(self.clone())))
             .build()?)
-    }
-
-    pub fn etcd_path(&self) -> String {
-        format!("{ETCD_ROOT_PATH}{}", self.name())
     }
 
     pub fn name(&self) -> String {
