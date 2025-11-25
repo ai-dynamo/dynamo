@@ -17,7 +17,7 @@ use crate::storage::kv;
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
 
-/// Discovery implementation backed by a KeyValueStore
+/// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
     store: Arc<kv::Manager>,
     cancel_token: CancellationToken,
@@ -313,7 +313,7 @@ impl Discovery for KVStoreDiscovery {
         // Use the provided cancellation token, or fall back to the default token
         let cancel_token = cancel_token.unwrap_or_else(|| self.cancel_token.clone());
 
-        // Use the KeyValueStoreManager's watch mechanism
+        // Use the kv::Manager's watch mechanism
         let (_, mut rx) = self.store.clone().watch(
             bucket_name,
             None, // No TTL
