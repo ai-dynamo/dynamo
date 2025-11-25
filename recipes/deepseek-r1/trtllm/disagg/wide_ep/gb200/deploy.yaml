@@ -106,7 +106,7 @@ metadata:
   name: trtllm-disagg-multinode
 spec:
   pvcs:
-    - name: model-cache-pvc
+    - name: model-cache
       create: false
   envs:
     - name: NCCL_MNNVL_ENABLE
@@ -143,7 +143,7 @@ spec:
       # NOTE: Prefill uses 1 node (no multinode section = single node)
       #       and contributes to ComputeDomain.numNodes (see above)
       volumeMounts:
-        - name: model-cache-pvc
+        - name: model-cache
           mountPoint: /model-cache
       sharedMemory:
         size: 800Gi
@@ -198,7 +198,7 @@ spec:
       componentType: worker
       replicas: 1
       volumeMounts:
-        - name: model-cache-pvc
+        - name: model-cache
           mountPoint: /model-cache
       multinode:
         # NOTE: This nodeCount contributes to ComputeDomain.numNodes (see above)
