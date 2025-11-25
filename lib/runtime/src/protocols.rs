@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
 
 pub mod annotated;
 pub mod maybe_error;
@@ -36,11 +38,17 @@ pub struct Component {
 ///
 /// Example format: `"namespace/component/endpoint"`
 ///
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct EndpointId {
     pub namespace: String,
     pub component: String,
     pub name: String,
+}
+
+impl fmt::Display for EndpointId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}/{}", self.namespace, self.component, self.name)
+    }
 }
 
 impl PartialEq<Vec<&str>> for EndpointId {

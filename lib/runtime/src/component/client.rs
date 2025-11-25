@@ -43,7 +43,7 @@ impl Client {
     pub(crate) async fn new(endpoint: Endpoint) -> Result<Self> {
         tracing::trace!(
             "Client::new_dynamic: Creating dynamic client for endpoint: {}",
-            endpoint.path()
+            endpoint.id()
         );
         let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
 
@@ -58,15 +58,6 @@ impl Client {
         };
         client.monitor_instance_source();
         Ok(client)
-    }
-
-    pub fn path(&self) -> String {
-        self.endpoint.path()
-    }
-
-    /// The root etcd path we watch in etcd to discover new instances to route to.
-    pub fn etcd_root(&self) -> String {
-        self.endpoint.etcd_root()
     }
 
     /// Instances available from watching key-value store
@@ -95,7 +86,7 @@ impl Client {
     pub async fn wait_for_instances(&self) -> Result<Vec<Instance>> {
         tracing::trace!(
             "wait_for_instances: Starting wait for endpoint: {}",
-            self.endpoint.path()
+            self.endpoint.id()
         );
         let mut rx = self.instance_source.as_ref().clone();
         // wait for there to be 1 or more endpoints
@@ -108,7 +99,7 @@ impl Client {
                 tracing::info!(
                     "wait_for_instances: Found {} instance(s) for endpoint: {}",
                     instances.len(),
-                    self.endpoint.path()
+                    self.endpoint.id()
                 );
                 break;
             }
@@ -145,7 +136,7 @@ impl Client {
     fn monitor_instance_source(&self) {
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
-        let endpoint_path = self.endpoint.path();
+        let endpoint_id = self.endpoint.id();
         tokio::task::spawn(async move {
             let mut rx = client.instance_source.as_ref().clone();
             while !cancel_token.is_cancelled() {
@@ -164,9 +155,7 @@ impl Client {
 
                 if let Err(err) = rx.changed().await {
                     tracing::error!(
-                        "monitor_instance_source: The Sender is dropped: {}, endpoint={}",
-                        err,
-                        endpoint_path
+                        "monitor_instance_source: The Sender is dropped: {err}, endpoint={endpoint_id}",
                     );
                     cancel_token.cancel();
                 }

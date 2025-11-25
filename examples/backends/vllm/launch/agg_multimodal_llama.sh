@@ -8,7 +8,8 @@ trap 'echo Cleaning up...; kill 0' EXIT
 MODEL_NAME="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
 
 # run ingress
-python -m dynamo.frontend --http-port=8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python -m dynamo.frontend &
 
 # run processor
 python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME --mm-prompt-template "<|image|>\n<prompt>" &
