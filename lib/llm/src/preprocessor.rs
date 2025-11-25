@@ -165,7 +165,7 @@ impl OpenAIPreprocessor {
     }
     /// Encode a string to it's tokens
     pub fn tokenize(&self, s: &str) -> anyhow::Result<Encoding> {
-        self.tokenizer.encode(s)
+        self.tokenizer.encode(s, true)
     }
 
     /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.
@@ -420,6 +420,8 @@ impl OpenAIPreprocessor {
                                     .insert(ANNOTATION_FORMATTED_PROMPT.to_string(), f.to_string());
                             }
 
+                            let is_completion_request = formatted_prompt.is_none();
+
                             // Completions will use raw_prompt, no template
                             let prompt = formatted_prompt.unwrap_or(raw_prompt);
 
@@ -444,12 +446,14 @@ impl OpenAIPreprocessor {
                                     tracing::warn!(
                                         "backend_instance_id provided but no token_data; tokenizing prompt"
                                     );
-                                    let encoding = self.tokenizer.encode(&prompt)?;
+                                    let encoding =
+                                        self.tokenizer.encode(&prompt, is_completion_request)?;
                                     (encoding.token_ids().to_vec(), false)
                                 }
                             } else {
                                 // No backend_instance_id provided, continue the normal flow.
-                                let encoding = self.tokenizer.encode(&prompt)?;
+                                let encoding =
+                                    self.tokenizer.encode(&prompt, is_completion_request)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -466,7 +470,7 @@ impl OpenAIPreprocessor {
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
-                                let encoding = self.tokenizer.encode(&texts[0])?;
+                                let encoding = self.tokenizer.encode(&texts[0], true)?;
                                 builder.token_ids(encoding.token_ids().to_vec());
                             } else {
                                 bail!(
@@ -497,7 +501,7 @@ impl OpenAIPreprocessor {
 
         let all_token_ids = match &request.inner.input {
             dynamo_async_openai::types::EmbeddingInput::String(s) => {
-                let encoding = self.tokenizer.encode(s)?;
+                let encoding = self.tokenizer.encode(s, true)?;
                 vec![encoding.token_ids().to_vec()]
             }
             dynamo_async_openai::types::EmbeddingInput::StringArray(arr) => {
@@ -506,7 +510,10 @@ impl OpenAIPreprocessor {
                     let tokenizer = self.tokenizer.clone();
                     let strs = input_strs.clone();
                     move || {
-                        tokenizer.encode_batch(&strs.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+                        tokenizer.encode_batch(
+                            &strs.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                            true,
+                        )
                     }
                 })
                 .await??;

@@ -53,8 +53,8 @@ pub mod traits {
     use super::*;
 
     pub trait Encoder: Send + Sync {
-        fn encode(&self, input: &str) -> Result<Encoding>;
-        fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>>;
+        fn encode(&self, input: &str, add_special_tokens: bool) -> Result<Encoding>;
+        fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>>;
     }
 
     pub trait Decoder: Send + Sync {
@@ -293,7 +293,7 @@ impl Sequence {
         //     Error::msg(format!("Failed to acquire read lock on tokenizer: {}", err))
         // })?;
 
-        let encoding = self.tokenizer.encode(input)?;
+        let encoding = self.tokenizer.encode(input, false)?;
         self.token_ids.extend(encoding.token_ids());
         Ok(())
     }
