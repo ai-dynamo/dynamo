@@ -8,13 +8,14 @@ from jinja2 import Environment, FileSystemLoader
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Renders dynamo Dockerfiles from templates")
-    parser.add_argument("--framework", type=str, help="Dockerfile framework to use.")
-    parser.add_argument("--target", type=str, help="Dockerfile target to use.")
-    parser.add_argument("--platform", type=str, help="Dockerfile platform to use.")
+    parser.add_argument("--framework", type=str, default="vllm", help="Dockerfile framework to use.")
+    parser.add_argument("--target", type=str, default="runtime", help="Dockerfile target to use.")
+    parser.add_argument("--platform", type=str, default="linux/amd64", help="Dockerfile platform to use.")
+    parser.add_argument("--show-result", action='store_true', help="Prints the rendered Dockerfile to stdout.")
     args = parser.parse_args()
     return args
 
-def render(framework, target, platform, context):
+def render(framework, target, platform, context, show_result):
     env = Environment(loader=FileSystemLoader("."),trim_blocks=True,lstrip_blocks=True)
     template = env.get_template("Dockerfile.template")
     rendered = template.render(
@@ -26,6 +27,13 @@ def render(framework, target, platform, context):
     with open("rendered.Dockerfile", "w") as f:
         f.write(rendered)
 
+    if show_result == True:
+        print("##############")
+        print("# Dockerfile #")
+        print("##############")
+        print(rendered)
+        print("##############")
+
     return
 
 def main():
@@ -33,11 +41,12 @@ def main():
     framework = args.framework
     target = args.target
     platform = args.platform
+    show_result = args.show_result
 
     with open("context.yaml", "r") as f:
         context = yaml.safe_load(f)
 
-    render(framework, target, platform, context)
+    render(framework, target, platform, context, show_result)
 
 if __name__ == "__main__":
     main()
