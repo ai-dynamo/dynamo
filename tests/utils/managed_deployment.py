@@ -332,13 +332,13 @@ class DeploymentSpec:
             service.envs = []
 
         # if env var already exists, update it
-        for env in service["envs"]:
+        for env in service.envs:
             if env["name"] == name:
                 env["value"] = value
                 return
 
         # if env var does not exist, add it
-        service["envs"].append({"name": name, "value": value})
+        service.envs.append({"name": name, "value": value})
 
     def get_service_env_vars(self, service_name: str) -> list[dict]:
         """
@@ -377,23 +377,24 @@ class DeploymentSpec:
             arg_value: Argument value (e.g., "1024")
         """
         service = self.get_service(service_name)
+        service_spec = service._spec
 
         # Ensure args list exists
-        if "extraPodSpec" not in service:
-            service["extraPodSpec"] = {"mainContainer": {}}
-        if "mainContainer" not in service["extraPodSpec"]:
-            service["extraPodSpec"]["mainContainer"] = {}
-        if "args" not in service["extraPodSpec"]["mainContainer"]:
-            service["extraPodSpec"]["mainContainer"]["args"] = []
+        if "extraPodSpec" not in service_spec:
+            service_spec["extraPodSpec"] = {"mainContainer": {}}
+        if "mainContainer" not in service_spec["extraPodSpec"]:
+            service_spec["extraPodSpec"]["mainContainer"] = {}
+        if "args" not in service_spec["extraPodSpec"]["mainContainer"]:
+            service_spec["extraPodSpec"]["mainContainer"]["args"] = []
 
-        args_list = service["extraPodSpec"]["mainContainer"]["args"]
+        args_list = service_spec["extraPodSpec"]["mainContainer"]["args"]
 
         # Convert to list if needed (sometimes it's a single string)
         if isinstance(args_list, str):
             import shlex
 
             args_list = shlex.split(args_list)
-            service["extraPodSpec"]["mainContainer"]["args"] = args_list
+            service_spec["extraPodSpec"]["mainContainer"]["args"] = args_list
 
         # Find existing argument
         arg_index = None
