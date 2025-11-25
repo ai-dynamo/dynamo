@@ -623,14 +623,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
         backend_input.dp_rank = Some(dp_rank);
 
-        // Check if worker_id is requested in extra_fields
-        let should_populate_worker_id = backend_input
-            .extra_fields
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .any(|s| s == "worker_id");
-
         // Get prefill worker ID if available (stored by PrefillRouter)
         // In aggregated mode, prefill_worker_id is None, so we use decode_worker_id for both
         let decode_worker_id = instance_id;
@@ -672,24 +664,30 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             prefill_marked = true;
                         }
 
-                        // Inject worker_id in first item's disaggregated_params if requested
-                        if first_item && should_populate_worker_id {
-                            if let Some(ref mut data) = item.data {
-                                // Add worker_id to disaggregated_params
-                                let worker_id_json = json!({
-                                    "prefill_worker_id": prefill_worker_id,
-                                    "decode_worker_id": decode_worker_id,
-                                });
-
-                                if let Some(ref mut params) = data.disaggregated_params {
-                                    if let Some(obj) = params.as_object_mut() {
-                                        obj.insert("worker_id".to_string(), worker_id_json);
-                                    }
-                                } else {
-                                    data.disaggregated_params = Some(json!({"worker_id": worker_id_json}));
-                                }
-                            }
+                        // Always inject worker_id in first item's disaggregated_params
+                        // This is needed for:
+                        // 1. PrefillRouter to know which prefill worker was chosen
+                        // 2. Client response when extra_fields contains "worker_id"
+                        if first_item {
                             first_item = false;
+
+                            let Some(ref mut data) = item.data else {
+                                yield item;
+                                continue;
+                            };
+
+                            // prefill_worker_id comes from context (set by PrefillRouter) or falls back to instance_id
+                            // decode_worker_id is always the current instance_id
+                            let worker_id_json = json!({
+                                "prefill_worker_id": prefill_worker_id,
+                                "decode_worker_id": decode_worker_id,
+                            });
+
+                            if let Some(obj) = data.disaggregated_params.as_mut().and_then(|p| p.as_object_mut()) {
+                                obj.insert("worker_id".to_string(), worker_id_json);
+                            } else {
+                                data.disaggregated_params = Some(json!({"worker_id": worker_id_json}));
+                            }
                         }
 
                         yield item;
