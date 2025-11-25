@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Simple ZMQ Subscriber for vLLM KV Events
+//! Simple ZMQ Subscriber for vLLM/TensorRT-LLM KV Events
 //!
-//! This is a simplified subscriber that deserializes raw vLLM events.
+//! This is a simplified subscriber that deserializes raw vLLM/TensorRT-LLM events.
 
 use anyhow::{Context, Result};
 use rmp_serde::Deserializer;
@@ -14,13 +14,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
-use super::tracker::{CacheStatusTracker, StorageTier};
+use super::tracker::{CacheStatusTracker, EventSource, StorageTier};
 
-/// Event batch received from vLLM (array format)
+/// Event batch received from vLLM/TensorRT-LLM (array format)
 /// Format: [timestamp, [events], data_parallel_rank]
 ///
 /// Note: This uses a tuple struct to deserialize from array [ts, events, rank]
-/// rather than an object {"ts": ..., "events": ..., "rank": ...} for vLLM compatibility.
+/// rather than an object {"ts": ..., "events": ..., "rank": ...} for vLLM/TensorRT-LLM compatibility.
 #[derive(Debug, Deserialize)]
 struct VllmEventBatch(
     f64,               // ts
@@ -59,7 +59,7 @@ impl std::fmt::Display for BlockHash {
     }
 }
 
-/// Raw vLLM event format (preserves all data including token_ids)
+/// Raw vLLM/TensorRT-LLM event format (preserves all data including token_ids)
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 enum VllmRawEvent {
@@ -88,9 +88,12 @@ pub async fn start_simple_zmq_listener(
     endpoint: String,
     tracker: Arc<RwLock<CacheStatusTracker>>,
     cancellation_token: CancellationToken,
+    engine_source: EventSource,
 ) -> Result<JoinHandle<()>> {
     let handle = tokio::spawn(async move {
-        if let Err(e) = run_listener_loop(endpoint, tracker, cancellation_token).await {
+        if let Err(e) =
+            run_listener_loop(endpoint, tracker, cancellation_token, engine_source).await
+        {
             tracing::error!("ZMQ listener task failed: {}", e);
         }
     });
@@ -102,6 +105,7 @@ async fn run_listener_loop(
     endpoint: String,
     tracker: Arc<RwLock<CacheStatusTracker>>,
     cancellation_token: CancellationToken,
+    engine_source: EventSource,
 ) -> Result<()> {
     tracing::info!(
         "KV event consolidator ZMQ listener connecting to {}",
@@ -174,7 +178,7 @@ async fn run_listener_loop(
                 // Process events
                 let mut tracker_guard = tracker.write().await;
                 for event in batch.events() {
-                    process_event(&mut tracker_guard, event.clone(), dp_rank);
+                    process_event(&mut tracker_guard, event.clone(), dp_rank, engine_source);
                 }
             }
         }
@@ -187,6 +191,7 @@ fn process_event(
     tracker: &mut CacheStatusTracker,
     event: VllmRawEvent,
     data_parallel_rank: Option<i32>,
+    engine_source: EventSource,
 ) {
     match event {
         VllmRawEvent::BlockStored {
@@ -259,7 +264,7 @@ fn process_event(
 
                 tracker.handle_store(
                     block_hash.to_string(),
-                    crate::block_manager::kv_consolidator::EventSource::Vllm,
+                    engine_source,
                     block_tokens,
                     current_parent.clone(),
                     block_size_usize,
@@ -289,10 +294,7 @@ fn process_event(
             );
 
             for block_hash in block_hashes {
-                tracker.handle_remove(
-                    &block_hash.to_string(),
-                    crate::block_manager::kv_consolidator::EventSource::Vllm,
-                );
+                tracker.handle_remove(&block_hash.to_string(), engine_source);
             }
         }
 

@@ -6,7 +6,6 @@
 import logging
 import os
 import shutil
-import tempfile
 
 import numpy as np
 import pytest
@@ -89,25 +88,6 @@ def extract_params(param_map) -> dict:
                 result[key] = getattr(param, field)
                 break
     return result
-
-
-@pytest.fixture
-def file_storage_backend():
-    """Fixture that sets up and tears down file storage backend.
-
-    Creates a temporary directory for file-based KV storage and sets
-    the DYN_FILE_KV environment variable. Cleans up after the test.
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        old_env = os.environ.get("DYN_FILE_KV")
-        os.environ["DYN_FILE_KV"] = tmpdir
-        logger.info(f"Set up file storage backend in: {tmpdir}")
-        yield tmpdir
-        # Cleanup
-        if old_env is not None:
-            os.environ["DYN_FILE_KV"] = old_env
-        else:
-            os.environ.pop("DYN_FILE_KV", None)
 
 
 @pytest.mark.e2e

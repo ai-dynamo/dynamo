@@ -10,9 +10,9 @@ export PYTHONHASHSEED=0
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
 
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port 8000 \
     --router-reset-states &
 
 # two decode workers (without KVBM)

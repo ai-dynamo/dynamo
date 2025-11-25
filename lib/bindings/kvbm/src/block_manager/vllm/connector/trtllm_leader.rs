@@ -115,6 +115,7 @@ impl KvConnectorLeader {
                     block_manager.get_block_manager().clone(),
                     leader.clone(),
                     kvbm_metrics_clone.clone(),
+                    Some(format!("worker-{}", worker_id)),
                 );
 
                 let _ = slot_manager_cell.set(sm);

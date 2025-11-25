@@ -29,16 +29,18 @@ This includes:
 
 After setting up Dynamo Cloud, use this script to prepare your namespace with the additional resources needed for benchmarking and profiling workflows:
 
-The setup script creates a `dynamo-pvc` with `ReadWriteMany` (RWX). If your cluster's default `storageClassName` does not support RWX, set `storageClassName` in `deploy/utils/manifests/pvc.yaml` to an RWX-capable class before running the script.
+The setup script creates a `dynamo-pvc` with `ReadWriteOnce` (RWO) access mode using your cluster's default storage class. This is sufficient for profiling workflows where only one job writes at a time.
 
-Example (add under `spec` in `deploy/utils/manifests/pvc.yaml`):
+If you want to use `ReadWriteMany` (RWX) for concurrent access, modify `deploy/utils/manifests/pvc.yaml` before running the script:
+
 ```yaml
-...
 spec:
   accessModes:
   - ReadWriteMany
-  storageClassName: <your-rwx-storageclass>
-...
+  storageClassName: <your-rwx-capable-storageclass>  # e.g., NFS-based storage
+  resources:
+    requests:
+      storage: 50Gi
 ```
 
 > [!TIP]

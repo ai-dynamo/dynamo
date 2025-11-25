@@ -14,6 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==0.7.0",
+    "transformers>=4.56.0,<=4.57.1",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
     "kubernetes>=32.0.1,<33.0.0",
@@ -49,13 +50,13 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.1.0rc5",
+    "tensorrt-llm==1.2.0rc2",
 ]
 
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.7.1",
-    "vllm[flashinfer]==0.10.2",
+    "vllm[flashinfer]==0.11.0",
 ]
 
 sglang = [
@@ -141,7 +142,7 @@ minversion = "8.0"
 tmp_path_retention_policy = "failed"
 
 # NOTE
-# We ignore model.py explcitly here to avoid mypy errors with duplicate modules
+# We ignore model.py explicitly here to avoid mypy errors with duplicate modules
 # pytest overrides the default mypy exclude configuration and so we exclude here as well
 addopts = [
     "-ra",
@@ -180,6 +181,8 @@ filterwarnings = [
     "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
+    # pytest-benchmark automatically disables when xdist is active, ignore the warning
+    "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
 ]
 
 
@@ -188,6 +191,7 @@ asyncio_mode = "auto"
 markers = [
     "pre_merge: marks tests to run before merging",
     "post_merge: marks tests to run after merge",
+    "parallel: marks tests that can run in parallel with pytest-xdist",
     "nightly: marks tests to run nightly",
     "weekly: marks tests to run weekly",
     "gpu_0: marks tests that don't require GPU",

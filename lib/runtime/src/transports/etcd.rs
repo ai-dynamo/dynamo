@@ -25,12 +25,10 @@ use tokio_util::sync::CancellationToken;
 mod connector;
 mod lease;
 mod lock;
-mod path;
 
 use connector::Connector;
 use lease::*;
 pub use lock::*;
-pub use path::*;
 
 use super::utils::build_in_runtime;
 use crate::config::environment_names::etcd as env_etcd;
@@ -764,7 +762,9 @@ mod tests {
         let key = "__integration_test_key";
         let value = b"test_value";
 
-        let client = drt.etcd_client().expect("etcd client should be available");
+        let client = Client::new(ClientOptions::default(), drt.runtime().clone())
+            .await
+            .expect("etcd client should be available");
         let lease_id = drt.connection_id();
 
         // Create the key
@@ -804,8 +804,10 @@ mod tests {
     }
 
     async fn test_kv_cache_operations(drt: DistributedRuntime) -> Result<()> {
-        // Get the client and unwrap it
-        let client = drt.etcd_client().expect("etcd client should be available");
+        // Make the client and unwrap it
+        let client = Client::new(ClientOptions::default(), drt.runtime().clone())
+            .await
+            .expect("etcd client should be available");
 
         // Create a unique test prefix to avoid conflicts with other tests
         let test_id = uuid::Uuid::new_v4().to_string();
