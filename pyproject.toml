@@ -59,7 +59,7 @@ vllm = [
     "nixl[cu12]<=0.7.1",
     "vllm[flashinfer]==0.11.0",
     # Satisfies vLLM 0.11.0 (>=4.55.2) and vLLM 0.11.2 (>=4.56.0, <5)
-    "transformers>=4.56.0",
+    "transformers>=4.56.0,<=4.57.1",
 ]
 
 sglang = [
