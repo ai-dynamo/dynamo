@@ -93,6 +93,7 @@ pub enum DiscoverySpec {
     MetricsEndpoint {
         namespace: String,
         url: String,
+        gpu_uuids: Vec<String>,
     },
 }
 
@@ -162,10 +163,11 @@ impl DiscoverySpec {
                 card_json,
                 model_suffix,
             },
-            Self::MetricsEndpoint { namespace, url } => DiscoveryInstance::MetricsEndpoint {
+            Self::MetricsEndpoint { namespace, url, gpu_uuids } => DiscoveryInstance::MetricsEndpoint {
                 namespace,
                 instance_id,
                 url,
+                gpu_uuids,
             },
         }
     }
@@ -195,6 +197,7 @@ pub enum DiscoveryInstance {
         namespace: String,
         instance_id: u64,
         url: String,
+        gpu_uuids: Vec<String>,
     },
 }
 
@@ -274,6 +277,7 @@ mod tests {
             namespace: "test-namespace".to_string(),
             instance_id: 12345,
             url: "http://localhost:8080/metrics".to_string(),
+            gpu_uuids: vec!["GPU-12345".to_string(), "GPU-67890".to_string()],
         };
 
         // Serialize to JSON
@@ -291,10 +295,12 @@ mod tests {
                 namespace,
                 instance_id,
                 url,
+                gpu_uuids,
             } => {
                 assert_eq!(namespace, "test-namespace");
                 assert_eq!(instance_id, 12345);
                 assert_eq!(url, "http://localhost:8080/metrics");
+                assert_eq!(gpu_uuids, vec!["GPU-12345".to_string(), "GPU-67890".to_string()]);
             }
             _ => panic!("Expected MetricsEndpoint variant"),
         }
@@ -305,6 +311,7 @@ mod tests {
         let spec = DiscoverySpec::MetricsEndpoint {
             namespace: "test-ns".to_string(),
             url: "http://localhost:8080/metrics".to_string(),
+            gpu_uuids: vec!["GPU-abc123".to_string()],
         };
 
         let instance = spec.with_instance_id(999);
@@ -314,10 +321,12 @@ mod tests {
                 namespace,
                 instance_id,
                 url,
+                gpu_uuids,
             } => {
                 assert_eq!(namespace, "test-ns");
                 assert_eq!(instance_id, 999);
                 assert_eq!(url, "http://localhost:8080/metrics");
+                assert_eq!(gpu_uuids, vec!["GPU-abc123".to_string()]);
             }
             _ => panic!("Expected MetricsEndpoint variant"),
         }
@@ -329,6 +338,7 @@ mod tests {
             namespace: "test-ns".to_string(),
             instance_id: 777,
             url: "http://localhost:8080/metrics".to_string(),
+            gpu_uuids: vec![],
         };
 
         assert_eq!(instance.instance_id(), 777);

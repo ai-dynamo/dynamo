@@ -149,6 +149,10 @@ impl Discovery for KubeDiscoveryClient {
             DiscoveryInstance::Model { .. } => {
                 metadata.unregister_model_card(&instance)?;
             }
+            DiscoveryInstance::MetricsEndpoint { .. } => {
+                // Metrics endpoints don't need explicit unregistration in Kube discovery
+                // They are managed via the system status server lifecycle
+            }
         }
 
         Ok(())
