@@ -44,9 +44,6 @@ ARG ARCH_ALT=x86_64
 # Python configuration
 ARG PYTHON_VERSION=3.12
 
-ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
-FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
-
 ########################################################
 ########## Framework Development Image ################
 ########################################################

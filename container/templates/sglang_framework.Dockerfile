@@ -15,9 +15,6 @@ ARG USE_SCCACHE
 ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
 
-ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
-FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
-
 ########################################################
 ########## Framework Development Image ################
 ########################################################
@@ -270,9 +267,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /sgl-workspace/DeepEP && \
     NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install --no-build-isolation .
 
-# Copy rust installation from dynamo_base to avoid duplication efforts
-COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+# Copy rust installation from dev to avoid duplication efforts
+COPY --from=dev /usr/local/rustup /usr/local/rustup
+COPY --from=dev /usr/local/cargo /usr/local/cargo
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \

@@ -107,9 +107,9 @@ ENV CUDA_HOME=/usr/local/cuda \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
     TRITON_CUDART_PATH=/usr/local/cuda/include
 
-# Copy nats and etcd from dynamo_base image
-COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# Copy nats and etcd from dev image
+COPY --from=dev /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dev /usr/local/bin/etcd/ /usr/local/bin/etcd/
 # Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
@@ -149,8 +149,8 @@ ENV DYNAMO_HOME=/workspace
 # Copy UCX from framework image as plugin for NIXL
 # Copy NIXL source from framework image
 # Copy dynamo wheels for gitlab artifacts
-COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo: --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+COPY --chown=dynamo: --from=dev /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo: --from=dev $NIXL_PREFIX $NIXL_PREFIX
 
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 ENV LD_LIBRARY_PATH=\
@@ -170,7 +170,7 @@ ENV LD_LIBRARY_PATH=/opt/dynamo/venv/lib/python3.12/site-packages/torch/lib:/opt
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
 COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
-COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: --from=dev /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN uv pip install \
       --no-cache \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
