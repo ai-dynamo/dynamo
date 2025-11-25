@@ -3,7 +3,7 @@
 
 use crate::physical::{
     manager::{SerializedLayout, TransferManager},
-    transfer::{TransferOptions, context::TransferCompleteNotification},
+    transfer::{BounceBuffer, TransferOptions, context::TransferCompleteNotification},
 };
 
 use super::*;
@@ -30,8 +30,8 @@ impl DirectWorker {
         &self,
         handle: LayoutHandle,
         block_ids: Vec<BlockId>,
-    ) -> Result<std::sync::Arc<dyn crate::physical::transfer::BounceBufferSpec>> {
-        self.manager.create_bounce_buffer(handle, block_ids)
+    ) -> Result<BounceBuffer> {
+        Ok(BounceBuffer::from_handle(handle, block_ids))
     }
 
     /// Export serialized layout metadata from the transfer manager.
@@ -45,13 +45,13 @@ impl DirectWorker {
     }
 }
 
-impl Worker for DirectWorker {
+impl WorkerTransfers for DirectWorker {
     fn execute_local_transfer(
         &self,
         src: LogicalLayoutHandle,
         dst: LogicalLayoutHandle,
-        src_block_ids: Vec<BlockId>,
-        dst_block_ids: Vec<BlockId>,
+        src_block_ids: Arc<[BlockId]>,
+        dst_block_ids: Arc<[BlockId]>,
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
         use LogicalLayoutHandle::*;
@@ -85,7 +85,7 @@ impl Worker for DirectWorker {
         &self,
         src: RemoteDescriptor,
         dst: LogicalLayoutHandle,
-        dst_block_ids: Vec<BlockId>,
+        dst_block_ids: Arc<[BlockId]>,
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
         use LogicalLayoutHandle::*;
@@ -99,14 +99,17 @@ impl Worker for DirectWorker {
         .ok_or_else(|| anyhow::anyhow!("Destination layout not registered: {:?}", dst))?;
 
         match src {
-            RemoteDescriptor::Layout { handle, block_ids } => self.manager.execute_transfer(
-                handle,
-                &block_ids,
-                dst_layout,
-                &dst_block_ids,
-                options,
-            ),
-            RemoteDescriptor::Object { keys } => {
+            RemoteDescriptor::Layout { handle, block_ids } => {
+                let block_ids_arc: Arc<[BlockId]> = block_ids.into();
+                self.manager.execute_transfer(
+                    handle,
+                    &block_ids_arc,
+                    dst_layout,
+                    &dst_block_ids,
+                    options,
+                )
+            }
+            RemoteDescriptor::Object { keys: _ } => {
                 todo!("implement remote object transfer")
             }
         }
@@ -116,12 +119,14 @@ impl Worker for DirectWorker {
         &self,
         src: LogicalLayoutHandle,
         dst: RemoteDescriptor,
-        src_block_ids: Vec<BlockId>,
+        src_block_ids: Arc<[BlockId]>,
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
         todo!("implement remote offload")
     }
+}
 
+impl Worker for DirectWorker {
     fn export_metadata(&self) -> Result<SerializedLayoutResponse> {
         self.manager
             .export_metadata()

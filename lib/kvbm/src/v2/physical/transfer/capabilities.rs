@@ -16,7 +16,10 @@ use std::sync::OnceLock;
 
 use crate::physical::{
     layout::LayoutConfig,
-    transfer::{PhysicalLayout, TransferManager, TransferOptions, executor::execute_transfer},
+    transfer::{
+        PhysicalLayout, TransferManager, TransferOptions,
+        executor::{TransferOptionsInternal, execute_transfer},
+    },
 };
 use dynamo_memory::nixl::NixlAgent;
 
@@ -129,7 +132,7 @@ impl TransferCapabilities {
             &dst,
             &src_blocks,
             &dst_blocks,
-            TransferOptions::default(),
+            TransferOptionsInternal::default(),
             ctx.context(),
         )?;
 

@@ -1394,7 +1394,7 @@ mod tests {
                 .build()
                 .expect("Should build manager");
 
-            let mut blocks = manager
+            let blocks = manager
                 .allocate_blocks(2)
                 .expect("Should allocate two blocks");
             let mut iter = blocks.into_iter();

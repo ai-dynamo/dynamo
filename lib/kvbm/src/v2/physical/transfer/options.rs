@@ -3,9 +3,11 @@
 
 //! Transfer options for configuring block and layer transfers.
 
-use super::BounceBufferSpec;
+use crate::physical::transfer::BounceBufferInternal;
+
+use super::BounceBuffer;
 use derive_builder::Builder;
-use std::{ops::Range, sync::Arc};
+use std::ops::Range;
 
 /// Options for configuring transfer operations.
 ///
@@ -44,7 +46,7 @@ pub struct TransferOptions {
     /// an intermediate staging area. The transfer will be split into two hops:
     /// source → bounce buffer → destination.
     #[builder(default, setter(strip_option, into))]
-    pub bounce_buffer: Option<Arc<dyn BounceBufferSpec>>,
+    pub bounce_buffer: Option<BounceBuffer>,
 }
 
 impl TransferOptions {

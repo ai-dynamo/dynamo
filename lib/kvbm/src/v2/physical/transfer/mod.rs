@@ -77,46 +77,46 @@ pub use super::manager::{LayoutHandle, SerializedLayout, TransferManager, Worker
 // #[cfg(test)]
 // pub use testing::{RoundTripTest, RoundTripTestResult};
 
-use anyhow::Result;
+// /// Specification for bounce buffer in multi-hop transfers.
+// ///
+// /// This structure provides the layout and block IDs to use as an intermediate
+// /// staging area when direct transfers are not allowed.
+// #[deprecated(since = "2025-11-25", note = "use TransferOptions instead")]
+// pub trait BounceBufferSpec: Send + Sync {
+//     fn layout(&self) -> &PhysicalLayout;
+//     fn block_ids(&self) -> &[BlockId];
+// }
 
-/// Future representing an in-progress transfer operation.
-///
-/// The transfer completes when this future resolves.
-pub type TransferFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
-
-/// Specification for bounce buffer in multi-hop transfers.
-///
-/// This structure provides the layout and block IDs to use as an intermediate
-/// staging area when direct transfers are not allowed.
-pub trait BounceBufferSpec: Send + Sync {
-    fn layout(&self) -> &PhysicalLayout;
-    fn block_ids(&self) -> &[BlockId];
+#[derive(Clone)]
+pub enum BounceBufferLayout {
+    Layout(PhysicalLayout),
+    Handle(LayoutHandle),
 }
 
-// #[cfg(all(test, feature = "testing-cuda"))]
-// mod cuda_integration_tests {
-//     use super::*;
-//     use crate::v2::layout::{
-//         FullyContiguousLayout, Layout, LayoutConfig, MemoryRegion, OwnedMemoryRegion,
-//     };
-//     use cudarc::driver::CudaContext;
-//     use std::sync::Arc;
+#[derive(Clone)]
+pub struct BounceBuffer {
+    layout: LayoutHandle,
+    block_ids: Vec<BlockId>,
+}
 
-//     // TODO: Add CUDA-specific integration tests
-//     // These would test:
-//     // - H2D transfers
-//     // - D2H transfers
-//     // - D2D transfers
-//     // - Async completion via event synchronization
-// }
+#[derive(Clone)]
+pub struct BounceBufferInternal {
+    layout: PhysicalLayout,
+    block_ids: Vec<BlockId>,
+}
 
-// #[cfg(all(test, feature = "testing-nixl"))]
-// mod nixl_integration_tests {
-//     use super::*;
+impl BounceBuffer {
+    pub fn from_handle(layout: LayoutHandle, block_ids: Vec<BlockId>) -> Self {
+        Self { layout, block_ids }
+    }
 
-//     // TODO: Add NIXL-specific integration tests
-//     // These would test:
-//     // - Remote memory access via NIXL Read
-//     // - Disk-backed transfers via NIXL Write
-//     // - Cross-node serialization with LayoutDescriptor
-// }
+    pub(crate) fn into_parts(self) -> (LayoutHandle, Vec<BlockId>) {
+        (self.layout, self.block_ids)
+    }
+}
+
+impl BounceBufferInternal {
+    pub fn from_layout(layout: PhysicalLayout, block_ids: Vec<BlockId>) -> Self {
+        Self { layout, block_ids }
+    }
+}

@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::{
     logical::{
-        blocks::{BlockMetadata, BlockRegistry, ImmutableBlock},
+        blocks::{BlockMetadata, BlockRegistry},
         manager::{BlockManager, FrequencyTrackingCapacity},
     },
     v2::logical::pools::SequenceHash,

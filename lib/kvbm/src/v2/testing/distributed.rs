@@ -7,7 +7,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::{
-    logical::{blocks::BlockMetadata, manager::BlockManager},
+    logical::manager::BlockManager,
     v2::{
         InstanceId,
         distributed::leader::InstanceLeader,
@@ -66,13 +66,16 @@ pub async fn create_instance_leader_pair(
 
     // Create G2 managers
     let g2_manager_a = Arc::new(managers::create_test_manager::<G2>(block_count, block_size));
+    let g3_manager_a = Arc::new(managers::create_test_manager::<G3>(block_count, block_size));
+
     let g2_manager_b = Arc::new(managers::create_test_manager::<G2>(block_count, block_size));
+    let g3_manager_b = Arc::new(managers::create_test_manager::<G3>(block_count, block_size));
 
     // Build InstanceLeader A
     let leader_a = InstanceLeader::builder()
-        .instance_id(nova_a.instance_id())
         .nova(nova_a.clone())
         .g2_manager(g2_manager_a.clone())
+        .g3_manager(g3_manager_a.clone())
         .workers(vec![]) // No workers for now (no transfers)
         .remote_leaders(vec![nova_b.instance_id()])
         .build()?;
@@ -82,9 +85,9 @@ pub async fn create_instance_leader_pair(
 
     // Build InstanceLeader B
     let leader_b = InstanceLeader::builder()
-        .instance_id(nova_b.instance_id())
         .nova(nova_b.clone())
         .g2_manager(g2_manager_b.clone())
+        .g3_manager(g3_manager_b.clone())
         .workers(vec![]) // No workers for now
         .remote_leaders(vec![nova_a.instance_id()])
         .build()?;
@@ -97,13 +100,13 @@ pub async fn create_instance_leader_pair(
             instance_id: nova_a.instance_id(),
             leader: leader_a,
             g2_manager: g2_manager_a,
-            g3_manager: None,
+            g3_manager: Some(g3_manager_a),
         },
         leader_b: TestInstanceLeader {
             instance_id: nova_b.instance_id(),
             leader: leader_b,
             g2_manager: g2_manager_b,
-            g3_manager: None,
+            g3_manager: Some(g3_manager_b),
         },
     })
 }
@@ -131,8 +134,10 @@ pub fn populate_leader_with_blocks(
     block_size: usize,
     start_token: u32,
 ) -> Result<(Arc<BlockManager<G2>>, Vec<SequenceHash>)> {
-    let token_sequence = super::token_blocks::create_token_sequence(num_blocks, block_size, start_token);
-    let seq_hashes = managers::populate_manager_with_blocks(&leader.g2_manager, token_sequence.blocks())?;
+    let token_sequence =
+        super::token_blocks::create_token_sequence(num_blocks, block_size, start_token);
+    let seq_hashes =
+        managers::populate_manager_with_blocks(&leader.g2_manager, token_sequence.blocks())?;
 
     Ok((leader.g2_manager.clone(), seq_hashes))
 }
@@ -163,8 +168,8 @@ mod tests {
             .await
             .expect("Should create pair");
 
-        let (manager, hashes) = populate_leader_with_blocks(&pair.leader_a, 10, 4, 0)
-            .expect("Should populate");
+        let (manager, hashes) =
+            populate_leader_with_blocks(&pair.leader_a, 10, 4, 0).expect("Should populate");
 
         assert_eq!(hashes.len(), 10);
         assert_eq!(manager.available_blocks(), 50); // All blocks available (10 in inactive)

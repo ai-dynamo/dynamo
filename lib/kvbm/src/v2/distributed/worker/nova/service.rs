@@ -5,7 +5,7 @@ use crate::physical::{manager::SerializedLayout, transfer::context::TransferConf
 
 use super::{
     Arc, DirectWorker, LocalTransferMessage, RemoteOffloadMessage, RemoteOnboardMessage, Result,
-    TransferOptions, Worker,
+    TransferOptions, WorkerTransfers,
 };
 
 use bytes::Bytes;
@@ -62,8 +62,8 @@ impl NovaWorkerService {
                 let notification = worker.execute_local_transfer(
                     message.src,
                     message.dst,
-                    message.src_block_ids,
-                    message.dst_block_ids,
+                    Arc::from(message.src_block_ids),
+                    Arc::from(message.dst_block_ids),
                     options,
                 )?;
 
@@ -99,7 +99,7 @@ impl NovaWorkerService {
                 let notification = worker.execute_remote_onboard(
                     message.src,
                     message.dst,
-                    message.dst_block_ids,
+                    Arc::from(message.dst_block_ids),
                     options,
                 )?;
 
@@ -135,7 +135,7 @@ impl NovaWorkerService {
                 let notification = worker.execute_remote_offload(
                     message.src,
                     message.dst,
-                    message.src_block_ids,
+                    Arc::from(message.src_block_ids),
                     options,
                 )?;
 

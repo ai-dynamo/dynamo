@@ -155,3 +155,155 @@ impl OnboardMessage {
         }
     }
 }
+
+// =============================================================================
+// Inverted Control Pattern (Prefill-Decode) Messages
+// =============================================================================
+//
+// These messages support the "inverted control pattern" where:
+// 1. Decode creates a local session (finds local matches, holds blocks)
+// 2. Decode sends the session_id to Prefill (out-of-band)
+// 3. Prefill attaches to the session on Decode via Nova
+// 4. Prefill controls the session remotely (queries state, triggers staging, pulls blocks)
+
+/// Messages for the inverted control pattern (remote session attachment).
+///
+/// Protocol:
+/// 1. Decode creates ControllableSession via `create_controllable_session()`
+/// 2. Prefill sends AttachSession to join
+/// 3. Decode sends SessionState with current block info
+/// 4. If G3 blocks exist and not auto-staging, Prefill sends TriggerStaging
+/// 5. Decode sends BlocksStaged as G3->G2 completes
+/// 6. Prefill pulls blocks via RDMA, sends BlocksPulled when done
+/// 7. Prefill sends DetachSession to close
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RemoteSessionMessage {
+    /// Prefill attaches to an existing session on Decode.
+    /// Triggers initial state emission.
+    AttachSession {
+        controller: InstanceId,
+        session_id: SessionId,
+    },
+
+    /// Session state snapshot sent after attachment or on state change.
+    /// Contains full metadata for G2-ready blocks and counts for pending G3.
+    SessionState {
+        session_id: SessionId,
+        /// Blocks currently in G2 (ready for RDMA pull)
+        g2_blocks: Vec<G2BlockInfo>,
+        /// Count of blocks pending G3->G2 staging
+        g3_pending_count: usize,
+        /// Optional: Full info for G3 blocks (for future direct G3 RDMA)
+        g3_blocks: Option<Vec<G3BlockInfo>>,
+        /// Current session phase
+        phase: RemoteSessionPhase,
+    },
+
+    /// Push notification when G3->G2 staging completes for specific blocks.
+    BlocksStaged {
+        session_id: SessionId,
+        /// Newly staged blocks now available in G2
+        staged_blocks: Vec<G2BlockInfo>,
+        /// Remaining G3 blocks pending
+        g3_remaining_count: usize,
+    },
+
+    /// Controller commands session to stage all G3 blocks to G2.
+    /// Idempotent: no-op if already staging or staged.
+    TriggerStaging {
+        controller: InstanceId,
+        session_id: SessionId,
+    },
+
+    /// Controller signals it has pulled specific blocks and they can be released.
+    BlocksPulled {
+        controller: InstanceId,
+        session_id: SessionId,
+        pulled_hashes: Vec<SequenceHash>,
+    },
+
+    /// Controller closes the session (all done).
+    DetachSession {
+        controller: InstanceId,
+        session_id: SessionId,
+    },
+
+    /// Session reports an error to controller.
+    SessionError {
+        session_id: SessionId,
+        error: String,
+    },
+}
+
+/// Full metadata for a G2 block (ready for RDMA pull).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct G2BlockInfo {
+    pub block_id: BlockId,
+    pub sequence_hash: SequenceHash,
+    pub layout_handle: LayoutHandle,
+}
+
+/// Metadata for a G3 block (for future direct RDMA from G3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct G3BlockInfo {
+    pub sequence_hash: SequenceHash,
+    // No block_id or layout_handle yet - G3 blocks need staging first
+}
+
+/// Phase of a remote-controlled session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RemoteSessionPhase {
+    /// Session created, awaiting controller attachment.
+    #[default]
+    AwaitingAttachment,
+    /// Controller attached, may still be staging.
+    Attached,
+    /// G3->G2 staging in progress (auto or triggered).
+    Staging,
+    /// All blocks in G2, ready for RDMA pull.
+    Ready,
+    /// Session complete (all blocks pulled or released).
+    Complete,
+}
+
+/// Options for controllable session creation.
+#[derive(Debug, Clone)]
+pub struct ControllableSessionOptions {
+    /// If true (default), immediately start G3→G2 staging.
+    /// If false, wait for controller to call trigger_staging().
+    pub auto_stage: bool,
+}
+
+impl Default for ControllableSessionOptions {
+    fn default() -> Self {
+        Self { auto_stage: true }
+    }
+}
+
+impl RemoteSessionMessage {
+    /// Extract the session ID from any message variant.
+    pub fn session_id(&self) -> SessionId {
+        match self {
+            RemoteSessionMessage::AttachSession { session_id, .. }
+            | RemoteSessionMessage::SessionState { session_id, .. }
+            | RemoteSessionMessage::BlocksStaged { session_id, .. }
+            | RemoteSessionMessage::TriggerStaging { session_id, .. }
+            | RemoteSessionMessage::BlocksPulled { session_id, .. }
+            | RemoteSessionMessage::DetachSession { session_id, .. }
+            | RemoteSessionMessage::SessionError { session_id, .. } => *session_id,
+        }
+    }
+
+    /// Extract the controller instance ID if present.
+    pub fn controller(&self) -> Option<InstanceId> {
+        match self {
+            RemoteSessionMessage::AttachSession { controller, .. }
+            | RemoteSessionMessage::TriggerStaging { controller, .. }
+            | RemoteSessionMessage::BlocksPulled { controller, .. }
+            | RemoteSessionMessage::DetachSession { controller, .. } => Some(*controller),
+            RemoteSessionMessage::SessionState { .. }
+            | RemoteSessionMessage::BlocksStaged { .. }
+            | RemoteSessionMessage::SessionError { .. } => None,
+        }
+    }
+}

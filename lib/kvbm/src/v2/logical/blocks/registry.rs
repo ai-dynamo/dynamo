@@ -572,11 +572,15 @@ impl BlockRegistrationHandle {
                         return Arc::new(duplicate);
                     }
                     BlockDuplicationPolicy::Reject => {
+                        // CRITICAL: Drop lock before calling reset_return_fn to avoid deadlock
+                        drop(attachments);
+
                         // Return existing primary, discard new block
-                        // The registered_block will be dropped and eventually returned to reset pool
                         let reset_block = registered_block.reset();
+                        let existing = existing_primary.clone();
+
                         reset_return_fn(reset_block);
-                        return existing_primary as Arc<dyn RegisteredBlock<T>>;
+                        return existing as Arc<dyn RegisteredBlock<T>>;
                     }
                 }
             }
@@ -684,9 +688,14 @@ impl BlockRegistrationHandle {
                         return Arc::new(duplicate);
                     }
                     BlockDuplicationPolicy::Reject => {
+                        // CRITICAL: Drop lock before calling reset_return_fn to avoid deadlock
+                        drop(attachments);
+
                         let reset_block = registered_block.reset();
+                        let existing = existing_primary.clone();
+
                         reset_return_fn(reset_block);
-                        return existing_primary as Arc<dyn RegisteredBlock<T>>;
+                        return existing as Arc<dyn RegisteredBlock<T>>;
                     }
                 }
             }

@@ -9,8 +9,8 @@
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
 
 use super::*;
-use crate::BlockId;
-use crate::physical::transfer::{BounceBufferSpec, TransferCapabilities, TransferOptions};
+use crate::physical::transfer::executor::TransferOptionsInternal;
+use crate::physical::transfer::{BounceBuffer, TransferCapabilities, TransferOptions};
 use crate::v2::physical::transfer::executor::execute_transfer;
 use anyhow::Result;
 use rstest::rstest;
@@ -34,20 +34,6 @@ fn build_layout(
     match layout_type {
         LayoutType::FC => create_fc_layout(agent, storage_kind, num_blocks),
         LayoutType::LW => create_lw_layout(agent, storage_kind, num_blocks),
-    }
-}
-
-struct DummyBounceBufferSpec {
-    pub layout: PhysicalLayout,
-    pub block_ids: Vec<usize>,
-}
-
-impl BounceBufferSpec for DummyBounceBufferSpec {
-    fn layout(&self) -> &PhysicalLayout {
-        &self.layout
-    }
-    fn block_ids(&self) -> &[BlockId] {
-        &self.block_ids
     }
 }
 
@@ -104,7 +90,12 @@ async fn test_p2p(
     )]
     dst_kind: StorageKind,
 ) -> Result<()> {
-    use crate::v2::physical::transfer::TransferOptions;
+    use crate::{
+        physical::transfer::{
+            BounceBufferInternal, BounceBufferLayout, executor::TransferOptionsInternal,
+        },
+        v2::physical::transfer::TransferOptions,
+    };
 
     let agent = build_agent_for_kinds(src_kind, dst_kind)?;
 
@@ -113,10 +104,7 @@ async fn test_p2p(
 
     let bounce_layout = build_layout(agent.clone(), LayoutType::FC, StorageKind::Pinned, 4);
 
-    let bounce_buffer_spec: Arc<dyn BounceBufferSpec> = Arc::new(DummyBounceBufferSpec {
-        layout: bounce_layout,
-        block_ids: vec![0, 1],
-    });
+    let bounce_buffer_spec = BounceBufferInternal::from_layout(bounce_layout, vec![0, 1]);
 
     let src_blocks = vec![0, 1];
     let dst_blocks = vec![2, 3];
@@ -124,7 +112,7 @@ async fn test_p2p(
     let checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
     let ctx = create_transfer_context(agent, None).unwrap();
 
-    let options = TransferOptions::builder()
+    let options = TransferOptionsInternal::builder()
         .bounce_buffer(bounce_buffer_spec)
         .build()?;
 
@@ -150,6 +138,8 @@ async fn test_roundtrip(
     #[values(StorageKind::System, StorageKind::Pinned, StorageKind::Device(0))]
     dst_kind: StorageKind,
 ) -> Result<()> {
+    use crate::physical::transfer::executor::TransferOptionsInternal;
+
     let agent = build_agent_for_kinds(src_kind, dst_kind)?;
 
     // Create layouts: source pinned, device intermediate, destination pinned
@@ -171,7 +161,7 @@ async fn test_roundtrip(
         &device,
         &src_blocks,
         &device_blocks,
-        TransferOptions::default(),
+        TransferOptionsInternal::default(),
         ctx.context(),
     )?;
     notification.await?;
@@ -182,7 +172,7 @@ async fn test_roundtrip(
         &dst,
         &device_blocks,
         &dst_blocks,
-        TransferOptions::default(),
+        TransferOptionsInternal::default(),
         ctx.context(),
     )?;
     notification.await?;
@@ -226,7 +216,7 @@ async fn test_gds(
         &dst,
         &src_blocks,
         &dst_blocks,
-        TransferOptions::default(),
+        TransferOptionsInternal::default(),
         ctx.context(),
     )?;
     notification.await?;
@@ -258,7 +248,7 @@ async fn test_large_block_counts(#[case] block_count: usize) {
         &device,
         &src_blocks,
         &device_blocks,
-        TransferOptions::default(),
+        TransferOptionsInternal::default(),
         ctx.context(),
     )
     .unwrap();
@@ -459,23 +449,31 @@ async fn test_bounce_with_guards_impl(
     let ctx = create_transfer_context(agent, None)?;
 
     // Execute bounce: host[0,1] → bounce[0,1]
+    let mut options_builder = TransferOptionsInternal::builder();
+    if let Some(range) = mode.layer_range() {
+        options_builder = options_builder.layer_range(range);
+    }
     let notification = execute_transfer(
         &host,
         &bounce,
         &src_blocks,
         &src_blocks,
-        TransferOptions::from_layer_range(mode.layer_range()),
+        options_builder.build()?,
         ctx.context(),
     )?;
     notification.await?;
 
     // Execute bounce: bounce[0,1] → host[3,4]
+    let mut options_builder = TransferOptionsInternal::builder();
+    if let Some(range) = mode.layer_range() {
+        options_builder = options_builder.layer_range(range);
+    }
     let notification = execute_transfer(
         &bounce,
         &host,
         &src_blocks,
         &dst_blocks,
-        TransferOptions::from_layer_range(mode.layer_range()),
+        options_builder.build()?,
         ctx.context(),
     )?;
     notification.await?;
@@ -609,12 +607,16 @@ async fn test_direct_transfer_impl(
     let ctx = create_transfer_context(agent, None)?;
 
     // Execute transfer
+    let mut options_builder = TransferOptionsInternal::builder();
+    if let Some(range) = mode.layer_range() {
+        options_builder = options_builder.layer_range(range);
+    }
     let notification = execute_transfer(
         &src,
         &dst,
         &src_blocks,
         &dst_blocks,
-        TransferOptions::from_layer_range(mode.layer_range()),
+        options_builder.build()?,
         ctx.context(),
     )?;
     notification.await?;

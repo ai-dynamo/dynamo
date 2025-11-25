@@ -8,13 +8,13 @@ pub struct NovaWorkerClient {
     remote: InstanceId,
 }
 
-impl Worker for NovaWorkerClient {
+impl WorkerTransfers for NovaWorkerClient {
     fn execute_local_transfer(
         &self,
         src: LogicalLayoutHandle,
         dst: LogicalLayoutHandle,
-        src_block_ids: Vec<BlockId>,
-        dst_block_ids: Vec<BlockId>,
+        src_block_ids: Arc<[BlockId]>,
+        dst_block_ids: Arc<[BlockId]>,
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
         // Create a single local event for this operation
@@ -35,8 +35,8 @@ impl Worker for NovaWorkerClient {
         let message = LocalTransferMessage {
             src,
             dst,
-            src_block_ids,
-            dst_block_ids,
+            src_block_ids: src_block_ids.to_vec(),
+            dst_block_ids: dst_block_ids.to_vec(),
             options,
         };
 
@@ -71,7 +71,7 @@ impl Worker for NovaWorkerClient {
         &self,
         src: RemoteDescriptor,
         dst: LogicalLayoutHandle,
-        dst_block_ids: Vec<BlockId>,
+        dst_block_ids: Arc<[BlockId]>,
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
         let event = self.nova.events().new_event()?;
@@ -87,7 +87,7 @@ impl Worker for NovaWorkerClient {
         let message = RemoteOnboardMessage {
             src,
             dst,
-            dst_block_ids,
+            dst_block_ids: dst_block_ids.to_vec(),
             options,
         };
 
@@ -120,7 +120,7 @@ impl Worker for NovaWorkerClient {
         &self,
         src: LogicalLayoutHandle,
         dst: RemoteDescriptor,
-        src_block_ids: Vec<BlockId>,
+        src_block_ids: Arc<[BlockId]>,
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
         let event = self.nova.events().new_event()?;
@@ -136,7 +136,7 @@ impl Worker for NovaWorkerClient {
         let message = RemoteOffloadMessage {
             src,
             dst,
-            src_block_ids,
+            src_block_ids: src_block_ids.to_vec(),
             options,
         };
 
@@ -164,7 +164,9 @@ impl Worker for NovaWorkerClient {
 
         Ok(TransferCompleteNotification::from_awaiter(awaiter))
     }
+}
 
+impl Worker for NovaWorkerClient {
     fn export_metadata(&self) -> Result<SerializedLayoutResponse> {
         let instance = self.remote;
 

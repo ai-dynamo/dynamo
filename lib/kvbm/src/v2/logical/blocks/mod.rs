@@ -79,6 +79,5 @@ pub(crate) trait RegisteredBlock<T>: Send + Sync {
     fn sequence_hash(&self) -> SequenceHash;
 
     /// Get the registration handle
-    #[expect(dead_code)]
     fn registration_handle(&self) -> &BlockRegistrationHandle;
 }

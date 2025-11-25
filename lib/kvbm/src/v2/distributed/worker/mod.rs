@@ -7,9 +7,13 @@ mod nova;
 use anyhow::Result;
 use futures::future::{Either, Ready, ready};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
-use crate::{
+pub use crate::{
     physical::{
         manager::{LayoutHandle, SerializedLayout},
         transfer::TransferCompleteNotification,
@@ -33,9 +37,9 @@ impl SerializedLayoutResponse {
         }
     }
 
-    pub fn from_awaiter(awaiter: SerializedResponseAwaiter) -> Self {
+    pub fn from_awaiter(awaiter: impl Into<SerializedResponseAwaiter>) -> Self {
         Self {
-            awaiter: Either::Right(awaiter),
+            awaiter: Either::Right(awaiter.into()),
         }
     }
 
@@ -84,7 +88,7 @@ impl std::future::IntoFuture for ImportMetadataResponse {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum RemoteDescriptor {
     Layout {
         handle: LayoutHandle,
@@ -95,7 +99,7 @@ pub enum RemoteDescriptor {
     },
 }
 
-pub trait Worker: Send + Sync {
+pub trait WorkerTransfers: Send + Sync {
     /// Execute a local transfer between two logical layouts.
     ///
     /// # Arguments
@@ -111,8 +115,8 @@ pub trait Worker: Send + Sync {
         &self,
         src: LogicalLayoutHandle,
         dst: LogicalLayoutHandle,
-        src_block_ids: Vec<BlockId>,
-        dst_block_ids: Vec<BlockId>,
+        src_block_ids: Arc<[BlockId]>,
+        dst_block_ids: Arc<[BlockId]>,
         options: crate::physical::transfer::TransferOptions,
     ) -> Result<TransferCompleteNotification>;
 
@@ -132,7 +136,7 @@ pub trait Worker: Send + Sync {
         &self,
         src: RemoteDescriptor,
         dst: LogicalLayoutHandle,
-        dst_block_ids: Vec<BlockId>,
+        dst_block_ids: Arc<[BlockId]>,
         options: crate::physical::transfer::TransferOptions,
     ) -> Result<TransferCompleteNotification>;
 
@@ -152,10 +156,12 @@ pub trait Worker: Send + Sync {
         &self,
         src: LogicalLayoutHandle,
         dst: RemoteDescriptor,
-        src_block_ids: Vec<BlockId>,
+        src_block_ids: Arc<[BlockId]>,
         options: crate::physical::transfer::TransferOptions,
     ) -> Result<TransferCompleteNotification>;
+}
 
+pub trait Worker: WorkerTransfers + Send + Sync {
     /// Export the local metadata for this worker.
     ///
     /// # Returns

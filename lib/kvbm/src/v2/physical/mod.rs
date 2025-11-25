@@ -4,3 +4,5 @@
 pub mod layout;
 pub mod manager;
 pub mod transfer;
+
+pub use {manager::TransferManager, transfer::TransferOptions};

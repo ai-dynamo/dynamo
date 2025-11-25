@@ -42,7 +42,7 @@ pub struct ResponderSession {
     g2_manager: Arc<BlockManager<G2>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
     worker: Option<Arc<dyn Worker>>,
-    transport: Arc<dyn MessageTransport>,
+    transport: Arc<MessageTransport>,
     held_g2_blocks: Vec<ImmutableBlock<G2>>,
     held_g3_blocks: Vec<ImmutableBlock<G3>>,
 }
@@ -56,7 +56,7 @@ impl ResponderSession {
         g2_manager: Arc<BlockManager<G2>>,
         g3_manager: Option<Arc<BlockManager<G3>>>,
         worker: Option<Arc<dyn Worker>>,
-        transport: Arc<dyn MessageTransport>,
+        transport: Arc<MessageTransport>,
     ) -> Self {
         Self {
             session_id,
@@ -265,8 +265,8 @@ impl ResponderSession {
         let notification = worker.execute_local_transfer(
             LogicalLayoutHandle::G3,
             LogicalLayoutHandle::G2,
-            stage_block_ids.clone(),
-            dst_block_ids.clone(),
+            Arc::from(stage_block_ids.clone()),
+            Arc::from(dst_block_ids.clone()),
             TransferOptions::default(),
         )?;
 

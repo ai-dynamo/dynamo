@@ -39,7 +39,7 @@ pub struct InitiatorSession {
     g2_manager: Arc<BlockManager<G2>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
     worker: Option<Arc<dyn Worker>>,
-    transport: Arc<dyn MessageTransport>,
+    transport: Arc<MessageTransport>,
     status_tx: watch::Sender<OnboardingStatus>,
 
     // Held blocks from local search
@@ -61,14 +61,14 @@ pub struct InitiatorSession {
 impl InitiatorSession {
     /// Create a new initiator session.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         session_id: SessionId,
         instance_id: InstanceId,
         mode: StagingMode,
         g2_manager: Arc<BlockManager<G2>>,
         g3_manager: Option<Arc<BlockManager<G3>>>,
         worker: Option<Arc<dyn Worker>>,
-        transport: Arc<dyn MessageTransport>,
+        transport: Arc<MessageTransport>,
         status_tx: watch::Sender<OnboardingStatus>,
         all_g2_blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
         control_rx: mpsc::Receiver<SessionControl>,
@@ -313,7 +313,10 @@ impl InitiatorSession {
                         && pending_acknowledgments.is_empty()
                         && pending_search_complete.is_empty()
                     {
-                        eprintln!("[INITIATOR {}] All responses received, exiting search_phase", self.session_id);
+                        eprintln!(
+                            "[INITIATOR {}] All responses received, exiting search_phase",
+                            self.session_id
+                        );
                         break;
                     }
                 }
@@ -326,7 +329,10 @@ impl InitiatorSession {
                         && pending_acknowledgments.is_empty()
                         && pending_search_complete.is_empty()
                     {
-                        eprintln!("[INITIATOR {}] All responses received, exiting search_phase", self.session_id);
+                        eprintln!(
+                            "[INITIATOR {}] All responses received, exiting search_phase",
+                            self.session_id
+                        );
                         break;
                     }
                 }
@@ -480,8 +486,8 @@ impl InitiatorSession {
         let notification = worker.execute_local_transfer(
             LogicalLayoutHandle::G3,
             LogicalLayoutHandle::G2,
-            src_ids,
-            dst_ids.clone(),
+            Arc::from(src_ids),
+            Arc::from(dst_ids.clone()),
             TransferOptions::default(),
         )?;
 

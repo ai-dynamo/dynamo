@@ -20,14 +20,17 @@ use crate::{
     },
 };
 
+use crate::v2::physical::manager::LayoutHandle;
+
 use super::{
     super::worker::Worker,
     FindMatchesOptions, FindMatchesResult, Leader, OnboardingStatus, SessionHandle, SessionId,
     StagingMode,
     nova::NovaLeaderService,
     session::{
-        InitiatorSession, MessageTransport, NovaTransport, OnboardMessage, OnboardSessionTx,
-        ResponderSession,
+        ControllableSession, ControllableSessionOptions, ControllableSessionResult,
+        InitiatorSession, MessageTransport, OnboardMessage, OnboardSessionTx, RemoteSessionHandle,
+        RemoteSessionMessage, RemoteSessionTx, ResponderSession, remote_session_state_channel,
     },
 };
 
@@ -37,12 +40,6 @@ use super::{
 /// managing G2 (host memory) and optional G3 (disk) block managers.
 #[derive(Clone)]
 pub struct InstanceLeader {
-    /// The instance ID of this leader.
-    instance_id: InstanceId,
-
-    /// Runtime handle for spawning async tasks.
-    rt: tokio::runtime::Handle,
-
     /// Nova instance for distributed communication.
     nova: Arc<Nova>,
 
@@ -66,14 +63,24 @@ pub struct InstanceLeader {
     remote_leaders: Vec<InstanceId>,
 
     /// Message transport for session communication.
-    transport: Arc<dyn MessageTransport>,
+    transport: Arc<MessageTransport>,
+
+    // ========================================================================
+    // Inverted Control Pattern (Prefill-Decode) Fields
+    // ========================================================================
+
+    /// Map of controllable sessions (Decode side).
+    /// Used when this instance hosts sessions that can be controlled remotely.
+    controllable_sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
+
+    /// Map of remote session receivers (Prefill side).
+    /// Used when this instance controls sessions on remote instances.
+    remote_sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
 }
 
 /// Builder for InstanceLeader.
 #[derive(Default)]
 pub struct InstanceLeaderBuilder {
-    instance_id: Option<InstanceId>,
-    rt: Option<tokio::runtime::Handle>,
     nova: Option<Arc<Nova>>,
     g2_manager: Option<Arc<BlockManager<G2>>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
@@ -83,11 +90,6 @@ pub struct InstanceLeaderBuilder {
 }
 
 impl InstanceLeaderBuilder {
-    pub fn instance_id(mut self, id: InstanceId) -> Self {
-        self.instance_id = Some(id);
-        self
-    }
-
     pub fn nova(mut self, nova: Arc<Nova>) -> Self {
         self.nova = Some(nova);
         self
@@ -124,7 +126,7 @@ impl InstanceLeaderBuilder {
         let nova = self
             .nova
             .ok_or_else(|| anyhow::anyhow!("Nova instance required"))?;
-        let transport = Arc::new(NovaTransport::new(nova.clone()));
+        let transport = Arc::new(MessageTransport::nova(nova.clone()));
 
         // // Validate at least one worker
         // if self.workers.is_empty() {
@@ -132,10 +134,6 @@ impl InstanceLeaderBuilder {
         // }
 
         Ok(InstanceLeader {
-            instance_id: self
-                .instance_id
-                .ok_or_else(|| anyhow::anyhow!("instance_id required"))?,
-            rt: self.rt.unwrap_or_else(tokio::runtime::Handle::current),
             nova,
             g2_manager: self
                 .g2_manager
@@ -146,6 +144,8 @@ impl InstanceLeaderBuilder {
             session_states: Arc::new(DashMap::new()),
             remote_leaders: self.remote_leaders.unwrap_or_default(),
             transport,
+            controllable_sessions: Arc::new(DashMap::new()),
+            remote_sessions: Arc::new(DashMap::new()),
         })
     }
 }
@@ -168,7 +168,7 @@ impl InstanceLeader {
     ///
     /// This must be called after construction to enable distributed onboarding.
     pub fn register_handlers(&self) -> Result<()> {
-        let instance_id = self.instance_id;
+        let instance_id = self.nova.instance_id();
         let g2_manager = self.g2_manager.clone();
         let g3_manager = self.g3_manager.clone();
         // TODO: Pass all workers to session or use aggregated transfer methods
@@ -210,6 +210,8 @@ impl InstanceLeader {
 
         NovaLeaderService::new(self.nova.clone(), self.sessions.clone())
             .with_spawn_responder(spawn_responder)
+            .with_controllable_sessions(self.controllable_sessions.clone())
+            .with_remote_sessions(self.remote_sessions.clone())
             .register_handlers()?;
 
         Ok(())
@@ -229,6 +231,190 @@ impl InstanceLeader {
     pub fn release_session(&self, session_id: SessionId) {
         self.session_states.remove(&session_id);
         self.sessions.remove(&session_id);
+    }
+
+    // ========================================================================
+    // Inverted Control Pattern (Prefill-Decode) Methods
+    // ========================================================================
+
+    /// Create a controllable session for local blocks.
+    ///
+    /// This is the "Decode side" of the inverted control pattern:
+    /// 1. Search local G2 and G3 for matches
+    /// 2. Create a ControllableSession that holds the blocks
+    /// 3. Return session_id to be sent to Prefill out-of-band
+    ///
+    /// By default, G3→G2 staging starts immediately (auto_stage=true).
+    pub fn create_controllable_session(
+        &self,
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<ControllableSessionResult> {
+        self.create_controllable_session_with_options(
+            sequence_hashes,
+            ControllableSessionOptions::default(),
+        )
+    }
+
+    /// Create a controllable session with custom options.
+    ///
+    /// Use this when you need to control auto-staging behavior.
+    pub fn create_controllable_session_with_options(
+        &self,
+        sequence_hashes: &[SequenceHash],
+        options: ControllableSessionOptions,
+    ) -> Result<ControllableSessionResult> {
+        let session_id = SessionId::from(Uuid::new_v4());
+
+        // Local search only
+        let g2_matches = self.g2_manager.match_blocks(sequence_hashes);
+
+        // Find remaining hashes not in G2
+        let remaining_hashes: Vec<_> = sequence_hashes
+            .iter()
+            .filter(|h| !g2_matches.iter().any(|b| b.sequence_hash() == **h))
+            .copied()
+            .collect();
+
+        // Search G3 for remaining hashes
+        let g3_matches = if let Some(ref g3_manager) = self.g3_manager {
+            g3_manager.match_blocks(&remaining_hashes)
+        } else {
+            Vec::new()
+        };
+
+        let local_g2_count = g2_matches.len();
+        let local_g3_count = g3_matches.len();
+
+        // Create session channel
+        let (tx, rx) = mpsc::channel(100);
+        self.controllable_sessions.insert(session_id, tx);
+
+        // TODO: Get actual G2 layout handle from manager
+        let g2_layout_handle = LayoutHandle::new(0, 0); // Placeholder
+
+        // Create controllable session
+        let session = ControllableSession::new(
+            session_id,
+            self.nova.instance_id(),
+            g2_matches,
+            g3_matches,
+            g2_layout_handle,
+            self.g2_manager.clone(),
+            self.g3_manager.clone(),
+            self.workers.first().cloned(),
+            self.transport.clone(),
+            rx,
+            options,
+        );
+
+        // Spawn session task
+        let controllable_sessions = self.controllable_sessions.clone();
+        tokio::spawn(async move {
+            if let Err(e) = session.run().await {
+                eprintln!("ControllableSession error: {e}");
+            }
+            // Clean up when session completes
+            controllable_sessions.remove(&session_id);
+        });
+
+        Ok(ControllableSessionResult {
+            session_id,
+            local_g2_count,
+            local_g3_count,
+        })
+    }
+
+    /// Attach to a remote session on another instance (Decode).
+    ///
+    /// This is the "Prefill side" of the inverted control pattern:
+    /// 1. Send AttachSession to Decode
+    /// 2. Receive RemoteSessionHandle for controlling the session
+    /// 3. Use handle to query state, trigger staging, pull blocks
+    pub async fn attach_remote_session(
+        &self,
+        remote_instance: InstanceId,
+        session_id: SessionId,
+    ) -> Result<RemoteSessionHandle> {
+        // Create local channel for receiving state updates
+        let (state_tx, state_rx) = remote_session_state_channel();
+
+        // Register handler for this session's messages
+        let (msg_tx, msg_rx) = mpsc::channel(100);
+        self.remote_sessions.insert(session_id, msg_tx);
+
+        // Spawn receiver task to update state
+        tokio::spawn(Self::run_remote_session_receiver(msg_rx, state_tx));
+
+        // Send attach message
+        let msg = RemoteSessionMessage::AttachSession {
+            controller: self.nova.instance_id(),
+            session_id,
+        };
+        self.transport
+            .send_remote_session(remote_instance, msg)
+            .await?;
+
+        Ok(RemoteSessionHandle::new(
+            session_id,
+            remote_instance,
+            self.nova.instance_id(),
+            self.transport.clone(),
+            state_rx,
+        ))
+    }
+
+    /// Internal: Process incoming messages for a remote session.
+    async fn run_remote_session_receiver(
+        mut rx: mpsc::Receiver<RemoteSessionMessage>,
+        state_tx: super::session::RemoteSessionStateTx,
+    ) {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                RemoteSessionMessage::SessionState {
+                    g2_blocks,
+                    g3_pending_count,
+                    g3_blocks,
+                    phase,
+                    ..
+                } => {
+                    state_tx.update_from_session_state(
+                        g2_blocks,
+                        g3_pending_count,
+                        g3_blocks,
+                        phase,
+                    );
+                }
+                RemoteSessionMessage::BlocksStaged {
+                    staged_blocks,
+                    g3_remaining_count,
+                    ..
+                } => {
+                    state_tx.update_from_blocks_staged(staged_blocks, g3_remaining_count);
+                }
+                RemoteSessionMessage::SessionError { error, .. } => {
+                    eprintln!("Remote session error: {}", error);
+                    break;
+                }
+                _ => {
+                    // Ignore outbound message types (AttachSession, TriggerStaging, etc.)
+                }
+            }
+        }
+    }
+
+    /// Release resources for a remote session handle.
+    pub fn release_remote_session(&self, session_id: SessionId) {
+        self.remote_sessions.remove(&session_id);
+    }
+
+    /// Get the controllable sessions map (for Nova handler registration).
+    pub(crate) fn controllable_sessions(&self) -> Arc<DashMap<SessionId, RemoteSessionTx>> {
+        self.controllable_sessions.clone()
+    }
+
+    /// Get the remote sessions map (for Nova handler registration).
+    pub(crate) fn remote_sessions(&self) -> Arc<DashMap<SessionId, RemoteSessionTx>> {
+        self.remote_sessions.clone()
     }
 
     // ========================================================================
@@ -369,7 +555,7 @@ impl Leader for InstanceLeader {
 
         let session = InitiatorSession::new(
             session_id,
-            self.instance_id,
+            self.nova.instance_id(),
             options.staging_mode,
             self.g2_manager.clone(),
             self.g3_manager.clone(),

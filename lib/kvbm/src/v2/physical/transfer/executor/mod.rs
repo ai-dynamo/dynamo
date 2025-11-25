@@ -10,6 +10,7 @@ mod nixl;
 use super::strategy::select_strategy;
 use super::validation::validate_block_transfer;
 use super::{PhysicalLayout, TransferContext, TransferOptions, TransferPlan, TransferStrategy};
+use crate::physical::transfer::BounceBufferInternal;
 use crate::v2::physical::transfer::{StorageKind, context::TransferCompleteNotification};
 use crate::{BlockId, SequenceHash};
 use anyhow::Result;
@@ -55,6 +56,51 @@ pub(crate) fn g4_write(
 // Re-export the NIXL transfer builder for public use
 pub use nixl::NixlTransferBuilder;
 
+#[derive(Default)]
+pub(crate) struct TransferOptionsInternal {
+    layer_range: Option<Range<usize>>,
+    nixl_write_notification: Option<u64>,
+    bounce_buffer: Option<BounceBufferInternal>,
+}
+
+impl TransferOptionsInternal {
+    pub(crate) fn builder() -> TransferOptionsInternalBuilder {
+        TransferOptionsInternalBuilder::default()
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct TransferOptionsInternalBuilder {
+    layer_range: Option<Range<usize>>,
+    nixl_write_notification: Option<u64>,
+    bounce_buffer: Option<BounceBufferInternal>,
+}
+
+impl TransferOptionsInternalBuilder {
+    pub(crate) fn layer_range(mut self, range: Range<usize>) -> Self {
+        self.layer_range = Some(range);
+        self
+    }
+
+    pub(crate) fn nixl_write_notification(mut self, notification: u64) -> Self {
+        self.nixl_write_notification = Some(notification);
+        self
+    }
+
+    pub(crate) fn bounce_buffer(mut self, bounce_buffer: BounceBufferInternal) -> Self {
+        self.bounce_buffer = Some(bounce_buffer);
+        self
+    }
+
+    pub(crate) fn build(self) -> Result<TransferOptionsInternal> {
+        Ok(TransferOptionsInternal {
+            layer_range: self.layer_range,
+            nixl_write_notification: self.nixl_write_notification,
+            bounce_buffer: self.bounce_buffer,
+        })
+    }
+}
+
 /// Execute a transfer between two physical layouts.
 ///
 /// This is an internal entry point for all transfer operations called by TransportManager.
@@ -72,7 +118,7 @@ pub(crate) fn execute_transfer(
     dst: &PhysicalLayout,
     src_block_ids: &[BlockId],
     dst_block_ids: &[BlockId],
-    options: TransferOptions,
+    options: TransferOptionsInternal,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     // Validate block IDs
@@ -331,7 +377,7 @@ struct TwoHopTransferParams<'a> {
     first_strategy: TransferStrategy,
     bounce_location: StorageKind,
     second_strategy: TransferStrategy,
-    options: TransferOptions,
+    options: TransferOptionsInternal,
     ctx: &'a TransferContext,
 }
 
@@ -361,10 +407,10 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
     let dst_block_ids = dst_block_ids.to_vec();
 
     let ctx_clone = ctx.clone();
-    let options_clone = options.clone();
+    // let options_clone = options.clone();
 
     ctx.tokio().spawn(async move {
-        let Some(ref bounce_buffer_spec) = options_clone.bounce_buffer else {
+        let Some(ref bounce_buffer_spec) = options.bounce_buffer else {
             let _ = system.poison(
                 handle,
                 "Two-hop transfers require a bounce buffer.".to_string(),
@@ -372,7 +418,7 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
             return;
         };
 
-        if bounce_buffer_spec.layout().location() != bounce_location {
+        if bounce_buffer_spec.layout.location() != bounce_location {
             let _ = system.poison(
                 handle,
                 "Bounce buffer layout does not match bounce location.".to_string(),
@@ -380,7 +426,7 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
             return;
         }
 
-        let num_bounce_blocks = bounce_buffer_spec.block_ids().len();
+        let num_bounce_blocks = bounce_buffer_spec.block_ids.len();
 
         // Handle case where bounce buffer is smaller than transfer size
         if num_bounce_blocks < src_block_ids.len() {
@@ -389,18 +435,17 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
                 .chunks(num_bounce_blocks)
                 .zip(dst_block_ids.chunks(num_bounce_blocks))
             {
-                let bounce_block_ids_to_use =
-                    &bounce_buffer_spec.block_ids()[..src_block_ids.len()];
+                let bounce_block_ids_to_use = &bounce_buffer_spec.block_ids[..src_block_ids.len()];
                 if let Err(e) = execute_two_hop_transfer_chunk(
                     &src_clone,
-                    bounce_buffer_spec.layout(),
+                    &bounce_buffer_spec.layout,
                     &dst_clone,
                     src_block_ids,
                     bounce_block_ids_to_use,
                     dst_block_ids,
                     first_strategy,
                     second_strategy,
-                    &options_clone.layer_range,
+                    &options.layer_range,
                     &ctx_clone,
                 )
                 .await
@@ -412,17 +457,17 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
             let _ = system.trigger(handle);
         } else if num_bounce_blocks == 1 {
             // Single bounce block: use sequential chunk processing
-            let bounce_block_ids_to_use = &bounce_buffer_spec.block_ids()[..src_block_ids.len()];
+            let bounce_block_ids_to_use = &bounce_buffer_spec.block_ids[..src_block_ids.len()];
             let result = execute_two_hop_transfer_chunk(
                 &src_clone,
-                bounce_buffer_spec.layout(),
+                &bounce_buffer_spec.layout,
                 &dst_clone,
                 src_block_ids.as_slice(),
                 bounce_block_ids_to_use,
                 dst_block_ids.as_slice(),
                 first_strategy,
                 second_strategy,
-                &options_clone.layer_range,
+                &options.layer_range,
                 &ctx_clone,
             )
             .await;
@@ -439,14 +484,14 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
             // Multiple bounce blocks: use optimized double-buffering
             if let Err(e) = handle_buffered_transfer(
                 &src_clone,
-                bounce_buffer_spec.layout(),
+                &bounce_buffer_spec.layout,
                 &dst_clone,
                 &src_block_ids,
-                bounce_buffer_spec.block_ids(),
+                &bounce_buffer_spec.block_ids,
                 &dst_block_ids,
                 first_strategy,
                 second_strategy,
-                &options_clone.layer_range,
+                &options.layer_range,
                 &ctx_clone,
             )
             .await

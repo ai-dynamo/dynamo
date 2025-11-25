@@ -7,7 +7,11 @@ pub mod session;
 
 pub use instance::InstanceLeader;
 pub use nova::NovaLeaderService;
-pub use session::{InitiatorSession, OnboardingSession, ResponderSession, SessionId};
+pub use session::{
+    ControllableSession, ControllableSessionOptions, ControllableSessionResult, G2BlockInfo,
+    G3BlockInfo, InitiatorSession, OnboardingSession, RemoteSessionHandle, RemoteSessionMessage,
+    RemoteSessionPhase, RemoteSessionState, ResponderSession, SessionId,
+};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

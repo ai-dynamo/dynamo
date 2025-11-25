@@ -10,3 +10,5 @@
 
 pub mod leader;
 pub mod worker;
+
+pub mod parallelism;

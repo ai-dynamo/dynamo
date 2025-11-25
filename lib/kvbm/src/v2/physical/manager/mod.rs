@@ -16,10 +16,11 @@ pub(crate) use metadata::LocalLayoutDescriptor;
 pub(crate) use remote::RemoteLayout;
 
 use crate::BlockId;
+use crate::physical::transfer::BounceBufferInternal;
 use crate::v2::physical::layout::PhysicalLayout;
-use crate::v2::physical::transfer::BounceBufferSpec;
 use crate::v2::physical::transfer::TransferContext;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
+use crate::v2::physical::transfer::executor::TransferOptionsInternal;
 use crate::v2::physical::transfer::options::TransferOptions;
 use anyhow::{Result, anyhow, bail};
 use dynamo_memory::StorageKind;
@@ -176,6 +177,30 @@ impl TransferManager {
             (src, dst)
         }; // Lock released here
 
+        let TransferOptions {
+            layer_range,
+            nixl_write_notification,
+            bounce_buffer,
+        } = options;
+
+        let mut internal_options = TransferOptionsInternal::builder();
+
+        if let Some(range) = layer_range {
+            internal_options = internal_options.layer_range(range);
+        }
+
+        if let Some(notification) = nixl_write_notification {
+            internal_options = internal_options.nixl_write_notification(notification);
+        }
+
+        if let Some(bounce) = bounce_buffer {
+            let (handle, block_ids) = bounce.into_parts();
+            let bounce_buffer = self.create_bounce_buffer(handle, block_ids)?;
+            internal_options = internal_options.bounce_buffer(bounce_buffer);
+        }
+
+        let options = internal_options.build()?;
+
         // Execute transfer with no lock held
         super::transfer::executor::execute_transfer(
             &src_layout,
@@ -208,11 +233,11 @@ impl TransferManager {
     ///
     /// This resolves the layout handle to a physical layout and wraps it in a
     /// BounceBufferSpec implementation for use in transfer options.
-    pub fn create_bounce_buffer(
+    pub(crate) fn create_bounce_buffer(
         &self,
         handle: LayoutHandle,
         block_ids: Vec<BlockId>,
-    ) -> Result<Arc<dyn BounceBufferSpec>> {
+    ) -> Result<BounceBufferInternal> {
         let layout = {
             let registry = self.registry.read().unwrap();
             registry
@@ -221,7 +246,7 @@ impl TransferManager {
                 .clone()
         };
 
-        Ok(Arc::new(SimpleBounceBuffer { layout, block_ids }))
+        Ok(BounceBufferInternal::from_layout(layout, block_ids))
     }
 
     // ===== Internal Methods for Testing =====
@@ -499,22 +524,6 @@ impl LayoutRegistry {
     /// Get all remote layout handles.
     pub(crate) fn remote_handles(&self) -> Vec<LayoutHandle> {
         self.remote_layouts.keys().copied().collect()
-    }
-}
-
-/// Simple implementation of BounceBufferSpec for use with resolved handles
-struct SimpleBounceBuffer {
-    layout: PhysicalLayout,
-    block_ids: Vec<BlockId>,
-}
-
-impl BounceBufferSpec for SimpleBounceBuffer {
-    fn layout(&self) -> &PhysicalLayout {
-        &self.layout
-    }
-
-    fn block_ids(&self) -> &[BlockId] {
-        &self.block_ids
     }
 }
 

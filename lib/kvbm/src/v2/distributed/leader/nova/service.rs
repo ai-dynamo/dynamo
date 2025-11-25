@@ -8,21 +8,27 @@ use dynamo_nova::am::{Nova, NovaHandler};
 use std::sync::Arc;
 
 use crate::v2::distributed::leader::session::{
-    OnboardMessage, OnboardSessionTx, SessionId, dispatch_onboard_message,
+    OnboardMessage, OnboardSessionTx, RemoteSessionMessage, RemoteSessionTx, SessionId,
+    dispatch_onboard_message, dispatch_remote_session_message,
 };
 
 /// Nova leader service for handling distributed onboarding messages.
 ///
-/// This service registers a simple handler that:
-/// 1. Deserializes incoming OnboardMessage
-/// 2. Dispatches to the appropriate session channel
-/// 3. For CreateSession messages, spawns a new responder session if needed
+/// This service registers handlers for:
+/// 1. OnboardMessage: Standard find_matches flow (initiator → responder)
+/// 2. RemoteSessionMessage: Inverted control pattern (Prefill-Decode)
 pub struct NovaLeaderService {
     nova: Arc<Nova>,
     sessions: Arc<DashMap<SessionId, OnboardSessionTx>>,
     /// Callback to spawn new responder sessions.
     /// Takes the CreateSession message and creates a new responder task.
     spawn_responder: Option<Arc<dyn Fn(OnboardMessage) -> Result<()> + Send + Sync>>,
+
+    // Inverted control pattern (Prefill-Decode) fields
+    /// Map of controllable sessions (Decode side).
+    controllable_sessions: Option<Arc<DashMap<SessionId, RemoteSessionTx>>>,
+    /// Map of remote session receivers (Prefill side).
+    remote_sessions: Option<Arc<DashMap<SessionId, RemoteSessionTx>>>,
 }
 
 impl NovaLeaderService {
@@ -31,6 +37,8 @@ impl NovaLeaderService {
             nova,
             sessions,
             spawn_responder: None,
+            controllable_sessions: None,
+            remote_sessions: None,
         }
     }
 
@@ -43,9 +51,33 @@ impl NovaLeaderService {
         self
     }
 
+    /// Set the controllable sessions map (Decode side of inverted pattern).
+    pub fn with_controllable_sessions(
+        mut self,
+        sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
+    ) -> Self {
+        self.controllable_sessions = Some(sessions);
+        self
+    }
+
+    /// Set the remote sessions map (Prefill side of inverted pattern).
+    pub fn with_remote_sessions(
+        mut self,
+        sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
+    ) -> Self {
+        self.remote_sessions = Some(sessions);
+        self
+    }
+
     /// Register all Nova handlers for leader-to-leader communication.
     pub fn register_handlers(self) -> Result<()> {
         self.register_onboard_handler()?;
+
+        // Only register remote_session handler if inverted pattern is configured
+        if self.controllable_sessions.is_some() || self.remote_sessions.is_some() {
+            self.register_remote_session_handler()?;
+        }
+
         Ok(())
     }
 
@@ -71,8 +103,11 @@ impl NovaLeaderService {
 
                 let session_id = message.session_id();
 
-                eprintln!("[HANDLER] Received message: {:?} for session {}",
-                    std::mem::discriminant(&message), session_id);
+                eprintln!(
+                    "[HANDLER] Received message: {:?} for session {}",
+                    std::mem::discriminant(&message),
+                    session_id
+                );
 
                 // If this is a CreateSession and no session exists, spawn responder
                 if matches!(message, OnboardMessage::CreateSession { .. }) {
@@ -92,6 +127,57 @@ impl NovaLeaderService {
             }
         })
         .build();
+
+        self.nova.register_handler(handler)?;
+
+        Ok(())
+    }
+
+    /// Register the "kvbm.leader.remote_session" handler.
+    ///
+    /// This handler supports the inverted control pattern (Prefill-Decode):
+    /// - Routes messages to controllable_sessions (Decode side) or remote_sessions (Prefill side)
+    fn register_remote_session_handler(&self) -> Result<()> {
+        let controllable_sessions = self
+            .controllable_sessions
+            .clone()
+            .unwrap_or_else(|| Arc::new(DashMap::new()));
+        let remote_sessions = self
+            .remote_sessions
+            .clone()
+            .unwrap_or_else(|| Arc::new(DashMap::new()));
+
+        let handler =
+            NovaHandler::am_handler_async("kvbm.leader.remote_session", move |ctx| {
+                let controllable_sessions = controllable_sessions.clone();
+                let remote_sessions = remote_sessions.clone();
+
+                async move {
+                    let message: RemoteSessionMessage = serde_json::from_slice(&ctx.payload)
+                        .map_err(|e| {
+                            anyhow::anyhow!("failed to deserialize RemoteSessionMessage: {e}")
+                        })?;
+
+                    let session_id = message.session_id();
+
+                    eprintln!(
+                        "[HANDLER] Received remote session message: {:?} for session {}",
+                        std::mem::discriminant(&message),
+                        session_id
+                    );
+
+                    // Dispatch to appropriate session map
+                    dispatch_remote_session_message(
+                        &controllable_sessions,
+                        &remote_sessions,
+                        message,
+                    )
+                    .await?;
+
+                    Ok(())
+                }
+            })
+            .build();
 
         self.nova.register_handler(handler)?;
 
