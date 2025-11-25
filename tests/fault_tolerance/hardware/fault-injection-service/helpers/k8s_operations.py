@@ -9,11 +9,14 @@ Provides utilities for managing nodes, pods, and deployments
 during fault injection scenarios.
 """
 
+import logging
 import time
 from typing import Dict, List, Optional
 
 from kubernetes import client
 from kubernetes.client.rest import ApiException
+
+logger = logging.getLogger(__name__)
 
 
 class NodeOperations:
@@ -68,7 +71,7 @@ class NodeOperations:
             return node.spec.unschedulable is True
 
         except Exception as e:
-            print(f"[✗] Failed to cordon node {node_name}: {e}")
+            logger.error(f"Failed to cordon node {node_name}: {e}")
             return False
 
     def uncordon_node(
@@ -112,7 +115,7 @@ class NodeOperations:
             return True
 
         except Exception as e:
-            print(f"[✗] Failed to uncordon node {node_name}: {e}")
+            logger.error(f"Failed to uncordon node {node_name}: {e}")
             return False
 
     def is_node_cordoned(self, node_name: str) -> bool:
@@ -151,10 +154,10 @@ class NodeOperations:
                     break
 
             if not target_pod:
-                print(f"[✗] No GPU driver pod found on node {node_name}")
+                logger.error(f"No GPU driver pod found on node {node_name}")
                 return False
 
-            print(f"    → Found driver pod: {target_pod}")
+            logger.info(f"Found driver pod: {target_pod}")
 
             # Get the current pod's creation timestamp before deletion
             old_pod = self.k8s_core.read_namespaced_pod(
@@ -163,14 +166,14 @@ class NodeOperations:
             old_creation_time = old_pod.metadata.creation_timestamp
 
             # Delete the pod to force restart
-            print("    → Deleting pod to trigger restart...")
+            logger.info("Deleting pod to trigger restart...")
             self.k8s_core.delete_namespaced_pod(
                 name=target_pod, namespace="gpu-operator", grace_period_seconds=0
             )
 
             # Wait for new pod to be ready
-            print(
-                f"    → Waiting for new driver pod to be ready (max {wait_timeout}s)..."
+            logger.info(
+                f"Waiting for new driver pod to be ready (max {wait_timeout}s)..."
             )
             start_time = time.time()
 
@@ -209,28 +212,28 @@ class NodeOperations:
 
                         if all_ready:
                             elapsed = int(time.time() - start_time)
-                            print(
-                                f"    ✓ New driver pod ready: {pod.metadata.name} (took {elapsed}s)"
+                            logger.info(
+                                f"New driver pod ready: {pod.metadata.name} (took {elapsed}s)"
                             )
 
                             # Wait a bit more for GPU initialization
-                            print(
-                                "    → Waiting additional 30s for GPU initialization..."
+                            logger.info(
+                                "Waiting additional 30s for GPU initialization..."
                             )
                             time.sleep(30)
 
-                            print("[✓] GPU driver restarted successfully")
+                            logger.info("GPU driver restarted successfully")
                             return True
                 except Exception:
                     pass
 
                 time.sleep(5)
 
-            print(f"[✗] GPU driver pod did not become ready within {wait_timeout}s")
+            logger.error(f"GPU driver pod did not become ready within {wait_timeout}s")
             return False
 
         except Exception as e:
-            print(f"[✗] Failed to restart GPU driver: {e}")
+            logger.error(f"Failed to restart GPU driver: {e}")
             return False
 
 
@@ -282,16 +285,16 @@ class PodOperations:
                         namespace=namespace,
                         grace_period_seconds=0,
                     )
-                    print(f"      ✓ Evicted: {pod.metadata.name}")
+                    logger.info(f"Evicted: {pod.metadata.name}")
                     drained_count += 1
                 except ApiException as e:
                     if e.status != 404:  # Ignore if already deleted
-                        print(f"      ✗ Failed to evict {pod.metadata.name}: {e}")
+                        logger.warning(f"Failed to evict {pod.metadata.name}: {e}")
 
             return drained_count
 
         except Exception as e:
-            print(f"[✗] Failed to drain pods: {e}")
+            logger.error(f"Failed to drain pods: {e}")
             return 0
 
     def get_pod_distribution(
@@ -321,7 +324,7 @@ class PodOperations:
             return distribution
 
         except Exception as e:
-            print(f"[✗] Failed to get pod distribution: {e}")
+            logger.error(f"Failed to get pod distribution: {e}")
             return {}
 
     def wait_for_pods_ready(
@@ -370,14 +373,14 @@ class PodOperations:
                             ready_count += 1
 
                 elapsed = int(time.time() - start_time)
-                print(f"    ... {elapsed}s: {ready_count}/{expected_count} ready")
+                logger.debug(f"{elapsed}s: {ready_count}/{expected_count} ready")
 
                 if ready_count >= expected_count:
-                    print(f"    ✓ All {expected_count} pods ready after {elapsed}s!")
+                    logger.info(f"All {expected_count} pods ready after {elapsed}s!")
                     return True
 
             except Exception as e:
-                print(f"    ... Error checking pods: {e}")
+                logger.warning(f"Error checking pods: {e}")
 
             time.sleep(30)
 
@@ -395,7 +398,7 @@ class PodOperations:
             node_name: If provided, only get pods on this node
 
         Returns:
-            List of dicts with pod name, state, and reason
+            List of dicts with keys: name (pod name), node (node name), and state (pod state)
         """
         try:
             field_selector = f"spec.nodeName={node_name}" if node_name else None
@@ -429,5 +432,5 @@ class PodOperations:
             return details
 
         except Exception as e:
-            print(f"[✗] Failed to get pod status details: {e}")
+            logger.error(f"Failed to get pod status details: {e}")
             return []
