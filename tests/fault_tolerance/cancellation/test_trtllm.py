@@ -375,7 +375,7 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
     End-to-end test for request cancellation during prefill to decode KV transfer phase.
 
     This test verifies that when a request is cancelled by the client during the KV transfer phase,
-    the system properly handles the cancellation and cleans up resources on the prefill worker.
+    the system properly handles the cancellation and cleans up resources on the workers.
     """
 
     # Step 1: Start the frontend
@@ -410,25 +410,24 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                     match_type="contains",
                 )
 
-                # Poll for start sending KV cache pattern
-                _, prefill_log_offset = poll_for_pattern(
-                    process=prefill_worker,
-                    pattern="Start sending KV cache for request ID: ",
-                    log_offset=prefill_log_offset,
+                # Poll for decode worker entry signaling start of KV transfer phase
+                _, decode_log_offset = poll_for_pattern(
+                    process=decode_worker,
+                    pattern=f"Decode Request ID: {request_id}",
                     poll_interval_ms=2,
-                    match_type="contains",
                 )
 
-                # Cancel during KV transfer phase
+                # Cancel during KV transfer phase in decode worker
                 cancellable_req.cancel()
                 logger.info(
-                    f"Cancelled request ID: {request_id} during KV transfer phase"
+                    f"Cancelled request ID: {request_id} at beginning of decode"
                 )
 
                 # Poll for "Aborted Request ID" in decode worker
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern=f"Aborted Request ID: {request_id}",
+                    log_offset=decode_log_offset,
                 )
 
                 # Verify frontend log has kill message
@@ -438,7 +437,7 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 )
 
                 logger.info(
-                    "Completion request cancellation during KV transfer phase detected successfully"
+                    "Completion request cancellation at beginning of decode detected successfully"
                 )
 
                 # Verify the workers are still functional
