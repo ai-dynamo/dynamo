@@ -5,11 +5,9 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress
-python -m dynamo.frontend --http-port=8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python -m dynamo.frontend &
 
 # run worker with LMCache enabled
-ENABLE_LMCACHE=1 \
-LMCACHE_CHUNK_SIZE=256 \
-LMCACHE_LOCAL_CPU=True \
-LMCACHE_MAX_LOCAL_CPU_SIZE=20 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
   python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector lmcache

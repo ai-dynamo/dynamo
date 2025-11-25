@@ -93,7 +93,7 @@ pub async fn prepare_engine(
                 request_template: local_model.request_template(),
             })
         }
-        EngineConfig::StaticFull { engine, model, .. } => {
+        EngineConfig::InProcessText { engine, model, .. } => {
             let service_name = model.service_name().to_string();
             tracing::debug!("Model: {service_name} with engine pre-processing");
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
@@ -105,7 +105,7 @@ pub async fn prepare_engine(
                 card: Some(model.into_card()),
             })
         }
-        EngineConfig::StaticCore {
+        EngineConfig::InProcessTokens {
             engine: inner_engine,
             model,
             ..

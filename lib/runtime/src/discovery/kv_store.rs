@@ -184,7 +184,7 @@ impl Discovery for KVStoreDiscovery {
             key_path
         );
         let bucket = self.store.get_or_create_bucket(bucket_name, None).await?;
-        let key = crate::storage::key_value_store::Key::from_raw(key_path.clone());
+        let key = crate::storage::key_value_store::Key::new(key_path.clone());
 
         tracing::debug!(
             "KVStoreDiscovery::register: Inserting into bucket={}, key={}",
@@ -201,6 +201,62 @@ impl Discovery for KVStoreDiscovery {
         );
 
         Ok(instance)
+    }
+
+    async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+        let (bucket_name, key_path) = match &instance {
+            DiscoveryInstance::Endpoint(inst) => {
+                let key = Self::endpoint_key(
+                    &inst.namespace,
+                    &inst.component,
+                    &inst.endpoint,
+                    inst.instance_id,
+                );
+                tracing::debug!(
+                    "Unregistering endpoint instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                    inst.instance_id,
+                    inst.namespace,
+                    inst.component,
+                    inst.endpoint,
+                    key
+                );
+                (INSTANCES_BUCKET, key)
+            }
+            DiscoveryInstance::Model {
+                namespace,
+                component,
+                endpoint,
+                instance_id,
+                ..
+            } => {
+                let key = Self::model_key(namespace, component, endpoint, *instance_id);
+                tracing::debug!(
+                    "Unregistering model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
+                    instance_id,
+                    namespace,
+                    component,
+                    endpoint,
+                    key
+                );
+                (MODELS_BUCKET, key)
+            }
+        };
+
+        // Get the bucket - if it doesn't exist, the instance is already removed from the KV store
+        let Some(bucket) = self.store.get_bucket(bucket_name).await? else {
+            tracing::warn!(
+                "Bucket {} does not exist, instance already removed",
+                bucket_name
+            );
+            return Ok(());
+        };
+
+        let key = crate::storage::key_value_store::Key::new(key_path.clone());
+
+        // Delete the entry from the bucket
+        bucket.delete(&key).await?;
+
+        Ok(())
     }
 
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
@@ -221,12 +277,12 @@ impl Discovery for KVStoreDiscovery {
 
         // Filter by prefix and deserialize
         let mut instances = Vec::new();
-        for (key_str, value) in entries {
-            if Self::matches_prefix(&key_str, &prefix, bucket_name) {
+        for (key, value) in entries {
+            if Self::matches_prefix(key.as_ref(), &prefix, bucket_name) {
                 match Self::parse_instance(&value) {
                     Ok(instance) => instances.push(instance),
                     Err(e) => {
-                        tracing::warn!(key = %key_str, error = %e, "Failed to parse discovery instance");
+                        tracing::warn!(%key, error = %e, "Failed to parse discovery instance");
                     }
                 }
             }

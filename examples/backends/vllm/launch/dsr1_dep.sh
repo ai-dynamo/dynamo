@@ -82,8 +82,9 @@ echo "  Model name: $MODEL"
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress if it's node 0
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 if [ $NODE_RANK -eq 0 ]; then
-    DYN_LOG=debug python -m dynamo.frontend --router-mode kv --http-port=8000 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
+    DYN_LOG=debug python -m dynamo.frontend --router-mode kv 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
 fi
 
 mkdir -p $LOG_DIR

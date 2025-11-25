@@ -4,6 +4,7 @@
 //! Interface to a traditional key-value store such as etcd.
 //! "key_value_store" spelt out because in AI land "KV" means something else.
 
+use std::borrow::Cow;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -12,10 +13,10 @@ use std::{collections::HashMap, path::PathBuf};
 use std::{env, fmt};
 
 use crate::CancellationToken;
-use crate::slug::Slug;
 use crate::transports::etcd as etcd_transport;
 use async_trait::async_trait;
 use futures::StreamExt;
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
 use serde::{Deserialize, Serialize};
 
 mod mem;
@@ -29,27 +30,32 @@ pub use file::FileStore;
 
 const WATCH_SEND_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// A key that is safe to use directly in the KV store.
-///
-/// TODO: Need to re-think this. etcd uses slash separators, so we often use from_raw
-/// to avoid the slug. But other impl's, particularly file, need a real slug.
-#[derive(Debug, Clone, PartialEq)]
+/// String we use as the Key in a key-value storage operation. Simple String wrapper
+/// that can encode / decode a string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Key(String);
 
 impl Key {
-    pub fn new(s: &str) -> Key {
-        Key(Slug::slugify(s).to_string())
+    pub fn new(s: String) -> Key {
+        Key(s)
     }
 
-    /// Create a Key without changing the string, it is assumed already KV store safe.
-    pub fn from_raw(s: String) -> Key {
-        Key(s)
+    /// Takes a URL-safe percent-encoded string and creates a Key from it by decoding first.
+    /// dynamo%2Fbackend%2Fgenerate%2F17216e63492ef21f becomes dynamo/backend/generate/17216e63492ef21f
+    pub fn from_url_safe(s: &str) -> Key {
+        Key(percent_decode_str(s).decode_utf8_lossy().to_string())
+    }
+
+    /// A URL-safe percent-encoded representation of this key.
+    /// e.g.  dynamo/backend/generate/17216e63492ef21f becomes dynamo%2Fbackend%2Fgenerate%2F17216e63492ef21f
+    pub fn url_safe(&self) -> Cow<'_, str> {
+        percent_encode(self.0.as_bytes(), NON_ALPHANUMERIC).into()
     }
 }
 
 impl From<&str> for Key {
     fn from(s: &str) -> Key {
-        Key::new(s)
+        Key::new(s.to_string())
     }
 }
 
@@ -73,21 +79,21 @@ impl From<&Key> for String {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyValue {
-    key: String,
+    key: Key,
     value: bytes::Bytes,
 }
 
 impl KeyValue {
-    pub fn new(key: String, value: bytes::Bytes) -> Self {
+    pub fn new(key: Key, value: bytes::Bytes) -> Self {
         KeyValue { key, value }
     }
 
     pub fn key(&self) -> String {
-        self.key.clone()
+        self.key.clone().to_string()
     }
 
     pub fn key_str(&self) -> &str {
-        &self.key
+        self.key.as_ref()
     }
 
     pub fn value(&self) -> &[u8] {
@@ -394,6 +400,7 @@ impl KeyValueStoreManager {
 pub trait KeyValueBucket: Send + Sync {
     /// A bucket is a collection of key/value pairs.
     /// Insert a value into a bucket, if it doesn't exist already
+    /// The Key should be the name of the item, not including the bucket name.
     async fn insert(
         &self,
         key: &Key,
@@ -402,9 +409,11 @@ pub trait KeyValueBucket: Send + Sync {
     ) -> Result<StoreOutcome, StoreError>;
 
     /// Fetch an item from the key-value storage
+    /// The Key should be the name of the item, not including the bucket name.
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError>;
 
     /// Delete an item from the bucket
+    /// The Key should be the name of the item, not including the bucket name.
     async fn delete(&self, key: &Key) -> Result<(), StoreError>;
 
     /// A stream of items inserted into the bucket.
@@ -414,7 +423,10 @@ pub trait KeyValueBucket: Send + Sync {
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError>;
 
-    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError>;
+    /// The entries in this bucket.
+    /// The Key includes the full path including the bucket name.
+    /// That means you cannot directory get a Key from `entries` and pass it to `get` or `delete`.
+    async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError>;
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -527,7 +539,7 @@ mod tests {
         let mut expected = Vec::with_capacity(3);
         for i in 1..=3 {
             let item = WatchEvent::Put(KeyValue::new(
-                format!("test{i}"),
+                Key::new(format!("test{i}")),
                 format!("value{i}").into(),
             ));
             expected.push(item);
@@ -596,7 +608,7 @@ mod tests {
         let mut rx1 = tap.subscribe();
         let mut rx2 = tap.subscribe();
 
-        let item = WatchEvent::Put(KeyValue::new("test1".to_string(), "GK".into()));
+        let item = WatchEvent::Put(KeyValue::new(Key::new("test1".to_string()), "GK".into()));
         let item_clone = item.clone();
         let handle1 = tokio::spawn(async move {
             let b = rx1.recv().await.unwrap();
