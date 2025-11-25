@@ -223,9 +223,7 @@ You can pass any sglang flags directly to this worker, see https://docs.sglang.a
 It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch) for running the TensorRT-LLM engine.
 
 > [!Note]
-> Ensure that you select a PyTorch container image version that matches the version of TensorRT-LLM you are using.
-> For example, if you are using `tensorrt-llm==1.1.0rc5`, use the PyTorch container image version `25.06`.
-> To find the correct PyTorch container version for your desired `tensorrt-llm` release, visit the [TensorRT-LLM Dockerfile.multi](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/Dockerfile.multi) on GitHub. Switch to the branch that matches your `tensorrt-llm` version, and look for the `BASE_TAG` line to identify the recommended PyTorch container tag.
+> Always match the PyTorch container tag with the TensorRT-LLM version you plan to use. For Dynamo `0.7.0` RC8 we validate against `tensorrt-llm==1.2.0rc2` inside `nvcr.io/nvidia/pytorch:25.10-py3`. For other releases, inspect [`container/Dockerfile.trtllm`](container/Dockerfile.trtllm) or the [TensorRT-LLM Dockerfile.multi](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/Dockerfile.multi) to find the recommended `BASE_TAG`.
 
 > [!Important]
 > Launch container with the following additional settings `--shm-size=1g --ulimit memlock=-1`
@@ -245,11 +243,26 @@ sudo apt-get -y install libopenmpi-dev
 > [!Tip]
 > You can learn more about these prequisites and known issues with TensorRT-LLM pip based installation [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html).
 
-### After installing the pre-requisites above, install Dynamo
+### Install TensorRT-LLM wheels with `uv`
 
+> [!Warning]
+> `uv pip install ai-dynamo[trtllm]` fails for `tensorrt-llm==1.2.0rc2` because the placeholder wheel cannot download the actual artifact from `https://pypi.nvidia.com/`, and `uv` requires URL-based dependencies (e.g., `etcd3`) to be declared explicitly. Use the same direct-wheel workflow we ship in [`container/Dockerfile.trtllm`](container/Dockerfile.trtllm#L140).
+
+```bash
+export ARCH_ALT=$(uname -p)
+export TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
+export TENSORRTLLM_PIP_WHEEL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc2-cp312-cp312-linux_${ARCH_ALT}.whl"
+
+uv pip install --no-cache --index-strategy=unsafe-best-match \
+  --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
+  "${TENSORRTLLM_PIP_WHEEL}" \
+  "etcd3 @ git+https://github.com/kragniz/python-etcd3.git@e58a899579ba416449c4e225b61f039457c8072a" \
+  triton==3.5.0 \
+  ai-dynamo[trtllm]
 ```
-uv pip install ai-dynamo[trtllm]
-```
+
+> [!Tip]
+> If `uv` is not available, `pip install --extra-index-url https://pypi.nvidia.com/ tensorrt-llm==1.2.0rc2` also works, although it downloads more data and is noticeably slower.
 
 Run the backend/worker like this:
 
