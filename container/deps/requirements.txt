@@ -37,7 +37,7 @@ prometheus-api-client==0.6.0
 prometheus_client==0.23.1
 prophet==1.2.1
 protobuf==5.29.5
-pydantic<=2.11.0  # Flexible versioning needed
+pydantic>=2.11.4,<2.12  # Required by aiconfigurator==0.4.0
 pyright==1.1.407
 PyYAML==6.0.3
 scikit-learn==1.7.2
