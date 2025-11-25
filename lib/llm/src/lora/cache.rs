@@ -4,8 +4,9 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
+use dynamo_runtime::config::environment_names::llm;
+
 const DEFAULT_LORA_CACHE_DIR: &str = "/tmp/dynamo_loras";
-const LORA_CACHE_DIR_ENV_VAR: &str = "DYN_LORA_PATH";
 
 #[derive(Clone)]
 pub struct LoRACache {
@@ -17,9 +18,9 @@ impl LoRACache {
         Self { cache_root }
     }
 
-    /// Get cache path from LORA_CACHE_DIR_ENV_VAR environment variable
+    /// Get cache path from DYN_LORA_PATH environment variable
     pub fn from_env() -> Result<Self> {
-        let cache_root = std::env::var(LORA_CACHE_DIR_ENV_VAR)
+        let cache_root = std::env::var(llm::DYN_LORA_PATH)
             .unwrap_or_else(|_| DEFAULT_LORA_CACHE_DIR.to_string());
         Ok(Self::new(PathBuf::from(cache_root)))
     }
