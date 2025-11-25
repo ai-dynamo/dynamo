@@ -337,6 +337,9 @@ get_options() {
             ;;
         --enable-media-ffmpeg)
             ENABLE_MEDIA_FFMPEG=true
+	    ;;
+        --enable-xpu)
+            ENABLE_XPU=true
             ;;
         --make-efa)
             MAKE_EFA=true
@@ -530,6 +533,7 @@ show_help() {
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--enable-media-nixl Enable media processing with NIXL support (default: true for frameworks, false for none)]"
     echo "  [--enable-media-ffmpeg Enable media processing with FFMPEG support (default: true for frameworks, false for none)]"
+    echo "  [--enable-xpu Enables XPU support in Python 3.12]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
@@ -567,7 +571,12 @@ BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
 
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
+    if [  ! -z ${ENABLE_XPU} ]; then
+        echo "INFO: Selecting xpu dockerfile "
+        DOCKERFILE=${SOURCE_DIR}/xpu/Dockerfile.xpu.vllm
+    else
+        DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
+    fi
 elif [[ $FRAMEWORK == "TRTLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm
 elif [[ $FRAMEWORK == "NONE" ]]; then
