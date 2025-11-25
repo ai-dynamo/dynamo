@@ -39,6 +39,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
+	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/modelendpoint"
@@ -302,6 +303,7 @@ func (r *DynamoModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				GenericFunc: func(e event.GenericEvent) bool { return false },
 			}),
 		).
+		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config)). // set the event filter to ignore resources handled by other controllers in namespace-restricted mode
 		Complete(r)
 }
 
