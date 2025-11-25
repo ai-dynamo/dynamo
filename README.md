@@ -249,7 +249,7 @@ sudo apt-get -y install libopenmpi-dev
 > `uv pip install ai-dynamo[trtllm]` fails for `tensorrt-llm==1.2.0rc2` because the placeholder wheel cannot download the actual artifact from `https://pypi.nvidia.com/`, and `uv` requires URL-based dependencies (e.g., `etcd3`) to be declared explicitly. Use the same direct-wheel workflow we ship in [`container/Dockerfile.trtllm`](container/Dockerfile.trtllm#L140).
 
 ```bash
-export ARCH_ALT=$(uname -p)
+export ARCH_ALT=$(uname -m)
 export TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 export TENSORRTLLM_PIP_WHEEL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc2-cp312-cp312-linux_${ARCH_ALT}.whl"
 
