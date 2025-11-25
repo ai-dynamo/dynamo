@@ -119,11 +119,7 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.register_model_card(instance.clone())?;
             }
-            DiscoveryInstance::MetricsEndpoint {
-                namespace,
-                url,
-                ..
-            } => {
+            DiscoveryInstance::MetricsEndpoint { namespace, url, .. } => {
                 tracing::info!(
                     "Registered metrics endpoint: namespace={}, url={}, instance_id={:x}",
                     namespace,

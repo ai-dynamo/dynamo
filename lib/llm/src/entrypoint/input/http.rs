@@ -145,8 +145,17 @@ pub async fn run(
 
     // Register frontend metrics endpoint with discovery
     // Use the model's namespace if available, otherwise use a default namespace
-    let protocol = if http_service.is_tls_enabled() { "https" } else { "http" };
-    let metrics_url = format!("{}://{}:{}/metrics", protocol, http_service.host(), http_service.port());
+    let protocol = if http_service.is_tls_enabled() {
+        "https"
+    } else {
+        "http"
+    };
+    let metrics_url = format!(
+        "{}://{}:{}/metrics",
+        protocol,
+        http_service.host(),
+        http_service.port()
+    );
     let metrics_spec = dynamo_runtime::discovery::DiscoverySpec::MetricsEndpoint {
         namespace: namespace_for_metrics,
         url: metrics_url.clone(),

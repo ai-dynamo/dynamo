@@ -1219,13 +1219,13 @@ mod integration_tests {
                     serde_json::from_str(&body).expect("response should be valid JSON");
 
                 assert_eq!(parsed["object"], "list");
-                let data = parsed["data"]
-                    .as_array()
-                    .expect("data should be an array");
+                let data = parsed["data"].as_array().expect("data should be an array");
 
                 let entry = data
                     .iter()
-                    .find(|entry| entry.get("namespace").and_then(|ns| ns.as_str()) == Some("system"))
+                    .find(|entry| {
+                        entry.get("namespace").and_then(|ns| ns.as_str()) == Some("system")
+                    })
                     .expect("system namespace entry should exist");
 
                 let url = entry

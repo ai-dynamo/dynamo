@@ -163,7 +163,11 @@ impl DiscoverySpec {
                 card_json,
                 model_suffix,
             },
-            Self::MetricsEndpoint { namespace, url, gpu_uuids } => DiscoveryInstance::MetricsEndpoint {
+            Self::MetricsEndpoint {
+                namespace,
+                url,
+                gpu_uuids,
+            } => DiscoveryInstance::MetricsEndpoint {
                 namespace,
                 instance_id,
                 url,
@@ -300,7 +304,10 @@ mod tests {
                 assert_eq!(namespace, "test-namespace");
                 assert_eq!(instance_id, 12345);
                 assert_eq!(url, "http://localhost:8080/metrics");
-                assert_eq!(gpu_uuids, vec!["GPU-12345".to_string(), "GPU-67890".to_string()]);
+                assert_eq!(
+                    gpu_uuids,
+                    vec!["GPU-12345".to_string(), "GPU-67890".to_string()]
+                );
             }
             _ => panic!("Expected MetricsEndpoint variant"),
         }
