@@ -7,18 +7,18 @@ Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA D
 
 ## Available Recipes
 
-| Model | Framework | Mode | GPUs | Deployment | Benchmark Recipe | Notes |GAIE integration |
-|-------|-----------|------|------|------------|------------------|-------|------------------|
-| **[Llama-3-70B](llama-3-70b/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization | ✅ | ❌ |
-| **[Llama-3-70B](llama-3-70b/vllm/disagg-single-node/)** | vLLM | Disagg (Single-Node) | 8x H100/H200 | ✅ | ✅ | Prefill + Decode separation | ❌ |
-| **[Llama-3-70B](llama-3-70b/vllm/disagg-multi-node/)** | vLLM | Disagg (Multi-Node) | 16x H100/H200 | ✅ | ✅ | 2 nodes, 8 GPUs each | ❌ |
-| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GPU | ✅ | ✅ | FP8 quantization | ❌ |
-| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x GPU | ✅ | ✅ | Prefill + Decode separation | ❌ |
-| **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
-| **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | TBD | ❌ | ❌ | Engine configs only, no K8s manifest | ❌ |
-| **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 8x H200 | ✅ | ❌ | Benchmark recipe pending | ❌ |
-| **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | Benchmark recipe pending | ❌ |
-| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 32+4 GB200 | ✅ | ✅ |Multi-node: 8 decode + 1 prefill nodes | ❌ |
+| Model | Framework | Mode | GPUs | Deployment | Benchmark Recipe | Notes |
+|-------|-----------|------|------|------------|------------------|-------|
+| **[Llama-3-70B](llama-3-70b/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization |
+| **[Llama-3-70B](llama-3-70b/vllm/disagg-single-node/)** | vLLM | Disagg (Single-Node) | 8x H100/H200 | ✅ | ✅ | Prefill + Decode separation |
+| **[Llama-3-70B](llama-3-70b/vllm/disagg-multi-node/)** | vLLM | Disagg (Multi-Node) | 16x H100/H200 | ✅ | ✅ | 2 nodes, 8 GPUs each |
+| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GPU | ✅ | ✅ | FP8 quantization |
+| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x GPU | ✅ | ✅ | Prefill + Decode separation |
+| **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP |
+| **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | TBD | ❌ | ❌ | Engine configs only, no K8s manifest |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 8x H200 | ✅ | ❌ | Benchmark recipe pending |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | Benchmark recipe pending |
+| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 32+4 GB200 | ✅ | ✅ |Multi-node: 8 decode + 1 prefill nodes |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available | ❌ = Missing or incomplete
@@ -176,22 +176,6 @@ kubectl apply -f llama-3-70b/vllm/agg/deploy.yaml -n ${NAMESPACE}
 
 # Test
 kubectl port-forward svc/llama3-70b-agg-frontend 8000:8000 -n ${NAMESPACE}
-```
-
-### Inference Gateway (GAIE) Integration (Optional)**
-
-For Llama-3-70B with vLLM (Aggregated), an example of integration with the Inference Gateway is provided.
-
-First, deploy the Dynamo Graph per instructions above.
-
-Then follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE.
-
-Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml. It should match the release tag and be in the format `nvcr.io/nvidia/ai-dynamo/frontend:<my-tag>` i.e. `nvcr.io/nvstaging/ai-dynamo/dynamo-frontend:0.7.0rc2-amd64`
-
-```bash
-export DEPLOY_PATH=llama-3-70b/vllm/agg/
-# DEPLOY_PATH=<model>/<framework>/<mode>/
-kubectl apply -R -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
 ```
 
 ### DeepSeek-R1 on GB200 (Multi-node)
