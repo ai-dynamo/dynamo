@@ -97,7 +97,7 @@ def convert_profile_results_to_npz(
 
 def is_profile_results_dir(path: Path) -> bool:
     """
-    Check if the given path is a profile results directory.
+    Check if the given path is a profile results directory (profiler-style format).
 
     A profile results directory contains:
     - selected_prefill_interpolation/raw_data.npz (or prefill_raw_data.json)
@@ -121,6 +121,76 @@ def is_profile_results_dir(path: Path) -> bool:
     ).exists()
 
     return has_prefill and has_decode
+
+
+def is_mocker_format_npz(path: Path) -> bool:
+    """
+    Check if the given path is a mocker-format NPZ file.
+
+    A mocker-format NPZ file contains:
+    - prefill_isl, prefill_ttft_ms
+    - decode_active_kv_tokens, decode_context_length, decode_itl
+
+    Args:
+        path: Path to check.
+
+    Returns:
+        True if path is a valid mocker-format NPZ file, False otherwise.
+    """
+    if not path.is_file():
+        return False
+    if path.suffix != ".npz":
+        return False
+
+    try:
+        with np.load(path) as data:
+            required_keys = {
+                "prefill_isl",
+                "prefill_ttft_ms",
+                "decode_active_kv_tokens",
+                "decode_context_length",
+                "decode_itl",
+            }
+            return required_keys.issubset(data.keys())
+    except Exception:
+        return False
+
+
+def resolve_profile_data(path: Path) -> Path:
+    """
+    Resolve profile data path to mocker-format NPZ.
+
+    This function handles backward compatibility by accepting either:
+    1. A mocker-format NPZ file (returned as-is)
+    2. A profiler-style results directory (converted to mocker-format NPZ)
+
+    Args:
+        path: Path to profile data (NPZ file or profiler results directory).
+
+    Returns:
+        Path to mocker-format NPZ file (may be a temp file if conversion was needed).
+
+    Raises:
+        FileNotFoundError: If path doesn't contain valid profile data in any supported format.
+    """
+    if is_mocker_format_npz(path):
+        logger.info(f"Using mocker-format NPZ file: {path}")
+        return path
+
+    if is_profile_results_dir(path):
+        logger.info(
+            f"Detected profiler-style results directory at {path}, converting to mocker NPZ..."
+        )
+        # Caller is responsible for managing the temp directory
+        return path
+
+    raise FileNotFoundError(
+        f"Path '{path}' is neither a mocker-format NPZ file nor a valid profiler results directory.\n"
+        f"Expected either:\n"
+        f"  - A .npz file with keys: prefill_isl, prefill_ttft_ms, decode_active_kv_tokens, decode_context_length, decode_itl\n"
+        f"  - A directory containing selected_prefill_interpolation/raw_data.npz and selected_decode_interpolation/raw_data.npz\n"
+        f"  - A directory containing prefill_raw_data.json and decode_raw_data.json"
+    )
 
 
 if __name__ == "__main__":
