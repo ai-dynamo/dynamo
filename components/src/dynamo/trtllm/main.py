@@ -23,6 +23,7 @@ import uvloop
 from prometheus_client import REGISTRY
 from tensorrt_llm.llmapi import (
     BuildConfig,
+    CacheTransceiverConfig,
     CapacitySchedulerPolicy,
     DynamicBatchConfig,
     KvCacheConfig,
@@ -206,6 +207,29 @@ async def init(runtime: DistributedRuntime, config: Config):
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
+
+    # NIXL version shipped with dynamo is not supported by tensorrt-llm<=1.2.0rc2.
+    # so we override the cache_transceiver_config to use NIXL backend.
+    # This is a temporary workaround until we upgrade to tensorrt-llm>=1.2.0rc3.
+    # You can disable this override by setting DYN_TRTLLM_UCX_OVERRIDE_DISABLE=1.
+    # TODO: Remove this override once we upgrade to tensorrt-llm>=1.2.0rc3.
+    ucx_override_disable = os.getenv("DYN_TRTLLM_UCX_OVERRIDE_DISABLE")
+    if ucx_override_disable is None or ucx_override_disable == "0":
+        logging.info("Enabling UCX backend for cache_transceiver_config")
+        if "cache_transceiver_config" not in arg_map:
+            arg_map["cache_transceiver_config"] = {"backend": "UCX"}
+        else:
+            current_cache_transceiver_config = arg_map["cache_transceiver_config"]
+            if isinstance(current_cache_transceiver_config, CacheTransceiverConfig):
+                current_cache_transceiver_config.backend = "UCX"
+            elif isinstance(current_cache_transceiver_config, dict):
+                current_cache_transceiver_config["backend"] = "UCX"
+            else:
+                logging.error(
+                    "cache_transceiver_config is not a valid type. Got: %s",
+                    type(current_cache_transceiver_config),
+                )
+                sys.exit(1)
 
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
