@@ -761,6 +761,18 @@ async fn chat_completions(
     }
     tracing::trace!("Received chat completions request: {:?}", request.content());
 
+    // Debug metadata field handling
+    if let Some(metadata) = &request.content().metadata {
+        let metadata_size = match serde_json::to_vec(metadata) {
+            Ok(bytes) => bytes.len(),
+            Err(_) => 0,
+        };
+        tracing::info!("FRONTEND: Received request with metadata field containing {} bytes, request_id: {}",
+                      metadata_size, request_id);
+    } else {
+        tracing::debug!("FRONTEND: No metadata field in request, request_id: {}", request_id);
+    }
+
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
 
@@ -1581,6 +1593,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            metadata: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -1610,6 +1623,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            metadata: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -1825,6 +1839,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            metadata: None,
             unsupported_fields: Default::default(),
         };
 
@@ -1854,6 +1869,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            metadata: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -1882,6 +1898,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            metadata: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -1910,6 +1927,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            metadata: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -1940,6 +1958,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             chat_template_args: None,
+            metadata: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -1968,6 +1987,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            metadata: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);

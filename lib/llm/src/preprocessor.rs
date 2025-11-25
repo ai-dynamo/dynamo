@@ -171,7 +171,8 @@ impl OpenAIPreprocessor {
             + SamplingOptionsProvider
             + StopConditionsProvider
             + OutputOptionsProvider
-            + NvExtProvider,
+            + NvExtProvider
+            + crate::protocols::common::MetadataProvider,
     >(
         &self,
         request: &R,
@@ -187,7 +188,24 @@ impl OpenAIPreprocessor {
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
-        Ok((builder.build()?, annotations))
+        let preprocessed_request = builder.build()?;
+
+        // Debug logging for metadata in extra_args
+        if let Some(extra_args) = &preprocessed_request.extra_args {
+            if let Some(metadata) = extra_args.get("metadata") {
+                let metadata_size = match serde_json::to_vec(metadata) {
+                    Ok(bytes) => bytes.len(),
+                    Err(_) => 0,
+                };
+                tracing::info!("PREPROCESSOR: Successfully added metadata to extra_args with size {} bytes", metadata_size);
+            } else {
+                tracing::debug!("PREPROCESSOR: extra_args present but no metadata field");
+            }
+        } else {
+            tracing::debug!("PREPROCESSOR: No extra_args in preprocessed request");
+        }
+
+        Ok((preprocessed_request, annotations))
     }
 
     pub fn builder<
@@ -271,7 +289,7 @@ impl OpenAIPreprocessor {
         }
     }
 
-    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
+    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest + crate::protocols::common::MetadataProvider>(
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
@@ -337,16 +355,48 @@ impl OpenAIPreprocessor {
             // TODO: decode and pass NIXL descriptors to the media map
         }
 
-        if !media_map.is_empty() {
-            builder.multi_modal_data(Some(media_map));
+        // Build extra_args if we have multimodal data or metadata
+        let has_multimodal_data = !media_map.is_empty();
+        let should_build_extra_args = has_multimodal_data || request.metadata().is_some();
 
+        // Debug logging for metadata handling
+        if let Some(metadata) = request.metadata() {
+            let metadata_size = match serde_json::to_vec(metadata) {
+                Ok(bytes) => bytes.len(),
+                Err(_) => 0,
+            };
+            tracing::info!("PREPROCESSOR gather_multi_modal_data: Found metadata in request with size {} bytes", metadata_size);
+        } else {
+            tracing::debug!("PREPROCESSOR gather_multi_modal_data: No metadata in request");
+        }
+
+        if has_multimodal_data {
+            builder.multi_modal_data(Some(media_map));
+        }
+
+        if should_build_extra_args {
             // Preserve original messages in extra_args for multimodal workers that need them
             // (e.g., TRT-LLM multimodal processor needs raw messages for proper tokenization)
-            let messages_json = serde_json::to_value(&messages)?;
-            let extra_args = serde_json::json!({
-                "messages": messages_json
-            });
-            builder.extra_args(Some(extra_args));
+            let mut extra_args_map = serde_json::Map::new();
+
+            // Add messages if we have multimodal data
+            if has_multimodal_data {
+                let messages_json = serde_json::to_value(&messages)?;
+                extra_args_map.insert("messages".to_string(), messages_json);
+                tracing::debug!("PREPROCESSOR gather_multi_modal_data: Added messages to extra_args for multimodal data");
+            }
+
+            // Add metadata if present
+            if let Some(metadata) = request.metadata() {
+                extra_args_map.insert("metadata".to_string(), metadata.clone());
+                tracing::info!("PREPROCESSOR gather_multi_modal_data: Successfully added metadata to extra_args");
+            }
+
+            let num_entries = extra_args_map.len();
+            builder.extra_args(Some(serde_json::Value::Object(extra_args_map)));
+            tracing::debug!("PREPROCESSOR gather_multi_modal_data: Built extra_args with {} entries", num_entries);
+        } else {
+            tracing::debug!("PREPROCESSOR gather_multi_modal_data: No extra_args needed (no multimodal data or metadata)");
         }
 
         Ok(())

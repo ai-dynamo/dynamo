@@ -63,6 +63,13 @@ class PerformanceConfig:
         self.transports = DEFAULT_TRANSPORTS.copy()
         self.custom_sizes = None  # List of specific sizes to test
         self.nats_max_payload_mb = 70  # Default NATS max payload in MB
+        self.extra_payload_size = 0  # Size of extra payload to add to metadata
+        self.min_extra_payload_mb = 0  # Minimum extra payload size in MB
+        self.max_extra_payload_mb = 0  # Maximum extra payload size in MB
+        self.extra_payload_step_mb = 1  # Step size for extra payload in MB
+        self.custom_extra_payload_sizes = (
+            None  # List of specific extra payload sizes to test
+        )
 
 
 # Function to create config with environment variable override
@@ -77,6 +84,14 @@ def create_config():
         cfg.num_runs_per_size = int(os.environ["PERF_TEST_RUNS"])
     if "PERF_TEST_NATS_PAYLOAD_MB" in os.environ:
         cfg.nats_max_payload_mb = int(os.environ["PERF_TEST_NATS_PAYLOAD_MB"])
+    if "PERF_TEST_EXTRA_PAYLOAD_SIZE" in os.environ:
+        cfg.extra_payload_size = int(os.environ["PERF_TEST_EXTRA_PAYLOAD_SIZE"])
+    if "PERF_TEST_MIN_EXTRA_PAYLOAD_MB" in os.environ:
+        cfg.min_extra_payload_mb = float(os.environ["PERF_TEST_MIN_EXTRA_PAYLOAD_MB"])
+    if "PERF_TEST_MAX_EXTRA_PAYLOAD_MB" in os.environ:
+        cfg.max_extra_payload_mb = float(os.environ["PERF_TEST_MAX_EXTRA_PAYLOAD_MB"])
+    if "PERF_TEST_EXTRA_PAYLOAD_STEP_MB" in os.environ:
+        cfg.extra_payload_step_mb = float(os.environ["PERF_TEST_EXTRA_PAYLOAD_STEP_MB"])
     if "PERF_TEST_SIZES" in os.environ:
         cfg.custom_sizes = [int(x) for x in os.environ["PERF_TEST_SIZES"].split(",")]
     else:
@@ -262,6 +277,52 @@ def generate_test_content(num_tokens: int) -> str:
         content_words.append(base_words[i % len(base_words)])
 
     return " ".join(content_words)
+
+
+def get_extra_payload_sizes(config) -> List[int]:
+    """Get list of extra payload sizes in bytes to test based on configuration"""
+    if config.custom_extra_payload_sizes:
+        return config.custom_extra_payload_sizes
+    elif config.max_extra_payload_mb > 0:
+        # Generate range from min to max
+        sizes_mb = []
+        current_mb = config.min_extra_payload_mb
+        while current_mb <= config.max_extra_payload_mb:
+            sizes_mb.append(current_mb)
+            current_mb += config.extra_payload_step_mb
+        return [int(s * 1024 * 1024) for s in sizes_mb]  # Convert to bytes
+    elif config.extra_payload_size > 0:
+        return [config.extra_payload_size]
+    else:
+        return [0]  # No extra payload
+
+
+def generate_extra_payload(size_bytes: int) -> dict:
+    """Generate extra payload data to include in metadata field.
+
+    Args:
+        size_bytes: Size of payload to generate in bytes
+
+    Returns:
+        Dictionary with extra payload data
+    """
+    if size_bytes <= 0:
+        return {}
+
+    # Generate random string data to reach target size
+    # Account for JSON overhead (quotes, structure, etc.)
+    effective_size = max(1, size_bytes - 50)  # Leave room for JSON structure
+
+    # Create random string content
+    payload_data = "".join(
+        random.choices(string.ascii_letters + string.digits, k=effective_size)
+    )
+
+    return {
+        "test_payload": payload_data,
+        "size_bytes": size_bytes,
+        "description": "Extra payload for performance testing",
+    }
 
 
 def send_large_payload_request_sync(url: str, payload: dict) -> Tuple[float, bool]:
@@ -610,6 +671,30 @@ async def benchmark_request_plane(
             "max_tokens": 1,
         }
 
+        # Refresh config to pick up environment variables set by main()
+        global config
+        config = create_config()
+
+        # Get list of extra payload sizes to test
+        extra_payload_sizes = get_extra_payload_sizes(config)
+        logger.info(
+            f"BENCHMARK DEBUG: Extra payload sizes to test: {[s/1024/1024 for s in extra_payload_sizes if s > 0]} MB"
+        )
+
+        # Add metadata to warmup payload if configured (use first extra payload size for warmup)
+        warmup_extra_size = extra_payload_sizes[0] if extra_payload_sizes[0] > 0 else 0
+        if warmup_extra_size > 0:
+            extra_payload = generate_extra_payload(warmup_extra_size)
+            warmup_payload["metadata"] = extra_payload
+            logger.info(
+                f"PERF TEST WARMUP: Added {warmup_extra_size/1024/1024:.1f} MB of extra payload to metadata"
+            )
+            logger.info(
+                f"PERF TEST WARMUP: Final warmup_payload keys: {list(warmup_payload.keys())}"
+            )
+        else:
+            logger.info("PERF TEST WARMUP: No extra payload configured")
+
         # Try warmup request with retries
         for attempt in range(10):
             warmup_time, warmup_success = await send_performance_request(
@@ -624,49 +709,74 @@ async def benchmark_request_plane(
         else:
             raise RuntimeError(f"Failed to warm up {request_plane.upper()} system")
 
-        # Test each payload size
+        # Test each combination of payload size and extra payload size
         for size in payload_sizes:
             estimated_bytes = tokens_to_bytes_estimate(size)
 
-            logger.info(
-                f"Testing {request_plane.upper()} with ~{size:,} tokens (~{estimated_bytes:,} bytes, ~{estimated_bytes/(1024*1024):.1f}MB)..."
-            )
+            for extra_size in extra_payload_sizes:
+                extra_mb = extra_size / 1024 / 1024 if extra_size > 0 else 0
 
-            test_content = generate_test_content(size)
-            test_payload = {
-                "model": MODEL_NAME,
-                "messages": [{"role": "user", "content": test_content}],
-                "stream": True,
-                "max_tokens": 10,
-            }
-
-            size_results = []
-
-            # Run multiple times for this size
-            for run in range(config.num_runs_per_size):
-                logger.info(f"  Run {run + 1}/{config.num_runs_per_size}")
-
-                timing, success = await send_performance_request(url, test_payload)
-                if success:
-                    size_results.append(timing)
-                    logger.info(f"    Completed in {timing:.3f}s")
+                if extra_size > 0:
+                    logger.info(
+                        f"Testing {request_plane.upper()} with ~{size:,} tokens (~{estimated_bytes:,} bytes, ~{estimated_bytes/(1024*1024):.1f}MB) + {extra_mb:.1f}MB extra payload..."
+                    )
                 else:
-                    logger.warning(f"    Run {run + 1} failed")
+                    logger.info(
+                        f"Testing {request_plane.upper()} with ~{size:,} tokens (~{estimated_bytes:,} bytes, ~{estimated_bytes/(1024*1024):.1f}MB)..."
+                    )
 
-                # Small delay between runs
-                await asyncio.sleep(1)
+                test_content = generate_test_content(size)
+                test_payload = {
+                    "model": MODEL_NAME,
+                    "messages": [{"role": "user", "content": test_content}],
+                    "stream": True,
+                    "max_tokens": 10,
+                }
 
-            if size_results:
-                results[size] = size_results
-                avg_time = sum(size_results) / len(size_results)
-                logger.info(
-                    f"  {request_plane.upper()} ~{size:,} tokens: avg {avg_time:.3f}s ({len(size_results)}/{config.num_runs_per_size} successful)"
-                )
-            else:
-                logger.warning(
-                    f"  All runs failed for {request_plane.upper()} with ~{size:,} tokens"
-                )
-                results[size] = []
+                # Add metadata with extra payload if configured
+                if extra_size > 0:
+                    extra_payload = generate_extra_payload(extra_size)
+                    test_payload["metadata"] = extra_payload
+                    logger.info(
+                        f"PERF TEST: Added {extra_mb:.1f} MB ({extra_size} bytes) of extra payload to metadata"
+                    )
+                    logger.info(
+                        f"PERF TEST: Final test_payload keys: {list(test_payload.keys())}"
+                    )
+                else:
+                    logger.info("PERF TEST: No extra payload configured")
+
+                # Create unique key for this combination
+                test_key = f"{size}t_{extra_mb:.1f}mb" if extra_size > 0 else size
+                size_results = []
+
+                # Run multiple times for this size/extra combination
+                for run in range(config.num_runs_per_size):
+                    logger.info(f"  Run {run + 1}/{config.num_runs_per_size}")
+
+                    timing, success = await send_performance_request(url, test_payload)
+                    if success:
+                        size_results.append(timing)
+                        logger.info(f"    Completed in {timing:.3f}s")
+                    else:
+                        logger.warning(f"    Run {run + 1} failed")
+
+                    # Small delay between runs
+                    await asyncio.sleep(1)
+
+                if size_results:
+                    results[test_key] = size_results
+                    avg_time = sum(size_results) / len(size_results)
+                    extra_desc = f" + {extra_mb:.1f}MB extra" if extra_size > 0 else ""
+                    logger.info(
+                        f"  {request_plane.upper()} ~{size:,} tokens{extra_desc}: avg {avg_time:.3f}s ({len(size_results)}/{config.num_runs_per_size} successful)"
+                    )
+                else:
+                    extra_desc = f" + {extra_mb:.1f}MB extra" if extra_size > 0 else ""
+                    logger.warning(
+                        f"  All runs failed for {request_plane.upper()} with ~{size:,} tokens{extra_desc}"
+                    )
+                    results[test_key] = []
 
     finally:
         # Clean up
@@ -678,9 +788,21 @@ async def benchmark_request_plane(
     return results
 
 
-def print_performance_comparison(
-    tcp_results: Dict[int, List[float]], nats_results: Dict[int, List[float]]
-):
+def extract_token_count_from_key(key):
+    """Extract token count from test key (handles both int and string keys like '1000t_1.0mb')"""
+    if isinstance(key, int):
+        return key
+    elif isinstance(key, str) and "t_" in key:
+        return int(key.split("t_")[0])
+    else:
+        # Try to convert string to int for backward compatibility
+        try:
+            return int(key)
+        except (ValueError, TypeError):
+            return 1000  # Default fallback
+
+
+def print_performance_comparison(tcp_results: Dict, nats_results: Dict):
     """Print a formatted comparison of TCP vs NATS performance"""
     print("\n" + "=" * 95)
     print("REQUEST PLANE PERFORMANCE COMPARISON")
@@ -735,8 +857,14 @@ def print_performance_comparison(
             speedup_display = "N/A"
             winner = "N/A"
 
-        bytes_est = tokens_to_bytes_estimate(size)
-        size_display = f"~{size//1000:,}K tokens (~{bytes_est//1024}KB)"
+        token_count = extract_token_count_from_key(size)
+        bytes_est = tokens_to_bytes_estimate(token_count)
+        size_display = f"~{token_count//1000:,}K tokens (~{bytes_est//1024}KB)"
+
+        # Add extra payload info if it's a combined key
+        if isinstance(size, str) and "t_" in size and "mb" in size:
+            extra_mb = size.split("_")[1].replace("mb", "")
+            size_display += f" + {extra_mb}MB"
         print(
             f"{size_display:<25} {tcp_display:<12} {nats_display:<12} {speedup_display:<10} {winner:<8}"
         )
@@ -776,7 +904,7 @@ def test_request_plane_performance_comparison(request, predownload_tokenizers):
     if config.custom_sizes:
         payload_sizes = sorted(config.custom_sizes)
         size_descriptions = [
-            f"~{s//1000}K tokens (~{tokens_to_bytes_estimate(s)//1024}KB)"
+            f"~{extract_token_count_from_key(s)//1000}K tokens (~{tokens_to_bytes_estimate(extract_token_count_from_key(s))//1024}KB)"
             for s in payload_sizes
         ]
         logger.info(f"Testing custom payload sizes: {size_descriptions}")
@@ -785,7 +913,7 @@ def test_request_plane_performance_comparison(request, predownload_tokenizers):
             range(config.min_prompt_size, config.max_prompt_size + 1, config.step_size)
         )
         size_descriptions = [
-            f"~{s//1000}K tokens (~{tokens_to_bytes_estimate(s)//1024}KB)"
+            f"~{extract_token_count_from_key(s)//1000}K tokens (~{tokens_to_bytes_estimate(extract_token_count_from_key(s))//1024}KB)"
             for s in payload_sizes
         ]
         logger.info(f"Testing payload sizes: {size_descriptions}")
@@ -886,6 +1014,15 @@ Examples:
 
   # Test large payloads only
   python test_request_plane_performance.py --min-size 200000 --max-size 400000 --step 50000
+
+  # Test with extra payload in metadata (for metadata handling performance)
+  python test_request_plane_performance.py --extra-payload-mb 10 --sizes 1000,10000
+
+  # Test with range of extra payload sizes
+  python test_request_plane_performance.py --extra-payload-range 1 5 1 --sizes 1000,10000
+
+  # Test specific extra payload sizes
+  python test_request_plane_performance.py --extra-payload-sizes "0.5,1,2,5" --sizes 1000
         """,
     )
 
@@ -956,6 +1093,34 @@ Examples:
         "--verbose", "-v", action="store_true", help="Enable verbose logging"
     )
 
+    # Extra payload configuration
+    extra_group = parser.add_mutually_exclusive_group()
+    extra_group.add_argument(
+        "--extra-payload-size",
+        type=int,
+        default=0,
+        help="Size of extra payload to add to metadata field in bytes (default: 0, disabled). Deprecated - use --extra-payload-mb instead",
+    )
+    extra_group.add_argument(
+        "--extra-payload-mb",
+        type=float,
+        help="Size of extra payload to add to metadata field in MB",
+    )
+
+    parser.add_argument(
+        "--extra-payload-range",
+        type=float,
+        nargs=3,
+        metavar=("MIN_MB", "MAX_MB", "STEP_MB"),
+        help="Extra payload size range: min_mb max_mb step_mb",
+    )
+
+    parser.add_argument(
+        "--extra-payload-sizes",
+        type=str,
+        help="Comma-separated list of extra payload sizes in MB (e.g., '1,5,10')",
+    )
+
     return parser.parse_args()
 
 
@@ -988,6 +1153,51 @@ def configure_from_args(args):
 
     # NATS configuration
     config.nats_max_payload_mb = args.nats_max_payload_mb
+
+    # Extra payload configuration
+    if args.extra_payload_sizes:
+        # Parse comma-separated sizes in MB
+        sizes_mb = [float(s.strip()) for s in args.extra_payload_sizes.split(",")]
+        config.custom_extra_payload_sizes = [
+            int(s * 1024 * 1024) for s in sizes_mb
+        ]  # Convert to bytes
+        config.extra_payload_size = 0  # Will be set per test
+        logger.info(
+            f"ARGS DEBUG: Custom extra payload sizes: {sizes_mb} MB -> {config.custom_extra_payload_sizes} bytes"
+        )
+    elif args.extra_payload_range:
+        # Use range in MB
+        min_mb, max_mb, step_mb = args.extra_payload_range
+        config.min_extra_payload_mb = min_mb
+        config.max_extra_payload_mb = max_mb
+        config.extra_payload_step_mb = step_mb
+        config.extra_payload_size = 0  # Will be set per test
+        logger.info(
+            f"ARGS DEBUG: Extra payload range: {min_mb}-{max_mb} MB, step {step_mb} MB"
+        )
+
+        # Set environment variables for pytest test functions to access
+        os.environ["PERF_TEST_MIN_EXTRA_PAYLOAD_MB"] = str(min_mb)
+        os.environ["PERF_TEST_MAX_EXTRA_PAYLOAD_MB"] = str(max_mb)
+        os.environ["PERF_TEST_EXTRA_PAYLOAD_STEP_MB"] = str(step_mb)
+    elif args.extra_payload_mb:
+        # Single size in MB
+        config.extra_payload_size = int(
+            args.extra_payload_mb * 1024 * 1024
+        )  # Convert to bytes
+        logger.info(
+            f"ARGS DEBUG: Extra payload size: {args.extra_payload_mb} MB -> {config.extra_payload_size} bytes"
+        )
+    else:
+        # Legacy byte size (deprecated)
+        config.extra_payload_size = args.extra_payload_size
+        if args.extra_payload_size > 0:
+            logger.info(
+                f"ARGS DEBUG: Extra payload size (deprecated bytes): {args.extra_payload_size}"
+            )
+
+    # Set environment variable for pytest test functions to access
+    os.environ["PERF_TEST_EXTRA_PAYLOAD_SIZE"] = str(config.extra_payload_size)
 
     # Logging configuration
     if args.verbose:

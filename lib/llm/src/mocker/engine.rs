@@ -243,6 +243,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         tracing::info!("MOCKER: Received request with {} input tokens (~{} token-bytes, {} actual-bytes), request_id: {}",
                       input_tokens_count, estimated_bytes, actual_request_bytes, ctx.id());
 
+        // Check for metadata in extra_args and log its size
+        if let Some(extra_args) = &request.extra_args {
+            if let Some(metadata) = extra_args.get("metadata") {
+                let metadata_size = match serde_json::to_vec(metadata) {
+                    Ok(bytes) => bytes.len(),
+                    Err(_) => 0,
+                };
+                tracing::info!("MOCKER: Request contains metadata with size {} bytes, request_id: {}",
+                              metadata_size, ctx.id());
+            }
+        }
+
         // For prefill workers, override max_tokens to 1
         let is_prefill = self.engine_args.worker_type == WorkerType::Prefill;
 
