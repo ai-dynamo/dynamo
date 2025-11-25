@@ -14,7 +14,7 @@ use url::Url;
 /// Minimal trait for LoRA sources
 /// Users can implement this in Rust for custom sources
 #[async_trait]
-pub trait LoRASourceTrait: Send + Sync {
+pub trait LoRASource: Send + Sync {
     /// Download LoRA from source to destination path
     /// Returns the actual path where files were written
     async fn download(&self, lora_uri: &str, dest_path: &Path) -> Result<PathBuf>;
@@ -56,7 +56,7 @@ impl LocalLoRASource {
 }
 
 #[async_trait]
-impl LoRASourceTrait for LocalLoRASource {
+impl LoRASource for LocalLoRASource {
     async fn download(&self, file_uri: &str, _dest_path: &Path) -> Result<PathBuf> {
         let source_path = Self::parse_file_uri(file_uri)?;
 
@@ -188,7 +188,7 @@ impl S3LoRASource {
 }
 
 #[async_trait]
-impl LoRASourceTrait for S3LoRASource {
+impl LoRASource for S3LoRASource {
     async fn download(&self, s3_uri: &str, dest_path: &Path) -> Result<PathBuf> {
         let (bucket, prefix) = Self::parse_s3_uri(s3_uri)?;
 

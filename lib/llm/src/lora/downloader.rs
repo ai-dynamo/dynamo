@@ -1,17 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{cache::LoRACache, source::LoRASourceTrait};
+use super::{cache::LoRACache, source::LoRASource};
 use anyhow::Result;
 use std::{path::PathBuf, sync::Arc};
 
 pub struct LoRADownloader {
-    sources: Vec<Arc<dyn LoRASourceTrait>>,
+    sources: Vec<Arc<dyn LoRASource>>,
     cache: LoRACache,
 }
 
 impl LoRADownloader {
-    pub fn new(sources: Vec<Arc<dyn LoRASourceTrait>>, cache: LoRACache) -> Self {
+    pub fn new(sources: Vec<Arc<dyn LoRASource>>, cache: LoRACache) -> Self {
         Self { sources, cache }
     }
 

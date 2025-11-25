@@ -12,4 +12,4 @@ mod source;
 
 pub use cache::LoRACache;
 pub use downloader::LoRADownloader;
-pub use source::{LoRASourceTrait, LocalLoRASource, S3LoRASource};
+pub use source::{LoRASource, LocalLoRASource, S3LoRASource};
