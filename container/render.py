@@ -15,8 +15,12 @@ def parse_args():
     args = parser.parse_args()
     return args
 
+def validate_args(args):
+    # TODO: Add validation logic
+    return
+
 def render(framework, target, platform, context, show_result):
-    env = Environment(loader=FileSystemLoader("."),trim_blocks=True,lstrip_blocks=True)
+    env = Environment(loader=FileSystemLoader("."),trim_blocks=False,lstrip_blocks=True)
     template = env.get_template("Dockerfile.template")
     rendered = template.render(
         context=context,
@@ -38,6 +42,7 @@ def render(framework, target, platform, context, show_result):
 
 def main():
     args = parse_args()
+    validate_args(args)
     framework = args.framework
     target = args.target
     platform = args.platform
