@@ -6,12 +6,22 @@
 GPU Fault Injector Agent - Runs as DaemonSet on GPU nodes.
 
 This agent provides privileged access for XID error injection:
-- XID 79 injection via nsenter+kmsg (writes to host's /dev/kmsg)
+- XID injection via nsenter+kmsg (writes to host's /dev/kmsg)
 - Triggers NVSentinel syslog-health-monitor detection
 - Initiates complete fault tolerance workflow
 
-All GPU errors are simulated by injecting appropriate XID codes to syslog.
-NVSentinel detects the XID and handles cordon/drain/restart/uncordon automatically.
+Accepts ANY XID error code for testing flexibility.
+Pre-defined messages for all DCGM/NVSentinel monitored XIDs:
+- Devastating: 79, 74, 48, 94, 95, 119, 120, 140
+- Memory: 31, 32, 43, 63, 64
+- PCIe: 38, 39, 42
+- Thermal: 60, 61, 62
+- Power: 54, 56, 57
+- Graphics: 13, 45, 69
+
+Unknown XIDs use generic error message format.
+NVSentinel detects XIDs and handles actions based on its own rules.
+See gpu_xid_injector.py for complete XID descriptions.
 """
 
 import logging
@@ -61,7 +71,12 @@ class XIDInjectRequest(BaseModel):
 
 
 class GPUFaultInjector:
-    """GPU fault injection operations with DCGM integration. XID 79 via nsenter+kmsg."""
+    """
+    GPU fault injection operations with DCGM integration.
+    
+    Supports ANY XID injection via nsenter+kmsg (27+ pre-defined messages).
+    Accepts any XID value (1-1000) for comprehensive fault tolerance testing.
+    """
 
     def __init__(self):
         self.active_faults: dict[str, dict[str, Any]] = {}
@@ -151,26 +166,51 @@ async def health_check():
 
 @app.post("/inject-xid")
 async def inject_xid(request: XIDInjectRequest):
-    """Inject XID 79 error via nsenter+kmsg (triggers NVSentinel detection)"""
+    """
+    Inject ANY XID error via nsenter+kmsg (triggers NVSentinel detection).
+    
+    Accepts any XID error code (1-1000) for maximum testing flexibility.
+    
+    Pre-defined messages for all DCGM/NVSentinel monitored XIDs:
+    
+    Devastating (always FAIL):
+    - 79: GPU fell off bus | 74: NVLink error | 48: ECC DBE | 94/95: ECC errors
+    - 119/120: GSP errors | 140: ECC unrecovered
+    
+    Subsystem (may WARN/escalate):
+    - Memory: 31, 32, 43, 63, 64 (MMU, PBDMA, page retirement)
+    - PCIe: 38, 39, 42 (bus, fabric, replay rate)
+    - Thermal: 60, 61, 62 (temperature limits)
+    - Power: 54, 56, 57 (power/clock state)
+    - Graphics: 13, 45, 69 (SM exceptions)
+    
+    Unknown XIDs use generic error message - NVSentinel will parse and handle
+    based on its own XID database.
+    """
     logger.info(
         f"Received XID {request.xid_type} injection request for GPU {request.gpu_id}"
     )
 
-    # Only XID 79 is supported via nsenter+kmsg
-    if request.xid_type != 79:
+    # Validate XID type is a reasonable integer (basic sanity check)
+    if not isinstance(request.xid_type, int) or request.xid_type < 1 or request.xid_type > 1000:
         raise HTTPException(
             status_code=400,
-            detail=f"XID {request.xid_type} not supported. Only XID 79 is implemented via nsenter+kmsg injection.",
+            detail=(
+                f"Invalid XID type: {request.xid_type}. "
+                f"XID must be an integer between 1-1000. "
+                f"Common XIDs: 79 (bus error), 74 (NVLink), 48/94/95 (ECC errors)."
+            ),
         )
 
     if not injector.kernel_xid_available or not injector.kernel_xid_injector:
         raise HTTPException(
             status_code=503,
-            detail="Kernel-level XID injector not available. XID 79 requires privileged access to syslog/kmsg.",
+            detail=f"Kernel-level XID injector not available. XID {request.xid_type} requires privileged access to syslog/kmsg.",
         )
 
-    success, message = injector.kernel_xid_injector.inject_xid_79_gpu_fell_off_bus(
-        gpu_id=request.gpu_id
+    # Use the generic inject_xid method which supports multiple XID types
+    success, message = injector.kernel_xid_injector.inject_xid(
+        xid_type=request.xid_type, gpu_id=request.gpu_id
     )
 
     if not success:
