@@ -222,7 +222,7 @@ You can pass any sglang flags directly to this worker, see https://docs.sglang.a
 It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch) for running the TensorRT-LLM engine.
 
 > [!Note]
-> Always match the PyTorch container tag with the TensorRT-LLM version you plan to use. For Dynamo `0.7.0` RC8 we validate against `tensorrt-llm==1.2.0rc2` inside `nvcr.io/nvidia/pytorch:25.10-py3`. For other releases, inspect [`container/Dockerfile.trtllm`](container/Dockerfile.trtllm) or the [TensorRT-LLM Dockerfile.multi](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/Dockerfile.multi) to find the recommended `BASE_TAG`.
+> Always match the PyTorch container tag with the TensorRT-LLM version you plan to use. For Dynamo `0.7.0` we validate against `tensorrt-llm==1.2.0rc2` inside `nvcr.io/nvidia/pytorch:25.10-py3`. For other releases, inspect [`container/Dockerfile.trtllm`](container/Dockerfile.trtllm) or the [TensorRT-LLM Dockerfile.multi](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/Dockerfile.multi) to find the recommended `BASE_TAG`.
 
 > [!Important]
 > Launch container with the following additional settings `--shm-size=1g --ulimit memlock=-1`
