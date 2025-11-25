@@ -36,7 +36,7 @@ def pytest_addoption(parser):
         "By default, these tests are excluded.",
     )
     parser.addoption(
-        "--skip-restart-services",
+        "--skip-service-restart",
         action="store_true",
         default=False,
         help="Skip restarting NATS and etcd services before deployment. "
@@ -119,6 +119,6 @@ def client_type(request):
 
 
 @pytest.fixture
-def skip_restart_services(request):
+def skip_service_restart(request):
     """Get skip restart services flag from command line."""
-    return request.config.getoption("--skip-restart-services")
+    return request.config.getoption("--skip-service-restart")

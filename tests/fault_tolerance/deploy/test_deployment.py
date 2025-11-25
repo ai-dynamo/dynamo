@@ -446,7 +446,7 @@ async def test_fault_scenario(
     image: str,
     namespace: str,
     validation_context,  # noqa: F811  # Shared context for passing data to validation
-    skip_restart_services: bool,
+    skip_service_restart: bool,
 ):
     """
     Test dynamo serve deployments with injected failures
@@ -497,7 +497,7 @@ async def test_fault_scenario(
         namespace=namespace,
         log_dir=request.node.log_dir,
         deployment_spec=scenario.deployment,
-        skip_restart_services=skip_restart_services,
+        skip_service_restart=skip_service_restart,
     ) as deployment:
         # Populate shared context for validation
         validation_context["deployment"] = deployment
