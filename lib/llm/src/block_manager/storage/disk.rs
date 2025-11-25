@@ -3,6 +3,7 @@
 
 use super::*;
 
+use aligned_vec::{AVec, ConstAlign};
 use anyhow::Context;
 use core::ffi::c_char;
 use nix::fcntl::{FallocateFlags, fallocate};
@@ -34,68 +35,29 @@ impl SystemAccessible for DiskStorage {}
 const ZERO_BUF_SIZE: usize = 16 * 1024 * 1024; // 16MB
 const PAGE_SIZE: usize = 4096; // Standard page size for O_DIRECT alignment
 
-/// A page-aligned buffer for O_DIRECT I/O operations.
+// Type alias for 4096-byte (page size) aligned vectors
+type Align4096 = ConstAlign<4096>;
+
+/// Create a page-aligned zero-filled buffer for O_DIRECT I/O operations.
 /// On filesystems like Lustre, O_DIRECT requires both buffer address and I/O size
 /// to be aligned to the filesystem block size (typically page size).
-struct AlignedBuffer {
-    ptr: *mut u8,
-    layout: std::alloc::Layout,
-    len: usize,
+fn create_aligned_buffer(size: usize) -> anyhow::Result<AVec<u8, Align4096>> {
+    // Round up to nearest page size to ensure alignment requirements
+    let aligned_size = size.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+
+    // Create aligned vector with compile-time PAGE_SIZE alignment
+    let mut buf = AVec::<u8, Align4096>::new(PAGE_SIZE);
+    buf.resize(aligned_size, 0u8); // Zero-fill
+
+    tracing::trace!(
+        "Allocated aligned buffer: size={}, aligned_size={}, align={}",
+        size,
+        aligned_size,
+        PAGE_SIZE
+    );
+
+    Ok(buf)
 }
-
-impl AlignedBuffer {
-    /// Create a new page-aligned zero-filled buffer.
-    /// Size will be rounded up to the nearest page boundary.
-    fn new(size: usize) -> anyhow::Result<Self> {
-        // Round up to nearest page size to ensure alignment requirements
-        let aligned_size = size.div_ceil(PAGE_SIZE) * PAGE_SIZE;
-
-        let layout = std::alloc::Layout::from_size_align(aligned_size, PAGE_SIZE)
-            .context("Failed to create aligned layout")?;
-
-        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-
-        if ptr.is_null() {
-            anyhow::bail!(
-                "Failed to allocate aligned buffer of {} bytes",
-                aligned_size
-            );
-        }
-
-        tracing::trace!(
-            "Allocated aligned buffer: size={}, aligned_size={}, align={}",
-            size,
-            aligned_size,
-            PAGE_SIZE
-        );
-
-        Ok(Self {
-            ptr,
-            layout,
-            len: aligned_size,
-        })
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-}
-
-impl Drop for AlignedBuffer {
-    fn drop(&mut self) {
-        unsafe {
-            std::alloc::dealloc(self.ptr, self.layout);
-        }
-    }
-}
-
-// Safety: AlignedBuffer owns its memory and is safe to send between threads
-unsafe impl Send for AlignedBuffer {}
-unsafe impl Sync for AlignedBuffer {}
 
 fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
     match fallocate(fd, FallocateFlags::empty(), 0, size as i64) {
@@ -115,9 +77,8 @@ fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
                     );
 
                     // Use page-aligned buffer for O_DIRECT compatibility (required on Lustre)
-                    let buf = AlignedBuffer::new(ZERO_BUF_SIZE)
+                    let buf = create_aligned_buffer(ZERO_BUF_SIZE)
                         .context("Failed to allocate aligned zero buffer")?;
-                    let buf_slice = buf.as_slice();
 
                     let mut file =
                         unsafe { File::from_raw_fd(nix::unistd::dup(fd).context("dup error")?) };
@@ -137,7 +98,7 @@ fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
                             std::cmp::min(aligned, buf.len())
                         };
 
-                        match file.write(&buf_slice[..to_write]) {
+                        match file.write(&buf[..to_write]) {
                             Ok(n) => {
                                 if n != to_write {
                                     tracing::error!(
@@ -177,7 +138,7 @@ fn allocate_file(fd: RawFd, size: u64) -> anyhow::Result<()> {
                                     to_write,
                                     written,
                                     size,
-                                    buf_slice.as_ptr(),
+                                    buf.as_ptr(),
                                     PAGE_SIZE
                                 );
 
@@ -524,7 +485,7 @@ mod tests {
         }
     }
 
-    /// Test that AlignedBuffer satisfies strict O_DIRECT requirements.
+    /// Test that aligned buffers satisfy strict O_DIRECT requirements.
     #[test]
     fn test_aligned_buffer_with_strict_writer() {
         let test_sizes = vec![
@@ -536,16 +497,17 @@ mod tests {
         ];
 
         for requested_size in test_sizes {
-            let buf = AlignedBuffer::new(requested_size).expect("Failed to create aligned buffer");
+            let buf =
+                create_aligned_buffer(requested_size).expect("Failed to create aligned buffer");
 
             let mut writer = StrictODirectWriter::new();
 
-            // This should succeed - AlignedBuffer meets strict requirements
-            let result = writer.write(buf.as_slice());
+            // This should succeed - aligned buffer meets strict requirements
+            let result = writer.write(&buf[..]);
 
             assert!(
                 result.is_ok(),
-                "AlignedBuffer write failed for size {}: {:?}",
+                "Aligned buffer write failed for size {}: {:?}",
                 requested_size,
                 result.err()
             );
@@ -593,7 +555,7 @@ mod tests {
         ];
 
         for total_size in test_sizes {
-            let buf = AlignedBuffer::new(ZERO_BUF_SIZE).expect("Failed to create buffer");
+            let buf = create_aligned_buffer(ZERO_BUF_SIZE).expect("Failed to create buffer");
 
             let mut writer = StrictODirectWriter::new();
             let mut written: u64 = 0;
@@ -609,14 +571,12 @@ mod tests {
                 };
 
                 // This should always succeed with our aligned buffer
-                writer
-                    .write_all(&buf.as_slice()[..to_write])
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "Write failed at offset {} for total size {}: {:?}",
-                            written, total_size, e
-                        )
-                    });
+                writer.write_all(&buf[..to_write]).unwrap_or_else(|e| {
+                    panic!(
+                        "Write failed at offset {} for total size {}: {:?}",
+                        written, total_size, e
+                    )
+                });
 
                 written += to_write as u64;
             }
