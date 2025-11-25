@@ -323,8 +323,14 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
-        runtime, component, engine_client, default_sampling_params
+        runtime,
+        component,
+        engine_client,
+        default_sampling_params,
+        getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
+        enable_multimodal=config.enable_multimodal,
     )
+    handler.add_temp_dir(prometheus_temp_dir)
 
     # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
     consolidator_enabled = False
@@ -430,6 +436,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         component,
         engine_client,
         default_sampling_params,
+        getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
+        enable_multimodal=config.enable_multimodal,
     )
 
     # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
