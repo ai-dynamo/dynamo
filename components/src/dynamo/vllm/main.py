@@ -317,6 +317,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         engine_client,
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
+        enable_multimodal=config.enable_multimodal,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -448,6 +449,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         engine_client,
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
+        enable_multimodal=config.enable_multimodal,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
