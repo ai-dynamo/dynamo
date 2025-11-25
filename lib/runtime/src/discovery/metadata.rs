@@ -388,6 +388,7 @@ mod tests {
             namespace: "test-ns".to_string(),
             instance_id: 123,
             url: "http://localhost:8080/metrics".to_string(),
+            gpu_uuids: vec![],
         };
 
         metadata.register_metrics_endpoint(instance).unwrap();
@@ -406,6 +407,7 @@ mod tests {
                 namespace: "ns1".to_string(),
                 instance_id: i,
                 url: format!("http://localhost:808{}/metrics", i),
+                gpu_uuids: vec![],
             };
             metadata.register_metrics_endpoint(instance).unwrap();
         }
@@ -415,6 +417,7 @@ mod tests {
                 namespace: "ns2".to_string(),
                 instance_id: i + 100,
                 url: format!("http://localhost:808{}/metrics", i + 100),
+                gpu_uuids: vec![],
             };
             metadata.register_metrics_endpoint(instance).unwrap();
         }
@@ -444,6 +447,7 @@ mod tests {
             namespace: "test-ns".to_string(),
             instance_id: 456,
             url: "http://localhost:8080/metrics".to_string(),
+            gpu_uuids: vec![],
         };
 
         metadata.register_metrics_endpoint(instance).unwrap();

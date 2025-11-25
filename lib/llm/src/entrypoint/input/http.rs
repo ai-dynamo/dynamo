@@ -150,8 +150,9 @@ pub async fn run(
     let metrics_spec = dynamo_runtime::discovery::DiscoverySpec::MetricsEndpoint {
         namespace: namespace_for_metrics,
         url: metrics_url.clone(),
+        gpu_uuids: Vec::new(),
     };
-    
+
     match distributed_runtime.discovery().register(metrics_spec).await {
         Ok(_) => {
             tracing::info!("Registered frontend metrics endpoint: {}", metrics_url);

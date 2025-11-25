@@ -42,6 +42,7 @@ async fn list_metrics_endpoints(
             namespace,
             instance_id,
             url,
+            ..
         } = instance
         {
             endpoints.push(MetricsEndpointListing {

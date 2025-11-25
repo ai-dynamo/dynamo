@@ -181,6 +181,7 @@ impl Discovery for KVStoreDiscovery {
                 namespace,
                 instance_id,
                 url,
+                ..
             } => {
                 let key = Self::metrics_endpoint_key(namespace, *instance_id);
                 tracing::debug!(
@@ -264,6 +265,20 @@ impl Discovery for KVStoreDiscovery {
                     key
                 );
                 (MODELS_BUCKET, key)
+            }
+            DiscoveryInstance::MetricsEndpoint {
+                namespace,
+                instance_id,
+                ..
+            } => {
+                let key = Self::metrics_endpoint_key(namespace, *instance_id);
+                tracing::debug!(
+                    "Unregistering metrics endpoint instance_id={}, namespace={}, key={}",
+                    instance_id,
+                    namespace,
+                    key
+                );
+                (METRICS_ENDPOINTS_BUCKET, key)
             }
         };
 
