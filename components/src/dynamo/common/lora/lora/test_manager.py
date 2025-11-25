@@ -44,12 +44,12 @@ async def test_manager_with_custom_source(temp_cache_dir):
     """Test LoRAManager with custom source"""
     manager = LoRAManager(cache_path=temp_cache_dir)
 
-    # Register mock source
+    # Register mock source for "mock://" scheme
     mock_source = MockLoRASource()
     manager.register_custom_source("mock", mock_source)
 
-    # Download using custom source
-    result = await manager.download_lora("mock://test-lora", source_hint="mock")
+    # Download using custom source (inferred from URI scheme)
+    result = await manager.download_lora("mock://test-lora")
 
     assert result["status"] == "success"
     assert "local_path" in result
@@ -66,12 +66,11 @@ async def test_manager_custom_source_not_found(temp_cache_dir):
     mock_source = MockLoRASource(should_exist=False)
     manager.register_custom_source("mock", mock_source)
 
-    # Try to download
-    result = await manager.download_lora("mock://test-lora", source_hint="mock")
+    # Try to download - should fail because exists() returns False
+    result = await manager.download_lora("mock://test-lora")
 
-    # Should still succeed if download() is called, but may fail if exists() is checked
-    # This depends on implementation details
-    assert "status" in result
+    assert result["status"] == "error"
+    assert "not found" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -134,15 +133,15 @@ def test_uri_to_cache_key():
 
     # Test S3 URI
     s3_key = manager._uri_to_cache_key("s3://bucket/path/to/lora")
-    assert s3_key == "path/to/lora"
+    assert s3_key == "s3__bucket_path_to_lora"
 
     # Test GCS URI
     gcs_key = manager._uri_to_cache_key("gs://bucket/path/to/lora")
-    assert gcs_key == "path/to/lora"
+    assert gcs_key == "gs__bucket_path_to_lora"
 
     # Test HTTP URI
     http_key = manager._uri_to_cache_key("https://example.com/path/to/lora")
-    assert http_key == "path/to/lora"
+    assert http_key == "https__example_com_path_to_lora"
 
     # Test file URI (fallback)
     file_key = manager._uri_to_cache_key("file:///local/path")

@@ -21,11 +21,6 @@ pub trait LoRASource: Send + Sync {
 
     /// Check if LoRA exists in this source
     async fn exists(&self, lora_uri: &str) -> Result<bool>;
-
-    /// Optional: Get metadata about the LoRA without downloading
-    async fn metadata(&self, _lora_uri: &str) -> Result<Option<serde_json::Value>> {
-        Ok(None) // Default implementation
-    }
 }
 
 /// Local filesystem LoRA source
@@ -79,40 +74,6 @@ impl LoRASource for LocalLoRASource {
         let source_path = Self::parse_file_uri(file_uri)?;
         Ok(source_path.exists() && source_path.is_dir())
     }
-
-    async fn metadata(&self, file_uri: &str) -> Result<Option<serde_json::Value>> {
-        let source_path = Self::parse_file_uri(file_uri)?;
-
-        if !source_path.exists() {
-            return Ok(None);
-        }
-
-        // Count files and total size
-        let mut file_count = 0usize;
-        let mut total_size = 0u64;
-
-        fn visit_dir(path: &Path, count: &mut usize, size: &mut u64) -> Result<()> {
-            for entry in std::fs::read_dir(path)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() {
-                    *count += 1;
-                    *size += entry.metadata()?.len();
-                } else if path.is_dir() {
-                    visit_dir(&path, count, size)?;
-                }
-            }
-            Ok(())
-        }
-
-        visit_dir(&source_path, &mut file_count, &mut total_size)?;
-
-        Ok(Some(serde_json::json!({
-            "file_count": file_count,
-            "total_size_bytes": total_size,
-            "local_path": source_path.display().to_string(),
-        })))
-    }
 }
 
 /// S3-based LoRA source using object_store crate
@@ -158,9 +119,16 @@ impl S3LoRASource {
             builder = builder
                 .with_endpoint(endpoint)
                 // Use path-style URLs for custom endpoints (e.g., MinIO)
-                .with_virtual_hosted_style_request(false)
-                // Allow HTTP for local development (MinIO often uses HTTP)
-                .with_allow_http(true);
+                .with_virtual_hosted_style_request(false);
+
+            // Only allow HTTP when explicitly enabled via environment variable
+            // HTTPS is the default for security
+            if std::env::var("AWS_ALLOW_HTTP")
+                .map(|v| v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
+                builder = builder.with_allow_http(true);
+            }
         }
 
         let store = builder.build()?;
@@ -256,31 +224,12 @@ impl LoRASource for S3LoRASource {
         let object_prefix = ObjectPath::from(prefix);
         let mut list_stream = bucket_store.list(Some(&object_prefix));
 
-        // Check if at least one object exists
-        Ok(list_stream.next().await.is_some())
-    }
-
-    async fn metadata(&self, s3_uri: &str) -> Result<Option<serde_json::Value>> {
-        let (bucket, prefix) = Self::parse_s3_uri(s3_uri)?;
-
-        let bucket_store = self.build_store(&bucket)?;
-
-        let object_prefix = ObjectPath::from(prefix);
-        let mut list_stream = bucket_store.list(Some(&object_prefix));
-
-        let mut total_size = 0u64;
-        let mut file_count = 0usize;
-
-        while let Some(meta_result) = list_stream.next().await {
-            let meta = meta_result?;
-            total_size += meta.size;
-            file_count += 1;
+        // Check if at least one object exists, propagating errors
+        match list_stream.next().await {
+            Some(Ok(_)) => Ok(true),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(false),
         }
-
-        Ok(Some(serde_json::json!({
-            "file_count": file_count,
-            "total_size_bytes": total_size,
-        })))
     }
 }
 
