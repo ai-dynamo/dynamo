@@ -148,12 +148,12 @@ async fn engine_for(
             // Auto-discover backends
             Ok(EngineConfig::Dynamic(Box::new(local_model)))
         }
-        Output::Echo => Ok(EngineConfig::StaticFull {
+        Output::Echo => Ok(EngineConfig::InProcessText {
             model: Box::new(local_model),
             engine: dynamo_llm::engines::make_echo_engine(),
         }),
         #[cfg(feature = "mistralrs")]
-        Output::MistralRs => Ok(EngineConfig::StaticFull {
+        Output::MistralRs => Ok(EngineConfig::InProcessText {
             engine: dynamo_engine_mistralrs::make_engine(&local_model).await?,
             model: Box::new(local_model),
         }),
@@ -164,7 +164,7 @@ async fn engine_for(
             let engine =
                 dynamo_llm::mocker::engine::make_mocker_engine(drt, endpoint, args).await?;
 
-            Ok(EngineConfig::StaticCore {
+            Ok(EngineConfig::InProcessTokens {
                 engine,
                 model: Box::new(local_model),
                 is_prefill: false,
