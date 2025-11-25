@@ -1,0 +1,4060 @@
+From 98cfa367d40b994f4e717b6855f0df0f16b09c5b Mon Sep 17 00:00:00 2001
+From: Kunshang Ji <kunshang.ji@intel.com>
+Date: Mon, 24 Mar 2025 18:03:11 +0800
+Subject: [PATCH 01/55] fix lm_eval default params
+
+Signed-off-by: Kunshang Ji <kunshang.ji@intel.com>
+---
+ .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/.buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh b/.buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh
+index 792f355c4..af2c24c4c 100644
+--- a/.buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh
++++ b/.buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh
+@@ -46,6 +46,6 @@ while getopts "m:b:l:f:t:" OPT; do
+ done
+ 
+ lm_eval --model vllm \
+-  --model_args "pretrained=$MODEL,tensor_parallel_size=$TP_SIZE,add_bos_token=true,trust_remote_code=true,max_model_len=4096" \
++  --model_args "pretrained=$MODEL,tensor_parallel_size=$TP_SIZE,add_bos_token=true,distributed_executor_backend=mp,trust_remote_code=true,max_model_len=4096,enforce_eager=true,max_num_batched_tokens=4096" \
+   --tasks gsm8k --num_fewshot "$FEWSHOT" --limit "$LIMIT" \
+   --batch_size "$BATCH_SIZE"
+-- 
+2.43.0
+
+
+From 6cc2602018390dcdb12b41498e94c97d2dc2bcb4 Mon Sep 17 00:00:00 2001
+From: yan <yan.ma@intel.com>
+Date: Wed, 23 Jul 2025 08:12:21 +0000
+Subject: [PATCH 02/55] update spec-decode UT
+
+Signed-off-by: yan <yan.ma@intel.com>
+---
+ tests/utils.py                   |  2 ++
+ tests/v1/e2e/test_spec_decode.py | 57 +++++++++++++++++---------------
+ 2 files changed, 33 insertions(+), 26 deletions(-)
+
+diff --git a/tests/utils.py b/tests/utils.py
+index 16e1e6039..514da44f4 100644
+--- a/tests/utils.py
++++ b/tests/utils.py
+@@ -1140,6 +1140,8 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
+             print("Skip FLASH_ATTN_VLLM_V1 on ROCm as aiter is not installed")
+ 
+         return attn_backend_list
++    elif current_platform.is_xpu():
++        return ["FLASH_ATTN"]
+     else:
+         raise ValueError("Unsupported platform")
+ 
+diff --git a/tests/v1/e2e/test_spec_decode.py b/tests/v1/e2e/test_spec_decode.py
+index 0b240b7d4..1ebd4fde4 100644
+--- a/tests/v1/e2e/test_spec_decode.py
++++ b/tests/v1/e2e/test_spec_decode.py
+@@ -90,7 +90,7 @@ def test_ngram_correctness(
+         m.setenv("VLLM_USE_V1", "1")
+         test_prompts = get_test_prompts(mm_enabled=False)
+ 
+-        ref_llm = LLM(model=model_name, max_model_len=1024)
++        ref_llm = LLM(model=model_name, max_model_len=1024, enforce_eager=True, block_size=64, dtype="float16")
+         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+         del ref_llm
+         torch.cuda.empty_cache()
+@@ -105,6 +105,10 @@ def test_ngram_correctness(
+                 "num_speculative_tokens": 3,
+             },
+             max_model_len=1024,
++            enforce_eager=True,
++            block_size=64,
++            dtype="float16",
++            gpu_memory_utilization=0.6,
+         )
+         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+         matches = 0
+@@ -125,30 +129,22 @@ def test_ngram_correctness(
+         cleanup_dist_env_and_memory()
+ 
+ 
+-@pytest.mark.parametrize(["model_setup", "mm_enabled"], [
+-    (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False),
+-    (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
+-      "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
+-    (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
+-      "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False),
+-    pytest.param(
+-        ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+-         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+-        False,
+-        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+-    pytest.param(
+-        ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+-         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+-        True,
+-        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+-    (("eagle", "eagle618/deepseek-v3-random",
+-      "eagle618/eagle-deepseek-v3-random", 1), False),
+-],
+-                         ids=[
+-                             "qwen3_eagle3", "llama3_eagle", "llama3_eagle3",
+-                             "llama4_eagle", "llama4_eagle_mm",
+-                             "deepseek_eagle"
+-                         ])
++@pytest.mark.parametrize(
++    ["model_setup", "mm_enabled"],
++    [
++        # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
++        # (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False),
++        (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
++          "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
++        (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
++          "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False),
++    ],
++    ids=[
++        # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
++        # "qwen3_eagle3",
++        "llama3_eagle",
++        "llama3_eagle3",
++    ])
+ @pytest.mark.parametrize("attn_backend",
+                          get_attn_backend_list_based_on_platform())
+ def test_eagle_correctness(
+@@ -188,7 +184,12 @@ def test_eagle_correctness(
+ 
+         ref_llm = LLM(model=model_name,
+                       max_model_len=2048,
+-                      tensor_parallel_size=tp_size)
++                      tensor_parallel_size=tp_size,
++                      enforce_eager=True,
++                      block_size=64,
++                      dtype="float16",
++                      gpu_memory_utilization=0.6,
++                      )
+         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+         del ref_llm
+         torch.cuda.empty_cache()
+@@ -204,6 +205,10 @@ def test_eagle_correctness(
+                 "num_speculative_tokens": 3,
+                 "max_model_len": 2048,
+             },
++            enforce_eager=True,
++            block_size=64,
++            dtype="float16",
++            gpu_memory_utilization=0.6,
+             max_model_len=2048,
+         )
+         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+-- 
+2.43.0
+
+
+From 2e8a4a978037ac5e6fb700b645754cfc6d7342eb Mon Sep 17 00:00:00 2001
+From: yan ma <yan.ma@intel.com>
+Date: Thu, 20 Feb 2025 00:17:57 +0800
+Subject: [PATCH 03/55] update gptq example
+
+Signed-off-by: yan ma <yan.ma@intel.com>
+---
+ tests/quantization/test_ipex_quant.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tests/quantization/test_ipex_quant.py b/tests/quantization/test_ipex_quant.py
+index 34b1b6c2e..4c8082646 100644
+--- a/tests/quantization/test_ipex_quant.py
++++ b/tests/quantization/test_ipex_quant.py
+@@ -25,7 +25,7 @@ DTYPE = ["bfloat16"]
+ @pytest.mark.parametrize("model", MODELS)
+ @pytest.mark.parametrize("dtype", DTYPE)
+ def test_ipex_quant(vllm_runner, model, dtype):
+-    with vllm_runner(model, dtype=dtype) as llm:
++    with vllm_runner(model, dtype=dtype, enforce_eager=True, block_size=64) as llm:
+         output = llm.generate_greedy(["The capital of France is"],
+                                      max_tokens=32)
+     assert output
+-- 
+2.43.0
+
+
+From 10aaaf7272700a3c04f24510a1298816a310f8a3 Mon Sep 17 00:00:00 2001
+From: yan <yan.ma@intel.com>
+Date: Thu, 24 Jul 2025 02:33:45 +0000
+Subject: [PATCH 04/55] update sliding window UT
+
+Signed-off-by: yan <yan.ma@intel.com>
+---
+ tests/v1/e2e/test_correctness_sliding_window.py | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/tests/v1/e2e/test_correctness_sliding_window.py b/tests/v1/e2e/test_correctness_sliding_window.py
+index 4dfe1d3bb..56f102253 100644
+--- a/tests/v1/e2e/test_correctness_sliding_window.py
++++ b/tests/v1/e2e/test_correctness_sliding_window.py
+@@ -18,7 +18,7 @@ class TestConfig:
+ 
+ model_config = {
+     "bigcode/starcoder2-3b": TestConfig(4096, (800, 1100)),
+-    "google/gemma-3-1b-it": TestConfig(4096, (400, 800)),
++    #"google/gemma-3-1b-it": TestConfig(4096, (400, 800)),
+ }
+ 
+ 
+@@ -26,7 +26,7 @@ model_config = {
+     "model",
+     [
+         "bigcode/starcoder2-3b",  # sliding window only
+-        "google/gemma-3-1b-it",  # sliding window + full attention
++        #"google/gemma-3-1b-it",  # sliding window + full attention
+     ])
+ @pytest.mark.parametrize("batch_size", [5])
+ @pytest.mark.parametrize("seed", [1])
+@@ -46,7 +46,9 @@ def test_sliding_window_retrieval(monkeypatch, model, batch_size, seed,
+ 
+         llm = LLM(
+             model=model,
+-            disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager)
++            disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager,
++            enforce_eager=True,
++            block_size=64)
+         sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
+ 
+         prompts, answer, indices = prep_prompts(batch_size,
+-- 
+2.43.0
+
+
+From 33a5fd1af2d3f963e0c5d536510ec0277c13cfc3 Mon Sep 17 00:00:00 2001
+From: Chaojun Zhang <chaojun.zhang@intel.com>
+Date: Mon, 21 Apr 2025 10:15:41 +0800
+Subject: [PATCH 05/55] remove assertion (#152)
+
+---
+ examples/offline_inference/vision_language.py             | 4 +++-
+ examples/offline_inference/vision_language_multi_image.py | 6 ++++--
+ vllm/model_executor/models/qwen2_5_vl.py                  | 8 ++++----
+ 3 files changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/examples/offline_inference/vision_language.py b/examples/offline_inference/vision_language.py
+index b104113b8..d2e3309fb 100644
+--- a/examples/offline_inference/vision_language.py
++++ b/examples/offline_inference/vision_language.py
+@@ -1431,7 +1431,9 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
+             "max_pixels": 1280 * 28 * 28,
+             "fps": 1,
+         },
+-        limit_mm_per_prompt={modality: 1},
++        limit_mm_per_prompt={"image": 1},
++        enforce_eager=True,
++        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+     )
+ 
+     if modality == "image":
+diff --git a/examples/offline_inference/vision_language_multi_image.py b/examples/offline_inference/vision_language_multi_image.py
+index 01c2905cf..2649c992b 100644
+--- a/examples/offline_inference/vision_language_multi_image.py
++++ b/examples/offline_inference/vision_language_multi_image.py
+@@ -982,12 +982,14 @@ def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+         )
+         smart_resize = None
+ 
+-    model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
++    model_name = "Qwen/Qwen2.5-VL-7B-Instruct"
+ 
+     engine_args = EngineArgs(
+         model=model_name,
+         max_model_len=32768 if smart_resize is None else 4096,
+-        max_num_seqs=5,
++        max_num_seqs=2,
++        enforce_eager=True,
++        gpu_memory_utilization=0.8,
+         limit_mm_per_prompt={"image": len(image_urls)},
+     )
+ 
+diff --git a/vllm/model_executor/models/qwen2_5_vl.py b/vllm/model_executor/models/qwen2_5_vl.py
+index 8aa777557..349d5d470 100644
+--- a/vllm/model_executor/models/qwen2_5_vl.py
++++ b/vllm/model_executor/models/qwen2_5_vl.py
+@@ -1210,10 +1210,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
+             if image_input is None and video_input is None:
+                 inputs_embeds = None
+             else:
+-                if uses_mrope(self.config):
+-                    assert positions.ndim == 2 and positions.size(0) == 3, (
+-                        "multimodal section rotary embedding requires "
+-                        f"(3, seq_len) positions, but got {positions.size()}")
++                # if uses_mrope(self.config):
++                #     assert positions.ndim == 2 and positions.size(0) == 3, (
++                #         "multimodal section rotary embedding requires "
++                #         f"(3, seq_len) positions, but got {positions.size()}")
+                 inputs_embeds = self.get_input_embeddings_v0(
+                     input_ids,
+                     image_input=image_input,
+-- 
+2.43.0
+
+
+From ea1a2cd53f211c364ab102e483a0c97e17d935d1 Mon Sep 17 00:00:00 2001
+From: Qiming Zhang <qiming1.zhang@intel.com>
+Date: Wed, 14 May 2025 22:30:30 -0700
+Subject: [PATCH 06/55] enable irope to support llama4 (#170)
+
+* enable irope to support llama4
+
+* enable custom_routing_function
+---
+ vllm/model_executor/layers/fused_moe/layer.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/vllm/model_executor/layers/fused_moe/layer.py b/vllm/model_executor/layers/fused_moe/layer.py
+index a90a71159..5638da392 100644
+--- a/vllm/model_executor/layers/fused_moe/layer.py
++++ b/vllm/model_executor/layers/fused_moe/layer.py
+@@ -601,7 +601,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
+                 logical_replica_count is not None:
+             raise NotImplementedError("Expert load balancing is not supported "
+                                       "for XPU.")
+-        assert custom_routing_function is None
+         return layer.ipex_fusion(
+             x,
+             use_grouped_topk,
+@@ -610,6 +609,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
+             renormalize,
+             topk_group,
+             num_expert_group,
++            custom_routing_function=custom_routing_function
+         )
+ 
+     def forward_tpu(
+-- 
+2.43.0
+
+
+From bcf57667b77d1e7d7f9b51c97f2c9104e6bce0af Mon Sep 17 00:00:00 2001
+From: yan <yanma1@habana.ai>
+Date: Tue, 20 May 2025 05:27:11 +0000
+Subject: [PATCH 07/55] add VLLM_XPU_FP8_DTYPE env for fp8 online quantization
+
+Signed-off-by: yan <yan.ma@intel.com>
+---
+ vllm/envs.py          | 5 +++++
+ vllm/platforms/xpu.py | 5 ++++-
+ 2 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/vllm/envs.py b/vllm/envs.py
+index 8ca7e0f19..e17e78c30 100755
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -175,6 +175,7 @@ if TYPE_CHECKING:
+     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
+     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
+     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
++    VLLM_XPU_FP8_DTYPE: str = "e5m2"
+ 
+ 
+ def get_default_cache_root():
+@@ -1241,6 +1242,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     # raw bytes. Defaults to True for backward compatibility.
+     "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES":
+     lambda: bool(int(os.getenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1"))),
++
++    # fp8 dtype for XPU platform
++    "VLLM_XPU_FP8_DTYPE":
++    lambda: os.environ.get("VLLM_XPU_FP8_DTYPE", "e5m2"),
+ }
+ 
+ # --8<-- [end:env-vars-definition]
+diff --git a/vllm/platforms/xpu.py b/vllm/platforms/xpu.py
+index 32208e7ff..88869a322 100644
+--- a/vllm/platforms/xpu.py
++++ b/vllm/platforms/xpu.py
+@@ -184,7 +184,10 @@ class XPUPlatform(Platform):
+ 
+     @classmethod
+     def fp8_dtype(cls) -> torch.dtype:
+-        return torch.float8_e5m2
++        if envs.VLLM_XPU_FP8_DTYPE == "e4m3":
++            return torch.float8_e4m3fn
++        else:
++            return torch.float8_e5m2
+ 
+     @classmethod
+     def is_data_center_gpu(cls) -> bool:
+-- 
+2.43.0
+
+
+From 1d1484b1da44550c3836d2348db69d113178599f Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Wed, 10 Sep 2025 06:13:27 +0000
+Subject: [PATCH 08/55] set test_output_len=10 to avoid long prompt test run
+
+Signed-off-by: Yan Ma <yan.ma@intel.com>
+---
+ vllm/benchmarks/serve.py | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/vllm/benchmarks/serve.py b/vllm/benchmarks/serve.py
+index a98eb2a78..14095ca4d 100644
+--- a/vllm/benchmarks/serve.py
++++ b/vllm/benchmarks/serve.py
+@@ -430,7 +430,8 @@ async def benchmark(
+     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
+         input_requests[0].prompt,
+         input_requests[0].prompt_len,
+-        input_requests[0].expected_output_len,
++        #input_requests[0].expected_output_len,
++        10,
+         input_requests[0].multi_modal_data,
+     )
+ 
+-- 
+2.43.0
+
+
+From 93937d4e07f04f4a730fbbfdb89d7cc0321603d1 Mon Sep 17 00:00:00 2001
+From: yan <yan.ma@intel.com>
+Date: Thu, 24 Jul 2025 03:00:18 +0000
+Subject: [PATCH 09/55] use default CCL_ZE_IPC_EXCHANGE
+
+---
+ vllm/v1/worker/xpu_worker.py | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/vllm/v1/worker/xpu_worker.py b/vllm/v1/worker/xpu_worker.py
+index 7355206f3..0061c8abb 100644
+--- a/vllm/v1/worker/xpu_worker.py
++++ b/vllm/v1/worker/xpu_worker.py
+@@ -153,11 +153,9 @@ class XPUWorker(Worker):
+             raise RuntimeError(
+                 f"Not support device type: {self.device_config.device}")
+ 
+-        ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE", "pidfd")
+         ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
+         ENV_LOCAL_WORLD_SIZE = os.getenv("LOCAL_WORLD_SIZE",
+                                          str(self.parallel_config.world_size))
+-        os.environ["CCL_ZE_IPC_EXCHANGE"] = ENV_CCL_ZE_IPC_EXCHANGE
+         os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
+         os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
+         os.environ["LOCAL_RANK"] = str(self.local_rank)
+-- 
+2.43.0
+
+
+From 398e7836598286214bac2e9c7da37bed5fb1df24 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Wed, 10 Sep 2025 06:33:50 +0000
+Subject: [PATCH 10/55] enable qwen3
+
+---
+ vllm/v1/attention/backends/flash_attn.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/vllm/v1/attention/backends/flash_attn.py b/vllm/v1/attention/backends/flash_attn.py
+index 20f1904b3..98034fde8 100755
+--- a/vllm/v1/attention/backends/flash_attn.py
++++ b/vllm/v1/attention/backends/flash_attn.py
+@@ -47,7 +47,7 @@ class FlashAttentionBackend(AttentionBackend):
+ 
+     @classmethod
+     def get_supported_head_sizes(cls) -> list[int]:
+-        return [32, 64, 96, 128, 160, 192, 224, 256]
++        return [32, 64, 80, 96, 128, 160, 192, 224, 256]
+ 
+     @classmethod
+     def validate_head_size(cls, head_size: int) -> None:
+-- 
+2.43.0
+
+
+From 46a36fc0e87b9f8fcf35c072a93fbf5fed0b0c1a Mon Sep 17 00:00:00 2001
+From: yan <yan.ma@intel.com>
+Date: Thu, 24 Jul 2025 03:23:09 +0000
+Subject: [PATCH 11/55] return dummy values instead of all-zero tensors during
+ profile
+
+---
+ vllm/v1/attention/backends/flash_attn.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/vllm/v1/attention/backends/flash_attn.py b/vllm/v1/attention/backends/flash_attn.py
+index 98034fde8..57313e2d3 100755
+--- a/vllm/v1/attention/backends/flash_attn.py
++++ b/vllm/v1/attention/backends/flash_attn.py
+@@ -455,7 +455,7 @@ class FlashAttentionImpl(AttentionImpl):
+ 
+         if attn_metadata is None:
+             # Profiling run.
+-            return output
++            return output.uniform_()
+ 
+         attn_type = self.attn_type
+ 
+-- 
+2.43.0
+
+
+From 4099648edfbe7642aa3764e59c75901fdcdb7f3b Mon Sep 17 00:00:00 2001
+From: yan <yan.ma@intel.com>
+Date: Thu, 24 Jul 2025 03:29:57 +0000
+Subject: [PATCH 12/55] skip dummy sampler run when use spec decode
+
+Signed-off-by: yan <yan.ma@intel.com>
+---
+ vllm/v1/worker/gpu_model_runner.py | 6 ++++--
+ vllm/v1/worker/gpu_worker.py       | 2 +-
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index ebb18e81c..082061d25 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -246,6 +246,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+         # NOTE(Jiayi): currently we put the entire draft model on
+         # the last PP rank. This is not ideal if there are many
+         # layers in the draft model.
++        self.use_spec_decode = False
++        if self.speculative_config:
++            self.use_spec_decode = True
+         if self.speculative_config and get_pp_group().is_last_rank:
+             if self.speculative_config.method == "ngram":
+                 self.drafter = NgramProposer(self.vllm_config)
+@@ -3025,11 +3028,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+                     # Cache the dummy encoder outputs.
+                     self.encoder_cache["tmp"] = dict(
+                         enumerate(dummy_encoder_outputs))
+-
+         # Add `is_profile` here to pre-allocate communication buffers
+         hidden_states, last_hidden_states \
+             = self._dummy_run(self.max_num_tokens, is_profile=True)
+-        if get_pp_group().is_last_rank:
++        if get_pp_group().is_last_rank and not self.use_spec_decode:
+             if self.is_pooling_model:
+                 output = self._dummy_pooler_run(hidden_states)
+             else:
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index 37dd431fd..6bf9abe0b 100644
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -407,7 +407,7 @@ class Worker(WorkerBase):
+                 )
+             if self.model_runner.is_pooling_model:
+                 self.model_runner._dummy_pooler_run(hidden_states)
+-            else:
++            elif not self.model_runner.use_spec_decode:
+                 self.model_runner._dummy_sampler_run(
+                     hidden_states=last_hidden_states)
+ 
+-- 
+2.43.0
+
+
+From 47cd31a94cc2b7a65e11a96b5dffe461207989e4 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Thu, 26 Jun 2025 14:14:48 +0800
+Subject: [PATCH 13/55] offload weights to cpu before fp8 online quant (#225)
+
+Signed-off-by: yan <yanma1@habana.ai>
+---
+ docs/features/quantization/fp8.md             |  2 +-
+ tests/quantization/test_cpu_offload.py        | 12 ++++-
+ vllm/envs.py                                  |  5 +++
+ .../model_executor/layers/quantization/fp8.py | 13 ++++--
+ vllm/model_executor/model_loader/utils.py     | 45 ++++++++++---------
+ 5 files changed, 52 insertions(+), 25 deletions(-)
+
+diff --git a/docs/features/quantization/fp8.md b/docs/features/quantization/fp8.md
+index 834c03cbe..439e1e0d7 100644
+--- a/docs/features/quantization/fp8.md
++++ b/docs/features/quantization/fp8.md
+@@ -134,4 +134,4 @@ print(result[0].outputs[0].text)
+ ```
+ 
+ !!! warning
+-    Currently, we load the model at original precision before quantizing down to 8-bits, so you need enough memory to load the whole model.
++    Currently, by default we load the model at original precision before quantizing down to 8-bits, so you need enough memory to load the whole model. To avoid this, adding `VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT=1` can allow offloading weights to cpu before quantization and quantized weights will be kept in device.
+diff --git a/tests/quantization/test_cpu_offload.py b/tests/quantization/test_cpu_offload.py
+index 08d9573ec..82a0e0cd8 100644
+--- a/tests/quantization/test_cpu_offload.py
++++ b/tests/quantization/test_cpu_offload.py
+@@ -1,4 +1,4 @@
+-# SPDX-License-Identifier: Apache-2.0
++# SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+ # Expanded quantized model tests for CPU offloading
+@@ -11,6 +11,16 @@ from tests.quantization.utils import is_quant_method_supported
+ from ..utils import compare_two_settings
+ 
+ 
++@pytest.mark.skipif(not is_quant_method_supported("fp8"),
++                    reason="fp8 is not supported on this GPU type.")
++def test_offload_weights_before_quant_fp8():
++    # Test quantization of an unquantized checkpoint
++    compare_two_settings("meta-llama/Llama-3.2-1B-Instruct",
++                         ["--quantization", "fp8"], ["--quantization", "fp8"],
++                         {"VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT": "1"},
++                         max_wait_seconds=480)
++
++
+ @pytest.mark.skipif(not is_quant_method_supported("fp8"),
+                     reason="fp8 is not supported on this GPU type.")
+ def test_cpu_offload_fp8():
+diff --git a/vllm/envs.py b/vllm/envs.py
+index e17e78c30..487fdcbfa 100755
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -176,6 +176,7 @@ if TYPE_CHECKING:
+     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
+     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
+     VLLM_XPU_FP8_DTYPE: str = "e5m2"
++    VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT: bool = False
+ 
+ 
+ def get_default_cache_root():
+@@ -1246,6 +1247,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     # fp8 dtype for XPU platform
+     "VLLM_XPU_FP8_DTYPE":
+     lambda: os.environ.get("VLLM_XPU_FP8_DTYPE", "e5m2"),
++
++    # Offload model weights to cpu before online fp8 quantization
++    "VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT":
++    lambda: os.environ.get("VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT", "0") == "1",
+ }
+ 
+ # --8<-- [end:env-vars-definition]
+diff --git a/vllm/model_executor/layers/quantization/fp8.py b/vllm/model_executor/layers/quantization/fp8.py
+index 3d94626e5..72c77e15c 100644
+--- a/vllm/model_executor/layers/quantization/fp8.py
++++ b/vllm/model_executor/layers/quantization/fp8.py
+@@ -309,10 +309,14 @@ class Fp8LinearMethod(LinearMethodBase):
+                         if self.quant_config.is_checkpoint_fp8_serialized else
+                         params_dtype)
+ 
++        # Force offloading weights to cpu if VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT
++        # enabled, otherwise use original device config which can be gpu or cpu
++        # (may happen when cpu_offload_gb > 0)
+         weight = ModelWeightParameter(data=torch.empty(
+             output_size_per_partition,
+             input_size_per_partition,
+-            dtype=weight_dtype),
++            dtype=weight_dtype,
++            device="cpu" if envs.VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT else None),
+                                       input_dim=1,
+                                       output_dim=0,
+                                       weight_loader=weight_loader)
+@@ -631,8 +635,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+             num_experts,
+             2 * intermediate_size_per_partition,
+             hidden_size,
+-            dtype=params_dtype),
++            dtype=params_dtype,
++            device="cpu" if envs.VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT else None),
+                                         requires_grad=False)
++
+         layer.register_parameter("w13_weight", w13_weight)
+         set_weight_attrs(w13_weight, extra_weight_attrs)
+ 
+@@ -640,7 +646,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+             num_experts,
+             hidden_size,
+             intermediate_size_per_partition,
+-            dtype=params_dtype),
++            dtype=params_dtype,
++            device="cpu" if envs.VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT else None),
+                                        requires_grad=False)
+         layer.register_parameter("w2_weight", w2_weight)
+         set_weight_attrs(w2_weight, extra_weight_attrs)
+diff --git a/vllm/model_executor/model_loader/utils.py b/vllm/model_executor/model_loader/utils.py
+index 0c2441a6d..d1747f2d3 100644
+--- a/vllm/model_executor/model_loader/utils.py
++++ b/vllm/model_executor/model_loader/utils.py
+@@ -15,6 +15,7 @@ from typing_extensions import assert_never
+ from vllm.attention import Attention
+ from vllm.config import (ModelConfig, ModelImpl, VllmConfig,
+                          set_current_vllm_config)
++from vllm.envs import VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT
+ from vllm.logger import init_logger
+ from vllm.model_executor.layers.linear import QKVCrossParallelLinear
+ from vllm.model_executor.layers.quantization.base_config import (
+@@ -144,26 +145,30 @@ def device_loading_context(module: torch.nn.Module,
+         yield module
+ 
+     finally:
+-        # Restore parameters to their original devices, ignoring new parameters
+-        pin_memory = is_pin_memory_available()
+-        for name, p in module.named_parameters():
+-            if name in original_device_states:
+-                original_device: torch.device = original_device_states[name]
+-                if original_device.type == "cpu":
+-                    # `torch.empty_like` does not support `pin_memory` argument
+-                    cpu_data = torch.empty_strided(
+-                        size=p.data.size(),
+-                        stride=p.data.stride(),
+-                        dtype=p.data.dtype,
+-                        layout=p.data.layout,
+-                        device="cpu",
+-                        pin_memory=pin_memory,
+-                    )
+-                    cpu_data.copy_(p.data)
+-                    p.data = cpu_data
+-                else:
+-                    p.data = p.data.to(original_device)
+-        # New parameters or parameters already on target device are untouched
++        # If weights were loaded onto the CPU for FP8 online quantization, there
++        # is no need to move them back to the original device.
++        if not VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT:
++            # Restore parameters to their original devices, ignoring new parameters # noqa: E501
++            pin_memory = is_pin_memory_available()
++            for name, p in module.named_parameters():
++                if name in original_device_states:
++                    original_device: torch.device = original_device_states[
++                        name]
++                    if original_device.type == "cpu":
++                        # `torch.empty_like` does not support `pin_memory` argument # noqa: E501
++                        cpu_data = torch.empty_strided(
++                            size=p.data.size(),
++                            stride=p.data.stride(),
++                            dtype=p.data.dtype,
++                            layout=p.data.layout,
++                            device="cpu",
++                            pin_memory=pin_memory,
++                        )
++                        cpu_data.copy_(p.data)
++                        p.data = cpu_data
++                    else:
++                        p.data = p.data.to(original_device)
++            # New parameters or parameters already on target device are untouched # noqa: E501
+ 
+ 
+ def get_model_architecture(
+-- 
+2.43.0
+
+
+From 89e2880ef1cba8e3481a1d224a504c84d2999bb3 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yanma1@habana.ai>
+Date: Mon, 23 Jun 2025 18:46:19 +0800
+Subject: [PATCH 14/55] increase AIOHTTP_TIMEOUT for long context test (#226)
+
+---
+ benchmarks/backend_request_func.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/benchmarks/backend_request_func.py b/benchmarks/backend_request_func.py
+index ba7c733be..61a9eeb91 100644
+--- a/benchmarks/backend_request_func.py
++++ b/benchmarks/backend_request_func.py
+@@ -18,7 +18,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
+ # NOTE(simon): do not import vLLM here so the benchmark script
+ # can run without vLLM installed.
+ 
+-AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
++AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=2 * 6 * 60 * 60)
+ 
+ 
+ @dataclass
+-- 
+2.43.0
+
+
+From 7c491b3b487826e258313f8c326a03d21820922d Mon Sep 17 00:00:00 2001
+From: Yejing Lai <yejing.lai@intel.com>
+Date: Mon, 30 Jun 2025 16:30:01 +0800
+Subject: [PATCH 15/55] Replace Qwen2.5 VL attention (#230)
+
+* Replace Qwen2.5 VL attention and add FP8 GEMM kernel WA
+
+* Replace Qwen2 VL attention
+---
+ vllm/model_executor/models/qwen2_5_vl.py | 36 +++++++++++++++++++++++-
+ vllm/model_executor/models/qwen2_vl.py   | 36 +++++++++++++++++++++++-
+ vllm/model_executor/models/vision.py     |  1 -
+ vllm/platforms/xpu.py                    |  4 +++
+ 4 files changed, 74 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/model_executor/models/qwen2_5_vl.py b/vllm/model_executor/models/qwen2_5_vl.py
+index 349d5d470..144ad5a97 100644
+--- a/vllm/model_executor/models/qwen2_5_vl.py
++++ b/vllm/model_executor/models/qwen2_5_vl.py
+@@ -301,7 +301,7 @@ class Qwen2_5_VisionAttention(nn.Module):
+         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+         if self.attn_backend not in {
+                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
+-                _Backend.ROCM_AITER_FA
++                _Backend.ROCM_AITER_FA, _Backend.IPEX
+         }:
+             raise RuntimeError(
+                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
+@@ -376,6 +376,38 @@ class Qwen2_5_VisionAttention(nn.Module):
+             context_layer = rearrange(output,
+                                       "(b s) ... -> b s ...",
+                                       b=batch_size)
++        elif self.attn_backend == _Backend.IPEX:
++            from vllm._ipex_ops import ipex_ops
++
++            q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
++
++            output = torch.empty(
++                q.shape,
++                dtype=q.dtype,
++                device=q.device)
++            ipex_ops.varlen_attention(
++                    q,
++                    k,
++                    v,
++                    output,
++                    cu_seqlens,
++                    cu_seqlens,
++                    None,
++                    max_seqlen,
++                    max_seqlen,
++                    pdropout=0.0,
++                    softmax_scale=1.0/(q.shape[-1] ** 0.5),
++                    zero_tensors=False,
++                    is_causal=True,
++                    return_softmax=False,
++                    gen_=None,
++                    window_size_left=-1,
++                    window_size_right=-1,
++                    logits_soft_cap=-1,
++            )
++            context_layer = rearrange(output,
++                            "(b s) ... -> b s ...",
++                            b=batch_size)
+         elif self.attn_backend == _Backend.TORCH_SDPA:
+             # Execute attention entry by entry for speed & less VRAM.
+             outputs = []
+@@ -714,6 +746,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
+             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+         elif self.attn_backend == _Backend.XFORMERS:
+             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
++        elif self.attn_backend == _Backend.IPEX:
++            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+         return max_seqlen, seqlens
+ 
+     @staticmethod
+diff --git a/vllm/model_executor/models/qwen2_vl.py b/vllm/model_executor/models/qwen2_vl.py
+index 90a1ad2a6..59ab8a019 100644
+--- a/vllm/model_executor/models/qwen2_vl.py
++++ b/vllm/model_executor/models/qwen2_vl.py
+@@ -317,7 +317,7 @@ class Qwen2VisionAttention(nn.Module):
+         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+         if self.attn_backend not in {
+                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
+-                _Backend.ROCM_AITER_FA
++                _Backend.ROCM_AITER_FA, _Backend.IPEX
+         }:
+             raise RuntimeError(
+                 f"Qwen2-VL does not support {self.attn_backend} backend now.")
+@@ -391,6 +391,38 @@ class Qwen2VisionAttention(nn.Module):
+             context_layer = rearrange(output,
+                                       "(b s) ... -> b s ...",
+                                       b=batch_size)
++        elif self.attn_backend == _Backend.IPEX:
++            from vllm._ipex_ops import ipex_ops
++
++            q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
++
++            output = torch.empty(
++                q.shape,
++                dtype=q.dtype,
++                device=q.device)
++            ipex_ops.varlen_attention(
++                    q,
++                    k,
++                    v,
++                    output,
++                    cu_seqlens,
++                    cu_seqlens,
++                    None,
++                    max_seqlen,
++                    max_seqlen,
++                    pdropout=0.0,
++                    softmax_scale=1.0/(q.shape[-1] ** 0.5),
++                    zero_tensors=False,
++                    is_causal=True,
++                    return_softmax=False,
++                    gen_=None,
++                    window_size_left=-1,
++                    window_size_right=-1,
++                    logits_soft_cap=-1,
++            )
++            context_layer = rearrange(output,
++                            "(b s) ... -> b s ...",
++                            b=batch_size)
+         elif self.attn_backend == _Backend.TORCH_SDPA:
+             # Execute attention entry by entry for speed & less VRAM.
+             outputs = []
+@@ -672,6 +704,8 @@ class Qwen2VisionTransformer(nn.Module):
+             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+         elif self.attn_backend == _Backend.XFORMERS:
+             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
++        elif self.attn_backend == _Backend.IPEX:
++            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+         return max_seqlen, seqlens
+ 
+     def forward(
+diff --git a/vllm/model_executor/models/vision.py b/vllm/model_executor/models/vision.py
+index c16aa5ac6..15cd2c632 100644
+--- a/vllm/model_executor/models/vision.py
++++ b/vllm/model_executor/models/vision.py
+@@ -80,7 +80,6 @@ def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
+ 
+     return current_platform.get_vit_attn_backend(support_fa)
+ 
+-
+ def resolve_visual_encoder_outputs(
+     encoder_outputs: Union[torch.Tensor, list[torch.Tensor]],
+     feature_sample_layers: Optional[list[int]],
+diff --git a/vllm/platforms/xpu.py b/vllm/platforms/xpu.py
+index 88869a322..1256f0e23 100644
+--- a/vllm/platforms/xpu.py
++++ b/vllm/platforms/xpu.py
+@@ -102,6 +102,10 @@ class XPUPlatform(Platform):
+     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+         return True
+ 
++    @classmethod
++    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
++        return _Backend.IPEX
++
+     @classmethod
+     def inference_mode(cls):
+         return torch.no_grad()
+-- 
+2.43.0
+
+
+From da0e65b249d8ded810b0f12231e99b840e4a8210 Mon Sep 17 00:00:00 2001
+From: Yejing Lai <yejing.lai@intel.com>
+Date: Tue, 8 Jul 2025 09:25:10 +0800
+Subject: [PATCH 16/55] fix teleChatForCausalLM not register issue (#245)
+
+---
+ vllm/model_executor/models/registry.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/vllm/model_executor/models/registry.py b/vllm/model_executor/models/registry.py
+index 7d7654e84..0a8c34824 100644
+--- a/vllm/model_executor/models/registry.py
++++ b/vllm/model_executor/models/registry.py
+@@ -142,6 +142,7 @@ _TEXT_GENERATION_MODELS = {
+     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
+     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
+     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
++    "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
+     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
+     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
+     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
+-- 
+2.43.0
+
+
+From 21590d5ad7407753fd4d8b3df92b9c7057fa72ab Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Sun, 31 Aug 2025 12:50:14 +0000
+Subject: [PATCH 17/55] enable microsoft/Phi-4-multimodal-instruct
+
+---
+ vllm/model_executor/models/phi4mm_audio.py | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/vllm/model_executor/models/phi4mm_audio.py b/vllm/model_executor/models/phi4mm_audio.py
+index a1c452053..a74e8cdb7 100644
+--- a/vllm/model_executor/models/phi4mm_audio.py
++++ b/vllm/model_executor/models/phi4mm_audio.py
+@@ -550,10 +550,11 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
+         enc_streaming_mask = self._streaming_mask(seq_len, batch_size,
+                                                   self.chunk_size,
+                                                   self.left_chunk)
+-
+-        if xs_pad.is_cuda:
+-            enc_streaming_mask = enc_streaming_mask.cuda()
+-            xs_pad = xs_pad.cuda()
++        
++        device = xs_pad.device
++        if device.type != "cpu":
++            enc_streaming_mask = enc_streaming_mask.to(device)
++            xs_pad = xs_pad.to(device)
+ 
+         input_tensor = xs_pad
+         input_tensor, masks = self._forward_embeddings_core(
+@@ -570,8 +571,8 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
+         if chunk_size_nc is not None:
+             enc_streaming_mask_nc = self._streaming_mask(
+                 seq_len, batch_size, chunk_size_nc, left_chunk_nc)
+-            if xs_pad.is_cuda:
+-                enc_streaming_mask_nc = enc_streaming_mask_nc.cuda()
++            if device.type != "cpu":
++                enc_streaming_mask_nc = enc_streaming_mask_nc.to(device)
+             if masks is not None:
+                 hs_mask_nc = masks & enc_streaming_mask_nc
+             else:
+-- 
+2.43.0
+
+
+From fdbb9322c2e162ba54407b996aaca25ea3c9c5f6 Mon Sep 17 00:00:00 2001
+From: yan <yanma1@habana.ai>
+Date: Fri, 18 Apr 2025 02:10:40 +0000
+Subject: [PATCH 18/55] revert determine_available_memory logic
+
+Signed-off-by: yan <yanma1@intel.com>
+---
+ vllm/v1/worker/xpu_worker.py | 43 ++++++++++++------------------------
+ 1 file changed, 14 insertions(+), 29 deletions(-)
+
+diff --git a/vllm/v1/worker/xpu_worker.py b/vllm/v1/worker/xpu_worker.py
+index 0061c8abb..b235fc0ea 100644
+--- a/vllm/v1/worker/xpu_worker.py
++++ b/vllm/v1/worker/xpu_worker.py
+@@ -83,9 +83,11 @@ class XPUWorker(Worker):
+     def determine_available_memory(self) -> int:
+         """Profiles the peak memory usage of the model to determine how many
+         KV blocks may be allocated without OOMs.
++
+         The engine will first conduct a profiling of the existing memory usage.
+         Then, it calculates the maximum possible number of GPU and CPU blocks
+         that can be allocated with the remaining free memory.
++
+         .. tip::
+             You may limit the usage of GPU memory
+             by adjusting the `gpu_memory_utilization` parameter.
+@@ -93,51 +95,34 @@ class XPUWorker(Worker):
+         # Profile the memory usage of the model and get the maximum number of
+         # cache blocks that can be allocated with the remaining free memory.
+         torch.xpu.empty_cache()
+-        torch.xpu.reset_peak_memory_stats()
+-
+-        free_gpu_memory, total_gpu_memory = torch.xpu.mem_get_info()
+-        current_allocated_bytes = torch.xpu.memory_allocated()
+-        msg = ("Before memory profiling run, "
+-               f"total GPU memory: {total_gpu_memory / 1024**2:.2f} MB, "
+-               f"model load takes {current_allocated_bytes / 1024**2:.2f} MB, "
+-               f"free gpu memory is {free_gpu_memory / 1024**2:.2f} MB.")
+-        logger.info(msg)
++
+         # Execute a forward pass with dummy inputs to profile the memory usage
+         # of the model.
+         self.model_runner.profile_run()
+ 
+-        free_gpu_memory, _ = self.xpu_get_mem_info()
++        # Calculate the number of blocks that can be allocated with the
++        # profiled peak memory.
++        torch.xpu.synchronize()
++        used_memory = torch.xpu.memory_allocated()
++        total_gpu_memory = torch.xpu.get_device_properties(
++            self.local_rank).total_memory
++        free_gpu_memory = total_gpu_memory - used_memory
++
+         # NOTE(woosuk): Here we assume that the other processes using the same
+         # GPU did not change their memory usage during the profiling.
+-        assert self.init_gpu_memory > free_gpu_memory, (
++        peak_memory = self.init_gpu_memory - free_gpu_memory
++        assert peak_memory > 0, (
+             "Error in memory profiling. "
+             f"Initial free memory {self.init_gpu_memory}, current free memory"
+             f" {free_gpu_memory}. This happens when the GPU memory was "
+             "not properly cleaned up before initializing the vLLM instance.")
+ 
+-        # Get the peak memory allocation recorded by torch
+-        peak_memory = torch.xpu.memory_stats()["allocated_bytes.all.peak"]
+-
+         torch.xpu.empty_cache()
+-        torch_allocated_bytes = torch.xpu.memory_stats(
+-        )["allocated_bytes.all.current"]
+-        total_allocated_bytes = self.xpu_get_mem_info(
+-        )[1] - self.xpu_get_mem_info()[0]
+-
+-        non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
+-        if non_torch_allocations > 0:
+-            peak_memory += non_torch_allocations
++
+         available_kv_cache_memory = (
+             total_gpu_memory * self.cache_config.gpu_memory_utilization -
+             peak_memory)
+ 
+-        msg = ("After memory profiling run, "
+-               f"peak memory usage is {peak_memory / 1024**2:.2f} MB,"
+-               f"torch mem is {torch_allocated_bytes / 1024**2:.2f} MB, "
+-               f"non-torch mem is {non_torch_allocations / 1024**2:.2f} MB, "
+-               f"free gpu memory is {free_gpu_memory / 1024**2:.2f} MB.")
+-        logger.info(msg)
+-
+         return int(available_kv_cache_memory)
+ 
+     def init_device(self):
+-- 
+2.43.0
+
+
+From 1b3bf77d98f3fa1d0201a4b0c83877ceaf364114 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Wed, 10 Sep 2025 06:56:53 +0000
+Subject: [PATCH 19/55] add cu_seqlens_k for xpu performance (#262)
+
+Signed-off-by: Kunshang Ji <kunshang.ji@intel.com>
+---
+ vllm/v1/attention/backends/flash_attn.py |  9 +++++++++
+ vllm/v1/attention/backends/utils.py      |  5 +++++
+ vllm/v1/spec_decode/eagle.py             |  2 ++
+ vllm/v1/worker/gpu_model_runner.py       | 22 ++++++++++++++++++++++
+ 4 files changed, 38 insertions(+)
+
+diff --git a/vllm/v1/attention/backends/flash_attn.py b/vllm/v1/attention/backends/flash_attn.py
+index 57313e2d3..f7b65bc6e 100755
+--- a/vllm/v1/attention/backends/flash_attn.py
++++ b/vllm/v1/attention/backends/flash_attn.py
+@@ -24,6 +24,7 @@ if is_flash_attn_varlen_func_available():
+ 
+ from vllm.config import VllmConfig, get_layers_from_vllm_config
+ from vllm.logger import init_logger
++from vllm.platforms import current_platform
+ from vllm.utils import cdiv
+ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                               AttentionMetadataBuilder,
+@@ -137,6 +138,8 @@ class FlashAttentionMetadata:
+     scheduler_metadata: Optional[torch.Tensor] = None
+     prefix_scheduler_metadata: Optional[torch.Tensor] = None
+     max_num_splits: int = 0
++    # For XPU.
++    seq_start_loc: Optional[torch.Tensor] = None
+ 
+     causal: bool = True
+ 
+@@ -234,6 +237,8 @@ class FlashAttentionMetadataBuilder(
+         max_query_len = common_attn_metadata.max_query_len
+         max_seq_len = common_attn_metadata.max_seq_len
+         query_start_loc = common_attn_metadata.query_start_loc
++        seq_start_loc = common_attn_metadata.seq_start_loc \
++            if current_platform.is_xpu() else None
+         seq_lens = common_attn_metadata.seq_lens
+         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+         block_table_tensor = common_attn_metadata.block_table_tensor
+@@ -345,6 +350,7 @@ class FlashAttentionMetadataBuilder(
+             num_actual_tokens=num_actual_tokens,
+             max_query_len=max_query_len,
+             query_start_loc=query_start_loc,
++            seq_start_loc=seq_start_loc,
+             max_seq_len=max_seq_len,
+             seq_lens=seq_lens,
+             block_table=block_table_tensor,
+@@ -528,6 +534,8 @@ class FlashAttentionImpl(AttentionImpl):
+ 
+             descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
+ 
++            cu_seqlens_k = attn_metadata.seq_start_loc if \
++                current_platform.is_xpu() else None
+             flash_attn_varlen_func(
+                 q=query[:num_actual_tokens],
+                 k=key_cache,
+@@ -535,6 +543,7 @@ class FlashAttentionImpl(AttentionImpl):
+                 out=output[:num_actual_tokens],
+                 cu_seqlens_q=cu_seqlens_q,
+                 max_seqlen_q=max_seqlen_q,
++                cu_seqlens_k=cu_seqlens_k,
+                 seqused_k=seqused_k,
+                 max_seqlen_k=max_seqlen_k,
+                 softmax_scale=self.scale,
+diff --git a/vllm/v1/attention/backends/utils.py b/vllm/v1/attention/backends/utils.py
+index 009943fa7..647b3e88a 100644
+--- a/vllm/v1/attention/backends/utils.py
++++ b/vllm/v1/attention/backends/utils.py
+@@ -46,6 +46,9 @@ class CommonAttentionMetadata:
+     query_start_loc_cpu: torch.Tensor
+     """(batch_size + 1,), the start location of each request in query Tensor"""
+ 
++    seq_start_loc: torch.Tensor
++    seq_start_loc_cpu: torch.Tensor
++
+     seq_lens: torch.Tensor
+     seq_lens_cpu: torch.Tensor
+     """(batch_size,), the length of each request including both computed tokens
+@@ -566,6 +569,8 @@ def make_local_attention_virtual_batches(
+         query_start_loc_cpu=query_start_loc_cpu,
+         query_start_loc=query_start_loc_cpu.to(device=device,
+                                                non_blocking=True),
++        seq_start_loc=None,
++        seq_start_loc_cpu=None,
+         seq_lens_cpu=seq_lens_cpu,
+         seq_lens=seq_lens_cpu.to(device=device, non_blocking=True),
+         num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
+diff --git a/vllm/v1/spec_decode/eagle.py b/vllm/v1/spec_decode/eagle.py
+index 7132d507c..a9ade77ea 100644
+--- a/vllm/v1/spec_decode/eagle.py
++++ b/vllm/v1/spec_decode/eagle.py
+@@ -595,6 +595,8 @@ class EagleProposer:
+                                                        non_blocking=True),
+             seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
+             query_start_loc_cpu=new_query_start_loc_cpu,
++            seq_start_loc=None,
++            seq_start_loc_cpu=None,
+             seq_lens_cpu=new_seq_lens_cpu,
+             num_computed_tokens_cpu=common_attn_metadata.
+             num_computed_tokens_cpu,
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index 082061d25..190bc0ba0 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -365,6 +365,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+                                        self.max_num_tokens),
+                                    dtype=np.int64)
+ 
++        # this is XPU specific
++        self.seq_start_loc = torch.zeros(self.max_num_reqs + 1,
++                                         dtype=torch.int32,
++                                         device=self.device)
++        self.seq_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
++                                             dtype=torch.int32,
++                                             device="cpu",
++                                             pin_memory=self.pin_memory)
++        self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
++
+         # Layer pairings for cross-layer KV sharing.
+         # If an Attention layer `layer_name` is in the keys of this dict, it
+         # means this layer will perform attention using the keys and values
+@@ -947,6 +957,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+         seq_lens = self.seq_lens.gpu[:num_reqs]
+         max_seq_len = self.seq_lens.np[:num_reqs].max().item()
+ 
++        # for xpu
++        seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
++                    num_scheduled_tokens)
++        self.seq_start_loc_np[0] = 0
++        np.cumsum(seq_lens, out=self.seq_start_loc_np[1:num_reqs + 1])
++        self.seq_start_loc[:num_reqs + 1].copy_(
++            self.seq_start_loc_cpu[:num_reqs + 1], non_blocking=True)
++
+         # Copy the tensors to the GPU.
+         self._prepare_input_ids(total_num_scheduled_tokens, cu_num_tokens)
+ 
+@@ -1044,6 +1062,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+             common_attn_metadata = CommonAttentionMetadata(
+                 query_start_loc=query_start_loc,
+                 query_start_loc_cpu=query_start_loc_cpu,
++                seq_start_loc=self.seq_start_loc[:num_reqs + 1],
++                seq_start_loc_cpu=self.seq_start_loc_cpu[:num_reqs + 1],
+                 seq_lens=seq_lens,
+                 seq_lens_cpu=seq_lens_cpu,
+                 num_computed_tokens_cpu=num_computed_tokens_cpu,
+@@ -2737,6 +2757,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+                     query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
+                     query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs +
+                                                                  1],
++                    seq_start_loc=self.seq_start_loc[:num_reqs + 1],
++                    seq_start_loc_cpu=self.seq_start_loc_cpu[:num_reqs + 1],
+                     seq_lens=self.seq_lens.gpu[:num_reqs],
+                     seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
+                     num_computed_tokens_cpu=self.input_batch.
+-- 
+2.43.0
+
+
+From 4f105ad1159502bf638ffb412a3031e566b06855 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Wed, 30 Jul 2025 09:36:25 +0800
+Subject: [PATCH 20/55] support encoder-only models on xpu (#281)
+
+Signed-off-by: yan <yan.ma@intel.com>
+---
+ vllm/v1/attention/backends/flash_attn.py | 25 ++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/vllm/v1/attention/backends/flash_attn.py b/vllm/v1/attention/backends/flash_attn.py
+index f7b65bc6e..32f55f36e 100755
+--- a/vllm/v1/attention/backends/flash_attn.py
++++ b/vllm/v1/attention/backends/flash_attn.py
+@@ -32,6 +32,8 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                               get_kv_cache_layout)
+ from vllm.v1.kv_cache_interface import AttentionSpec
+ 
++if current_platform.is_xpu():
++    from vllm._ipex_ops import ipex_ops
+ logger = init_logger(__name__)
+ 
+ # NOTE(woosuk): This is an arbitrary number. Tune it if needed.
+@@ -623,6 +625,29 @@ class FlashAttentionImpl(AttentionImpl):
+             cu_seqlens_q.shape[0] - 1,  # type: ignore[union-attr]
+             self.num_kv_heads)
+ 
++        if current_platform.is_xpu():
++            ipex_ops.varlen_attention(
++                    query=query,
++                    key=key,
++                    value=value,
++                    out=output,
++                    seqlen_q=cu_seqlens_q,
++                    seqlen_k=cu_seqlens_k,
++                    max_seqlen_q=max_seqlen_q,
++                    max_seqlen_k=max_seqlen_k,
++                    softmax_scale=self.scale,
++                    is_causal=False,  # Encoder attention is bidirectional
++                    alibi_slopes=self.alibi_slopes,
++                    pdropout=0.0,
++                    zero_tensors=False,
++                    return_softmax=False,
++                    gen_=None,
++                    window_size_left=-1,
++                    window_size_right=-1,
++                    logits_soft_cap=self.logits_soft_cap,
++                    )
++            return output
++
+         # Call flash attention directly on Q, K, V tensors
+         flash_attn_varlen_func(
+             q=query,
+-- 
+2.43.0
+
+
+From 0a5010a3e7afc74d23f015f7c31450dbbb4c1fd7 Mon Sep 17 00:00:00 2001
+From: wenjun liu <wenjun.liu@intel.com>
+Date: Wed, 30 Jul 2025 13:43:56 +0800
+Subject: [PATCH 21/55] Enable 2508 release CI (#269)
+
+* add ci workflow files
+
+* 1
+
+* 1
+
+* add docker prune for building
+
+* 1
+
+* 1
+
+* 1
+
+* 1
+
+* 1
+
+* 1
+
+* 1
+
+* 1
+
+* add cache clean
+
+* add cache clean
+
+* add cache clean
+
+* add cache clean
+
+* only for release branch enable
+
+* fix results upload
+
+* 1
+
+* fix proxy
+
+* 1
+
+* change proxy for bmg
+---
+ .github/workflows/ci.yaml     | 185 ++++++++++++++++++++++++++++++++++
+ .github/workflows/ci_pvc.yaml | 181 +++++++++++++++++++++++++++++++++
+ 2 files changed, 366 insertions(+)
+ create mode 100644 .github/workflows/ci.yaml
+ create mode 100644 .github/workflows/ci_pvc.yaml
+
+diff --git a/.github/workflows/ci.yaml b/.github/workflows/ci.yaml
+new file mode 100644
+index 000000000..aef250abe
+--- /dev/null
++++ b/.github/workflows/ci.yaml
+@@ -0,0 +1,185 @@
++name: Run Intel XPU BMG CI
++
++on:
++  pull_request:
++    branches:
++      - '**release**'  
++    types: [opened, synchronize, reopened]  # 
++
++jobs:
++  run-xpu-BMG-CI:
++    if: |
++        github.event_name == 'pull_request' ||
++        (github.event_name == 'issue_comment' && 
++        github.event.issue.pull_request &&
++        contains(github.event.comment.body, '/BMG_CI'))
++    runs-on: BMG 
++
++    steps:
++    - name: Fix workspace permissions
++      run: |
++        sudo chown -R $(whoami):$(whoami) "$GITHUB_WORKSPACE"
++        sudo chmod -R 755 "$GITHUB_WORKSPACE"
++        sudo rm -f "$GITHUB_WORKSPACE/.git/index.lock" || true
++
++    - name: Checkout QA_ci (test code)  #
++      uses: actions/checkout@v4
++      with:
++        ref: QA_ci
++        path: qa_ci_code
++
++    - name: Checkout PR + Release Branch (DUT code)
++      uses: actions/checkout@v4
++      with:
++        ref: ${{ github.event.pull_request.head.ref }}
++        path: target_code
++        fetch-depth: 0  # 
++
++    - name: Merge PR into Release Branch
++      run: |
++        cd target_code
++        git fetch origin ${{ github.base_ref }}
++        git merge origin/${{ github.base_ref }} --no-commit
++      shell: bash
++
++    - name: Build docker image
++      run: |
++        echo "start to build image"
++        cd target_code
++        if [ -n "${{ github.event.pull_request.number }}" ]; then
++          image_name="vllm_xpu_ci_${{ github.event.pull_request.number }}"
++        else
++          image_name="vllm_xpu_ci_$(echo $GITHUB_REF | awk -F '/' '{print $3}')"
++        fi
++        image_name=$(echo "$image_name" | tr '[:upper:]' '[:lower:]')
++        #!/bin/bash
++
++        # Configuration
++        MAX_RETRIES=6                      # Maximum number of retry attempts
++        TIMEOUT=1800                       # 30-minute timeout per attempt (in seconds)
++        LOG_FILE="docker_build.log"         # Log file path
++
++        # Proxy configurations - add more if needed
++        PROXIES=(
++          "http://child-prc.intel.com:913"    # First fallback
++          "http://proxy.ims.intel.com:911"    # Primary proxy
++          "http://child-prc.intel.com:913"    # First fallback
++        )
++
++        # No-proxy configuration
++        NO_PROXY=".intel.com,intel.com,localhost,127.0.0.1"
++        #docker builder prune -f  #clean cache     
++        docker builder prune --all --force
++
++        #Loop through proxy configurations
++        for (( attempt=1; attempt<=$MAX_RETRIES; attempt++ )); do
++          proxy_index=$(( (attempt-1) % ${#PROXIES[@]} ))
++          proxy=${PROXIES[$proxy_index]}
++          echo "=== Attempt $attempt/$MAX_RETRIES (Proxy: $proxy) ===" | tee -a "$LOG_FILE"
++          
++          if [ $attempt -eq 1 ]; then
++            # First attempt without no_proxy
++            timeout $TIMEOUT docker build \
++              --build-arg http_proxy=$proxy \
++              --build-arg https_proxy=$proxy \
++              -f docker/Dockerfile.xpu \
++              -t "$image_name" \
++              --shm-size=4g . 2>&1 | tee -a "$LOG_FILE"
++          else
++            # Subsequent attempts with no_proxy
++            timeout $TIMEOUT docker build \
++              --build-arg http_proxy=$proxy \
++              --build-arg https_proxy=$proxy \
++              --build-arg no_proxy="$NO_PROXY" \
++              -f docker/Dockerfile.xpu \
++              -t "$image_name" \
++              --shm-size=4g . 2>&1 | tee -a "$LOG_FILE"
++          fi
++
++          # Check if build succeeded
++          if [ ${PIPESTATUS[0]} -eq 0 ]; then
++            echo "=== Build succeeded on attempt $attempt ===" | tee -a "$LOG_FILE"
++            exit 0
++          fi
++        done
++
++        echo "=== ERROR: All $MAX_RETRIES attempts failed. Check $LOG_FILE for details. ===" | tee -a "$LOG_FILE"
++        exit 1
++
++    - name: Prepare environment (clean up old processes and containers)
++      run: |
++        echo "Killing any process on port 8000..."
++        lsof -t -i:8000 | xargs -r kill -9 || true
++
++        echo "Killing old vllm server processes..."
++        pkill -f "python3 -m vllm.entrypoints.openai.api_server" || true
++
++        echo "Removing old container if exists..."
++        docker rm -f vllm_internal_ci || true
++    
++    - name: Run benchmark inside local Docker image
++      run: |
++        # Reuse the image_name from previous step
++        if [ -n "${{ github.event.pull_request.number }}" ]; then
++          image_name="vllm_xpu_ci_${{ github.event.pull_request.number }}"
++        else
++          image_name="vllm_xpu_ci_$(echo $GITHUB_REF | awk -F '/' '{print $3}')"
++        fi
++        image_name=$(echo "$image_name" | tr '[:upper:]' '[:lower:]')
++
++        echo "Running benchmark using image: $image_name"
++        docker run -t --rm --name vllm_internal_ci --shm-size 10g \
++          --net=host \
++          --ipc=host \
++          --privileged \
++          -v ${HOME}/actions-runner/_work/vllm-xpu/vllm-xpu/qa_ci_code:/WORKSPACE \
++          -v /dev/dri/by-path:/dev/dri/by-path \
++          -v ${HOME}/.cache:/root/.cache/ \
++          -e http_proxy=${http_proxy:-"http://proxy-dmz.intel.com:912"} \
++          -e https_proxy=${http_proxy:-"http://proxy-dmz.intel.com:912"} \
++          -e no_proxy=${no_proxy:-"127.0.0.1,localhost"} \
++          --device /dev/dri:/dev/dri \
++          -w /workspace \
++          --entrypoint='' \
++          --mount type=bind,source="$HOME/.secrets/my_token",target=/run/secrets/my_token,readonly \
++          $image_name \
++          bash -c "bash /WORKSPACE/.buildkite/nightly-benchmarks/scripts/CI_run_server_benchmarks.sh BMG || true; chown -R \$(id -u):\$(id -g) /WORKSPACE"
++
++    - name: Validate server benchmark results
++      run: |
++            python3 ${HOME}/actions-runner/_work/vllm-xpu/vllm-xpu/qa_ci_code/.buildkite/nightly-benchmarks/scripts/analyze_benchmark_results_final.py --test-selector BMG
++            cat ${HOME}/actions-runner/_work/vllm-xpu/vllm-xpu/qa_ci_code/benchmarks/results/benchmark_analysis_final.json
++
++    - name: Fix permissions
++      run: sudo chmod -R 755 ${{ runner.workspace }}/vllm-xpu/qa_ci_code/benchmarks/results/
++    
++    - name: Debug path
++      run: ls -la ${{ runner.workspace }}/vllm-xpu/qa_ci_code/benchmarks/results/
++
++    - name: Upload benchmark results
++      if: always()
++      uses: actions/upload-artifact@v4
++      with:
++        name: benchmark-results
++        path: ${{ runner.workspace }}/vllm-xpu/qa_ci_code/benchmarks/results/
++
++    - name: Analyze and validate benchmark results
++      if: always()
++      run: |
++        RESULTS_FILE="$HOME/actions-runner/_work/vllm-xpu/vllm-xpu/qa_ci_code/benchmarks/results/benchmark_analysis_final.json"
++        if [ ! -f "$RESULTS_FILE" ]; then
++          echo "❌ Benchmark analysis file not found!"
++          exit 1
++        fi
++        
++        echo "📊 Benchmark Results:"
++        cat "$RESULTS_FILE"
++        FAILURES=$(jq -r '.[] | select(.function != "pass") | .case_name' "$RESULTS_FILE")
++        
++        if [ -n "$FAILURES" ]; then
++          echo "❌ Failed cases detected:"
++          echo "$FAILURES"
++          exit 1
++        else
++          echo "✅ All benchmarks passed"
++        fi
+diff --git a/.github/workflows/ci_pvc.yaml b/.github/workflows/ci_pvc.yaml
+new file mode 100644
+index 000000000..eaa2f332a
+--- /dev/null
++++ b/.github/workflows/ci_pvc.yaml
+@@ -0,0 +1,181 @@
++name: Run Intel XPU PVC CI
++
++on:
++  pull_request:
++    branches:
++      - '**release**' 
++    types: [opened, synchronize, reopened]  # 
++
++jobs:
++  run-xpu-PVC-CI:
++    runs-on: PVC
++
++    steps:
++    - name: Fix workspace permissions
++      run: |
++        sudo chown -R $(whoami):$(whoami) "$GITHUB_WORKSPACE"
++        sudo chmod -R 755 "$GITHUB_WORKSPACE"
++        sudo rm -f "$GITHUB_WORKSPACE/.git/index.lock" || true
++
++    - name: Checkout QA_ci (test code)  # 
++      uses: actions/checkout@v4
++      with:
++        ref: QA_ci
++        path: qa_ci_code
++
++    - name: Checkout PR + Release Branch (DUT code)
++      uses: actions/checkout@v4
++      with:
++        ref: ${{ github.event.pull_request.head.ref }}
++        path: target_code
++        fetch-depth: 0  # 
++
++    # 
++    - name: Merge PR into Release Branch
++      run: |
++        cd target_code
++        git fetch origin ${{ github.base_ref }}
++        git merge origin/${{ github.base_ref }} --no-commit
++      shell: bash
++
++    - name: Build docker image
++      run: |
++        echo "start to build image"
++        cd target_code
++        if [ -n "${{ github.event.pull_request.number }}" ]; then
++          image_name="vllm_xpu_ci_${{ github.event.pull_request.number }}"
++        else
++          image_name="vllm_xpu_ci_$(echo $GITHUB_REF | awk -F '/' '{print $3}')"
++        fi
++        image_name=$(echo "$image_name" | tr '[:upper:]' '[:lower:]')
++        #!/bin/bash
++
++        # Configuration
++        MAX_RETRIES=6                      # Maximum number of retry attempts
++        TIMEOUT=1800                       # 30-minute timeout per attempt (in seconds)
++        LOG_FILE="docker_build.log"         # Log file path
++
++        # Proxy configurations - add more if needed
++        PROXIES=(
++          "http://proxy.ims.intel.com:911"    # Primary proxy
++          "http://child-prc.intel.com:913"    # First fallback
++        )
++
++        # No-proxy configuration
++        NO_PROXY=".intel.com,intel.com,localhost,127.0.0.1"
++        #docker builder prune -f  #clean cache  
++        docker builder prune --all --force
++  
++        # Loop through proxy configurations
++        for (( attempt=1; attempt<=$MAX_RETRIES; attempt++ )); do
++                  proxy_index=$(( (attempt-1) % ${#PROXIES[@]} ))
++                  proxy=${PROXIES[$proxy_index]}
++                  echo "=== Attempt $attempt/$MAX_RETRIES (Proxy: $proxy) ===" | tee -a "$LOG_FILE"
++                  
++                  if [ $attempt -eq 1 ]; then
++                    # First attempt without no_proxy
++                    timeout $TIMEOUT docker build \
++                      --build-arg http_proxy=$proxy \
++                      --build-arg https_proxy=$proxy \
++                      -f docker/Dockerfile.xpu \
++                      -t "$image_name" \
++                      --shm-size=4g . 2>&1 | tee -a "$LOG_FILE"
++                  else
++                    # Subsequent attempts with no_proxy
++                    timeout $TIMEOUT docker build \
++                      --build-arg http_proxy=$proxy \
++                      --build-arg https_proxy=$proxy \
++                      --build-arg no_proxy="$NO_PROXY" \
++                      -f docker/Dockerfile.xpu \
++                      -t "$image_name" \
++                      --shm-size=4g . 2>&1 | tee -a "$LOG_FILE"
++                  fi
++
++                  # Check if build succeeded
++                  if [ ${PIPESTATUS[0]} -eq 0 ]; then
++                    echo "=== Build succeeded on attempt $attempt ===" | tee -a "$LOG_FILE"
++                    exit 0
++                  fi
++                done
++
++        echo "=== ERROR: All $MAX_RETRIES attempts failed. Check $LOG_FILE for details. ===" | tee -a "$LOG_FILE"
++        exit 1
++
++    - name: Prepare environment (clean up old processes and containers)
++      run: |
++        echo "Killing any process on port 8000..."
++        lsof -t -i:8000 | xargs -r kill -9 || true
++
++        echo "Killing old vllm server processes..."
++        pkill -f "python3 -m vllm.entrypoints.openai.api_server" || true
++
++        echo "Removing old container if exists..."
++        docker rm -f vllm_internal_ci || true
++    
++    - name: Run benchmark inside local Docker image
++      run: |
++        # Reuse the image_name from previous step
++        if [ -n "${{ github.event.pull_request.number }}" ]; then
++          image_name="vllm_xpu_ci_${{ github.event.pull_request.number }}"
++        else
++          image_name="vllm_xpu_ci_$(echo $GITHUB_REF | awk -F '/' '{print $3}')"
++        fi
++        image_name=$(echo "$image_name" | tr '[:upper:]' '[:lower:]')
++
++        echo "Running benchmark using image: $image_name"
++        docker run -t --rm --name vllm_internal_ci --shm-size 10g \
++          --net=host \
++          --ipc=host \
++          --privileged \
++          -v $HOME/actions-runner/_work/vllm-xpu/vllm-xpu/qa_ci_code:/WORKSPACE \
++          -v /dev/dri/by-path:/dev/dri/by-path \
++          -v /mnt/data3:/root/.cache/ \
++          -e http_proxy=${http_proxy:-"http://proxy-dmz.intel.com:912"} \
++          -e https_proxy=${http_proxy:-"http://proxy-dmz.intel.com:912"} \
++          -e no_proxy=${no_proxy:-"127.0.0.1,localhost"} \
++          --device /dev/dri:/dev/dri \
++          -w /workspace \
++          --entrypoint='' \
++          --mount type=bind,source="$HOME/.secrets/my_token",target=/run/secrets/my_token,readonly \
++          $image_name \
++          bash -c "IPEX_FMHA_V3=0 bash /WORKSPACE/.buildkite/nightly-benchmarks/scripts/CI_run_server_benchmarks.sh "PVC" || true; chown -R \$(id -u):\$(id -g) /WORKSPACE"
++
++    - name: Validate server benchmark results
++      run: |
++        python3 $HOME/actions-runner/_work/vllm-xpu/vllm-xpu/qa_ci_code/.buildkite/nightly-benchmarks/scripts/analyze_benchmark_results_final.py --test-selector "PVC"
++        cat $HOME/actions-runner/_work/vllm-xpu/vllm-xpu/qa_ci_code/benchmarks/results/benchmark_analysis_final.json
++
++    - name: Fix permissions
++      run: sudo chmod -R 755 ${{ runner.workspace }}/vllm-xpu/qa_ci_code/benchmarks/results/
++    
++    - name: Debug path
++      run: ls -la ${{ runner.workspace }}/vllm-xpu/qa_ci_code/benchmarks/results/
++
++    - name: Upload benchmark results
++      if: always()
++      uses: actions/upload-artifact@v4
++      with:
++        name: benchmark-results
++        path: ${{ runner.workspace }}/vllm-xpu/qa_ci_code/benchmarks/results/
++
++    - name: Analyze and validate benchmark results
++      if: always()
++      run: |
++        RESULTS_FILE="$HOME/actions-runner/_work/vllm-xpu/vllm-xpu/qa_ci_code/benchmarks/results/benchmark_analysis_final.json"
++        if [ ! -f "$RESULTS_FILE" ]; then
++          echo "❌ Benchmark analysis file not found!"
++          exit 1
++        fi
++        
++        echo "📊 Benchmark Results:"
++        cat "$RESULTS_FILE"
++        
++        FAILURES=$(jq -r '.[] | select(.function != "pass") | .case_name' "$RESULTS_FILE")
++        
++        if [ -n "$FAILURES" ]; then
++          echo "❌ Failed cases detected:"
++          echo "$FAILURES"
++          exit 1
++        else
++          echo "✅ All benchmarks passed"
++        fi
+-- 
+2.43.0
+
+
+From 72e07836f4075b749ecfe067243fa58162804bd5 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Sun, 31 Aug 2025 13:29:22 +0000
+Subject: [PATCH 22/55] use docker 2509
+
+---
+ docker/Dockerfile.xpu | 2 +-
+ requirements/xpu.txt  | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/docker/Dockerfile.xpu b/docker/Dockerfile.xpu
+index ef4223525..ffa7c6ea7 100644
+--- a/docker/Dockerfile.xpu
++++ b/docker/Dockerfile.xpu
+@@ -62,7 +62,7 @@ FROM vllm-base AS vllm-openai
+ 
+ # install additional dependencies for openai api server
+ RUN --mount=type=cache,target=/root/.cache/pip \
+-    pip install accelerate hf_transfer pytest pytest_asyncio lm_eval[api] modelscope
++    pip install accelerate hf_transfer pytest pytest_asyncio lm_eval[api] 'modelscope!=1.15.0'
+ 
+ RUN --mount=type=cache,target=/root/.cache/pip \
+     pip uninstall oneccl oneccl-devel -y
+diff --git a/requirements/xpu.txt b/requirements/xpu.txt
+index 74f5b05b2..dc0a6dbaa 100644
+--- a/requirements/xpu.txt
++++ b/requirements/xpu.txt
+@@ -11,6 +11,7 @@ jinja2>=3.1.6
+ datasets # for benchmark scripts
+ numba == 0.60.0 # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
+ nixl==0.3.0 # for PD disaggregation
++
+ torch==2.8.0+xpu
+ torchaudio
+ torchvision
+-- 
+2.43.0
+
+
+From 4d0aeb641508a142d4293f9f37cc77ee132fade6 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Sun, 31 Aug 2025 13:32:44 +0000
+Subject: [PATCH 23/55] add example scripts for validation
+
+---
+ examples/bmg/reasoning.py                     | 27 ++++++++++++++
+ examples/bmg/tooling.py                       | 37 +++++++++++++++++++
+ .../structured_outputs/structured_outputs.py  |  4 +-
+ 3 files changed, 67 insertions(+), 1 deletion(-)
+ create mode 100644 examples/bmg/reasoning.py
+ create mode 100644 examples/bmg/tooling.py
+
+diff --git a/examples/bmg/reasoning.py b/examples/bmg/reasoning.py
+new file mode 100644
+index 000000000..04f91786e
+--- /dev/null
++++ b/examples/bmg/reasoning.py
+@@ -0,0 +1,27 @@
++from openai import OpenAI
++
++# Modify OpenAI's API key and API base to use vLLM's API server.
++openai_api_key = "EMPTY"
++openai_api_base = "http://0.0.0.0:8000/v1"
++
++client = OpenAI(
++    api_key=openai_api_key,
++    base_url=openai_api_base,
++)
++
++models = client.models.list()
++model = models.data[0].id
++
++# Round 1
++messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
++# For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
++# For Qwen3 series, if you want to disable thinking in reasoning mode, add:
++# extra_body={"chat_template_kwargs": {"enable_thinking": False}}
++response = client.chat.completions.create(model=model, messages=messages)
++
++reasoning_content = response.choices[0].message.reasoning_content
++content = response.choices[0].message.content
++
++print("reasoning_content:", reasoning_content)
++print("content:", content)
++
+diff --git a/examples/bmg/tooling.py b/examples/bmg/tooling.py
+new file mode 100644
+index 000000000..bf8375831
+--- /dev/null
++++ b/examples/bmg/tooling.py
+@@ -0,0 +1,37 @@
++import json
++
++client = OpenAI(base_url="http://0.0.0.0:8000/v1", api_key="dummy")
++
++def get_weather(location: str, unit: str):
++    return f"Getting the weather for {location} in {unit}..."
++tool_functions = {"get_weather": get_weather}
++
++tools = [{
++    "type": "function",
++    "function": {
++        "name": "get_weather",
++        "description": "Get the current weather in a given location",
++        "parameters": {
++            "type": "object",
++            "properties": {
++                "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
++                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
++            },
++            "required": ["location", "unit"]
++        }
++    }
++}]
++
++response = client.chat.completions.create(
++    model=client.models.list().data[0].id,
++    messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
++    tools=tools,
++    temperature=0,
++    tool_choice="auto"
++)
++
++tool_call = response.choices[0].message.tool_calls[0].function
++print(f"Function called: {tool_call.name}")
++print(f"Arguments: {tool_call.arguments}")
++print(f"Result: {tool_functions[tool_call.name](**json.loads(tool_call.arguments))}")                                                                               30,22         Bot
++
+diff --git a/examples/online_serving/structured_outputs/structured_outputs.py b/examples/online_serving/structured_outputs/structured_outputs.py
+index 2a8f46372..990b47f22 100644
+--- a/examples/online_serving/structured_outputs/structured_outputs.py
++++ b/examples/online_serving/structured_outputs/structured_outputs.py
+@@ -225,7 +225,7 @@ async def cli():
+     )
+     args = parser.parse_args()
+ 
+-    base_url = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
++    base_url = os.getenv("OPENAI_BASE_URL", "http://0.0.0.0:8000/v1")
+     client = openai.AsyncOpenAI(base_url=base_url, api_key="EMPTY")
+     constraints = list(PARAMS) if "*" in args.constraint else list(set(args.constraint))
+     model = (await client.models.list()).data[0].id
+@@ -236,6 +236,7 @@ async def cli():
+                 client.chat.completions.create(
+                     model=model,
+                     max_tokens=1024,
++                    temperature=0,
+                     stream=True,
+                     **PARAMS[name],
+                 )
+@@ -250,6 +251,7 @@ async def cli():
+                 client.chat.completions.create(
+                     model=model,
+                     max_tokens=1024,
++                    temperature=0,
+                     stream=False,
+                     **PARAMS[name],
+                 )
+-- 
+2.43.0
+
+
+From cd868b7764e9636bfb2595f994bc02789b8f5838 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Mon, 1 Sep 2025 03:13:17 +0000
+Subject: [PATCH 24/55] fix warm up model issue caused by compilation config
+
+Signed-off-by: Yan Ma <yan.ma@intel.com>
+---
+ vllm/platforms/xpu.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/vllm/platforms/xpu.py b/vllm/platforms/xpu.py
+index 1256f0e23..a72e75c90 100644
+--- a/vllm/platforms/xpu.py
++++ b/vllm/platforms/xpu.py
+@@ -131,6 +131,8 @@ class XPUPlatform(Platform):
+         if vllm_config.lora_config is not None:
+             compilation_config.level = CompilationLevel.NO_COMPILATION
+ 
++        if compilation_config.compile_sizes is None:
++            compilation_config.compile_sizes = {}
+         # check and update parallel config
+         parallel_config = vllm_config.parallel_config
+         parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
+-- 
+2.43.0
+
+
+From 1f6fb22336f50fd17fd308993b16a559b2ca6b9d Mon Sep 17 00:00:00 2001
+From: zofia <110436990+zufangzhu@users.noreply.github.com>
+Date: Tue, 9 Sep 2025 15:05:50 +0800
+Subject: [PATCH 25/55] remove default scheme value (#328)
+
+Signed-off-by: Zhu, Zufang <zufang.zhu@intel.com>
+---
+ .../layers/quantization/ipex_quant.py              | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/vllm/model_executor/layers/quantization/ipex_quant.py b/vllm/model_executor/layers/quantization/ipex_quant.py
+index 5f9d48142..330bcae7e 100644
+--- a/vllm/model_executor/layers/quantization/ipex_quant.py
++++ b/vllm/model_executor/layers/quantization/ipex_quant.py
+@@ -45,6 +45,7 @@ class IPEXConfig(QuantizationConfig):
+         modules_to_not_convert: Optional[list[str]] = None,
+         desc_act: Optional[bool] = None,
+         lm_head_quantized: Optional[bool] = None,
++        is_qweight_sym: Optional[bool] = None,
+     ) -> None:
+         super().__init__()
+         self.method = method
+@@ -62,6 +63,7 @@ class IPEXConfig(QuantizationConfig):
+         if self.method not in ["awq", "gptq"]:
+             raise ValueError(f"IPEX quantization supports [awq, gptq], "
+                              f"but got {self.method}.")
++        self.is_qweight_sym = is_qweight_sym
+ 
+     def __repr__(self) -> str:
+         return (f"IPEXConfig(method={self.method},"
+@@ -96,16 +98,18 @@ class IPEXConfig(QuantizationConfig):
+                                            ["q_group_size", "group_size"])
+             modules_to_not_convert = cls.get_from_keys_or(
+                 config, ["modules_to_not_convert"], None)
++            is_qweight_sym = not cls.get_from_keys_or(config, ["zero_point"], default=False)
+             return cls(method, weight_bits, group_size, modules_to_not_convert,
+-                       False, False)
++                       False, False, is_qweight_sym)
+         # otherwise for gptq
+         weight_bits = cls.get_from_keys(config, ["bits"])
+         group_size = cls.get_from_keys(config, ["group_size"])
+         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
+                                                  default=False)
+         desc_act = cls.get_from_keys_or(config, ["desc_act"], default=False)
++        is_qweight_sym = cls.get_from_keys_or(config, ["sym"], default=True)
+         return cls(method, weight_bits, group_size, [], desc_act,
+-                   lm_head_quantized)
++                   lm_head_quantized, is_qweight_sym)
+ 
+     @classmethod
+     def override_quantization_method(
+@@ -183,7 +187,8 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
+             g_idx=g_idx,
+             bias=bias,
+             group_size=self.quant_config.group_size,
+-            quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["gptq"]
++            quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["gptq"],
++            weight_qscheme="sym" if self.quant_config.is_qweight_sym else "asym",
+         )
+ 
+     def apply(self,
+@@ -249,7 +254,8 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
+             qconfig=qconfig,
+             bias=bias,
+             group_size=self.quant_config.group_size,
+-            quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["awq"]  # type: ignore
++            quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["awq"],
++            weight_qscheme="sym" if self.quant_config.is_qweight_sym else "asym",
+         )
+ 
+     def apply(self,
+-- 
+2.43.0
+
+
+From a04c20507d6655449c752073d7a1ddd321fa7795 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Thu, 11 Sep 2025 12:35:38 +0000
+Subject: [PATCH 26/55] fix encoder-only model breaks caused by kv_cache check
+
+Signed-off-by: Yan Ma <yan.ma@intel.com>
+---
+ vllm/v1/core/kv_cache_utils.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/vllm/v1/core/kv_cache_utils.py b/vllm/v1/core/kv_cache_utils.py
+index 2c0eac3dd..c4a229b78 100644
+--- a/vllm/v1/core/kv_cache_utils.py
++++ b/vllm/v1/core/kv_cache_utils.py
+@@ -1048,7 +1048,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
+         kv_cache_spec: The kv cache spec of each attention layer in the model
+     """
+ 
+-    if is_kv_cache_type_uniform(kv_cache_spec):
++    if not kv_cache_spec or is_kv_cache_type_uniform(kv_cache_spec):
+         return
+ 
+     logger.warning(
+-- 
+2.43.0
+
+
+From 93c539bf83574237779c088de1824e61bbe3e37c Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Fri, 12 Sep 2025 05:51:27 +0000
+Subject: [PATCH 27/55] fix ROPE casued by upstream refactor for model
+ Qwen2.5-VL and deepseek-v2-lite
+
+Signed-off-by: Yan Ma <yan.ma@intel.com>
+---
+ .../layers/rotary_embedding/deepseek_scaling_rope.py     | 9 +++++++++
+ vllm/model_executor/layers/rotary_embedding/mrope.py     | 9 +++++++++
+ 2 files changed, 18 insertions(+)
+
+diff --git a/vllm/model_executor/layers/rotary_embedding/deepseek_scaling_rope.py b/vllm/model_executor/layers/rotary_embedding/deepseek_scaling_rope.py
+index 7ac2e4bb6..450d0cee1 100644
+--- a/vllm/model_executor/layers/rotary_embedding/deepseek_scaling_rope.py
++++ b/vllm/model_executor/layers/rotary_embedding/deepseek_scaling_rope.py
+@@ -138,3 +138,12 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
+         offsets: Optional[torch.Tensor] = None,
+     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+         return self.forward_native(positions, query, key, offsets)
++
++    def forward_xpu(
++        self,
++        positions: torch.Tensor,
++        query: torch.Tensor,
++        key: Optional[torch.Tensor] = None,
++        offsets: Optional[torch.Tensor] = None,
++    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
++        return self.forward_native(positions, query, key, offsets)
+diff --git a/vllm/model_executor/layers/rotary_embedding/mrope.py b/vllm/model_executor/layers/rotary_embedding/mrope.py
+index 0acb5ea74..87402d6e5 100644
+--- a/vllm/model_executor/layers/rotary_embedding/mrope.py
++++ b/vllm/model_executor/layers/rotary_embedding/mrope.py
+@@ -300,6 +300,15 @@ class MRotaryEmbedding(RotaryEmbedding):
+         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+         return query, key
+ 
++    def forward_xpu(
++        self,
++        positions: torch.Tensor,
++        query: torch.Tensor,
++        key: Optional[torch.Tensor] = None,
++        offsets: Optional[torch.Tensor] = None,
++    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
++        return self.forward_native(positions, query, key, offsets)
++
+     @classmethod
+     def get_input_positions(
+         cls,
+-- 
+2.43.0
+
+
+From ecf816248eb7be90d1bead9d49bb77e022f11441 Mon Sep 17 00:00:00 2001
+From: Kunshang Ji <kunshang.ji@intel.com>
+Date: Wed, 17 Sep 2025 14:58:36 +0800
+Subject: [PATCH 28/55] fix async scheduling by forward cuda APIs (#337)
+
+---
+ vllm/v1/worker/xpu_model_runner.py | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/vllm/v1/worker/xpu_model_runner.py b/vllm/v1/worker/xpu_model_runner.py
+index fb892211f..ea69bc2c8 100644
+--- a/vllm/v1/worker/xpu_model_runner.py
++++ b/vllm/v1/worker/xpu_model_runner.py
+@@ -47,6 +47,10 @@ def _torch_cuda_wrapper():
+     try:
+         # replace cuda Event with xpu Event, this should work by default
+         torch.cuda.Event = torch.xpu.Event
++        torch.cuda.Stream = torch.xpu.Stream
++        torch.cuda.current_stream = torch.xpu.current_stream
++        torch.cuda.stream = torch.xpu.stream
++        torch.cuda.default_stream = torch.xpu.current_stream
+         yield
+     finally:
+         # if anything goes wrong, just patch it with a placeholder
+-- 
+2.43.0
+
+
+From 8982f98607c83ab840adbf403af6d2f6199234f6 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Wed, 17 Sep 2025 16:48:07 +0800
+Subject: [PATCH 29/55] fix vit attn for models like THUDM/GLM-4v-9B on xpu
+ (#339)
+
+Signed-off-by: Yan Ma <yan.ma@intel.com>
+---
+ vllm/attention/layer.py | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/vllm/attention/layer.py b/vllm/attention/layer.py
+index bb05b468f..89d727892 100644
+--- a/vllm/attention/layer.py
++++ b/vllm/attention/layer.py
+@@ -400,7 +400,8 @@ class MultiHeadAttention(nn.Module):
+                                                           value,
+                                                           scale=self.scale)
+         elif (self.attn_backend == _Backend.TORCH_SDPA
+-              or self.attn_backend == _Backend.TORCH_SDPA_VLLM_V1):
++              or self.attn_backend == _Backend.TORCH_SDPA_VLLM_V1
++              or self.attn_backend == _Backend.IPEX):
+             query, key, value = (x.transpose(1, 2)
+                                  for x in (query, key, value))
+             out = F.scaled_dot_product_attention(query,
+-- 
+2.43.0
+
+
+From 09aeb1c03d4885f6087895bf5d9e20232b61e096 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Thu, 18 Sep 2025 14:50:53 +0800
+Subject: [PATCH 30/55] fix mha for OpenGVLab/InternVL3_5-38B (#342)
+
+Signed-off-by: Yan Ma <yan.ma@intel.com>
+---
+ vllm/attention/layer.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/vllm/attention/layer.py b/vllm/attention/layer.py
+index 89d727892..b5d5359e2 100644
+--- a/vllm/attention/layer.py
++++ b/vllm/attention/layer.py
+@@ -380,7 +380,7 @@ class MultiHeadAttention(nn.Module):
+     ) -> torch.Tensor:
+         """Input shape: batch_size x seq_len x hidden_size"""
+         # TODO(Isotr0py): Use existing backend implementations and support FA3
+-        bsz, q_len, _ = query.size()
++        bsz, q_len = query.size()[:2]
+         kv_len = key.size(1)
+ 
+         query = query.view(bsz, q_len, self.num_heads, self.head_size)
+-- 
+2.43.0
+
+
+From ac37c8b75f9a674f068201dd3ea0420181e81fd9 Mon Sep 17 00:00:00 2001
+From: Kunshang Ji <kunshang.ji@intel.com>
+Date: Fri, 19 Sep 2025 13:15:15 +0800
+Subject: [PATCH 31/55] fix seq_lens override issue (#345)
+
+---
+ vllm/v1/worker/gpu_model_runner.py | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index 190bc0ba0..e95e7e724 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -958,10 +958,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+         max_seq_len = self.seq_lens.np[:num_reqs].max().item()
+ 
+         # for xpu
+-        seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+-                    num_scheduled_tokens)
+         self.seq_start_loc_np[0] = 0
+-        np.cumsum(seq_lens, out=self.seq_start_loc_np[1:num_reqs + 1])
++        np.cumsum(self.seq_lens.np[:num_reqs],
++                  out=self.seq_start_loc_np[1:num_reqs + 1])
+         self.seq_start_loc[:num_reqs + 1].copy_(
+             self.seq_start_loc_cpu[:num_reqs + 1], non_blocking=True)
+ 
+-- 
+2.43.0
+
+
+From 5395286c834b2f3bb5692e8bf6d54b4d97a8e01d Mon Sep 17 00:00:00 2001
+From: Qiming Zhang <qiming1.zhang@intel.com>
+Date: Thu, 18 Sep 2025 22:23:06 -0700
+Subject: [PATCH 32/55] ep optional when dp (#346)
+
+Signed-off-by: mayuyuace <qiming1.zhang@intel.com>
+---
+ examples/offline_inference/data_parallel.py | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/examples/offline_inference/data_parallel.py b/examples/offline_inference/data_parallel.py
+index 36d805a32..78fcde38e 100644
+--- a/examples/offline_inference/data_parallel.py
++++ b/examples/offline_inference/data_parallel.py
+@@ -96,6 +96,9 @@ def parse_args():
+         "--quantization",
+         type=str,
+     )
++    parser.add_argument(
++        "--enable-expert-parallel", action="store_true", help="Enable expert parallel."
++    )
+     return parser.parse_args()
+ 
+ 
+@@ -162,7 +165,7 @@ def main(
+         model=model,
+         tensor_parallel_size=GPUs_per_dp_rank,
+         enforce_eager=enforce_eager,
+-        enable_expert_parallel=True,
++        enable_expert_parallel=args.enable_expert_parallel,
+         trust_remote_code=trust_remote_code,
+         max_num_seqs=max_num_seqs,
+         max_model_len=max_model_len,
+-- 
+2.43.0
+
+
+From c0582cebd4aacf7063e8e449797ebc4b8d449600 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Tue, 23 Sep 2025 12:45:39 +0800
+Subject: [PATCH 33/55] release tensor explicitly (#348)
+
+Signed-off-by: Yan Ma <yan.ma@intel.com>
+---
+ vllm/v1/worker/gpu_model_runner.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index e95e7e724..7d42973e4 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -987,6 +987,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+             logits_indices = query_start_loc[1:] - 1
+             num_draft_tokens = None
+             spec_decode_metadata = None
++            self.num_draft_tokens.gpu = None
++            self.num_accepted_tokens.gpu = None
+         else:
+             # Get the number of draft tokens for each request.
+             # Iterate over the dictionary rather than all requests since not all
+-- 
+2.43.0
+
+
+From b71109c28188201ff67aeeda9ab39902befc0084 Mon Sep 17 00:00:00 2001
+From: Kunshang Ji <kunshang.ji@intel.com>
+Date: Tue, 23 Sep 2025 15:32:26 +0800
+Subject: [PATCH 34/55] Add gpt-oss mxfp4 model support (#349)
+
+* support gpt-oss fp4
+
+* remove assert
+
+* add backend
+
+* add backend
+
+* fix interface
+
+* address comments
+
+* add padding
+
+* fix pad
+---
+ vllm/_ipex_ops.py                             |  1 +
+ .../layers/quantization/mxfp4.py              | 74 ++++++++++++++++++-
+ vllm/model_executor/models/gpt_oss.py         |  3 -
+ vllm/v1/attention/backends/flash_attn.py      |  2 -
+ 4 files changed, 73 insertions(+), 7 deletions(-)
+
+diff --git a/vllm/_ipex_ops.py b/vllm/_ipex_ops.py
+index c2868c040..4c6ff98d0 100644
+--- a/vllm/_ipex_ops.py
++++ b/vllm/_ipex_ops.py
+@@ -300,6 +300,7 @@ class ipex_ops:
+             causal,
+             block_table,
+             alibi_slopes,
++            sink=s_aux,
+             softcap=softcap,
+             window_size_left=real_window_size[0],
+             window_size_right=real_window_size[1],
+diff --git a/vllm/model_executor/layers/quantization/mxfp4.py b/vllm/model_executor/layers/quantization/mxfp4.py
+index f935bdd84..9a80b80e7 100644
+--- a/vllm/model_executor/layers/quantization/mxfp4.py
++++ b/vllm/model_executor/layers/quantization/mxfp4.py
+@@ -95,6 +95,9 @@ def get_mxfp4_backend():
+         else:
+             logger.info_once("Using Triton backend")
+             return Mxfp4Backend.TRITON
++    elif current_platform.is_xpu():
++        logger.info_once("Using ipex marlin backend on XPU")
++        return Mxfp4Backend.MARLIN
+     elif current_platform.is_rocm() and has_triton_kernels():
+         logger.info_once("Using Triton backend")
+         return Mxfp4Backend.TRITON
+@@ -140,7 +143,10 @@ class Mxfp4Config(QuantizationConfig):
+                 return UnquantizedLinearMethod()
+             raise NotImplementedError("Mxfp4 linear layer is not implemented")
+         elif isinstance(layer, FusedMoE):
+-            return Mxfp4MoEMethod(layer.moe_config)
++            if current_platform.is_xpu():
++                return IpexFp4MoeMethod(layer.moe_config)
++            else:
++                return Mxfp4MoEMethod(layer.moe_config)
+         elif isinstance(layer, Attention):
+             raise NotImplementedError(
+                 "Mxfp4 attention layer is not implemented")
+@@ -165,6 +171,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
+     def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                        hidden_size: int, intermediate_size_per_partition: int,
+                        params_dtype: torch.dtype, **extra_weight_attrs):
++        self.original_hidden_size = hidden_size
+         self.num_experts = num_experts
+         weight_dtype = torch.uint8
+         scale_dtype = torch.uint8
+@@ -192,7 +199,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
+             #    k = intermediate_size_per_partition_after_pad
+             intermediate_size_per_partition_after_pad = round_up(
+                 intermediate_size_per_partition, 128)
+-            hidden_size = round_up(hidden_size, 256)
++            if current_platform.is_xpu(): 
++                hidden_size = round_up(hidden_size, 128) 
++            else:
++                hidden_size = round_up(hidden_size, 256) 
+ 
+             layer.params_dtype = params_dtype
+             layer.num_experts = num_experts
+@@ -949,3 +959,63 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
+             )
+         else:
+             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
++
++
++class IpexFp4MoeMethod(Mxfp4MoEMethod):
++
++    def __init__(self, moe_config: FusedMoEConfig):
++        super().__init__(moe_config)
++        self.moe_config = moe_config
++        self.alpha = 1.702
++        self.limit = 7.0
++
++    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
++        import intel_extension_for_pytorch as ipex
++        layer.w13_weight.data = layer.w13_weight.data.view(torch.int32)
++        layer.w2_weight.data = layer.w2_weight.data.view(torch.int32)
++        layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
++            layer.w13_weight,
++            layer.w2_weight,
++            w1_scale_inv=layer.w13_weight_scale,
++            w2_scale_inv=layer.w2_weight_scale,
++            w13_bias=layer.w13_bias,
++            w2_bias=layer.w2_bias,
++            is_mxfp4=True,
++        )
++
++    def apply(
++        self,
++        layer: torch.nn.Module,
++        x: torch.Tensor,
++        router_logits: torch.Tensor,
++        top_k: int,
++        renormalize: bool,
++        use_grouped_topk: bool = False,
++        topk_group: Optional[int] = None,
++        num_expert_group: Optional[int] = None,
++        global_num_experts: int = -1,
++        expert_map: Optional[torch.Tensor] = None,
++        custom_routing_function: Optional[Callable] = None,
++        scoring_func: str = "softmax",
++        routed_scaling_factor: float = 1.0,
++        e_score_correction_bias: Optional[torch.Tensor] = None,
++        apply_router_weight_on_input: bool = False,
++        activation: str = "silu",
++        enable_eplb: bool = False,
++        expert_load_view: Optional[torch.Tensor] = None,
++        logical_to_physical_map: Optional[torch.Tensor] = None,
++        logical_replica_count: Optional[torch.Tensor] = None,
++    ) -> torch.Tensor:
++        hidden_size_pad = round_up(self.original_hidden_size, 128)
++        x_pad = torch.nn.functional.pad(
++            x, (0, hidden_size_pad - x.size(-1)))
++        hidden_states = layer.ipex_fusion(x_pad,
++                                          use_grouped_topk,
++                                          top_k,
++                                          router_logits,
++                                          renormalize,
++                                          topk_group,
++                                          num_expert_group,
++                                          activation="swiglu_oai")
++        hidden_states = hidden_states[..., :self.original_hidden_size].contiguous()
++        return hidden_states
+diff --git a/vllm/model_executor/models/gpt_oss.py b/vllm/model_executor/models/gpt_oss.py
+index e0b4df772..d85d30d91 100644
+--- a/vllm/model_executor/models/gpt_oss.py
++++ b/vllm/model_executor/models/gpt_oss.py
+@@ -311,9 +311,6 @@ class GptOssModel(nn.Module):
+             if is_pp_missing_parameter(name, self):
+                 continue
+ 
+-            # FIXME(woosuk): Remove this after testing.
+-            weight = weight.cuda()
+-
+             if ".w13_weight_scale" in name:
+                 # Handle MLP gate and up projection weights scale
+                 if use_ep:
+diff --git a/vllm/v1/attention/backends/flash_attn.py b/vllm/v1/attention/backends/flash_attn.py
+index 32f55f36e..c02d74145 100755
+--- a/vllm/v1/attention/backends/flash_attn.py
++++ b/vllm/v1/attention/backends/flash_attn.py
+@@ -421,8 +421,6 @@ class FlashAttentionImpl(AttentionImpl):
+ 
+         self.sinks = sinks
+         if self.sinks is not None:
+-            assert self.vllm_flash_attn_version == 3, (
+-                "Sinks are only supported in FlashAttention 3")
+             assert self.sinks.shape[0] == num_heads, (
+                 "Sinks must have the same number of heads as the number of "
+                 "heads in the layer")
+-- 
+2.43.0
+
+
+From c0d9fc85b4c4fe940b7535f28273c105c1fda5f0 Mon Sep 17 00:00:00 2001
+From: Fanli Lin <fanli0116@gmail.com>
+Date: Wed, 24 Sep 2025 16:47:41 +0800
+Subject: [PATCH 35/55] [XPU] Fix MOE DP accuracy issue on XPU (#25465) (#352)
+
+---
+ examples/offline_inference/data_parallel.py   | 10 ++++++++--
+ .../device_communicators/xpu_communicator.py  | 19 +++++++++++++++++++
+ 2 files changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/examples/offline_inference/data_parallel.py b/examples/offline_inference/data_parallel.py
+index 78fcde38e..2a4233b6a 100644
+--- a/examples/offline_inference/data_parallel.py
++++ b/examples/offline_inference/data_parallel.py
+@@ -97,8 +97,12 @@ def parse_args():
+         type=str,
+     )
+     parser.add_argument(
+-        "--enable-expert-parallel", action="store_true", help="Enable expert parallel."
++        "--disable-expert-parallel",
++        dest="enable_expert_parallel",
++        action="store_false",
++        help="Disable expert parallel (default: enabled).",
+     )
++    parser.set_defaults(enable_expert_parallel=True)
+     return parser.parse_args()
+ 
+ 
+@@ -111,6 +115,7 @@ def main(
+     dp_master_port,
+     GPUs_per_dp_rank,
+     enforce_eager,
++    enable_expert_parallel,
+     trust_remote_code,
+     max_num_seqs,
+     max_model_len,
+@@ -165,7 +170,7 @@ def main(
+         model=model,
+         tensor_parallel_size=GPUs_per_dp_rank,
+         enforce_eager=enforce_eager,
+-        enable_expert_parallel=args.enable_expert_parallel,
++        enable_expert_parallel=enable_expert_parallel,
+         trust_remote_code=trust_remote_code,
+         max_num_seqs=max_num_seqs,
+         max_model_len=max_model_len,
+@@ -225,6 +230,7 @@ if __name__ == "__main__":
+                 dp_master_port,
+                 tp_size,
+                 args.enforce_eager,
++                args.enable_expert_parallel,
+                 args.trust_remote_code,
+                 args.max_num_seqs,
+                 args.max_model_len,
+diff --git a/vllm/distributed/device_communicators/xpu_communicator.py b/vllm/distributed/device_communicators/xpu_communicator.py
+index 067315deb..b236bae26 100644
+--- a/vllm/distributed/device_communicators/xpu_communicator.py
++++ b/vllm/distributed/device_communicators/xpu_communicator.py
+@@ -25,6 +25,12 @@ class XpuCommunicator(DeviceCommunicatorBase):
+         super().__init__(cpu_group, device, device_group, unique_name)
+         if self.use_all2all:
+             all2all_backend = envs.VLLM_ALL2ALL_BACKEND
++            if all2all_backend != "naive":
++                logger.warning(
++                    "`%s` all2all manager is not supported on XPU."
++                    "Falling back to `naive` all2all manager for XPU.",
++                    all2all_backend)
++                all2all_backend = "naive"
+             if all2all_backend == "naive":
+                 from .all2all import NaiveAll2AllManager
+                 self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
+@@ -67,3 +73,16 @@ class XpuCommunicator(DeviceCommunicatorBase):
+ 
+     def broadcast(self, input_: torch.Tensor, src: int = 0) -> None:
+         dist.broadcast(input_, src=src, group=self.device_group)
++
++    def dispatch(
++            self, hidden_states: torch.Tensor,
++            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
++        assert self.all2all_manager is not None
++        hidden_states, router_logits = self.all2all_manager.dispatch(
++            hidden_states, router_logits)
++        return hidden_states, router_logits
++
++    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
++        assert self.all2all_manager is not None
++        hidden_states = self.all2all_manager.combine(hidden_states)
++        return hidden_states
+-- 
+2.43.0
+
+
+From 85aab7e4c40578c241dd7ecafe0ff00219d1f9d3 Mon Sep 17 00:00:00 2001
+From: liuzhenwei <zhenweiliu@habana.ai>
+Date: Wed, 24 Sep 2025 19:16:10 +0800
+Subject: [PATCH 36/55] [P/D] add 1p1d acc test script (#343)
+
+* [P/D] add 1p1d acc test script
+
+Signed-off-by: zhenwei-intel <zhenwei.liu@intel.com>
+
+* Update run_xpu_disagg_accuracy_test.sh
+
+---------
+
+Signed-off-by: zhenwei-intel <zhenwei.liu@intel.com>
+---
+ .../run_xpu_disagg_accuracy_test.sh           | 156 ++++++++++++++++++
+ 1 file changed, 156 insertions(+)
+ create mode 100644 tests/v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh
+
+diff --git a/tests/v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh b/tests/v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh
+new file mode 100644
+index 000000000..ae4909b29
+--- /dev/null
++++ b/tests/v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh
+@@ -0,0 +1,156 @@
++#!/bin/bash
++set -e
++
++# Hosts / ports
++PREFILL_HOST=${PREFILL_HOST:-"localhost"}
++PREFILL_PORT=${PREFILL_PORT:-8100}
++PREFILL_NIXL_SIDE_PORT=${PREFILL_NIXL_SIDE_PORT:-5577}
++DECODE_HOST=${DECODE_HOST:-"localhost"}
++DECODE_PORT=${DECODE_PORT:-8200}
++PROXY_HOST=${PROXY_HOST:-"localhost"}
++PROXY_PORT=${PROXY_PORT:-8192}
++BASELINE_HOST=${BASELINE_HOST:-"localhost"}
++BASELINE_PORT=${BASELINE_PORT:-9290}
++
++
++# Model to run.
++MODEL_NAME=${MODEL_NAME:-"Qwen/Qwen3-0.6B"}
++MAX_MODEL_LEN=${MAX_MODEL_LEN:-1024}
++BLOCK_SIZE=${BLOCK_SIZE:-16}
++
++
++# execution env
++GIT_ROOT=$(git rev-parse --show-toplevel)
++EXP_ROOT="${GIT_ROOT}/tests/v1/kv_connector/nixl_integration"
++
++OUTPUT_FILE=${OUTPUT_FILE:-"${EXP_ROOT}/.xpu_accuracy_test_outputs.txt"}
++
++# Trap the SIGINT signal (triggered by Ctrl+C)
++trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
++
++cleanup() {
++  echo "Cleaning up any running vLLM instances..."
++  pkill -f "vllm serve" || true
++  sleep 2
++}
++
++wait_for_server() {
++  local host=$1
++  local port=$2
++  timeout 1200 bash -c "
++    until curl -s ${host}:${port}/v1/completions > /dev/null; do
++      sleep 1
++    done" && return 0 || return 1
++}
++
++launch_baseline() {
++  BASELINE_BASE_CMD="
++  ONEAPI_DEVICE_SELECTOR=level_zero:0 \
++  VLLM_USE_V1=1 \
++  VLLM_WORKER_MULTIPROC_METHOD=spawn \
++  VLLM_ENABLE_V1_MULTIPROCESSING=1 vllm serve $MODEL_NAME \
++      --host ${BASELINE_HOST} \
++      --port ${BASELINE_PORT} \
++      --max-model-len ${MAX_MODEL_LEN}\
++      --seed 42 \
++      -tp 1 \
++      --block-size ${BLOCK_SIZE} \
++      --gpu-memory-utilization 0.8 \
++      --disable-log-requests \
++      --dtype float16 \
++      --enforce-eager"
++  echo ${BASELINE_BASE_CMD}      
++  bash -c "${BASELINE_BASE_CMD}" &
++  sleep 10
++  wait_for_server ${BASELINE_HOST} ${BASELINE_PORT}
++}
++
++launch_pd() {
++  PREFILL_BASE_CMD="
++  ONEAPI_DEVICE_SELECTOR=level_zero:0 \
++  VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S=200 \
++  VLLM_USE_V1=1 \
++  VLLM_NIXL_SIDE_CHANNEL_HOST=${PREFILL_HOST} \
++  VLLM_NIXL_SIDE_CHANNEL_PORT=${PREFILL_NIXL_SIDE_PORT} \
++  VLLM_WORKER_MULTIPROC_METHOD=spawn \
++  VLLM_ENABLE_V1_MULTIPROCESSING=1 vllm serve $MODEL_NAME \
++      --host ${PREFILL_HOST} \
++      --port ${PREFILL_PORT} \
++      --max-model-len ${MAX_MODEL_LEN}\
++      --seed 42 \
++      --block-size ${BLOCK_SIZE} \
++      --enforce-eager \
++      --dtype float16 \
++      -tp 1 \
++      --gpu-memory-utilization 0.8 \
++      --disable-log-requests \
++      --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}'"
++
++
++  DECODE_BASE_CMD="
++  ONEAPI_DEVICE_SELECTOR=level_zero:1 \
++  VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S=200 \
++  VLLM_USE_V1=1 \
++  VLLM_WORKER_MULTIPROC_METHOD=spawn \
++  VLLM_ENABLE_V1_MULTIPROCESSING=1 vllm serve $MODEL_NAME \
++      --host ${DECODE_HOST} \
++      --port ${DECODE_PORT} \
++      --max-model-len ${MAX_MODEL_LEN}\
++      --seed 42 \
++      --block-size ${BLOCK_SIZE} \
++      --enforce-eager \
++      -tp 1 \
++      --dtype float16 \
++      --gpu-memory-utilization 0.8 \
++      --disable-log-requests \
++      --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}'"
++
++  echo ${PREFILL_BASE_CMD}
++  echo ${DECODE_BASE_CMD}
++  sleep 2
++
++  # execute on hosts
++  bash -c "${PREFILL_BASE_CMD}" &
++  bash -c "${DECODE_BASE_CMD}" &
++  sleep 1
++  wait_for_server ${PREFILL_HOST} ${PREFILL_PORT}
++  sleep 1
++  wait_for_server ${DECODE_HOST} ${DECODE_PORT}
++  sleep 1
++}
++
++launch_pd_proxy(){
++  PROXY_BASE_CMD="
++  python3 ${EXP_ROOT}/toy_proxy_server.py \
++  --prefiller-host ${PREFILL_HOST} --prefiller-port ${PREFILL_PORT} \
++  --decoder-host ${DECODE_HOST} --decoder-port ${DECODE_PORT} \
++  --host=${PROXY_HOST} --port ${PROXY_PORT}"
++  echo ${PROXY_BASE_CMD} 
++  bash -c "${PROXY_BASE_CMD}" &
++  sleep 2
++}
++
++run_tests(){
++  local service_url=$1
++  local mode=$2
++  python3 ${EXP_ROOT}/test_disagg_accuracy.py --service_url=${service_url} --model_name=${MODEL_NAME} --mode=${mode} --file_name=${OUTPUT_FILE}
++}
++
++
++# run non-disagg. baseline & save outputs
++launch_baseline
++run_tests "http://${BASELINE_HOST}:${BASELINE_PORT}" "baseline"
++cleanup
++sleep 10
++
++
++# run disagg. & do exact-match with the outputs from baseline
++launch_pd
++launch_pd_proxy
++run_tests "http://${PROXY_HOST}:${PROXY_PORT}" "disagg"
++echo "-----P/D success----"
++
++rm ${OUTPUT_FILE}
++cleanup
++
++exit 0
+-- 
+2.43.0
+
+
+From 6c53282e626839d40ed9b70c1191fd479255ac18 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Thu, 25 Sep 2025 10:01:34 +0800
+Subject: [PATCH 37/55] [Build] Update Xgrammar to 0.1.25 (#25467) (#351)
+
+Signed-off-by: chaunceyjiang <chaunceyjiang@gmail.com>
+Co-authored-by: Chauncey <chaunceyjiang@gmail.com>
+---
+ requirements/common.txt                       | 2 +-
+ vllm/v1/structured_output/backend_xgrammar.py | 8 ++++++--
+ 2 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/requirements/common.txt b/requirements/common.txt
+index b8665104b..a52745f69 100644
+--- a/requirements/common.txt
++++ b/requirements/common.txt
+@@ -24,7 +24,7 @@ outlines_core == 0.2.11
+ # required for outlines backend disk cache
+ diskcache == 5.6.3
+ lark == 1.2.2
+-xgrammar == 0.1.23; platform_machine == "x86_64" or platform_machine == "aarch64" or platform_machine == "arm64"
++xgrammar == 0.1.25; platform_machine == "x86_64" or platform_machine == "aarch64" or platform_machine == "arm64"
+ typing_extensions >= 4.10
+ filelock >= 3.16.1 # need to contain https://github.com/tox-dev/filelock/pull/317
+ partial-json-parser # used for parsing partial JSON outputs
+diff --git a/vllm/v1/structured_output/backend_xgrammar.py b/vllm/v1/structured_output/backend_xgrammar.py
+index 5e00f6380..c296b3f28 100644
+--- a/vllm/v1/structured_output/backend_xgrammar.py
++++ b/vllm/v1/structured_output/backend_xgrammar.py
+@@ -108,7 +108,9 @@ class XgrammarBackend(StructuredOutputBackend):
+                     end=s["end"],
+                 ) for s in s_tag["structures"]
+             ]
+-            ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
++            structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
++                tags, s_tag["triggers"])
++            ctx = self.compiler.compile_structural_tag(structural_tag)
+         else:
+             logger.error(
+                 "Validation should have already occurred. Please file an issue."
+@@ -318,6 +320,8 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
+                     end=s["end"],
+                 ) for s in s_tag["structures"]
+             ]
+-            xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
++            structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
++                tags, s_tag["triggers"])
++            xgr.Grammar.from_structural_tag(structural_tag)
+         except Exception as e:
+             raise ValueError("Invalid structural tag specification.") from e
+-- 
+2.43.0
+
+
+From f4e29ebda73260b34174ede281165476b1c858f5 Mon Sep 17 00:00:00 2001
+From: Yan Ma <yan.ma@intel.com>
+Date: Fri, 26 Sep 2025 09:37:24 +0800
+Subject: [PATCH 38/55] quick fix for spec decode (#355)
+
+Signed-off-by: Yan Ma <yan.ma@intel.com>
+---
+ vllm/v1/worker/gpu_model_runner.py | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index 7d42973e4..822fa16bb 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -1004,6 +1004,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+             logits_indices = spec_decode_metadata.logits_indices
+             self.num_draft_tokens.np[:num_reqs] = num_draft_tokens
+             self.num_draft_tokens.np[num_reqs:].fill(0)
++            if self.num_draft_tokens.gpu is None:
++                self.num_draft_tokens.gpu = self.num_draft_tokens.cpu.to(self.device)
+             self.num_draft_tokens.copy_to_gpu()
+ 
+         logits_indices_padded = None
+@@ -1023,6 +1025,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+             self.num_accepted_tokens.np[:num_reqs] = (
+                 self.input_batch.num_accepted_tokens_cpu[:num_reqs])
+             self.num_accepted_tokens.np[num_reqs:].fill(1)
++            if self.num_accepted_tokens.gpu is None:
++                self.num_accepted_tokens.gpu = self.num_accepted_tokens.cpu.to(self.device)
+             self.num_accepted_tokens.copy_to_gpu()
+ 
+         # Prepare the attention metadata for each KV cache group and make layers
+-- 
+2.43.0
+
+
+From 79b97dde6db6317679e883dfddc91046693718b8 Mon Sep 17 00:00:00 2001
+From: jundu <jun.du@intel.com>
+Date: Fri, 26 Sep 2025 15:57:51 +0800
+Subject: [PATCH 39/55] Update ipex to public version in requirements/xpu.txt 
+ (#353)
+
+* Update requirements/xpu.txt ipex-ci/dep_update_20250925_721306eb6
+
+* Update xpu.txt
+
+---------
+
+Co-authored-by: wenjun liu <wenjun.liu@intel.com>
+---
+ requirements/xpu.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/requirements/xpu.txt b/requirements/xpu.txt
+index dc0a6dbaa..c0203a754 100644
+--- a/requirements/xpu.txt
++++ b/requirements/xpu.txt
+@@ -17,4 +17,4 @@ torchaudio
+ torchvision
+ --extra-index-url=https://download.pytorch.org/whl/xpu
+ 
+-intel-extension-for-pytorch @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/intel_extension_for_pytorch-2.8.10.post0%2Bxpu-cp312-cp312-linux_x86_64.whl
++intel-extension-for-pytorch @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/intel_extension_for_pytorch-2.8.10.post1%2Bxpu-cp312-cp312-linux_x86_64.whl
+-- 
+2.43.0
+
+
+From 2f28b63d7d4c88dfd4c393cf2868205de1cf1361 Mon Sep 17 00:00:00 2001
+From: Fanli Lin <fanli0116@gmail.com>
+Date: Fri, 26 Sep 2025 18:57:29 +0800
+Subject: [PATCH 40/55] fix broken VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT for MoE
+ models  (#357)
+
+* fix cpu offloading quant
+
+Signed-off-by: Fanli Lin <fanli.lin@intel.com>
+
+* Revert "Update ipex to public version in requirements/xpu.txt  (#353)"
+
+This reverts commit 79b97dde6db6317679e883dfddc91046693718b8.
+
+* use FusedMoEMethodBase
+
+Signed-off-by: Fanli Lin <fanli.lin@intel.com>
+
+* revert
+
+Signed-off-by: Fanli Lin <fanli.lin@intel.com>
+
+---------
+
+Signed-off-by: Fanli Lin <fanli.lin@intel.com>
+---
+ vllm/model_executor/layers/quantization/ipex_quant.py | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/vllm/model_executor/layers/quantization/ipex_quant.py b/vllm/model_executor/layers/quantization/ipex_quant.py
+index 330bcae7e..8895dc10d 100644
+--- a/vllm/model_executor/layers/quantization/ipex_quant.py
++++ b/vllm/model_executor/layers/quantization/ipex_quant.py
+@@ -9,6 +9,7 @@ from torch.nn import Module
+ from torch.nn.parameter import Parameter
+ 
+ from vllm._ipex_ops import ipex_ops as ops
++import vllm.envs as envs
+ from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
+                                                   FusedMoeWeightScaleSupported)
+ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+@@ -313,7 +314,8 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
+             num_experts,
+             2 * intermediate_size_per_partition,
+             hidden_size,
+-            dtype=params_dtype),
++            dtype=params_dtype,
++            device="cpu" if envs.VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT else None),
+                                         requires_grad=False)
+         layer.register_parameter("w13_weight", w13_weight)
+         set_weight_attrs(w13_weight, extra_weight_attrs)
+@@ -322,7 +324,8 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
+             num_experts,
+             hidden_size,
+             intermediate_size_per_partition,
+-            dtype=params_dtype),
++            dtype=params_dtype,
++            device="cpu" if envs.VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT else None),
+                                        requires_grad=False)
+         layer.register_parameter("w2_weight", w2_weight)
+         set_weight_attrs(w2_weight, extra_weight_attrs)
+-- 
+2.43.0
+
+
+From 21359121df74b830b30cdee2dc44a333edec241d Mon Sep 17 00:00:00 2001
+From: Kunshang Ji <kunshang.ji@intel.com>
+Date: Sat, 11 Oct 2025 15:50:51 +0800
+Subject: [PATCH 41/55] fix async scheduling, root cause is event.synchronize
+ may have some bug, use stream.synchronize instead (#360)
+
+---
+ vllm/v1/worker/gpu_model_runner.py | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index 822fa16bb..16688b01d 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -117,6 +117,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
+     ):
+         self._model_runner_output = model_runner_output
+         self._invalid_req_indices = invalid_req_indices
++        self.async_output_copy_stream = async_output_copy_stream
+ 
+         # Event on the copy stream so we can synchronize the non-blocking copy.
+         self._async_copy_ready_event = torch.cuda.Event()
+@@ -138,7 +139,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
+         
+         This function blocks until the copy is finished.
+         """
+-        self._async_copy_ready_event.synchronize()
++        # self._async_copy_ready_event.synchronize()
++        self.async_output_copy_stream.synchronize()
+ 
+         # Release the device tensor once the copy has completed
+         del self._sampled_token_ids
+-- 
+2.43.0
+
+
+From f2c993c007bb8519ac45d3324d750c0f2b3d5955 Mon Sep 17 00:00:00 2001
+From: Guancheng Fu <110874468+gc-fu@users.noreply.github.com>
+Date: Tue, 14 Oct 2025 11:32:12 +0800
+Subject: [PATCH 42/55] Fix errors in qwen_vl models (#363)
+
+---
+ vllm/model_executor/models/qwen2_5_vl.py | 2 +-
+ vllm/model_executor/models/qwen2_vl.py   | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/vllm/model_executor/models/qwen2_5_vl.py b/vllm/model_executor/models/qwen2_5_vl.py
+index 144ad5a97..2d74d64bc 100644
+--- a/vllm/model_executor/models/qwen2_5_vl.py
++++ b/vllm/model_executor/models/qwen2_5_vl.py
+@@ -398,7 +398,7 @@ class Qwen2_5_VisionAttention(nn.Module):
+                     pdropout=0.0,
+                     softmax_scale=1.0/(q.shape[-1] ** 0.5),
+                     zero_tensors=False,
+-                    is_causal=True,
++                    is_causal=False,
+                     return_softmax=False,
+                     gen_=None,
+                     window_size_left=-1,
+diff --git a/vllm/model_executor/models/qwen2_vl.py b/vllm/model_executor/models/qwen2_vl.py
+index 59ab8a019..a17acdf6e 100644
+--- a/vllm/model_executor/models/qwen2_vl.py
++++ b/vllm/model_executor/models/qwen2_vl.py
+@@ -413,7 +413,7 @@ class Qwen2VisionAttention(nn.Module):
+                     pdropout=0.0,
+                     softmax_scale=1.0/(q.shape[-1] ** 0.5),
+                     zero_tensors=False,
+-                    is_causal=True,
++                    is_causal=False,
+                     return_softmax=False,
+                     gen_=None,
+                     window_size_left=-1,
+-- 
+2.43.0
+
+
+From 5c1c18efe9378190df8015e9d74a03cc910985a9 Mon Sep 17 00:00:00 2001
+From: Qiming Zhang <qiming1.zhang@intel.com>
+Date: Tue, 14 Oct 2025 01:03:24 -0700
+Subject: [PATCH 43/55] Fix: add forward_xpu to Llama4VisionRotaryEmbedding
+ (#368)
+
+---
+ .../layers/rotary_embedding/llama4_vision_rope.py          | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/vllm/model_executor/layers/rotary_embedding/llama4_vision_rope.py b/vllm/model_executor/layers/rotary_embedding/llama4_vision_rope.py
+index 37ead43e2..4c1776900 100644
+--- a/vllm/model_executor/layers/rotary_embedding/llama4_vision_rope.py
++++ b/vllm/model_executor/layers/rotary_embedding/llama4_vision_rope.py
+@@ -79,3 +79,10 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
+         key: Optional[torch.Tensor] = None,
+     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+         return self.forward_native(query, key)
++
++    def forward_xpu(  # type: ignore[override]
++        self,
++        query: torch.Tensor,
++        key: Optional[torch.Tensor] = None,
++    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
++        return self.forward_native(query, key)
+-- 
+2.43.0
+
+
+From 51d5b75dd0eab343c3cae49b6bc963f139faf885 Mon Sep 17 00:00:00 2001
+From: Fanli Lin <fanli0116@gmail.com>
+Date: Tue, 14 Oct 2025 16:23:15 +0800
+Subject: [PATCH 44/55] fix vllm duplicated installation (#366)
+
+* no setup.py
+
+* use existing env to build
+---
+ docker/Dockerfile.xpu | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/docker/Dockerfile.xpu b/docker/Dockerfile.xpu
+index ffa7c6ea7..bc4cfbf85 100644
+--- a/docker/Dockerfile.xpu
++++ b/docker/Dockerfile.xpu
+@@ -54,7 +54,7 @@ ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+ 
+ RUN --mount=type=cache,target=/root/.cache/pip \
+     --mount=type=bind,source=.git,target=.git \
+-    python3 setup.py install
++    pip install --no-build-isolation .
+ 
+ CMD ["/bin/bash"]
+ 
+-- 
+2.43.0
+
+
+From 07fa78cae0ce162700609658cab8822e8a85f56d Mon Sep 17 00:00:00 2001
+From: Kunshang Ji <kunshang.ji@intel.com>
+Date: Fri, 17 Oct 2025 10:19:12 +0800
+Subject: [PATCH 45/55] fix async scheduling using torch.Event (#367)
+
+* Revert "fix async scheduling, root cause is event.synchronize may have some bug, use stream.synchronize instead (#360)"
+
+This reverts commit 21359121df74b830b30cdee2dc44a333edec241d.
+
+* use torch.Event instead of torch.cuda/xpu.Event
+---
+ vllm/v1/worker/gpu_model_runner.py | 18 +++++++++---------
+ vllm/v1/worker/xpu_model_runner.py | 12 ++----------
+ 2 files changed, 11 insertions(+), 19 deletions(-)
+
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index 16688b01d..d38ce960b 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -117,10 +117,9 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
+     ):
+         self._model_runner_output = model_runner_output
+         self._invalid_req_indices = invalid_req_indices
+-        self.async_output_copy_stream = async_output_copy_stream
+ 
+         # Event on the copy stream so we can synchronize the non-blocking copy.
+-        self._async_copy_ready_event = torch.cuda.Event()
++        self._async_copy_ready_event = torch.Event()
+ 
+         # Keep a reference to the device tensor to avoid it being
+         # deallocated until we finish copying it to the host.
+@@ -139,8 +138,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
+         
+         This function blocks until the copy is finished.
+         """
+-        # self._async_copy_ready_event.synchronize()
+-        self.async_output_copy_stream.synchronize()
++        self._async_copy_ready_event.synchronize()
+ 
+         # Release the device tensor once the copy has completed
+         del self._sampled_token_ids
+@@ -351,9 +349,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+ 
+         # CUDA event to synchronize use of reused CPU tensors between steps
+         # when async scheduling is enabled.
+-        self.prepare_inputs_event: Optional[torch.cuda.Event] = None
++        self.prepare_inputs_event: Optional[torch.Event] = None
+         if self.use_async_scheduling:
+-            self.prepare_inputs_event = torch.cuda.Event()
++            self.prepare_inputs_event = torch.Event()
+             # Start in a completed state.
+             self.prepare_inputs_event.record(torch.cuda.default_stream())
+ 
+@@ -411,7 +409,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+         # Cached outputs.
+         self._draft_token_ids: Optional[Union[list[list[int]],
+                                               torch.Tensor]] = None
+-        self.transfer_event = torch.cuda.Event()
++        self.transfer_event = torch.Event()
+         self.sampled_token_ids_pinned_cpu = torch.empty(
+             (self.max_model_len, 1),
+             dtype=torch.int64,
+@@ -1007,7 +1005,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+             self.num_draft_tokens.np[:num_reqs] = num_draft_tokens
+             self.num_draft_tokens.np[num_reqs:].fill(0)
+             if self.num_draft_tokens.gpu is None:
+-                self.num_draft_tokens.gpu = self.num_draft_tokens.cpu.to(self.device)
++                self.num_draft_tokens.gpu = self.num_draft_tokens.cpu.to(
++                    self.device)
+             self.num_draft_tokens.copy_to_gpu()
+ 
+         logits_indices_padded = None
+@@ -1028,7 +1027,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+                 self.input_batch.num_accepted_tokens_cpu[:num_reqs])
+             self.num_accepted_tokens.np[num_reqs:].fill(1)
+             if self.num_accepted_tokens.gpu is None:
+-                self.num_accepted_tokens.gpu = self.num_accepted_tokens.cpu.to(self.device)
++                self.num_accepted_tokens.gpu = self.num_accepted_tokens.cpu.to(
++                    self.device)
+             self.num_accepted_tokens.copy_to_gpu()
+ 
+         # Prepare the attention metadata for each KV cache group and make layers
+diff --git a/vllm/v1/worker/xpu_model_runner.py b/vllm/v1/worker/xpu_model_runner.py
+index ea69bc2c8..5ba4631cd 100644
+--- a/vllm/v1/worker/xpu_model_runner.py
++++ b/vllm/v1/worker/xpu_model_runner.py
+@@ -38,20 +38,12 @@ class XPUModelRunner(GPUModelRunner):
+ @contextmanager
+ def _torch_cuda_wrapper():
+ 
+-    class _EventPlaceholder:
+-
+-        def __init__(self, *args, **kwargs) -> None:
+-            self.record = lambda: None
+-            self.synchronize = lambda: None
+-
+     try:
+-        # replace cuda Event with xpu Event, this should work by default
+-        torch.cuda.Event = torch.xpu.Event
++        # replace cuda APIs with xpu APIs
+         torch.cuda.Stream = torch.xpu.Stream
+         torch.cuda.current_stream = torch.xpu.current_stream
+         torch.cuda.stream = torch.xpu.stream
+         torch.cuda.default_stream = torch.xpu.current_stream
+         yield
+     finally:
+-        # if anything goes wrong, just patch it with a placeholder
+-        torch.cuda.Event = _EventPlaceholder
++        pass
+-- 
+2.43.0
+
+
+From 4a4da9d7b0478250369468e2d032d62d892309cc Mon Sep 17 00:00:00 2001
+From: Kunshang Ji <kunshang.ji@intel.com>
+Date: Fri, 17 Oct 2025 12:50:19 +0800
+Subject: [PATCH 46/55] Enable Expert parallel (#356)
+
+* enable ep for fp4/fp8/fp16 MoE models
+
+* update moe_config
+---
+ vllm/model_executor/layers/fused_moe/layer.py         | 2 ++
+ vllm/model_executor/layers/quantization/ipex_quant.py | 2 ++
+ vllm/model_executor/layers/quantization/mxfp4.py      | 2 ++
+ 3 files changed, 6 insertions(+)
+
+diff --git a/vllm/model_executor/layers/fused_moe/layer.py b/vllm/model_executor/layers/fused_moe/layer.py
+index 5638da392..645fbb59e 100644
+--- a/vllm/model_executor/layers/fused_moe/layer.py
++++ b/vllm/model_executor/layers/fused_moe/layer.py
+@@ -356,10 +356,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
+ 
+         if current_platform.is_xpu():
+             import intel_extension_for_pytorch as ipex
++            ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
+             layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+                 layer.w13_weight,
+                 layer.w2_weight,
+                 use_prepack=True,
++                experts_start_id=ep_rank_start,
+             )
+         elif current_platform.is_cpu():
+             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
+diff --git a/vllm/model_executor/layers/quantization/ipex_quant.py b/vllm/model_executor/layers/quantization/ipex_quant.py
+index 8895dc10d..28d3d34f0 100644
+--- a/vllm/model_executor/layers/quantization/ipex_quant.py
++++ b/vllm/model_executor/layers/quantization/ipex_quant.py
+@@ -374,6 +374,7 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
+             layer.w2_weight = torch.nn.Parameter(w2_weight,
+                                                  requires_grad=False)
+         import intel_extension_for_pytorch as ipex
++        ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
+         layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+             layer.w13_weight,
+             layer.w2_weight,
+@@ -382,6 +383,7 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
+             a1_scale_inv=layer.w13_input_scale,
+             a2_scale_inv=layer.w2_input_scale,
+             use_prepack=True,
++            experts_start_id=ep_rank_start,
+         )
+ 
+     def apply(
+diff --git a/vllm/model_executor/layers/quantization/mxfp4.py b/vllm/model_executor/layers/quantization/mxfp4.py
+index 9a80b80e7..ba177b181 100644
+--- a/vllm/model_executor/layers/quantization/mxfp4.py
++++ b/vllm/model_executor/layers/quantization/mxfp4.py
+@@ -973,6 +973,7 @@ class IpexFp4MoeMethod(Mxfp4MoEMethod):
+         import intel_extension_for_pytorch as ipex
+         layer.w13_weight.data = layer.w13_weight.data.view(torch.int32)
+         layer.w2_weight.data = layer.w2_weight.data.view(torch.int32)
++        ep_rank_start = self.moe_config.ep_rank * self.moe_config.num_local_experts
+         layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+             layer.w13_weight,
+             layer.w2_weight,
+@@ -981,6 +982,7 @@ class IpexFp4MoeMethod(Mxfp4MoEMethod):
+             w13_bias=layer.w13_bias,
+             w2_bias=layer.w2_bias,
+             is_mxfp4=True,
++            experts_start_id=ep_rank_start,
+         )
+ 
+     def apply(
+-- 
+2.43.0
+
+
+From 573acdc1b27c8726d11a74c35b652bbfb800b317 Mon Sep 17 00:00:00 2001
+From: Kunshang Ji <kunshang.ji@intel.com>
+Date: Fri, 17 Oct 2025 15:29:45 +0800
+Subject: [PATCH 47/55] use seqused_k instead of cu_seqlens_k (#374)
+
+* use seqused_k
+
+* remove
+---
+ vllm/_ipex_ops.py | 10 +---------
+ 1 file changed, 1 insertion(+), 9 deletions(-)
+
+diff --git a/vllm/_ipex_ops.py b/vllm/_ipex_ops.py
+index 4c6ff98d0..7d2d2e8aa 100644
+--- a/vllm/_ipex_ops.py
++++ b/vllm/_ipex_ops.py
+@@ -273,14 +273,6 @@ class ipex_ops:
+         num_splits=0,
+         s_aux: Optional[torch.Tensor] = None,
+     ):
+-        if cu_seqlens_k is None:
+-            # cu_seqlens_k is not used in ipex kernel.
+-            cu_seqlens_k = torch.cumsum(seqused_k, dim=0)
+-            cu_seqlens_k = torch.cat([
+-                torch.tensor([0], device=seqused_k.device, dtype=torch.int32),
+-                cu_seqlens_k
+-            ]).to(torch.int32)
+-
+         real_window_size: tuple[int, int]
+         if window_size is None:
+             real_window_size = (-1, -1)
+@@ -293,7 +285,7 @@ class ipex_ops:
+             k,
+             v,
+             cu_seqlens_q,
+-            cu_seqlens_k,
++            seqused_k,
+             max_seqlen_q,
+             max_seqlen_k,
+             softmax_scale,
+-- 
+2.43.0
+
+
+From 2ad0ed1dc5fcfa078aea5ca15ec2a0f9ea6d31ef Mon Sep 17 00:00:00 2001
+From: Qiming Zhang <qiming1.zhang@intel.com>
+Date: Fri, 17 Oct 2025 02:08:04 -0700
+Subject: [PATCH 48/55] support qwen3-30b-a3b gptq int4 (#375)
+
+* support qwen3-30b-a3b gptq int4
+
+Signed-off-by: mayuyuace <qiming1.zhang@intel.com>
+
+* use current_platform.is_cuda
+
+Signed-off-by: mayuyuace <qiming1.zhang@intel.com>
+
+---------
+
+Signed-off-by: mayuyuace <qiming1.zhang@intel.com>
+---
+ vllm/model_executor/layers/fused_moe/layer.py |  1 +
+ .../layers/quantization/gptq_marlin.py        |  3 +-
+ .../layers/quantization/ipex_quant.py         | 84 ++++++++++++++++++-
+ vllm/model_executor/models/qwen3_moe.py       |  2 +
+ 4 files changed, 87 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/model_executor/layers/fused_moe/layer.py b/vllm/model_executor/layers/fused_moe/layer.py
+index 645fbb59e..09f4946a8 100644
+--- a/vllm/model_executor/layers/fused_moe/layer.py
++++ b/vllm/model_executor/layers/fused_moe/layer.py
+@@ -940,6 +940,7 @@ class FusedMoE(CustomOp):
+         # need full intermediate size pre-sharding for WNA16 act order
+         if (self.quant_method.__class__.__name__
+                 in ("GPTQMarlinMoEMethod",
++                    "XPUGPTQMarlinMoEMethod",
+                     "CompressedTensorsWNA16MarlinMoEMethod",
+                     "CompressedTensorsWNA16MoEMethod")):
+             moe_quant_params["intermediate_size_full"] = intermediate_size
+diff --git a/vllm/model_executor/layers/quantization/gptq_marlin.py b/vllm/model_executor/layers/quantization/gptq_marlin.py
+index 76de3a59c..5308fbd33 100644
+--- a/vllm/model_executor/layers/quantization/gptq_marlin.py
++++ b/vllm/model_executor/layers/quantization/gptq_marlin.py
+@@ -540,7 +540,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
+         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
+ 
+         device = layer.w13_qweight.device
+-        layer.workspace = marlin_make_workspace_new(device, 4)
++        if current_platform.is_cuda():
++            layer.workspace = marlin_make_workspace_new(device, 4)
+ 
+     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+ 
+diff --git a/vllm/model_executor/layers/quantization/ipex_quant.py b/vllm/model_executor/layers/quantization/ipex_quant.py
+index 28d3d34f0..cef8d81e2 100644
+--- a/vllm/model_executor/layers/quantization/ipex_quant.py
++++ b/vllm/model_executor/layers/quantization/ipex_quant.py
+@@ -1,7 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+-from typing import Any, Callable, Optional
++from typing import Any, Callable, Optional, Union
+ 
+ import torch
+ from packaging import version
+@@ -12,6 +12,7 @@ from vllm._ipex_ops import ipex_ops as ops
+ import vllm.envs as envs
+ from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
+                                                   FusedMoeWeightScaleSupported)
++from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                                UnquantizedLinearMethod)
+ from vllm.model_executor.layers.quantization import QuantizationMethods
+@@ -22,8 +23,10 @@ from vllm.model_executor.layers.quantization.base_config import (
+ from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
+                                                          Fp8LinearMethod)
+ from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
++from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinMoEMethod
+ from vllm.model_executor.utils import set_weight_attrs
+ from vllm.platforms import current_platform
++from vllm.scalar_type import scalar_types
+ 
+ MIN_IPEX_VERSION = "2.6.0"
+ 
+@@ -38,6 +41,11 @@ class IPEXConfig(QuantizationConfig):
+         "gptq": 0,
+     }
+ 
++    TYPE_MAP = {
++        (4, True): scalar_types.uint4b8,
++        (8, True): scalar_types.uint8b128,
++    }
++
+     def __init__(
+         self,
+         method: str,
+@@ -47,15 +55,19 @@ class IPEXConfig(QuantizationConfig):
+         desc_act: Optional[bool] = None,
+         lm_head_quantized: Optional[bool] = None,
+         is_qweight_sym: Optional[bool] = None,
++        full_config: dict[str, Any] = None,
+     ) -> None:
+         super().__init__()
+         self.method = method
++        self.linear_quant_method = method
+         self.weight_bits = weight_bits
+         self.group_size = group_size
+         self.modules_to_not_convert = modules_to_not_convert or []
+         self.desc_act = desc_act
+         self.lm_head_quantized = lm_head_quantized
++        self.full_config = full_config
+         self.pack_factor = 32 // self.weight_bits
++        self.bit8_pack_factor = 8 // self.weight_bits
+ 
+         if self.weight_bits not in [4]:
+             raise ValueError(f"IPEX quantization supports weight bits [4], "
+@@ -65,6 +77,11 @@ class IPEXConfig(QuantizationConfig):
+             raise ValueError(f"IPEX quantization supports [awq, gptq], "
+                              f"but got {self.method}.")
+         self.is_qweight_sym = is_qweight_sym
++        self.is_sym = is_qweight_sym
++
++        self.quant_type = self.TYPE_MAP[(weight_bits, is_qweight_sym)]
++        # used to identify GPTQ model quantized by autoround
++        self.autoround_version = full_config.get("autoround_version", "")
+ 
+     def __repr__(self) -> str:
+         return (f"IPEXConfig(method={self.method},"
+@@ -110,7 +127,7 @@ class IPEXConfig(QuantizationConfig):
+         desc_act = cls.get_from_keys_or(config, ["desc_act"], default=False)
+         is_qweight_sym = cls.get_from_keys_or(config, ["sym"], default=True)
+         return cls(method, weight_bits, group_size, [], desc_act,
+-                   lm_head_quantized, is_qweight_sym)
++                   lm_head_quantized, is_qweight_sym, config)
+ 
+     @classmethod
+     def override_quantization_method(
+@@ -134,6 +151,9 @@ class IPEXConfig(QuantizationConfig):
+                 return IPEXAWQLinearMethod(self)
+             if self.method == "gptq":
+                 return IPEXGPTQLinearMethod(self)
++        if isinstance(layer, FusedMoE):
++            if self.method == "gptq":
++                return XPUGPTQMarlinMoEMethod(self, layer.moe_config)
+         return None
+ 
+ 
+@@ -419,3 +439,63 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
+             num_expert_group,
+             custom_routing_function=custom_routing_function,
+         )
++
++class XPUGPTQMarlinMoEMethod(GPTQMarlinMoEMethod):
++    def __init__(
++        self,
++        quant_config: IPEXConfig,
++        moe: "FusedMoEConfig",
++    ) -> None:
++        super().__init__(quant_config, moe)
++        self.quant_config = quant_config
++
++    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
++        import intel_extension_for_pytorch as ipex
++        if self.quant_config.linear_quant_method == "gptq":
++            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
++                layer.w13_qweight.permute(0, 2, 1),
++                layer.w2_qweight.permute(0, 2, 1),
++                w1_scale_inv=layer.w13_scales.permute(0, 2, 1),
++                w2_scale_inv=layer.w2_scales.permute(0, 2, 1),
++                is_int4=True
++            )
++        else:
++            raise NotImplementedError(
++                f"Unsupported quant method {self.quant_config.linear_quant_method} "
++                "for XPU MOE.")
++
++    def apply(
++        self,
++        layer: torch.nn.Module,
++        x: torch.Tensor,
++        router_logits: torch.Tensor,
++        top_k: int,
++        renormalize: bool,
++        use_grouped_topk: bool = False,
++        topk_group: Optional[int] = None,
++        num_expert_group: Optional[int] = None,
++        global_num_experts: int = -1,
++        expert_map: Optional[torch.Tensor] = None,
++        custom_routing_function: Optional[Callable] = None,
++        scoring_func: str = "softmax",
++        routed_scaling_factor: float = 1.0,
++        e_score_correction_bias: Optional[torch.Tensor] = None,
++        apply_router_weight_on_input: bool = False,
++        activation: str = "silu",
++        enable_eplb: bool = False,
++        expert_load_view: Optional[torch.Tensor] = None,
++        logical_to_physical_map: Optional[torch.Tensor] = None,
++        logical_replica_count: Optional[torch.Tensor] = None,
++    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
++        res = layer.ipex_fusion(
++            x,
++            use_grouped_topk,
++            top_k,
++            router_logits,
++            renormalize,
++            topk_group=topk_group,
++            num_expert_group=num_expert_group,
++            custom_routing_function=custom_routing_function,
++            scoring_func=scoring_func,
++        )
++        return res
+diff --git a/vllm/model_executor/models/qwen3_moe.py b/vllm/model_executor/models/qwen3_moe.py
+index 85429b3a0..748a4f8e1 100644
+--- a/vllm/model_executor/models/qwen3_moe.py
++++ b/vllm/model_executor/models/qwen3_moe.py
+@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
+ from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+ from vllm.model_executor.layers.quantization.gptq_marlin import (
+     GPTQMarlinConfig)
++from vllm.model_executor.layers.quantization.ipex_quant import IPEXConfig
+ from vllm.model_executor.layers.rotary_embedding import get_rope
+ from vllm.model_executor.layers.vocab_parallel_embedding import (
+     ParallelLMHead, VocabParallelEmbedding)
+@@ -165,6 +166,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
+         if isinstance(
+                 quant_config,
+             (GPTQConfig,
++             IPEXConfig,
+              GPTQMarlinConfig)) and not quant_config.autoround_version:
+             return None
+         return quant_config
+-- 
+2.43.0
+
+
+From 618f3ffd24587ae0830d3201bef016599ff3d0df Mon Sep 17 00:00:00 2001
+From: Fanli Lin <fanli0116@gmail.com>
+Date: Tue, 21 Oct 2025 09:44:31 +0800
+Subject: [PATCH 49/55] fix video dtype error (#378)
+
+---
+ vllm/multimodal/profiling.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/vllm/multimodal/profiling.py b/vllm/multimodal/profiling.py
+index ffc69a2db..0d25524b3 100644
+--- a/vllm/multimodal/profiling.py
++++ b/vllm/multimodal/profiling.py
+@@ -130,7 +130,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
+     ) -> list[npt.NDArray]:
+         if num_videos == 0:
+             return []
+-        video = np.full((num_frames, width, height, 3), 255)
++        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
+         return [video] * num_videos
+ 
+ 
+-- 
+2.43.0
+
+
+From 6bc62f324072d0edc472be78aac234d57698d811 Mon Sep 17 00:00:00 2001
+From: Qiming Zhang <qiming1.zhang@intel.com>
+Date: Tue, 21 Oct 2025 00:21:50 -0700
+Subject: [PATCH 50/55] Support qwen3-30b-a3b-gptq-int4 tp = 4 & tp = 8 (#379)
+
+* gptq int4 tp=4 & 8
+
+Signed-off-by: mayuyuace <qiming1.zhang@intel.com>
+
+* padding only when gptq & tp > 2
+
+Signed-off-by: mayuyuace <qiming1.zhang@intel.com>
+
+* use round_up
+
+* remove comment
+
+Signed-off-by: mayuyuace <qiming1.zhang@intel.com>
+
+---------
+
+Signed-off-by: mayuyuace <qiming1.zhang@intel.com>
+---
+ .../layers/quantization/ipex_quant.py         | 169 +++++++++++++++++-
+ vllm/model_executor/models/qwen3_moe.py       |  34 ++++
+ 2 files changed, 200 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/model_executor/layers/quantization/ipex_quant.py b/vllm/model_executor/layers/quantization/ipex_quant.py
+index cef8d81e2..52af039c4 100644
+--- a/vllm/model_executor/layers/quantization/ipex_quant.py
++++ b/vllm/model_executor/layers/quantization/ipex_quant.py
+@@ -9,6 +9,7 @@ from torch.nn import Module
+ from torch.nn.parameter import Parameter
+ 
+ from vllm._ipex_ops import ipex_ops as ops
++from vllm.distributed import get_tensor_model_parallel_world_size
+ import vllm.envs as envs
+ from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
+                                                   FusedMoeWeightScaleSupported)
+@@ -23,10 +24,10 @@ from vllm.model_executor.layers.quantization.base_config import (
+ from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
+                                                          Fp8LinearMethod)
+ from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
+-from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinMoEMethod
+ from vllm.model_executor.utils import set_weight_attrs
+ from vllm.platforms import current_platform
+ from vllm.scalar_type import scalar_types
++from vllm.utils import round_up
+ 
+ MIN_IPEX_VERSION = "2.6.0"
+ 
+@@ -440,14 +441,176 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
+             custom_routing_function=custom_routing_function,
+         )
+ 
+-class XPUGPTQMarlinMoEMethod(GPTQMarlinMoEMethod):
++class XPUGPTQMarlinMoEMethod(FusedMoEMethodBase):
++
+     def __init__(
+         self,
+         quant_config: IPEXConfig,
+         moe: "FusedMoEConfig",
+     ) -> None:
+-        super().__init__(quant_config, moe)
++        super().__init__(moe)
+         self.quant_config = quant_config
++        if self.quant_config.quant_type.size_bits == 4:
++            self.quant_type = scalar_types.uint4b8
++        else:
++            raise ValueError(
++                "XPUGPTQMarlinMoEMethod only supports int4 now.")
++
++    def create_weights(
++        self,
++        layer: torch.nn.Module,
++        num_experts: int,
++        hidden_size: int,
++        intermediate_size_per_partition: int,
++        params_dtype: torch.dtype,
++        **extra_weight_attrs,
++    ):
++        intermediate_size_full = extra_weight_attrs.pop(
++            "intermediate_size_full")
++
++        self.is_k_full = (not self.quant_config.desc_act) or (
++            intermediate_size_per_partition == intermediate_size_full)
++
++        tp_size = get_tensor_model_parallel_world_size()
++        if tp_size == 4:
++            intermediate_size_per_partition = round_up(
++                intermediate_size_per_partition, 256)
++        elif tp_size == 8:
++            intermediate_size_per_partition = round_up(
++                intermediate_size_per_partition, 128)
++
++        if self.quant_config.group_size != -1:
++            scales_size13 = hidden_size // self.quant_config.group_size
++            w2_scales_size = (intermediate_size_full
++                              if self.quant_config.desc_act else
++                              intermediate_size_per_partition)
++            scales_size2 = (w2_scales_size // self.quant_config.group_size)
++            strategy = FusedMoeWeightScaleSupported.GROUP.value
++        else:
++            scales_size13 = 1
++            scales_size2 = 1
++            strategy = FusedMoeWeightScaleSupported.CHANNEL.value
++
++        extra_weight_attrs.update({
++            "quant_method": strategy,
++            "is_transposed": True
++        })
++        # Fused gate_up_proj (column parallel)
++        w13_qweight = torch.nn.Parameter(
++            torch.empty(
++                num_experts,
++                hidden_size // self.quant_config.pack_factor,
++                2 * intermediate_size_per_partition,
++                dtype=torch.int32,
++            ),
++            requires_grad=False,
++        )
++        layer.register_parameter("w13_qweight", w13_qweight)
++        set_weight_attrs(w13_qweight, extra_weight_attrs)
++        # down_proj (row parallel)
++        w2_qweight = torch.nn.Parameter(
++            torch.empty(
++                num_experts,
++                intermediate_size_per_partition //
++                self.quant_config.pack_factor,
++                hidden_size,
++                dtype=torch.int32,
++            ),
++            requires_grad=False,
++        )
++        layer.register_parameter("w2_qweight", w2_qweight)
++        set_weight_attrs(w2_qweight, extra_weight_attrs)
++        # up_proj scales
++        w13_scales = torch.nn.Parameter(
++            torch.empty(num_experts,
++                        scales_size13,
++                        2 * intermediate_size_per_partition,
++                        dtype=params_dtype),
++            requires_grad=False,
++        )
++        layer.register_parameter("w13_scales", w13_scales)
++        set_weight_attrs(w13_scales, extra_weight_attrs)
++        # down_proj scales
++        w2_scales = torch.nn.Parameter(
++            torch.empty(num_experts,
++                        scales_size2,
++                        hidden_size,
++                        dtype=params_dtype),
++            requires_grad=False,
++        )
++        layer.register_parameter("w2_scales", w2_scales)
++        set_weight_attrs(w2_scales, extra_weight_attrs)
++        # don't shard the w2 scales when running act order
++        set_weight_attrs(w2_scales,
++                         {"load_full_w2": self.quant_config.desc_act})
++        # up_proj scales
++        w13_qzeros = torch.nn.Parameter(
++            torch.empty(num_experts,
++                        scales_size13,
++                        2 * intermediate_size_per_partition //
++                        self.quant_config.pack_factor,
++                        dtype=params_dtype),
++            requires_grad=False,
++        )
++        layer.register_parameter("w13_qzeros", w13_qzeros)
++        set_weight_attrs(w13_qzeros, extra_weight_attrs)
++        # down_proj scales
++        w2_qzeros = torch.nn.Parameter(
++            torch.empty(num_experts,
++                        scales_size2,
++                        hidden_size // self.quant_config.pack_factor,
++                        dtype=params_dtype),
++            requires_grad=False,
++        )
++        layer.register_parameter("w2_qzeros", w2_qzeros)
++        set_weight_attrs(w2_qzeros, extra_weight_attrs)
++        # don't shard the w2 scales when running act order
++        set_weight_attrs(w2_qzeros,
++                         {"load_full_w2": self.quant_config.desc_act})
++        w13_g_idx = torch.nn.Parameter(
++            torch.empty(
++                num_experts,
++                hidden_size,
++                dtype=torch.int32,
++            ),
++            requires_grad=False,
++        )
++        layer.register_parameter("w13_g_idx", w13_g_idx)
++        set_weight_attrs(w13_g_idx, extra_weight_attrs)
++        w2_g_idx = torch.nn.Parameter(
++            torch.empty(
++                num_experts,
++                intermediate_size_per_partition,
++                dtype=torch.int32,
++            ),
++            requires_grad=False,
++        )
++        layer.register_parameter("w2_g_idx", w2_g_idx)
++        set_weight_attrs(w2_g_idx, extra_weight_attrs)
++        w13_g_idx_sort_indices = torch.nn.Parameter(
++            torch.empty(
++                num_experts,
++                hidden_size,
++                dtype=torch.int32,
++            ),
++            requires_grad=False,
++        )
++        layer.register_parameter("w13_g_idx_sort_indices",
++                                 w13_g_idx_sort_indices)
++        set_weight_attrs(w13_g_idx_sort_indices, extra_weight_attrs)
++        w2_g_idx_sort_indices = torch.nn.Parameter(
++            torch.empty(
++                num_experts,
++                intermediate_size_per_partition,
++                dtype=torch.int32,
++            ),
++            requires_grad=False,
++        )
++        layer.register_parameter("w2_g_idx_sort_indices",
++                                 w2_g_idx_sort_indices)
++        set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
++
++        device = layer.w13_qweight.device
+ 
+     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+         import intel_extension_for_pytorch as ipex
+diff --git a/vllm/model_executor/models/qwen3_moe.py b/vllm/model_executor/models/qwen3_moe.py
+index 748a4f8e1..4b9f3b15a 100644
+--- a/vllm/model_executor/models/qwen3_moe.py
++++ b/vllm/model_executor/models/qwen3_moe.py
+@@ -57,6 +57,7 @@ from vllm.model_executor.model_loader.weight_utils import (
+     default_weight_loader, maybe_remap_kv_scale_name)
+ from vllm.model_executor.sampling_metadata import SamplingMetadata
+ from vllm.sequence import IntermediateTensors
++from vllm.utils import round_up
+ 
+ from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
+ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
+@@ -469,7 +470,40 @@ class Qwen3MoeModel(nn.Module):
+         params_dict = dict(self.named_parameters())
+         loaded_params: set[str] = set()
+         expert_params_mapping = self.get_expert_mapping()
++        is_padding_needed = False
++        quantization_config = getattr(self.config, "quantization_config", None)
++        if quantization_config is not None:
++            quant_method = quantization_config.get("quant_method", "").lower()
++        tp_size = get_tensor_model_parallel_world_size()
++        if (quant_method in ("gptq")) and (tp_size == 4 or tp_size == 8):
++            is_padding_needed = True
+         for name, loaded_weight in weights:
++            if is_padding_needed:
++                if ".down_proj.g_idx" in name:
++                    shape0 = loaded_weight.shape[0]
++                    target_size = round_up(shape0, 1024)
++                    pad_size = target_size - shape0
++                    loaded_weight = torch.nn.functional.pad(loaded_weight, (0, pad_size), value=0)
++                elif ".down_proj.qweight" in name:
++                    shape0 = loaded_weight.shape[0]
++                    target_size = round_up(shape0, 128)
++                    pad_size = target_size - shape0
++                    loaded_weight = torch.nn.functional.pad(loaded_weight, (0, 0, 0, pad_size), value=0)
++                elif ".down_proj.scales" in name or ".down_proj.qzeros" in name:
++                    shape0 = loaded_weight.shape[0]
++                    target_size = round_up(shape0, 8)
++                    pad_size = target_size - shape0
++                    loaded_weight = torch.nn.functional.pad(loaded_weight, (0, 0, 0, pad_size), value=0)
++                elif ".gate_proj.qweight" in name or ".gate_proj.scales" in name or ".up_proj.qweight" in name or ".up_proj.scales" in name:
++                    shape1 = loaded_weight.shape[1]
++                    target_size = round_up(shape1, 1024)
++                    pad_size = target_size - shape1
++                    loaded_weight = torch.nn.functional.pad(loaded_weight, (0, pad_size), value=0)
++                elif ".gate_proj.qzeros" in name or ".up_proj.qzeros" in name:
++                    shape1 = loaded_weight.shape[1]
++                    target_size = round_up(shape1, 128)
++                    pad_size = target_size - shape1
++                    loaded_weight = torch.nn.functional.pad(loaded_weight, (0, pad_size), value=0)
+             for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                 # Skip non-stacked layers and experts (experts handled below).
+                 if weight_name not in name:
+-- 
+2.43.0
+
+
+From 4faf6afb71d276b61c0fb150624a6d57a9159b63 Mon Sep 17 00:00:00 2001
+From: Fanli Lin <fanli0116@gmail.com>
+Date: Fri, 24 Oct 2025 10:49:26 +0800
+Subject: [PATCH 51/55] fix quant_method none (#383)
+
+Signed-off-by: Fanli Lin <fanli.lin@intel.com>
+---
+ vllm/model_executor/models/qwen3_moe.py | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/model_executor/models/qwen3_moe.py b/vllm/model_executor/models/qwen3_moe.py
+index 4b9f3b15a..55156bb65 100644
+--- a/vllm/model_executor/models/qwen3_moe.py
++++ b/vllm/model_executor/models/qwen3_moe.py
+@@ -474,9 +474,9 @@ class Qwen3MoeModel(nn.Module):
+         quantization_config = getattr(self.config, "quantization_config", None)
+         if quantization_config is not None:
+             quant_method = quantization_config.get("quant_method", "").lower()
+-        tp_size = get_tensor_model_parallel_world_size()
+-        if (quant_method in ("gptq")) and (tp_size == 4 or tp_size == 8):
+-            is_padding_needed = True
++            tp_size = get_tensor_model_parallel_world_size()
++            if (quant_method in ("gptq")) and (tp_size == 4 or tp_size == 8):
++                is_padding_needed = True
+         for name, loaded_weight in weights:
+             if is_padding_needed:
+                 if ".down_proj.g_idx" in name:
+-- 
+2.43.0
+
+
+From 180881f7a75ff4b80e844a57f96d1d9bf82e3599 Mon Sep 17 00:00:00 2001
+From: Kunshang Ji <kunshang.ji@intel.com>
+Date: Fri, 24 Oct 2025 16:12:31 +0800
+Subject: [PATCH 52/55] fix fuesd_add_rms_norm (#384)
+
+---
+ vllm/_ipex_ops.py | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/vllm/_ipex_ops.py b/vllm/_ipex_ops.py
+index 7d2d2e8aa..8c1de5637 100644
+--- a/vllm/_ipex_ops.py
++++ b/vllm/_ipex_ops.py
+@@ -162,14 +162,14 @@ class ipex_ops:
+     @staticmethod
+     def rms_norm(input: torch.Tensor, weight: torch.Tensor,
+                  epsilon: float) -> torch.Tensor:
+-        return ipex.llm.functional.rms_norm(input, weight, epsilon)
++        out = torch.empty_like(input)
++        torch.ops.torch_ipex.rms_norm_vllm(out, input, weight, epsilon)
++        return out
+ 
+     @staticmethod
+     def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
+                            weight: torch.Tensor, epsilon: float) -> None:
+-        tmp = ipex.llm.functional.add_rms_norm(residual, input, weight, None,
+-                                               epsilon, True)
+-        input.copy_(tmp)
++        torch.ops.torch_ipex.fused_add_rms_norm_vllm(input, residual, weight, epsilon)
+ 
+     @staticmethod
+     def varlen_attention(
+-- 
+2.43.0
+
+
+From 1babc91fe91f4643acd83793e49c53a24c5923b1 Mon Sep 17 00:00:00 2001
+From: Qiming Zhang <qiming1.zhang@intel.com>
+Date: Sun, 26 Oct 2025 22:59:49 -0700
+Subject: [PATCH 53/55] fix rms_norm & fix awq (#387)
+
+Signed-off-by: mayuyuace <qiming1.zhang@intel.com>
+---
+ vllm/_ipex_ops.py                             |  2 +-
+ .../layers/quantization/ipex_quant.py         | 24 ++++++++++---------
+ 2 files changed, 14 insertions(+), 12 deletions(-)
+
+diff --git a/vllm/_ipex_ops.py b/vllm/_ipex_ops.py
+index 8c1de5637..e28d733ee 100644
+--- a/vllm/_ipex_ops.py
++++ b/vllm/_ipex_ops.py
+@@ -163,7 +163,7 @@ class ipex_ops:
+     def rms_norm(input: torch.Tensor, weight: torch.Tensor,
+                  epsilon: float) -> torch.Tensor:
+         out = torch.empty_like(input)
+-        torch.ops.torch_ipex.rms_norm_vllm(out, input, weight, epsilon)
++        torch.ops.torch_ipex.rms_norm_vllm(out, input.contiguous(), weight, epsilon)
+         return out
+ 
+     @staticmethod
+diff --git a/vllm/model_executor/layers/quantization/ipex_quant.py b/vllm/model_executor/layers/quantization/ipex_quant.py
+index 52af039c4..b7af0924c 100644
+--- a/vllm/model_executor/layers/quantization/ipex_quant.py
++++ b/vllm/model_executor/layers/quantization/ipex_quant.py
+@@ -42,11 +42,6 @@ class IPEXConfig(QuantizationConfig):
+         "gptq": 0,
+     }
+ 
+-    TYPE_MAP = {
+-        (4, True): scalar_types.uint4b8,
+-        (8, True): scalar_types.uint8b128,
+-    }
+-
+     def __init__(
+         self,
+         method: str,
+@@ -78,11 +73,10 @@ class IPEXConfig(QuantizationConfig):
+             raise ValueError(f"IPEX quantization supports [awq, gptq], "
+                              f"but got {self.method}.")
+         self.is_qweight_sym = is_qweight_sym
+-        self.is_sym = is_qweight_sym
+ 
+-        self.quant_type = self.TYPE_MAP[(weight_bits, is_qweight_sym)]
+         # used to identify GPTQ model quantized by autoround
+-        self.autoround_version = full_config.get("autoround_version", "")
++        self.autoround_version = full_config.get(
++            "autoround_version", "") if full_config is not None else ""
+ 
+     def __repr__(self) -> str:
+         return (f"IPEXConfig(method={self.method},"
+@@ -443,6 +437,11 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
+ 
+ class XPUGPTQMarlinMoEMethod(FusedMoEMethodBase):
+ 
++    TYPE_MAP = {
++        (4, True): scalar_types.uint4b8,
++        (8, True): scalar_types.uint8b128,
++    }
++
+     def __init__(
+         self,
+         quant_config: IPEXConfig,
+@@ -450,9 +449,12 @@ class XPUGPTQMarlinMoEMethod(FusedMoEMethodBase):
+     ) -> None:
+         super().__init__(moe)
+         self.quant_config = quant_config
+-        if self.quant_config.quant_type.size_bits == 4:
+-            self.quant_type = scalar_types.uint4b8
+-        else:
++
++        weight_bits = quant_config.weight_bits
++        is_qweight_sym = quant_config.is_qweight_sym
++        self.quant_type = self.TYPE_MAP[(weight_bits, is_qweight_sym)]
++
++        if self.quant_type.size_bits != 4:
+             raise ValueError(
+                 "XPUGPTQMarlinMoEMethod only supports int4 now.")
+ 
+-- 
+2.43.0
+
+
+From dc22567f84690264d1725d1d181352e7a7584623 Mon Sep 17 00:00:00 2001
+From: jundu <jun.du@intel.com>
+Date: Thu, 30 Oct 2025 15:50:40 +0800
+Subject: [PATCH 54/55] Update oneccl to 2021.15.6.2 (#388)
+
+* Update requirements/xpu.txt ipex-ci/dep_update_20251027_f7903ad79
+
+* Update oneCCL
+
+* Update xpu.txt
+
+---------
+
+Co-authored-by: wenjun liu <wenjun.liu@intel.com>
+---
+ docker/Dockerfile.xpu | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/docker/Dockerfile.xpu b/docker/Dockerfile.xpu
+index bc4cfbf85..cfd3dfa4b 100644
+--- a/docker/Dockerfile.xpu
++++ b/docker/Dockerfile.xpu
+@@ -26,8 +26,8 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
+ 
+ RUN apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing
+ 
+-RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.4/intel-oneccl-2021.15.4.11_offline.sh
+-RUN bash intel-oneccl-2021.15.4.11_offline.sh -a --silent --eula accept && echo "source /opt/intel/oneapi/setvars.sh --force" >> /root/.bashrc
++RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.6/intel-oneccl-2021.15.6.2_offline.sh
++RUN bash intel-oneccl-2021.15.6.2_offline.sh -a --silent --eula accept && echo "source /opt/intel/oneapi/setvars.sh --force" >> /root/.bashrc
+ SHELL ["bash", "-c"]
+ CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+ 
+-- 
+2.43.0
+
+
+From 871a7ab75012461835dd4abbb77b5596f3cb0ee2 Mon Sep 17 00:00:00 2001
+From: Zhan Xue <zhan.xue@intel.com>
+Date: Wed, 19 Nov 2025 19:06:32 +0800
+Subject: [PATCH 55/55] enable xpu gdr
+
+Signed-off-by: Zhan Xue <zhan.xue@intel.com>
+---
+ .../kv_transfer/kv_connector/v1/nixl_connector.py   | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+index 17f5be76c..063841988 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+@@ -61,7 +61,10 @@ except ImportError:
+ _NIXL_SUPPORTED_XPUS = {
+     "cuda": ("cuda", ),
+     "tpu": ("cpu", ),
+-    "xpu": ("cpu", ),
++    "xpu": (
++            "cpu",
++            "xpu",
++    ),
+ }
+ 
+ 
+@@ -475,6 +478,8 @@ class NixlConnectorWorker:
+             self.nixl_memory_type = "VRAM"
+         elif self.kv_buffer_device == "cpu":
+             self.nixl_memory_type = "DRAM"
++        elif self.kv_buffer_device == "xpu":
++            self.nixl_memory_type = "VRAM"
+         else:
+             raise RuntimeError(
+                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
+@@ -655,6 +660,12 @@ class NixlConnectorWorker:
+ 
+     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
+         """Assign copy (d2h, h2d) operations when host buffer is used."""
++        # Set a no-op if the host buffer is not cpu.
++        if self.kv_buffer_device != "cpu":
++            return
++        # Set a no-op if self.device_type is 'cpu'.
++        if self.device_type == "cpu":
++            return
+         assert self.use_host_buffer
+         self.copy_blocks = copy_operation
+ 
+-- 
+2.43.0
+

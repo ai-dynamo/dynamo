@@ -1,0 +1,94 @@
+From 979b23865d1908c55aef1a2d080463580b37e276 Mon Sep 17 00:00:00 2001
+From: Zhan Xue <zhan.xue@intel.com>
+Date: Wed, 19 Nov 2025 17:29:43 +0800
+Subject: [PATCH 1/2] Enable xpu gdr
+
+Signed-off-by: Cherry Zhang <cherry.zhang@intel.com>
+Signed-off-by: Yihua Xu <yihua.xu@intel.com>
+---
+ src/uct/ib/base/ib_md.c      | 6 ++++++
+ src/uct/ze/copy/ze_copy_md.c | 3 ++-
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/uct/ib/base/ib_md.c b/src/uct/ib/base/ib_md.c
+index b771eb91c..46c6b2a3b 100644
+--- a/src/uct/ib/base/ib_md.c
++++ b/src/uct/ib/base/ib_md.c
+@@ -1337,6 +1337,12 @@ ucs_status_t uct_ib_md_open_common(uct_ib_md_t *md,
+         /* check if ROCM KFD driver is loaded */
+         uct_ib_check_gpudirect_driver(md, "/dev/kfd", UCS_MEMORY_TYPE_ROCM);
+ 
++#if HAVE_ZE
++	uct_ib_check_gpudirect_driver(
++		md, "/sys/module/xe/srcversion",
++		UCS_MEMORY_TYPE_ZE_DEVICE);
++#endif
++
+         /* Check for dma-buf support */
+         uct_ib_md_check_dmabuf(md);
+     }
+diff --git a/src/uct/ze/copy/ze_copy_md.c b/src/uct/ze/copy/ze_copy_md.c
+index f60ec1ebd..0a59bd0c8 100644
+--- a/src/uct/ze/copy/ze_copy_md.c
++++ b/src/uct/ze/copy/ze_copy_md.c
+@@ -48,7 +48,8 @@ static ucs_status_t uct_ze_copy_md_query(uct_md_h md, uct_md_attr_v2_t *md_attr)
+     md_attr->alloc_mem_types  = UCS_BIT(UCS_MEMORY_TYPE_ZE_HOST) |
+                                 UCS_BIT(UCS_MEMORY_TYPE_ZE_DEVICE) |
+                                 UCS_BIT(UCS_MEMORY_TYPE_ZE_MANAGED);
+-    md_attr->access_mem_types = UCS_BIT(UCS_MEMORY_TYPE_ZE_HOST) |
++    md_attr->access_mem_types = UCS_BIT(UCS_MEMORY_TYPE_HOST) |
++                                UCS_BIT(UCS_MEMORY_TYPE_ZE_HOST) |
+                                 UCS_BIT(UCS_MEMORY_TYPE_ZE_DEVICE) |
+                                 UCS_BIT(UCS_MEMORY_TYPE_ZE_MANAGED);
+     md_attr->detect_mem_types = UCS_BIT(UCS_MEMORY_TYPE_ZE_HOST) |
+-- 
+2.43.0
+
+
+From f5c4c8e0538af488272a86cae0176cfdcbc9d667 Mon Sep 17 00:00:00 2001
+From: Zhan Xue <zhan.xue@intel.com>
+Date: Fri, 21 Nov 2025 22:46:25 +0800
+Subject: [PATCH 2/2] Fix compilation
+
+Signed-off-by: Zhan Xue <zhan.xue@intel.com>
+---
+ src/uct/ze/copy/ze_copy_iface.c | 6 +++---
+ src/uct/ze/copy/ze_copy_md.c    | 4 ++--
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/src/uct/ze/copy/ze_copy_iface.c b/src/uct/ze/copy/ze_copy_iface.c
+index f09949933..9de97bff4 100644
+--- a/src/uct/ze/copy/ze_copy_iface.c
++++ b/src/uct/ze/copy/ze_copy_iface.c
+@@ -196,9 +196,9 @@ uct_ze_copy_estimate_perf(uct_iface_h tl_iface, uct_perf_attr_t *perf_attr)
+ 
+ static uct_iface_internal_ops_t uct_ze_copy_iface_internal_ops = {
+     .iface_estimate_perf   = uct_ze_copy_estimate_perf,
+-    .iface_vfs_refresh     = ucs_empty_function,
+-    .ep_query              = ucs_empty_function_return_unsupported,
+-    .ep_invalidate         = ucs_empty_function_return_unsupported,
++    .iface_vfs_refresh      = (void (*)(struct uct_iface *))ucs_empty_function,
++    .ep_query               = (ucs_status_t (*)(struct uct_ep *, uct_ep_attr_t *))ucs_empty_function_return_unsupported,
++    .ep_invalidate          = (ucs_status_t (*)(struct uct_ep *, unsigned int))ucs_empty_function_return_unsupported,
+     .ep_connect_to_ep_v2   = (uct_ep_connect_to_ep_v2_func_t)ucs_empty_function_return_unsupported,
+     .iface_is_reachable_v2 = uct_ze_copy_iface_is_reachable_v2,
+     .ep_is_connected       = uct_base_ep_is_connected
+diff --git a/src/uct/ze/copy/ze_copy_md.c b/src/uct/ze/copy/ze_copy_md.c
+index 0a59bd0c8..98c8ed428 100644
+--- a/src/uct/ze/copy/ze_copy_md.c
++++ b/src/uct/ze/copy/ze_copy_md.c
+@@ -249,9 +249,9 @@ static uct_md_ops_t md_ops = {
+     .mem_free           = uct_ze_copy_mem_free,
+     .mem_advise         = (uct_md_mem_advise_func_t)ucs_empty_function_return_unsupported,
+     .mem_reg            = uct_ze_copy_mem_reg,
+-    .mem_dereg          = ucs_empty_function_return_success,
++    .mem_dereg          = (ucs_status_t (*)(struct uct_md *, const uct_md_mem_dereg_params_t *)) ucs_empty_function_return_success,
+     .mem_query          = uct_ze_copy_md_mem_query,
+-    .mkey_pack          = ucs_empty_function_return_success,
++    .mkey_pack          = (ucs_status_t (*)(struct uct_md *, void *, void *, size_t,  const uct_md_mkey_pack_params_t *, void *))ucs_empty_function_return_success,
+     .mem_attach         = (uct_md_mem_attach_func_t)ucs_empty_function_return_unsupported,
+     .detect_memory_type = uct_ze_copy_md_detect_memory_type,
+ };
+-- 
+2.43.0
+

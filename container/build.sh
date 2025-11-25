@@ -292,6 +292,9 @@ get_options() {
         --enable-kvbm)
             ENABLE_KVBM=true
             ;;
+        --enable-xpu)
+            ENABLE_XPU=true
+            ;;
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
             ;;
@@ -461,6 +464,7 @@ show_help() {
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
+    echo "  [--enable-xpu Enables XPU support in Python 3.12]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
@@ -522,7 +526,12 @@ fi
 
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
+    if [  ! -z ${ENABLE_XPU} ]; then
+        echo "INFO: Selecting Dockerfile.xpu.vllm"
+        DOCKERFILE=${SOURCE_DIR}/xpu/Dockerfile.xpu.vllm
+    else
+        DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
+    fi
 elif [[ $FRAMEWORK == "TRTLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm
 elif [[ $FRAMEWORK == "NONE" ]]; then
@@ -847,7 +856,12 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         echo "======================================"
         echo "Starting Build 1: Base Image"
         echo "======================================"
+        if [[ $FRAMEWORK == "VLLM" ]] && [  ! -z ${ENABLE_XPU} ]; then
+        echo "Building Base Image Dockerfile.xpu"
+        $RUN_PREFIX docker build -f "${SOURCE_DIR}/xpu/Dockerfile.xpu" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        else
         $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+	fi
         # Start framework build
         echo "======================================"
         echo "Starting Build 2: Framework Image"
