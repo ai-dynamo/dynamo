@@ -14,6 +14,16 @@ Pod calls cudaMalloc() → LD_PRELOAD intercepts → Returns error → Pod crash
 
 **Result**: Realistic GPU failure testing without hardware damage.
 
+## Scope
+
+This library simulates **software/orchestration-level failures** that occur when GPU hardware becomes inaccessible or unusable:
+- ✅ **In scope**: CUDA API failures due to GPU becoming unavailable (XID errors, device not found, ECC errors)
+- ✅ **Use case**: Testing Kubernetes pod rescheduling, inference failover, recovery orchestration
+- ❌ **Out of scope**: Bit-level Silent Data Corruption (SDC), compute errors, incorrect results
+- ❌ **Not modeled**: General GPU faulting phenomena at the computation/memory level
+
+**Note**: SDC detection mechanisms will not trigger with this approach, as we intercept at the CUDA API layer, not at the hardware/computation layer.
+
 ## Supported XID Errors
 
 | XID | Description | CUDA Error | Use Case |
