@@ -71,7 +71,6 @@ class BaseWorkerHandler(ABC):
         component,
         engine,
         default_sampling_params,
-        model_max_len: int | None = None,
         enable_multimodal: bool = False,
     ):
         self.runtime = runtime
@@ -81,8 +80,6 @@ class BaseWorkerHandler(ABC):
         self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
         self.image_loader = ImageLoader()
-        self.temp_dirs: list[tempfile.TemporaryDirectory] = []
-        self.model_max_len = model_max_len
         self.enable_multimodal = enable_multimodal
 
     @abstractmethod
@@ -230,7 +227,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         component,
         engine,
         default_sampling_params,
-        model_max_len: int | None = None,
         enable_multimodal: bool = False,
     ):
         super().__init__(
@@ -238,7 +234,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             component,
             engine,
             default_sampling_params,
-            model_max_len,
             enable_multimodal,
         )
 
@@ -292,7 +287,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         component,
         engine,
         default_sampling_params,
-        model_max_len: int | None = None,
         enable_multimodal: bool = False,
     ):
         super().__init__(
@@ -300,7 +294,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             component,
             engine,
             default_sampling_params,
-            model_max_len,
             enable_multimodal,
         )
 
