@@ -24,7 +24,7 @@ from dynamo.planner.utils.perf_interpolation import (
     PrefillInterpolator,
 )
 from dynamo.planner.utils.pre_swept_results_utils import PreSweptResultsHelper
-from dynamo.planner.utils.prometheus import PrometheusAPIClient
+from dynamo.planner.utils.prometheus import MetricSource, PrometheusAPIClient
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -91,7 +91,11 @@ class Planner:
 
             # Use backend metrics for vLLM (queries vllm:* metrics directly from workers)
             # Use frontend metrics for other backends (queries dynamo_frontend_* metrics)
-            metric_source = "backend" if args.backend.lower() == "vllm" else "frontend"
+            metric_source = (
+                MetricSource.VLLM
+                if args.backend.lower() == "vllm"
+                else MetricSource.FRONTEND
+            )
             logger.info(
                 f"Initializing Prometheus client with metric_source='{metric_source}' for backend '{args.backend}'"
             )

@@ -15,6 +15,7 @@
 
 import logging
 import typing
+from enum import Enum
 
 from prometheus_api_client import PrometheusConnect
 from pydantic import BaseModel, ValidationError
@@ -44,6 +45,40 @@ class FrontendMetricContainer(BaseModel):
     value: typing.Tuple[float, float]  # [timestamp, value]
 
 
+class MetricSource(Enum):
+    FRONTEND = "frontend"
+    VLLM = "vllm"
+    SGLANG = "sglang"  # not supported yet
+    TRTLLM = "trtllm"  # not supported yet
+
+
+METRIC_SOURCE_MAP = {  # sourced from prometheus_names.py
+    {
+        MetricSource.VLLM: {
+            prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS: "vllm:time_to_first_token_seconds",  # histogram
+            prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS: "vllm:inter_token_latency_seconds",  # histogram
+            prometheus_names.frontend_service.REQUEST_DURATION_SECONDS: "vllm:e2e_request_latency_seconds",  # histogram - vLLM's e2e latency
+            prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS: "vllm:prompt_tokens_total",  # counter - total prompt tokens
+            prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS: "vllm:generation_tokens_total",  # counter - total generation tokens
+            prometheus_names.frontend_service.REQUESTS_TOTAL: "vllm:request_success_total",  # counter
+        },
+        MetricSource.FRONTEND: {
+            prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS}",
+            prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS}",
+            prometheus_names.frontend_service.REQUEST_DURATION_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.REQUEST_DURATION_SECONDS}",
+            prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS}",
+            prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS}",
+            prometheus_names.frontend_service.REQUESTS_TOTAL: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.REQUESTS_TOTAL}",
+        },
+    }
+}
+
+METRIC_SOURCE_MODEL_ATTR = {
+    MetricSource.VLLM: "model_name",
+    MetricSource.FRONTEND: "model",
+}
+
+
 class PrometheusAPIClient:
     """
     Client for querying Dynamo metrics from Prometheus.
@@ -65,19 +100,11 @@ class PrometheusAPIClient:
         ttft = backend_client.get_avg_time_to_first_token("60s", "llama-3-8b")
     """
 
-    # Metric name mapping for backend (vLLM) metrics
-    # Maps from frontend metric concept to actual vLLM metric name
-    BACKEND_METRIC_MAP = {
-        "time_to_first_token_seconds": "time_to_first_token_seconds",  # histogram
-        "inter_token_latency_seconds": "inter_token_latency_seconds",  # histogram
-        "request_duration_seconds": "e2e_request_latency_seconds",  # histogram - vLLM's e2e latency
-        "input_sequence_tokens": "prompt_tokens_total",  # counter - total prompt tokens
-        "output_sequence_tokens": "generation_tokens_total",  # counter - total generation tokens
-        "requests_total": "request_success_total",  # counter
-    }
-
     def __init__(
-        self, url: str, dynamo_namespace: str, metric_source: str = "frontend"
+        self,
+        url: str,
+        dynamo_namespace: str,
+        metric_source: MetricSource = MetricSource.FRONTEND,
     ):
         """
         Initialize Prometheus API client.
@@ -97,6 +124,7 @@ class PrometheusAPIClient:
         self.prom = PrometheusConnect(url=url, disable_ssl=True)
         self.dynamo_namespace = dynamo_namespace
         self.metric_source = metric_source
+        self.model_attr = METRIC_SOURCE_MODEL_ATTR[self.metric_source]
 
     def _get_average_metric(
         self, full_metric_name: str, interval: str, operation_name: str, model_name: str
@@ -115,42 +143,36 @@ class PrometheusAPIClient:
             Average metric value or 0 if no data/error
         """
         try:
-            # Apply metric prefix based on source
-            if self.metric_source == "frontend":
-                # Prepend the frontend metric prefix if not already present
-                if not full_metric_name.startswith(
-                    prometheus_names.name_prefix.FRONTEND
-                ):
-                    full_metric_name = (
-                        f"{prometheus_names.name_prefix.FRONTEND}_{full_metric_name}"
-                    )
-            else:  # backend
-                # Backend uses vllm: prefix
-                # Check if it's already a full vllm metric name (from our mapping)
-                if not full_metric_name.startswith("vllm:"):
-                    full_metric_name = f"vllm:{full_metric_name}"
+            full_metric_name = METRIC_SOURCE_MAP[self.metric_source][full_metric_name]
 
-            query = f"increase({full_metric_name}_sum[{interval}])/increase({full_metric_name}_count[{interval}])"
-            result = self.prom.custom_query(query=query)
-            if not result:
+            # Query sum and count separately
+            sum_query = f"increase({full_metric_name}_sum[{interval}])"
+            count_query = f"increase({full_metric_name}_count[{interval}])"
+
+            sum_result = self.prom.custom_query(query=sum_query)
+            count_result = self.prom.custom_query(query=count_query)
+
+            if not sum_result or not count_result:
                 # No data available yet (no requests made) - return 0 silently
                 logger.warning(
                     f"No prometheus metric data available for {full_metric_name}, use 0 instead"
                 )
                 return 0
-            metrics_containers = parse_frontend_metric_containers(result)
 
-            values = []
-            for container in metrics_containers:
+            sum_containers = parse_frontend_metric_containers(sum_result)
+            count_containers = parse_frontend_metric_containers(count_result)
+
+            # Sum up values for matching containers
+            total_sum = 0.0
+            total_count = 0.0
+
+            for container in sum_containers:
                 # Determine which label to use for model filtering
                 if self.metric_source == "frontend":
                     # Frontend uses 'model' label and lowercases model names
                     model_match = (
                         container.metric.model
                         and container.metric.model.lower() == model_name.lower()
-                    )
-                    namespace_match = (
-                        container.metric.dynamo_namespace == self.dynamo_namespace
                     )
                 else:  # backend
                     # Backend (vLLM) uses 'model_name' label - check both for compatibility
@@ -160,22 +182,45 @@ class PrometheusAPIClient:
                     model_match = (
                         backend_model and backend_model.lower() == model_name.lower()
                     )
-                    # Backend metrics don't have dynamo_namespace, filter by pod name containing dynamo namespace
-                    pod_name = getattr(container.metric, "pod", "")
-                    namespace_match = (
-                        self.dynamo_namespace in pod_name if pod_name else True
-                    )
+                namespace_match = (
+                    container.metric.dynamo_namespace == self.dynamo_namespace
+                )
 
                 # Filter by model and namespace
                 if model_match and namespace_match:
-                    values.append(container.value[1])
+                    total_sum += container.value[1]
 
-            if not values:
+            for container in count_containers:
+                # Determine which label to use for model filtering
+                if self.metric_source == "frontend":
+                    # Frontend uses 'model' label and lowercases model names
+                    model_match = (
+                        container.metric.model
+                        and container.metric.model.lower() == model_name.lower()
+                    )
+                else:  # backend
+                    # Backend (vLLM) uses 'model_name' label - check both for compatibility
+                    backend_model = getattr(
+                        container.metric, "model_name", container.metric.model
+                    )
+                    model_match = (
+                        backend_model and backend_model.lower() == model_name.lower()
+                    )
+                namespace_match = (
+                    container.metric.dynamo_namespace == self.dynamo_namespace
+                )
+
+                # Filter by model and namespace
+                if model_match and namespace_match:
+                    total_count += container.value[1]
+
+            if total_count == 0:
                 logger.warning(
                     f"No prometheus metric data available for {full_metric_name} with model {model_name} and dynamo namespace {self.dynamo_namespace}, use 0 instead"
                 )
                 return 0
-            return sum(values) / len(values)
+
+            return total_sum / total_count
 
         except Exception as e:
             logger.error(f"Error getting {operation_name}: {e}")
@@ -191,8 +236,10 @@ class PrometheusAPIClient:
         Formula: increase(counter_total[interval]) / increase(request_success_total[interval])
         """
         try:
-            full_metric_name = f"vllm:{counter_metric}"
-            requests_metric = "vllm:request_success_total"
+            full_metric_name = METRIC_SOURCE_MAP[self.metric_source][counter_metric]
+            requests_metric = METRIC_SOURCE_MAP[self.metric_source][
+                prometheus_names.frontend_service.REQUESTS_TOTAL
+            ]
 
             # Query both the counter and request count
             counter_query = f"increase({full_metric_name}[{interval}])"
@@ -219,8 +266,7 @@ class PrometheusAPIClient:
                     container.metric, "model_name", container.metric.model
                 )
                 if backend_model and backend_model.lower() == model_name.lower():
-                    pod_name = getattr(container.metric, "pod", "")
-                    if self.dynamo_namespace in pod_name if pod_name else True:
+                    if container.metric.dynamo_namespace == self.dynamo_namespace:
                         total_counter += container.value[1]
 
             for container in requests_containers:
@@ -228,8 +274,7 @@ class PrometheusAPIClient:
                     container.metric, "model_name", container.metric.model
                 )
                 if backend_model and backend_model.lower() == model_name.lower():
-                    pod_name = getattr(container.metric, "pod", "")
-                    if self.dynamo_namespace in pod_name if pod_name else True:
+                    if container.metric.dynamo_namespace == self.dynamo_namespace:
                         total_requests += container.value[1]
 
             if total_requests == 0:
@@ -262,15 +307,6 @@ class PrometheusAPIClient:
         )
 
     def get_avg_request_duration(self, interval: str, model_name: str):
-        if self.metric_source == "backend":
-            # Backend uses e2e_request_latency_seconds instead of request_duration_seconds
-            metric_name = self.BACKEND_METRIC_MAP["request_duration_seconds"]
-            return self._get_average_metric(
-                metric_name,
-                interval,
-                "avg e2e request latency",
-                model_name,
-            )
         return self._get_average_metric(
             prometheus_names.frontend_service.REQUEST_DURATION_SECONDS,
             interval,
@@ -286,16 +322,9 @@ class PrometheusAPIClient:
         For backend: queries vllm:request_success_total
         """
         try:
-            if self.metric_source == "frontend":
-                requests_total_metric = prometheus_names.frontend_service.REQUESTS_TOTAL
-                # Prepend the frontend metric prefix if not already present
-                if not requests_total_metric.startswith(
-                    prometheus_names.name_prefix.FRONTEND
-                ):
-                    requests_total_metric = f"{prometheus_names.name_prefix.FRONTEND}_{requests_total_metric}"
-            else:  # backend
-                # Backend uses vllm:request_success_total
-                requests_total_metric = "vllm:request_success_total"
+            requests_total_metric = METRIC_SOURCE_MAP[self.metric_source][
+                prometheus_names.frontend_service.REQUESTS_TOTAL
+            ]
 
             raw_res = self.prom.custom_query(
                 query=f"increase({requests_total_metric}[{interval}])"
@@ -310,9 +339,6 @@ class PrometheusAPIClient:
                         container.metric.model
                         and container.metric.model.lower() == model_name.lower()
                     )
-                    namespace_match = (
-                        container.metric.dynamo_namespace == self.dynamo_namespace
-                    )
                 else:  # backend
                     # Backend (vLLM) uses 'model_name' label - check both for compatibility
                     backend_model = getattr(
@@ -321,11 +347,9 @@ class PrometheusAPIClient:
                     model_match = (
                         backend_model and backend_model.lower() == model_name.lower()
                     )
-                    # Backend metrics don't have dynamo_namespace, filter by pod name containing dynamo namespace
-                    pod_name = getattr(container.metric, "pod", "")
-                    namespace_match = (
-                        self.dynamo_namespace in pod_name if pod_name else True
-                    )
+                namespace_match = (
+                    container.metric.dynamo_namespace == self.dynamo_namespace
+                )
 
                 # Filter by model and namespace
                 if model_match and namespace_match:
@@ -338,9 +362,11 @@ class PrometheusAPIClient:
     def get_avg_input_sequence_tokens(self, interval: str, model_name: str):
         if self.metric_source == "backend":
             # Backend uses prompt_tokens counter (not histogram)
-            metric_name = self.BACKEND_METRIC_MAP["input_sequence_tokens"]
             return self._get_counter_average(
-                metric_name, interval, model_name, "input_sequence_tokens"
+                prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS,
+                interval,
+                model_name,
+                "input_sequence_tokens",
             )
         return self._get_average_metric(
             prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS,
@@ -352,9 +378,11 @@ class PrometheusAPIClient:
     def get_avg_output_sequence_tokens(self, interval: str, model_name: str):
         if self.metric_source == "backend":
             # Backend uses generation_tokens counter (not histogram)
-            metric_name = self.BACKEND_METRIC_MAP["output_sequence_tokens"]
             return self._get_counter_average(
-                metric_name, interval, model_name, "output_sequence_tokens"
+                prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS,
+                interval,
+                model_name,
+                "output_sequence_tokens",
             )
         return self._get_average_metric(
             prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS,
