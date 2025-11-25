@@ -15,7 +15,7 @@ use crate::{
     distributed::RequestPlaneMode,
     pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint},
     protocols::EndpointId,
-    storage::key_value_store,
+    storage::kv,
     traits::DistributedRuntimeProvider,
     transports::nats,
 };

@@ -17,7 +17,6 @@ use crate::{
         AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
         SingleIn,
     },
-    storage::key_value_store::{KeyValueStoreManager, WatchEvent},
     traits::DistributedRuntimeProvider,
     transports::etcd::Client as EtcdClient,
 };
