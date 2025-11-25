@@ -47,7 +47,9 @@ class DynamoWorkerProcess(ManagedProcess):
             "--free-gpu-memory-fraction",
             "0.45",
             "--max-seq-len",
-            "8192",
+            "16384",
+            "--max-num-tokens",
+            "16384",
             "--migration-limit",
             migration_limit,
         ]
