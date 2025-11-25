@@ -183,6 +183,17 @@ async def init(runtime: DistributedRuntime, config: Config):
         dynamic_batch_config=dynamic_batch_config,
     )
     modality = getattr(config, "modality", None) or "text"
+    if config.use_trtllm_tokenizer:
+        logging.info(
+            "Using TensorRT-LLM's built in tokenizer. Setting skip_tokenizer_init to False"
+        )
+        skip_tokenizer_init = False
+    else:
+        logging.info(
+            "Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True"
+        )
+        skip_tokenizer_init = True
+
     arg_map = {
         "model": model_path,
         "scheduler_config": scheduler_config,
@@ -190,6 +201,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "pipeline_parallel_size": config.pipeline_parallel_size,
         "moe_expert_parallel_size": config.expert_parallel_size,
         "backend": Backend.PYTORCH,
+        "skip_tokenizer_init": skip_tokenizer_init,
         "build_config": build_config,
         "kv_cache_config": kv_cache_config,
         "gpus_per_node": gpus_per_node,
@@ -286,6 +298,8 @@ async def init(runtime: DistributedRuntime, config: Config):
     if hasattr(default_sampling_params, "return_perf_metrics"):
         default_sampling_params.return_perf_metrics = True
     model_input = ModelInput.Tokens
+    if config.use_trtllm_tokenizer:
+        model_input = ModelInput.Text
 
     # Set model type based on disaggregation mode for unified frontend support
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -326,8 +340,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     else:
-        # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
-        default_sampling_params.detokenize = False
+        if config.use_trtllm_tokenizer:
+            default_sampling_params.detokenize = True
+        else:
+            # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
+            default_sampling_params.detokenize = False
 
     connector = None
     logging.info("Initializing NIXL Connect.")
