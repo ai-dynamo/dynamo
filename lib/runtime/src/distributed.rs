@@ -7,6 +7,7 @@ use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ComponentNatsServerPrometheusMetrics, ServiceClient, ServiceSet};
 use crate::storage::kv::{self, Store as _};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
+use crate::utils::ip_resolver::get_http_rpc_host_from_env;
 use crate::{
     component::{self, ComponentBuilder, Endpoint, Namespace},
     discovery::Discovery,
@@ -14,7 +15,6 @@ use crate::{
     metrics::{MetricsHierarchy, MetricsRegistry},
     transports::{etcd, nats, tcp},
 };
-use crate::utils::ip_resolver::get_http_rpc_host_from_env;
 use crate::{discovery, system_status_server, transports};
 
 use super::utils::GracefulShutdownTracker;
@@ -108,7 +108,10 @@ impl DistributedRuntime {
     ///
     /// # Returns
     /// A string representing the hostname/IP to advertise in metrics endpoint URLs
-    pub fn resolve_metrics_advertise_host(configured_host: &str, actual_addr: &std::net::SocketAddr) -> String {
+    pub fn resolve_metrics_advertise_host(
+        configured_host: &str,
+        actual_addr: &std::net::SocketAddr,
+    ) -> String {
         if !Self::host_is_wildcard(configured_host) {
             return configured_host.to_string();
         }
@@ -303,8 +306,7 @@ impl DistributedRuntime {
 
                     // Register metrics endpoint with discovery
                     // Use "system" namespace for the system status server's metrics endpoint
-                    let advertise_host =
-                        Self::resolve_metrics_advertise_host(&host, &addr);
+                    let advertise_host = Self::resolve_metrics_advertise_host(&host, &addr);
                     let metrics_url = format!("http://{}:{}/metrics", advertise_host, addr.port());
                     let metrics_spec = crate::discovery::DiscoverySpec::MetricsEndpoint {
                         namespace: "system".to_string(),
@@ -312,7 +314,11 @@ impl DistributedRuntime {
                         gpu_uuids: system_status_server::get_local_gpu_uuids(),
                     };
 
-                    match distributed_runtime.discovery_client.register(metrics_spec).await {
+                    match distributed_runtime
+                        .discovery_client
+                        .register(metrics_spec)
+                        .await
+                    {
                         Ok(_) => {
                             tracing::info!("Registered system metrics endpoint: {}", metrics_url);
                         }

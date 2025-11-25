@@ -9,7 +9,7 @@ use crate::logging::make_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
-use axum::{Router, Json, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -895,13 +895,13 @@ mod integration_tests {
                     serde_json::from_str(&body).expect("response should be valid JSON");
 
                 assert_eq!(parsed["object"], "list");
-                let data = parsed["data"]
-                    .as_array()
-                    .expect("data should be an array");
+                let data = parsed["data"].as_array().expect("data should be an array");
 
                 let entry = data
                     .iter()
-                    .find(|entry| entry.get("namespace").and_then(|ns| ns.as_str()) == Some("system"))
+                    .find(|entry| {
+                        entry.get("namespace").and_then(|ns| ns.as_str()) == Some("system")
+                    })
                     .expect("system namespace entry should exist");
 
                 let url = entry

@@ -4,20 +4,18 @@
 use std::sync::Arc;
 
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
 };
 use serde::Serialize;
 
-use super::{service_v2, RouteDoc};
+use super::{RouteDoc, service_v2};
 
 /// List all metrics endpoints discovered in the system
-async fn list_metrics_endpoints(
-    State(state): State<Arc<service_v2::State>>,
-) -> Response {
+async fn list_metrics_endpoints(State(state): State<Arc<service_v2::State>>) -> Response {
     // Query discovery for all metrics endpoints
     let discovery = state.discovery();
     let metrics_endpoints = match discovery
@@ -89,4 +87,3 @@ pub fn list_metrics_endpoints_router(
 
     (vec![doc], router)
 }
-

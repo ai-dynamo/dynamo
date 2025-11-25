@@ -164,7 +164,9 @@ fn filter_instances(
     query: &DiscoveryQuery,
 ) -> Vec<DiscoveryInstance> {
     match query {
-        DiscoveryQuery::AllEndpoints | DiscoveryQuery::AllModels | DiscoveryQuery::AllMetricsEndpoints => instances,
+        DiscoveryQuery::AllEndpoints
+        | DiscoveryQuery::AllModels
+        | DiscoveryQuery::AllMetricsEndpoints => instances,
 
         DiscoveryQuery::NamespacedEndpoints { namespace } => instances
             .into_iter()
