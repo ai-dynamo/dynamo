@@ -65,7 +65,15 @@ class BaseWorkerHandler(ABC):
     Request handler for the generate and clear_kv_blocks endpoints.
     """
 
-    def __init__(self, runtime, component, engine, default_sampling_params):
+    def __init__(
+        self,
+        runtime,
+        component,
+        engine,
+        default_sampling_params,
+        model_max_len: int | None = None,
+        enable_multimodal: bool = False,
+    ):
         self.runtime = runtime
         self.component = component
         self.engine_client = engine
@@ -73,6 +81,9 @@ class BaseWorkerHandler(ABC):
         self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
         self.image_loader = ImageLoader()
+        self.temp_dirs: list[tempfile.TemporaryDirectory] = []
+        self.model_max_len = model_max_len
+        self.enable_multimodal = enable_multimodal
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -127,6 +138,13 @@ class BaseWorkerHandler(ABC):
         """
         if "multi_modal_data" not in request or request["multi_modal_data"] is None:
             return None
+
+        # Security check: reject multimodal data if not explicitly enabled
+        if not self.enable_multimodal:
+            raise ValueError(
+                "Received multimodal data but multimodal processing is not enabled. "
+                "Use --enable-multimodal flag to enable multimodal processing."
+            )
 
         mm_map = request["multi_modal_data"]
         vllm_mm_data = {}
@@ -212,8 +230,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         component,
         engine,
         default_sampling_params,
+        model_max_len: int | None = None,
+        enable_multimodal: bool = False,
     ):
-        super().__init__(runtime, component, engine, default_sampling_params)
+        super().__init__(
+            runtime,
+            component,
+            engine,
+            default_sampling_params,
+            model_max_len,
+            enable_multimodal,
+        )
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
@@ -259,8 +286,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
-    def __init__(self, runtime, component, engine, default_sampling_params):
-        super().__init__(runtime, component, engine, default_sampling_params)
+    def __init__(
+        self,
+        runtime,
+        component,
+        engine,
+        default_sampling_params,
+        model_max_len: int | None = None,
+        enable_multimodal: bool = False,
+    ):
+        super().__init__(
+            runtime,
+            component,
+            engine,
+            default_sampling_params,
+            model_max_len,
+            enable_multimodal,
+        )
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation with decode phase
