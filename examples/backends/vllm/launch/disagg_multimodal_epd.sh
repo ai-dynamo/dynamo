@@ -76,7 +76,7 @@ python -m dynamo.frontend --http-port=8000 &
 
 # Start processor
 echo "Starting processor..."
-python -m dynamo.vllm --multimodal-processor --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
+python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
 
 # Configure GPU memory optimization for specific models
 EXTRA_ARGS=""
@@ -86,17 +86,17 @@ fi
 
 # Start encode worker
 echo "Starting encode worker on GPU 1..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-encode-worker --model $MODEL_NAME  $EXTRA_ARGS --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME  $EXTRA_ARGS --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
 
 # Start prefill worker
 echo "Starting prefill worker on GPU 2..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
-CUDA_VISIBLE_DEVICES=2 python -m dynamo.vllm --multimodal-worker --is-prefill-worker --model $MODEL_NAME $EXTRA_ARGS --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
+CUDA_VISIBLE_DEVICES=2 python -m dynamo.vllm --multimodal-worker --is-prefill-worker --enable-multimodal --model $MODEL_NAME $EXTRA_ARGS --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
 
 # Start decode worker
 echo "Starting decode worker on GPU 3..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
-CUDA_VISIBLE_DEVICES=3 python -m dynamo.vllm --multimodal-decode-worker --model $MODEL_NAME $EXTRA_ARGS --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
+CUDA_VISIBLE_DEVICES=3 python -m dynamo.vllm --multimodal-decode-worker --enable-multimodal --model $MODEL_NAME $EXTRA_ARGS --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."
