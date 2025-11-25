@@ -7,7 +7,7 @@ import yaml
 from jinja2 import Environment, FileSystemLoader
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="A script that greets a user.")
+    parser = argparse.ArgumentParser(description="Renders dynamo Dockerfiles from templates")
     parser.add_argument("--framework", type=str, help="Dockerfile framework to use.")
     parser.add_argument("--target", type=str, help="Dockerfile target to use.")
     parser.add_argument("--platform", type=str, help="Dockerfile platform to use.")
@@ -36,6 +36,7 @@ def main():
 
     with open("context.yaml", "r") as f:
         context = yaml.safe_load(f)
+
     render(framework, target, platform, context)
 
 if __name__ == "__main__":
