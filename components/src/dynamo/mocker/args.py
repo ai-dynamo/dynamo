@@ -9,12 +9,65 @@ import tempfile
 from pathlib import Path
 
 from . import __version__
+from .utils.planner_profiler_perf_data_converter import (
+    convert_profile_results_to_npz,
+    is_profile_results_dir,
+)
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
 logger = logging.getLogger(__name__)
+
+
+class ProfileDataResult:
+    """Result of processing --planner-profile-data argument. Cleans up tmpdir on deletion."""
+
+    def __init__(
+        self, npz_path: Path | None, tmpdir: tempfile.TemporaryDirectory | None
+    ):
+        self.npz_path = npz_path
+        self._tmpdir = tmpdir
+
+    def __del__(self):
+        if self._tmpdir is not None:
+            try:
+                self._tmpdir.cleanup()
+                logger.debug("Cleaned up profile data temporary directory")
+            except Exception:
+                pass  # Best effort cleanup
+
+
+def resolve_planner_profile_data(
+    planner_profile_data: Path | None,
+) -> ProfileDataResult:
+    """
+    Resolve --planner-profile-data to an NPZ file path.
+
+    If the path is a profile results directory (containing selected_prefill_interpolation
+    and selected_decode_interpolation), converts it to an NPZ file in a tmpdir.
+
+    Args:
+        planner_profile_data: Path from --planner-profile-data argument.
+
+    Returns:
+        ProfileDataResult with npz_path and optional tmpdir for cleanup.
+    """
+    if planner_profile_data is None:
+        return ProfileDataResult(npz_path=None, tmpdir=None)
+
+    if is_profile_results_dir(planner_profile_data):
+        logger.info(
+            f"Detected profile results directory at {planner_profile_data}, converting to NPZ..."
+        )
+        tmpdir = tempfile.TemporaryDirectory(prefix="mocker_perf_data_")
+        npz_path = Path(tmpdir.name) / "perf_data.npz"
+        convert_profile_results_to_npz(planner_profile_data, npz_path)
+        return ProfileDataResult(npz_path=npz_path, tmpdir=tmpdir)
+
+    # Assume it's already an NPZ file or JSON configmap
+    return ProfileDataResult(npz_path=planner_profile_data, tmpdir=None)
 
 
 def create_temp_engine_args_file(args) -> Path:
@@ -182,7 +235,8 @@ def parse_args():
         "--planner-profile-data",
         type=Path,
         default=None,
-        help="Path to JSON configmap or NPZ file containing performance profiling data from planner_profiler_perf_data_converter.py (default: None, uses hardcoded polynomials)",
+        help="Path to profile results directory containing selected_prefill_interpolation/ and "
+        "selected_decode_interpolation/ subdirectories (default: None, uses hardcoded polynomials)",
     )
     parser.add_argument(
         "--num-workers",
