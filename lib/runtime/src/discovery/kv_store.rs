@@ -572,6 +572,7 @@ mod tests {
         let spec = DiscoverySpec::MetricsEndpoint {
             namespace: "test-ns".to_string(),
             url: "http://localhost:8080/metrics".to_string(),
+            gpu_uuids: Vec::new(),
         };
 
         let instance = client.register(spec).await.unwrap();
@@ -581,6 +582,7 @@ mod tests {
                 namespace,
                 url,
                 instance_id,
+                ..
             } => {
                 assert_eq!(namespace, "test-ns");
                 assert_eq!(url, "http://localhost:8080/metrics");
@@ -601,18 +603,21 @@ mod tests {
         let spec1 = DiscoverySpec::MetricsEndpoint {
             namespace: "ns1".to_string(),
             url: "http://localhost:8080/metrics".to_string(),
+            gpu_uuids: Vec::new(),
         };
         client.register(spec1).await.unwrap();
 
         let spec2 = DiscoverySpec::MetricsEndpoint {
             namespace: "ns2".to_string(),
             url: "http://localhost:8081/metrics".to_string(),
+            gpu_uuids: Vec::new(),
         };
         client.register(spec2).await.unwrap();
 
         let spec3 = DiscoverySpec::MetricsEndpoint {
             namespace: "ns3".to_string(),
             url: "http://localhost:8082/metrics".to_string(),
+            gpu_uuids: Vec::new(),
         };
         client.register(spec3).await.unwrap();
 
@@ -665,6 +670,7 @@ mod tests {
             let spec = DiscoverySpec::MetricsEndpoint {
                 namespace: "test-ns".to_string(),
                 url: "http://localhost:8080/metrics".to_string(),
+                gpu_uuids: Vec::new(),
             };
             client_clone.register(spec).await.unwrap();
         });
