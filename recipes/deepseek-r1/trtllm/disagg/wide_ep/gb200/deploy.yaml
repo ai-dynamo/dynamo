@@ -172,7 +172,7 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 500
+            failureThreshold: 600
           volumeMounts:
             - name: prefill-config-volume
               mountPath: /config
@@ -230,7 +230,7 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 500
+            failureThreshold: 600
           volumeMounts:
             - name: decode-config-volume
               mountPath: /config
