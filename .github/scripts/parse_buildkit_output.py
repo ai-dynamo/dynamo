@@ -168,154 +168,18 @@ class BuildKitParser:
 
         return int(val * multipliers.get(unit, 1))
 
-    def generate_report(self, build_data: Dict[str, Any], image_name: str = None) -> str:
-        """Generate a human-readable report from parsed build data"""
-        report = []
-        report.append("=" * 80)
-        report.append("📊 BUILDKIT DETAILED BUILD REPORT")
-        if image_name:
-            report.append(f"🐳 Image: {image_name}")
-        report.append("=" * 80)
-        report.append("")
-
-        # Summary section
-        summary = build_data["summary"]
-        report.append("📈 BUILD SUMMARY")
-        report.append("-" * 80)
-        report.append(f"Total Steps:        {summary['total_steps']}")
-        report.append(f"Cached Steps:       {summary['cached_steps']}")
-        report.append(f"Built Steps:        {summary['built_steps']}")
-        report.append(f"Cache Hit Rate:     {summary['cache_hit_rate_percent']:.1f}%")
-        report.append(f"Total Duration:     {summary['total_duration_sec']:.2f}s")
-
-        total_size = summary["total_size_transferred_bytes"]
-        if total_size > 0:
-            report.append(
-                f"Data Transferred:   {self._format_size(total_size)}"
-            )
-        report.append("")
-
-        # Steps section
-        report.append("🔨 DETAILED STEPS")
-        report.append("-" * 80)
-        report.append("")
-
-        for step in build_data["steps"]:
-            step_num = step["step_number"]
-            status_icon = self._get_status_icon(step)
-            cached_indicator = " [CACHED]" if step["cached"] else ""
-
-            report.append(
-                f"{status_icon} Step #{step_num}: {step['step_name']}{cached_indicator}"
-            )
-
-            if step["command"]:
-                # Truncate very long commands
-                cmd = step["command"]
-                if len(cmd) > 100:
-                    cmd = cmd[:97] + "..."
-                report.append(f"   Command: {cmd}")
-
-            report.append(f"   Status:   {step['status'].upper()}")
-
-            if step["duration_sec"] > 0:
-                report.append(f"   Duration: {step['duration_sec']:.2f}s")
-
-            if step["size_transferred"] > 0:
-                report.append(
-                    f"   Size:     {self._format_size(step['size_transferred'])}"
-                )
-
-            # Show interesting substeps
-            if step["substeps"]:
-                interesting = [
-                    s
-                    for s in step["substeps"]
-                    if any(
-                        keyword in s["message"].lower()
-                        for keyword in ["done", "complete", "extracting", "pulling"]
-                    )
-                ]
-                if interesting and len(interesting) <= 5:
-                    for substep in interesting[:3]:  # Show max 3
-                        msg = substep["message"]
-                        if len(msg) > 70:
-                            msg = msg[:67] + "..."
-                        report.append(f"   └─ {msg}")
-
-            report.append("")
-
-        # Top 5 slowest steps
-        slowest = sorted(
-            build_data["steps"], key=lambda s: s["duration_sec"], reverse=True
-        )[:5]
-        slowest = [s for s in slowest if s["duration_sec"] > 0]
-
-        if slowest:
-            report.append("⏱️  TOP 5 SLOWEST STEPS")
-            report.append("-" * 80)
-            for i, step in enumerate(slowest, 1):
-                report.append(
-                    f"{i}. Step #{step['step_number']}: {step['step_name']} "
-                    f"({step['duration_sec']:.2f}s)"
-                )
-            report.append("")
-
-        # Top 5 largest transfers
-        largest = sorted(
-            build_data["steps"], key=lambda s: s["size_transferred"], reverse=True
-        )[:5]
-        largest = [s for s in largest if s["size_transferred"] > 0]
-
-        if largest:
-            report.append("📦 TOP 5 LARGEST DATA TRANSFERS")
-            report.append("-" * 80)
-            for i, step in enumerate(largest, 1):
-                report.append(
-                    f"{i}. Step #{step['step_number']}: {step['step_name']} "
-                    f"({self._format_size(step['size_transferred'])})"
-                )
-            report.append("")
-
-        report.append("=" * 80)
-        report.append(f"Report generated at: {build_data['parsed_at']}")
-        report.append("=" * 80)
-
-        return "\n".join(report)
-
-    def _get_status_icon(self, step: Dict[str, Any]) -> str:
-        """Get emoji icon for step status"""
-        if step["cached"]:
-            return "⚡"
-        elif step["status"] == "done":
-            return "✅"
-        elif step["status"] == "error":
-            return "❌"
-        else:
-            return "⏳"
-
-    def _format_size(self, bytes_size: int) -> str:
-        """Format bytes to human-readable size"""
-        for unit in ["B", "KB", "MB", "GB", "TB"]:
-            if bytes_size < 1024.0:
-                return f"{bytes_size:.2f} {unit}"
-            bytes_size /= 1024.0
-        return f"{bytes_size:.2f} PB"
-
 
 def main():
     """Main entry point"""
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 3:
         print(
-            "Usage: parse_buildkit_output.py <build_log_file> [output_json] [output_report] [image_name]",
+            "Usage: parse_buildkit_output.py <build_log_file> <output_json>",
             file=sys.stderr,
         )
         sys.exit(1)
 
     log_file = sys.argv[1]
-    output_json = sys.argv[2] if len(sys.argv) > 2 else None
-    output_report = sys.argv[3] if len(sys.argv) > 3 else None
-    image_name = sys.argv[4] if len(sys.argv) > 4 else None
+    output_json = sys.argv[2]
 
     # Read build log
     try:
@@ -330,22 +194,15 @@ def main():
     build_data = parser.parse_log(log_content)
 
     # Output JSON
-    if output_json:
+    try:
         with open(output_json, "w") as f:
             json.dump(build_data, f, indent=2)
         print(f"✅ Build data written to: {output_json}", file=sys.stderr)
+    except Exception as e:
+        print(f"Error writing JSON file: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    # Output report
-    report_text = parser.generate_report(build_data, image_name)
-    if output_report:
-        with open(output_report, "w") as f:
-            f.write(report_text)
-        print(f"✅ Build report written to: {output_report}", file=sys.stderr)
-    else:
-        # Print to stdout if no output file specified
-        print(report_text)
-
-    # Also print summary to stderr for immediate feedback
+    # Print summary to stderr for immediate feedback
     print("", file=sys.stderr)
     print("📊 Build Summary:", file=sys.stderr)
     print(
