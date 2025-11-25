@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import logging
 import multiprocessing
 import os
 import re
 import signal
-import time
 from contextlib import contextmanager
 from typing import Any
 from multiprocessing.context import SpawnProcess
@@ -229,7 +229,7 @@ async def _inject_failures(
     affected_pods: dict[str, list] = {}
 
     for failure in failures:
-        time.sleep(failure.time)
+        await asyncio.sleep(failure.time)
 
         logger.info(f"Injecting failure for: {failure}")
 

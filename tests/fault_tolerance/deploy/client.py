@@ -363,7 +363,6 @@ def run_aiperf(
     # Note: For continuous load, we only run once and expect SIGINT to stop it
     max_attempts = 1 if continuous_load else (max_retries if max_retries > 0 else 1)
     success = False
-    all_results = []
 
     for attempt in range(max_attempts):
         if continuous_load:
@@ -394,16 +393,6 @@ def run_aiperf(
                 f.write("\n\n=== STDERR ===\n")
                 f.write(result.stderr)
 
-            all_results.append(
-                {
-                    "attempt": attempt + 1,
-                    "returncode": result.returncode,
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                }
-            )
-
-            # Even with continuous load, with SIGINT, aiperf should return 0 and create the profile_export_aiperf.json file
             if result.returncode == 0:
                 # AI-Perf returns 0 even if all requests failed, so we need to check the output
                 json_path = attempt_dir / "profile_export_aiperf.json"
@@ -440,7 +429,6 @@ def run_aiperf(
                 )
         except Exception as e:
             logger.error(f"Error in attempt {attempt + 1}: {str(e)}")
-            all_results.append({"attempt": attempt + 1, "error": str(e)})
 
         # Sleep before next attempt (if not the last attempt and not continuous load)
         if not success and attempt < max_attempts - 1 and not continuous_load:
@@ -468,9 +456,9 @@ def run_aiperf_with_signal_handling(
     """
     Run aiperf with signal handling for graceful shutdown.
 
-    Handles SIGINT forwarding and timeout when running with subprocess.Popen.
-    This ensures that Ctrl-C and SIGINT are properly forwarded to the subprocess
-    so it can clean up gracefully and write results files.
+    Handles SIGINT and SIGTERM forwarding and timeout when running with subprocess.Popen.
+    This ensures that Ctrl-C (SIGINT) and graceful termination signals (SIGTERM)
+    are properly forwarded to the subprocess so it can clean up gracefully and write results files.
     """
     proc = subprocess.Popen(
         cmd_attempt,
@@ -480,15 +468,20 @@ def run_aiperf_with_signal_handling(
         stdin=subprocess.DEVNULL,
     )
 
-    # Set up signal handler to forward SIGINT to subprocess
     def signal_handler(signum, frame):
-        logger.info(f"Received signal {signum}, forwarding to aiperf subprocess")
+        signal_names = {
+            signal.SIGINT: "SIGINT",
+            signal.SIGTERM: "SIGTERM",
+        }
+        signal_name = signal_names.get(signum, f"signal {signum}")
+        logger.info(f"Received {signal_name}, forwarding to aiperf subprocess")
         try:
-            proc.send_signal(signal.SIGINT)
+            proc.send_signal(signum)
         except ProcessLookupError:
             pass  # Process already terminated
 
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     try:
         stdout, stderr = proc.communicate(timeout=timeout)

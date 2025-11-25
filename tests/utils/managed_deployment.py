@@ -57,6 +57,15 @@ class ServiceSpec:
         except KeyError:
             return None
 
+    @property
+    def envs(self) -> list[dict[str, str]]:
+        """Environment variables for the service"""
+        return self._spec.get("envs", [])
+
+    @envs.setter
+    def envs(self, value: list[dict[str, str]]):
+        self._spec["envs"] = value
+
     @image.setter
     def image(self, value: str):
         if "extraPodSpec" not in self._spec:
@@ -318,13 +327,9 @@ class DeploymentSpec:
         """
         Set an environment variable for a specific service
         """
-        # Check service exists
-        if service_name not in self._deployment_spec["spec"]["services"]:
-            raise ValueError(f"Service '{service_name}' not found in deployment spec")
-
-        service = self._deployment_spec["spec"]["services"][service_name]
-        if "envs" not in service:
-            service["envs"] = []
+        service = self.get_service(service_name)
+        if service.envs is None:
+            service.envs = []
 
         # if env var already exists, update it
         for env in service["envs"]:
@@ -342,11 +347,8 @@ class DeploymentSpec:
         Returns:
             List of environment variable dicts (e.g., [{"name": "VAR", "value": "val"}])
         """
-        # Check service exists
-        if service_name not in self._deployment_spec["spec"]["services"]:
-            raise ValueError(f"Service '{service_name}' not found in deployment spec")
-
-        return self._deployment_spec["spec"]["services"][service_name].get("envs", [])
+        service = self.get_service(service_name)
+        return service.envs
 
     @property
     def services(self) -> list[ServiceSpec]:
@@ -374,11 +376,7 @@ class DeploymentSpec:
             arg_name: Argument name (e.g., "--max-model-len", "--max-seq-len")
             arg_value: Argument value (e.g., "1024")
         """
-        # Get the service
-        if service_name not in self._deployment_spec["spec"]["services"]:
-            raise ValueError(f"Service '{service_name}' not found in deployment spec")
-
-        service = self._deployment_spec["spec"]["services"][service_name]
+        service = self.get_service(service_name)
 
         # Ensure args list exists
         if "extraPodSpec" not in service:
@@ -418,15 +416,23 @@ class DeploymentSpec:
             # Add new argument
             args_list.extend([arg_name, arg_value])
 
+    def get_service(self, service_name: str) -> ServiceSpec:
+        """
+        Get a specific service from the deployment spec
+        """
+        if service_name not in self._deployment_spec["spec"]["services"]:
+            raise ValueError(f"Service '{service_name}' not found in deployment spec")
+
+        return ServiceSpec(
+            service_name, self._deployment_spec["spec"]["services"][service_name]
+        )
+
     def set_service_replicas(self, service_name: str, replicas: int):
         """
         Set the number of replicas for a specific service
         """
-        # Check service exists
-        if service_name not in self._deployment_spec["spec"]["services"]:
-            raise ValueError(f"Service '{service_name}' not found in deployment spec")
-
-        self._deployment_spec["spec"]["services"][service_name]["replicas"] = replicas
+        service = self.get_service(service_name)
+        service.replicas = replicas
 
     def save(self, out_file: str):
         """Save updated deployment to file"""
