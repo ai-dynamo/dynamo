@@ -9,8 +9,8 @@ use std::{
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
 
-use dynamo_runtime::prelude::DistributedRuntimeProvider;
 use dynamo_runtime::{component::Endpoint, storage::key_value_store::Key};
+use dynamo_runtime::{prelude::DistributedRuntimeProvider, protocols::EndpointId};
 
 use crate::{
     discovery::KV_ROUTERS_ROOT_PATH,
@@ -56,7 +56,7 @@ pub struct ModelManager {
 
     // These are Mutex because we read and write rarely and equally
     cards: Mutex<HashMap<String, ModelDeploymentCard>>,
-    kv_choosers: Mutex<HashMap<String, Arc<KvRouter>>>, // Key: component service_name
+    kv_choosers: Mutex<HashMap<EndpointId, Arc<KvRouter>>>,
     prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
 }
 
@@ -293,13 +293,13 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        let endpoint_path = endpoint.path();
+        let endpoint_id = endpoint.id();
 
-        if let Some(kv_chooser) = self.get_kv_chooser(&endpoint_path) {
+        if let Some(kv_chooser) = self.get_kv_chooser(&endpoint_id) {
             // Check if the existing router has a different block size
             if kv_chooser.block_size() != kv_cache_block_size {
                 tracing::warn!(
-                    endpoint = %endpoint_path,
+                    endpoint = %endpoint_id,
                     existing_block_size = %kv_chooser.block_size(),
                     requested_block_size = %kv_cache_block_size,
                     "KV Router block size mismatch! Endpoint is requesting a different kv_cache_block_size than the existing router. \
@@ -315,7 +315,14 @@ impl ModelManager {
             .get_or_create_bucket(KV_ROUTERS_ROOT_PATH, None)
             .await?;
         let router_uuid = uuid::Uuid::new_v4();
-        let router_key = Key::new(format!("{}/{router_uuid}", endpoint.path()));
+        // In lib/llm/src/kv_router/subscriber.rs we filter on component.service_name() so this
+        // must have that prefix.
+        let router_key = Key::new(format!(
+            "{}/{}/{}",
+            endpoint.component().service_name(),
+            endpoint.name(),
+            router_uuid,
+        ));
         let json_router_config = serde_json::to_vec_pretty(&kv_router_config.unwrap_or_default())?;
         router_bucket
             .insert(&router_key, json_router_config.into(), 0)
@@ -334,12 +341,12 @@ impl ModelManager {
         let new_kv_chooser = Arc::new(chooser);
         self.kv_choosers
             .lock()
-            .insert(endpoint_path, new_kv_chooser.clone());
+            .insert(endpoint_id, new_kv_chooser.clone());
         Ok(new_kv_chooser)
     }
 
-    fn get_kv_chooser(&self, service_name: &str) -> Option<Arc<KvRouter>> {
-        self.kv_choosers.lock().get(service_name).cloned()
+    fn get_kv_chooser(&self, id: &EndpointId) -> Option<Arc<KvRouter>> {
+        self.kv_choosers.lock().get(id).cloned()
     }
 
     /// Register a prefill router for a decode model. Returns a receiver that will be

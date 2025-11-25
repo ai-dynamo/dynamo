@@ -1475,6 +1475,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 				UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 				GenericFunc: func(ge event.GenericEvent) bool { return true },
 			}),
-		). // Watch DGDs created by this controller (via label)
+		).                                                                          // Watch DGDs created by this controller (via label)
+		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config)). // set the event filter to ignore resources handled by other controllers in namespace-restricted mode
 		Complete(r)
 }
