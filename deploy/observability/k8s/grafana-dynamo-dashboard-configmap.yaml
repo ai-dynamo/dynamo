@@ -757,7 +757,7 @@ data:
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Container CPU usage by namespace",
+          "description": "Container CPU usage per pod in selected namespace(s)",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -841,7 +841,7 @@ data:
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container!=\"\"}[5m]))",
+              "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod!=\"\"}[5m]))",
               "instant": false,
               "legendFormat": "{{pod}}",
               "range": true,
@@ -856,7 +856,7 @@ data:
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Memory usage by pod",
+          "description": "Memory usage per pod in selected namespace(s)",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -941,7 +941,7 @@ data:
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", container!=\"\"})",
+              "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", pod!=\"\"})",
               "instant": false,
               "legendFormat": "{{pod}}",
               "range": true,
