@@ -688,7 +688,10 @@ mod tests {
         client.register(spec3).await.unwrap();
 
         // List all metrics endpoints
-        let all = client.list(DiscoveryQuery::AllMetricsEndpoints).await.unwrap();
+        let all = client
+            .list(DiscoveryQuery::AllMetricsEndpoints)
+            .await
+            .unwrap();
         assert_eq!(all.len(), 3);
 
         // List namespaced metrics endpoints
@@ -745,11 +748,7 @@ mod tests {
         let event = stream.next().await.unwrap().unwrap();
         match event {
             DiscoveryEvent::Added(instance) => match instance {
-                DiscoveryInstance::MetricsEndpoint {
-                    namespace,
-                    url,
-                    ..
-                } => {
+                DiscoveryInstance::MetricsEndpoint { namespace, url, .. } => {
                     assert_eq!(namespace, "test-ns");
                     assert_eq!(url, "http://localhost:8080/metrics");
                 }
