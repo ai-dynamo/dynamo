@@ -54,7 +54,8 @@ declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4)
 DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
-DOCKERFILE=${SOURCE_DIR}/Dockerfile
+DOCKERFILE_BASE=${SOURCE_DIR}/Dockerfile
+DOCKERFILE=${DOCKERFILE_BASE}
 BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
@@ -292,6 +293,9 @@ get_options() {
         --enable-kvbm)
             ENABLE_KVBM=true
             ;;
+        --enable-xpu)
+            ENABLE_XPU=true
+            ;;
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
             ;;
@@ -461,6 +465,7 @@ show_help() {
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
+    echo "  [--enable-xpu Enables XPU support in Python 3.12]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
@@ -522,7 +527,13 @@ fi
 
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
+    if [  ! -z ${ENABLE_XPU} ]; then
+        echo "INFO: Selecting xpu dockerfile "
+        DOCKERFILE_BASE=${SOURCE_DIR}/xpu/Dockerfile.xpu
+        DOCKERFILE=${SOURCE_DIR}/xpu/Dockerfile.xpu.vllm
+    else
+        DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
+    fi
 elif [[ $FRAMEWORK == "TRTLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm
 elif [[ $FRAMEWORK == "NONE" ]]; then
@@ -847,7 +858,29 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         echo "======================================"
         echo "Starting Build 1: Base Image"
         echo "======================================"
-        $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+
+        # Create build log directory for BuildKit reports
+        BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
+        mkdir -p "${BUILD_LOG_DIR}"
+        BASE_BUILD_LOG="${BUILD_LOG_DIR}/base-image-build.log"
+
+        # Use BuildKit for enhanced metadata
+        if [ -z "$RUN_PREFIX" ]; then
+            if docker buildx version &>/dev/null; then
+                docker buildx build --builder default --progress=plain --load -f "${DOCKERFILE_BASE}" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            else
+                DOCKER_BUILDKIT=1 docker build --progress=plain -f "${DOCKERFILE_BASE}" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                BUILD_EXIT_CODE=${PIPESTATUS[0]}
+            fi
+
+            if [ ${BUILD_EXIT_CODE} -ne 0 ]; then
+                exit ${BUILD_EXIT_CODE}
+            fi
+        else
+            $RUN_PREFIX docker build -f "${DOCKERFILE_BASE}" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+        fi
+
         # Start framework build
         echo "======================================"
         echo "Starting Build 2: Framework Image"
