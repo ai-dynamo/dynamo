@@ -36,6 +36,7 @@ class KVRouterProcess(ManagedProcess):
         frontend_port: int,
         namespace: str,
         store_backend: str = "etcd",
+        enforce_disagg: bool = False,
     ):
         command = [
             "python3",
@@ -52,6 +53,9 @@ class KVRouterProcess(ManagedProcess):
             "--namespace",
             namespace,
         ]
+
+        if enforce_disagg:
+            command.append("--enforce-disagg")
 
         super().__init__(
             command=command,
@@ -1488,6 +1492,196 @@ def _test_router_indexers_sync(
     asyncio.run(test_sync())
 
     logger.info("Indexers sync test completed successfully")
+
+
+def _test_router_disagg_decisions(
+    prefill_workers,
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    store_backend: str = "etcd",
+):
+    """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
+
+    Assumes prefill_workers and decode_workers are already initialized. This function manages
+    router lifecycle and sends progressive requests with overlapping prefixes.
+
+    This test:
+    1. Starts the KV router frontend with disagg support
+    2. Sends 4 progressive requests where each extends the previous tokens by block_size
+    3. Extracts prefill_worker_id and decode_worker_id from response nvext
+    4. Verifies all prefill_worker_ids are the same (due to prefix reuse routing)
+    5. Verifies prefill_worker_id is NOT in the set of decode_worker_ids (true disagg)
+
+    Args:
+        prefill_workers: Prefill workers already initialized with __enter__()
+        decode_workers: Decode workers already initialized with __enter__()
+        block_size: Block size for KV cache
+        request: Pytest request fixture for managing resources
+        frontend_port: Port for the frontend HTTP server
+        test_payload: Base test payload to send to /v1/chat/completions
+        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+
+    Raises:
+        AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
+        AssertionError: If prefill_worker_id is in decode_worker_ids (not true disagg)
+    """
+    try:
+        # Start KV router frontend - uses decode_workers namespace for discovery
+        # The frontend will auto-discover both prefill and decode workers
+        logger.info(
+            f"Starting KV router frontend on port {frontend_port} for disagg test"
+        )
+        kv_router = KVRouterProcess(
+            request,
+            block_size,
+            frontend_port,
+            decode_workers.namespace,
+            store_backend,
+            enforce_disagg=True,
+        )
+        kv_router.__enter__()
+
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+
+        # Wait for workers to register with frontend
+        logger.info(
+            "Waiting for prefill and decode workers to register with frontend..."
+        )
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+            )
+        )
+
+        async def send_progressive_requests():
+            """Send 4 progressive requests with overlapping prefixes and collect worker IDs."""
+            prefill_worker_ids = []
+            decode_worker_ids = []
+
+            # Generate base tokens for progressive prefix extension
+            base_content = test_payload["messages"][0]["content"]
+
+            async with aiohttp.ClientSession() as session:
+                for i in range(4):
+                    # Build progressive content by repeating base content
+                    # Each iteration adds more content to extend the prefix
+                    progressive_content = " ".join([base_content] * (i + 1))
+
+                    # Create payload with worker_id in extra_fields to get prefill/decode worker IDs
+                    payload = {
+                        **test_payload,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": progressive_content,
+                            }
+                        ],
+                        "nvext": {"extra_fields": ["worker_id"]},
+                        "stream": True,
+                    }
+
+                    logger.info(
+                        f"Sending request {i + 1}/4 with progressive prefix "
+                        f"(~{len(progressive_content)} chars)"
+                    )
+
+                    async with session.post(chat_url, json=payload) as response:
+                        assert (
+                            response.status == 200
+                        ), f"Request {i + 1} failed with status {response.status}"
+
+                        # Collect all chunks and look for nvext with worker_id
+                        prefill_wid = None
+                        decode_wid = None
+
+                        async for line in response.content:
+                            if not line:
+                                continue
+
+                            line_str = line.decode("utf-8", errors="replace").strip()
+                            if not line_str.startswith("data:"):
+                                continue
+
+                            data_str = line_str[5:].strip()
+                            if data_str == "[DONE]":
+                                break
+
+                            try:
+                                data = json.loads(data_str)
+                                # Check for nvext.worker_id in the response
+                                nvext = data.get("nvext", {})
+                                worker_id_info = nvext.get("worker_id", {})
+
+                                if worker_id_info:
+                                    if "prefill_worker_id" in worker_id_info:
+                                        prefill_wid = worker_id_info[
+                                            "prefill_worker_id"
+                                        ]
+                                    if "decode_worker_id" in worker_id_info:
+                                        decode_wid = worker_id_info["decode_worker_id"]
+
+                            except json.JSONDecodeError:
+                                continue
+
+                        logger.info(
+                            f"Request {i + 1}: prefill_worker_id={prefill_wid}, "
+                            f"decode_worker_id={decode_wid}"
+                        )
+
+                        if prefill_wid is not None:
+                            prefill_worker_ids.append(prefill_wid)
+                        if decode_wid is not None:
+                            decode_worker_ids.append(decode_wid)
+
+                    # Small delay between requests
+                    await asyncio.sleep(0.5)
+
+            return prefill_worker_ids, decode_worker_ids
+
+        # Run the progressive requests
+        prefill_ids, decode_ids = asyncio.run(send_progressive_requests())
+
+        logger.info(f"Collected prefill_worker_ids: {prefill_ids}")
+        logger.info(f"Collected decode_worker_ids: {decode_ids}")
+
+        # Verify we got worker IDs from all requests
+        assert len(prefill_ids) == 4, (
+            f"Expected 4 prefill_worker_ids, got {len(prefill_ids)}. "
+            f"Make sure nvext.extra_fields=['worker_id'] is being processed."
+        )
+
+        # Verify all prefill_worker_ids are the same (prefix reuse)
+        unique_prefill_ids = set(prefill_ids)
+        assert len(unique_prefill_ids) == 1, (
+            f"Expected all prefill requests to route to the same worker due to prefix reuse, "
+            f"but found {len(unique_prefill_ids)} unique prefill_worker_ids: {unique_prefill_ids}. "
+            f"Full list: {prefill_ids}"
+        )
+
+        # Verify prefill_worker_id is NOT in decode_worker_ids (true disagg)
+        unique_decode_ids = set(decode_ids)
+        prefill_id = prefill_ids[0]
+        assert prefill_id not in unique_decode_ids, (
+            f"Prefill worker {prefill_id} should NOT be in decode workers {unique_decode_ids}. "
+            f"This suggests disaggregated mode is not working correctly - "
+            f"prefill and decode should use separate worker pools."
+        )
+
+        logger.info(
+            f"Successfully verified disaggregated routing:\n"
+            f"  - All 4 requests routed to same prefill_worker_id={prefill_id} (prefix reuse)\n"
+            f"  - Prefill worker is NOT in decode worker set {unique_decode_ids} (true disagg)"
+        )
+
+    finally:
+        if "kv_router" in locals():
+            kv_router.__exit__(None, None, None)
 
 
 def _test_router_decisions(

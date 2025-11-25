@@ -36,7 +36,7 @@ scipy<1.14.0  # Pin scipy version for pmdarima compatibility
 sentencepiece
 tensorboard==2.19.0
 tensorboardX==2.6.2.2
-transformers
+transformers<=4.57.1
 types-aiofiles
 types-PyYAML
 uvicorn
