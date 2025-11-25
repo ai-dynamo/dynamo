@@ -7,8 +7,8 @@ from jinja2 import Environment, FileSystemLoader
 env = Environment(loader=FileSystemLoader("."),trim_blocks=True,lstrip_blocks=True)
 template = env.get_template("Dockerfile.template")
 rendered = template.render(
-    framework="none",
-    target="dev"
+    framework="trtllm",
+    target="framework"
 )
 
 with open("rendered.Dockerfile", "w") as f:
