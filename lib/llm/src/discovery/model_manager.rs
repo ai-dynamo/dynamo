@@ -14,13 +14,11 @@ use dynamo_runtime::{
     discovery::DiscoverySpec,
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
+    transports::nats,
 };
 
 use crate::{
-    kv_router::{
-        KV_ROUTER_COMPONENT, KV_ROUTER_ENDPOINT, KvRouter, KvRouterConfig,
-        scheduler::DefaultWorkerSelector,
-    },
+    kv_router::{KvRouter, KvRouterConfig, router_endpoint_id, scheduler::DefaultWorkerSelector},
     model_card::ModelDeploymentCard,
     model_type::ModelType,
     types::{
@@ -323,19 +321,9 @@ impl ModelManager {
 
         // Build NATS transport subject for the router endpoint
         // Use KV_ROUTER_COMPONENT as the component name to distinguish from the generate endpoint's component
-        let router_endpoint_id = EndpointId {
-            namespace: endpoint.component().namespace().name().to_string(),
-            component: KV_ROUTER_COMPONENT.to_string(),
-            name: KV_ROUTER_ENDPOINT.to_string(),
-        };
+        let router_endpoint_id = router_endpoint_id(endpoint.id().namespace);
         // Placeholder subject - router is not callable, only registered for lifecycle coordination
-        let nats_subject = format!(
-            "{}_{}.{}-{:x}",
-            router_endpoint_id.namespace,
-            router_endpoint_id.component,
-            router_endpoint_id.name,
-            instance_id
-        );
+        let nats_subject = nats::instance_subject(&router_endpoint_id, instance_id);
 
         let discovery_spec = DiscoverySpec::Endpoint {
             namespace: router_endpoint_id.namespace.clone(),
@@ -346,8 +334,8 @@ impl ModelManager {
 
         discovery.register(discovery_spec).await?;
 
-        // Use instance_id (hex) as the consumer UUID for NATS consumer coordination
-        let consumer_uuid = format!("{:x}", instance_id);
+        // Use instance_id (hex) as the consumer ID for NATS consumer coordination
+        let consumer_id = instance_id.to_string();
 
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
         let chooser = KvRouter::new(
@@ -356,7 +344,7 @@ impl ModelManager {
             kv_cache_block_size,
             Some(selector),
             kv_router_config,
-            consumer_uuid,
+            consumer_id,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);

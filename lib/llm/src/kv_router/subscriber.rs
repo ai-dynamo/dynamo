@@ -20,10 +20,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, KV_ROUTER_COMPONENT, KV_ROUTER_ENDPOINT, RADIX_STATE_BUCKET,
-    RADIX_STATE_FILE,
+    KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
     indexer::{DumpRequest, GetWorkersRequest, RouterEvent},
     protocols::WorkerId,
+    router_discovery_query,
 };
 
 /// Delay between snapshot reads to verify stability
@@ -214,7 +214,7 @@ impl SnapshotResources {
 #[allow(clippy::too_many_arguments)]
 pub async fn start_kv_router_background(
     component: Component,
-    consumer_uuid: String,
+    consumer_id: String,
     kv_events_tx: mpsc::Sender<RouterEvent>,
     remove_worker_tx: mpsc::Sender<WorkerId>,
     maybe_get_workers_tx: Option<mpsc::Sender<GetWorkersRequest>>,
@@ -235,7 +235,7 @@ pub async fn start_kv_router_background(
         stream_name.clone(),
         nats_server.clone(),
         std::time::Duration::from_secs(60), // 1 minute timeout
-        consumer_uuid.clone(),
+        consumer_id.clone(),
     );
     nats_queue.connect_with_reset(router_reset_states).await?;
 
@@ -263,7 +263,7 @@ pub async fn start_kv_router_background(
     }
 
     // Cleanup orphaned consumers on startup
-    cleanup_orphaned_consumers(&mut nats_queue, &component, &consumer_uuid).await;
+    cleanup_orphaned_consumers(&mut nats_queue, &component, &consumer_id).await;
 
     // Get the generate endpoint and watch for instance deletions
     let generate_endpoint = component.endpoint("generate");
@@ -278,11 +278,7 @@ pub async fn start_kv_router_background(
         .await?;
 
     // Watch for router deletions to clean up orphaned consumers via discovery
-    let router_discovery_key = DiscoveryQuery::Endpoint {
-        namespace: component.namespace().name().to_string(),
-        component: KV_ROUTER_COMPONENT.to_string(),
-        endpoint: KV_ROUTER_ENDPOINT.to_string(),
-    };
+    let router_discovery_key = router_discovery_query(component.namespace().name());
     let mut router_event_stream = discovery_client
         .list_and_watch(router_discovery_key, Some(cancellation_token.clone()))
         .await?;
@@ -423,7 +419,7 @@ pub async fn start_kv_router_background(
                     };
 
                     // The consumer UUID is the instance_id in hex format
-                    let consumer_to_delete = format!("{:x}", router_instance_id);
+                    let consumer_to_delete = router_instance_id.to_string();
 
                     tracing::info!(
                         router_instance_id = router_instance_id,
@@ -453,7 +449,7 @@ pub async fn start_kv_router_background(
 async fn cleanup_orphaned_consumers(
     nats_queue: &mut NatsQueue,
     component: &Component,
-    consumer_uuid: &str,
+    consumer_id: &str,
 ) {
     let Ok(consumers) = nats_queue.list_consumers().await else {
         return;
@@ -461,25 +457,22 @@ async fn cleanup_orphaned_consumers(
 
     // Get active routers from discovery
     let discovery = component.drt().discovery();
-    let router_discovery_key = DiscoveryQuery::Endpoint {
-        namespace: component.namespace().name().to_string(),
-        component: KV_ROUTER_COMPONENT.to_string(),
-        endpoint: KV_ROUTER_ENDPOINT.to_string(),
-    };
-
-    let Ok(router_instances) = discovery.list(router_discovery_key).await else {
+    let Ok(router_instances) = discovery
+        .list(router_discovery_query(component.namespace().name()))
+        .await
+    else {
         tracing::debug!("Failed to list router instances from discovery, skipping cleanup");
         return;
     };
 
-    // Build set of active router instance IDs (in hex format)
+    // Build set of active router instance IDs
     let active_instance_ids: HashSet<String> = router_instances
         .iter()
-        .map(|instance| format!("{:x}", instance.instance_id()))
+        .map(|instance| instance.instance_id().to_string())
         .collect();
 
     for consumer in consumers {
-        if consumer == consumer_uuid {
+        if consumer == consumer_id {
             // Never delete myself (extra/redundant safeguard)
             continue;
         }
