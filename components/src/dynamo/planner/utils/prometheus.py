@@ -53,24 +53,22 @@ class MetricSource(Enum):
 
 
 METRIC_SOURCE_MAP = {  # sourced from prometheus_names.py
-    {
-        MetricSource.VLLM: {
-            prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS: "vllm:time_to_first_token_seconds",  # histogram
-            prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS: "vllm:inter_token_latency_seconds",  # histogram
-            prometheus_names.frontend_service.REQUEST_DURATION_SECONDS: "vllm:e2e_request_latency_seconds",  # histogram - vLLM's e2e latency
-            prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS: "vllm:prompt_tokens_total",  # counter - total prompt tokens
-            prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS: "vllm:generation_tokens_total",  # counter - total generation tokens
-            prometheus_names.frontend_service.REQUESTS_TOTAL: "vllm:request_success_total",  # counter
-        },
-        MetricSource.FRONTEND: {
-            prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS}",
-            prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS}",
-            prometheus_names.frontend_service.REQUEST_DURATION_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.REQUEST_DURATION_SECONDS}",
-            prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS}",
-            prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS}",
-            prometheus_names.frontend_service.REQUESTS_TOTAL: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.REQUESTS_TOTAL}",
-        },
-    }
+    MetricSource.VLLM: {
+        prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS: "vllm:time_to_first_token_seconds",  # histogram
+        prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS: "vllm:inter_token_latency_seconds",  # histogram
+        prometheus_names.frontend_service.REQUEST_DURATION_SECONDS: "vllm:e2e_request_latency_seconds",  # histogram - vLLM's e2e latency
+        prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS: "vllm:prompt_tokens_total",  # counter - total prompt tokens
+        prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS: "vllm:generation_tokens_total",  # counter - total generation tokens
+        prometheus_names.frontend_service.REQUESTS_TOTAL: "vllm:request_success_total",  # counter
+    },
+    MetricSource.FRONTEND: {
+        prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS}",
+        prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS}",
+        prometheus_names.frontend_service.REQUEST_DURATION_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.REQUEST_DURATION_SECONDS}",
+        prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS}",
+        prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS}",
+        prometheus_names.frontend_service.REQUESTS_TOTAL: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.REQUESTS_TOTAL}",
+    },
 }
 
 METRIC_SOURCE_MODEL_ATTR = {
