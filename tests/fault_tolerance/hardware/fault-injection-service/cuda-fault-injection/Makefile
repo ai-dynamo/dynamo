@@ -1,15 +1,19 @@
-# Makefile for CUDA Fault Injection Library
-# Simulates XID 79 (GPU falls off bus) via LD_PRELOAD
+# Makefile for CUDA Intercept Library
+# Simulates various XID errors via LD_PRELOAD
+#
+# GCC Version: Requires gcc 4.8+ (any modern gcc works)
+#              Tested with gcc 7.5, 9.4, 11.x, 13.x
+#              Uses standard C99 features only
 
 .PHONY: all clean test help
 
 # Compiler settings
 CC = gcc
-CFLAGS = -fPIC -Wall -Wextra
+CFLAGS = -fPIC -Wall -Wextra -std=c99
 LDFLAGS = -shared
 LDLIBS = -ldl
-TARGET = fake_cuda_xid79.so
-SOURCE = fake_cuda_xid79.c
+TARGET = cuda_intercept.so
+SOURCE = cuda_intercept.c
 
 all: $(TARGET)
 

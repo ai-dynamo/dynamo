@@ -1,11 +1,11 @@
 /*
- * Fake CUDA Library for XID Error Simulation
+ * CUDA Intercept Library
  *
  * This library intercepts CUDA calls and returns appropriate error codes
  * to simulate various GPU failures (XIDs).
  *
  * Supported XID types (set via CUDA_XID_TYPE environment variable):
- *   79  - GPU fell off bus (CUDA_ERROR_NO_DEVICE)
+ *   79  - GPU fell off bus (CUDA_ERROR_NO_DEVICE) - DEFAULT
  *   48  - Double-bit ECC error (CUDA_ERROR_ECC_UNCORRECTABLE)
  *   94  - Contained ECC error (CUDA_ERROR_ECC_UNCORRECTABLE)
  *   95  - Uncontained error (CUDA_ERROR_UNKNOWN)
@@ -13,12 +13,12 @@
  *   74  - NVLink error (CUDA_ERROR_PEER_ACCESS_UNSUPPORTED)
  *
  * Compile:
- *   gcc -shared -fPIC fake_cuda_xid79.c -o fake_cuda_xid79.so
+ *   gcc -shared -fPIC -ldl cuda_intercept.c -o cuda_intercept.so
  *
  * Use:
  *   export CUDA_FAULT_INJECTION_ENABLED=1
- *   export CUDA_XID_TYPE=79
- *   LD_PRELOAD=/path/to/fake_cuda_xid79.so python -m vllm.entrypoints.api_server
+ *   export CUDA_XID_TYPE=79  # or 48, 94, 95, 43, 74
+ *   LD_PRELOAD=/path/to/cuda_intercept.so python -m vllm.entrypoints.api_server
  */
 
 #include <dlfcn.h>
