@@ -312,6 +312,7 @@ class Publisher:
                 token_ids = []
                 num_block_tokens = []
                 block_hashes = []
+                block_mm_infos = []
                 for block in data["blocks"]:
                     token_num_in_block = len(block["tokens"])
                     block_hash = _to_signed_i64(block["block_hash"])
@@ -331,13 +332,27 @@ class Publisher:
                     for token in block["tokens"]:
                         token_ids.append(int(token["token_id"]))
 
+                    # Extract MM extra info if present (block-level offsets from TRTLLM)
+                    mm_extra_info = None
+                    if "mm_objects" in block and block["mm_objects"]:
+                        mm_extra_info = {
+                            "mm_objects": [
+                                {
+                                    "mm_hash": int(obj["mm_hash"]),
+                                    "offsets": [(int(start), int(end)) for start, end in obj["offsets"]],
+                                }
+                                for obj in block["mm_objects"]
+                            ]
+                        }
+                    block_mm_infos.append(mm_extra_info)
+
                 # Note: Currently data does not have lora_id.
                 # Using 0 as default value. If later data has
                 # lora_id, we need to verify if this is correct.
                 lora_id = data.get("lora_id", 0)
 
                 logging.debug(
-                    f"publish stored event: event_id: {event_id}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
+                    f"publish stored event: event_id: {event_id}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}, block_mm_infos: {block_mm_infos}"
                 )
                 self.kv_event_publisher.publish_stored(
                     event_id,
@@ -346,6 +361,7 @@ class Publisher:
                     block_hashes,
                     lora_id,
                     parent_hash,
+                    block_mm_infos,
                 )
             elif data["type"] == "removed":
                 self.processing_initial_created_events = False

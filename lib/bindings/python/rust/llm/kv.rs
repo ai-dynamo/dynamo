@@ -30,7 +30,7 @@ pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> 
         return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
     }
 
-    let hashes = compute_block_hash_for_seq(&tokens, kv_block_size as u32);
+    let hashes = compute_block_hash_for_seq(&tokens, kv_block_size as u32, None);
     Ok(hashes.into_iter().map(|h| h.0).collect())
 }
 
@@ -269,7 +269,7 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (event_id, token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None))]
+    #[pyo3(signature = (event_id, token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None, block_mm_infos=None))]
     fn publish_stored(
         &mut self,
         py: Python,
@@ -279,11 +279,24 @@ impl KvEventPublisher {
         block_hashes: Vec<i64>,
         lora_id: u64,
         parent_hash: Option<i64>,
+        block_mm_infos: Option<Bound<PyAny>>,
     ) -> PyResult<()> {
         let kv_block_size = self.kv_block_size as u32;
         let dp_rank = self.dp_rank;
         let warning_count = self.warning_count.clone();
         let inner = self.inner.clone();
+
+        // Convert Python block_mm_infos to Rust Vec<Option<BlockExtraInfo>>
+        let mm_infos_rust: Option<Vec<Option<BlockExtraInfo>>> = block_mm_infos
+            .map(|infos_py| {
+                pythonize::depythonize_bound::<Vec<Option<BlockExtraInfo>>>(infos_py).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Failed to convert block_mm_infos: {}",
+                        e
+                    ))
+                })
+            })
+            .transpose()?;
 
         py.allow_threads(|| {
             let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
@@ -298,6 +311,7 @@ impl KvEventPublisher {
                         &block_hashes_u64,
                         lora_id,
                         &warning_count,
+                        mm_infos_rust.as_deref(),
                     ),
                 }),
                 dp_rank,
