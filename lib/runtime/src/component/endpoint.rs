@@ -17,6 +17,7 @@ use crate::{
     protocols::EndpointId,
     storage::key_value_store,
     traits::DistributedRuntimeProvider,
+    transports::nats,
 };
 
 #[derive(Educe, Builder, Dissolve)]
@@ -98,9 +99,10 @@ impl EndpointConfigBuilder {
             // no connection id so it's per-endpoint not per-instance. Doesn't match.
             // To not block current refactor I am keeping previous behavior, but I think needs
             // investigation.
-            handler_map
-                .lock()
-                .insert(nats_subject(&endpoint_id, connection_id), stats_handler);
+            handler_map.lock().insert(
+                nats::instance_subject(&endpoint_id, connection_id),
+                stats_handler,
+            );
         }
 
         // This creates a child token of the runtime's endpoint_shutdown_token. That token is
@@ -258,7 +260,7 @@ impl EndpointConfigBuilder {
 fn build_transport_type(
     mode: RequestPlaneMode,
     endpoint_id: &EndpointId,
-    instance_id: u64,
+    connection_id: u64,
 ) -> TransportType {
     match mode {
         RequestPlaneMode::Http => {
@@ -290,15 +292,8 @@ fn build_transport_type(
 
             TransportType::Tcp(tcp_endpoint)
         }
-        RequestPlaneMode::Nats => TransportType::Nats(nats_subject(endpoint_id, instance_id)),
+        RequestPlaneMode::Nats => {
+            TransportType::Nats(nats::instance_subject(endpoint_id, connection_id))
+        }
     }
-}
-
-/// The NATS subject to talk to this instance on.
-/// TODO: Do we need to sanitize the names?
-fn nats_subject(endpoint_id: &EndpointId, instance_id: u64) -> String {
-    format!(
-        "{}_{}.{}-{:x}",
-        endpoint_id.namespace, endpoint_id.component, endpoint_id.name, instance_id,
-    )
 }

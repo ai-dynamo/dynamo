@@ -17,6 +17,7 @@
 //!
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
 use crate::metrics::MetricsHierarchy;
+use crate::protocols::EndpointId;
 use crate::traits::events::EventPublisher;
 
 use anyhow::Result;
@@ -988,6 +989,15 @@ impl DRTNatsClientPrometheusMetrics {
         self.connects.set(connects as i64);
         self.connection_state.set(connection_state);
     }
+}
+
+/// The NATS subject / inbox to talk to an instance on.
+/// TODO: Do we need to sanitize the names?
+pub(crate) fn instance_subject(endpoint_id: &EndpointId, instance_id: u64) -> String {
+    format!(
+        "{}_{}.{}-{:x}",
+        endpoint_id.namespace, endpoint_id.component, endpoint_id.name, instance_id,
+    )
 }
 
 #[cfg(test)]
