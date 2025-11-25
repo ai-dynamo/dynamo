@@ -73,11 +73,11 @@ if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
 fi
 
 # Start processor (Python-based preprocessing, handles prompt templating)
-python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
+python -m dynamo.vllm --multimodal-processor --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
 
 # run E/P/D workers
-CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME &
-CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-worker --enable-multimodal --model $MODEL_NAME $EXTRA_ARGS &
+CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --model $MODEL_NAME &
+CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-worker --model $MODEL_NAME $EXTRA_ARGS &
 
 # Wait for all background processes to complete
 wait

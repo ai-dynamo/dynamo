@@ -62,7 +62,6 @@ class Config:
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
     multimodal_decode_worker: bool = False
-    enable_multimodal: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
     # dump config to file
@@ -163,11 +162,6 @@ def parse_args() -> Config:
         help="Run as unified encode+prefill+decode worker for models requiring integrated image encoding (e.g., Llama 4)",
     )
     parser.add_argument(
-        "--enable-multimodal",
-        action="store_true",
-        help="Enable multimodal processing. If not set, none of the multimodal components can be used.",
-    )
-    parser.add_argument(
         "--mm-prompt-template",
         type=str,
         default="USER: <image>\n<prompt> ASSISTANT:",
@@ -224,9 +218,6 @@ def parse_args() -> Config:
             "Use only one of --multimodal-processor, --multimodal-encode-worker, --multimodal-worker, --multimodal-decode-worker, or --multimodal-encode-prefill-worker"
         )
 
-    if mm_flags == 1 and not args.enable_multimodal:
-        raise ValueError("Use --enable-multimodal to enable multimodal processing")
-
     # Set component and endpoint based on worker type
     if args.multimodal_processor:
         config.component = "processor"
@@ -265,7 +256,6 @@ def parse_args() -> Config:
     config.multimodal_worker = args.multimodal_worker
     config.multimodal_decode_worker = args.multimodal_decode_worker
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
-    config.enable_multimodal = args.enable_multimodal
     config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv
 

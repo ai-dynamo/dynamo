@@ -38,13 +38,7 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         )
 
         # Call BaseWorkerHandler.__init__ with proper parameters
-        super().__init__(
-            runtime,
-            component,
-            engine_client,
-            default_sampling_params,
-            enable_multimodal=config.enable_multimodal,
-        )
+        super().__init__(runtime, component, engine_client, default_sampling_params)
 
         self.config = config
         self.enable_disagg = config.is_prefill_worker
@@ -104,13 +98,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         )
 
         # Call BaseWorkerHandler.__init__ with proper parameters
-        super().__init__(
-            runtime,
-            component,
-            engine_client,
-            default_sampling_params,
-            enable_multimodal=config.enable_multimodal,
-        )
+        super().__init__(runtime, component, engine_client, default_sampling_params)
 
         self.config = config
         self.decode_worker_client = decode_worker_client
