@@ -256,7 +256,7 @@ uv pip install --no-cache --index-strategy=unsafe-best-match \
   --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
   "${TENSORRTLLM_PIP_WHEEL}" \
   triton==3.5.0 \
-  ai-dynamo[trtllm]
+  "ai-dynamo[trtllm]==0.7.0"
 ```
 
 > [!Tip]
