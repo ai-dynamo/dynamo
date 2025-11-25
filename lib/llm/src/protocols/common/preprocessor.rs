@@ -5,7 +5,7 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::RouterConfigOverride;
+use crate::kv_router::{RouterConfigOverride, protocols::RequestExtraInfo};
 use crate::protocols::TokenIdType;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -97,6 +97,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Multimodal request-level metadata (mm_hash and token offsets)
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_extra_info: Option<RequestExtraInfo>,
 }
 
 impl PreprocessedRequest {
