@@ -31,6 +31,7 @@ pub mod scheduler;
 pub mod scoring;
 pub mod sequence;
 pub mod subscriber;
+pub mod worker_query;
 
 pub use prefill_router::PrefillRouter;
 
@@ -73,6 +74,9 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for radix tree snapshot storage
 pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
+
+// for worker-local kvindexer query
+pub const WORKER_KV_INDEXER_QUERY_SUBJECT: &str = "worker_kv_indexer_query";
 
 /// A trait that users can implement to define custom selection logic
 pub trait WorkerSelector {

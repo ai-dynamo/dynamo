@@ -1327,7 +1327,7 @@ impl LocalKvIndexer {
     }
 
     /// get all buffered events (oldest first)
-    pub fn get_all_events(&self) -> Vec<(WorkerId, KvCacheEvent)> {
+    pub fn get_all_buffered_events(&self) -> Vec<(WorkerId, KvCacheEvent)> {
         let buffer = self.event_buffer.lock().unwrap();
         buffer.iter().cloned().collect()
     }
@@ -1450,6 +1450,8 @@ impl KvIndexerInterface for LocalKvIndexer {
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<(), KvRouterError> {
+        // TODO I guess the local kvindexers have little use for this method?
+        // Keeping it here now to implement the trait fully
         self.indexer
             .process_routing_decision(worker, local_hashes, sequence_hashes)
             .await
@@ -1460,6 +1462,8 @@ impl KvIndexerInterface for LocalKvIndexer {
         tokens: &[u32],
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
+        // TODO I guess the local kvindexers have little use for this method?
+        // Keeping it here now to implement the trait fully
         self.indexer
             .process_routing_decision_for_request(tokens, worker)
             .await

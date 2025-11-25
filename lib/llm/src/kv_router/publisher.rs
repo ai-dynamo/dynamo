@@ -16,14 +16,15 @@ use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
 use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
-use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
+use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher, events::EventSubscriber};
 use dynamo_runtime::{
     component::{Component, Namespace},
     transports::nats::{NatsQueue, QUEUE_NAME, Slug},
 };
+use futures::StreamExt;
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, KV_METRICS_SUBJECT,
+    KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_QUERY_SUBJECT,
     indexer::{KvIndexerMetrics, LocalKvIndexer, RouterEvent, compute_block_hash_for_seq},
     protocols::*,
     scoring::LoadEvent,
@@ -98,6 +99,8 @@ pub struct KvEventPublisher {
     /// Optional worker-local indexer for tracking this worker's own KV cache.
     /// When present, events are applied to this indexer before being published to NATS.
     local_indexer: Option<Arc<LocalKvIndexer>>,
+    /// Optional runtime for router->local indexer comm
+    local_indexer_query_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl KvEventPublisher {
@@ -147,6 +150,21 @@ impl KvEventPublisher {
             None
         };
 
+        // Spawn runtime for router->local indexer comm if requested
+        let local_indexer_query_handle = local_indexer.as_ref().map(|local_indexer_ref| {
+            let component = component.clone();
+            let local_indexer = local_indexer_ref.clone();
+            component.drt().runtime().secondary().spawn({
+                async move {
+                    start_worker_kv_query_service(
+                        component,
+                        worker_id,
+                        local_indexer,
+                    ).await
+                }
+            })
+        });
+
         let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
             .to_string()
             .replace("_", "-");
@@ -183,6 +201,7 @@ impl KvEventPublisher {
             cancellation_token,
             tx,
             local_indexer,
+            local_indexer_query_handle,
         })
     }
 
@@ -206,6 +225,10 @@ impl KvEventPublisher {
 
         if let Some(source) = self.source.take() {
             source.shutdown();
+        }
+
+        if let Some(handle) = self.local_indexer_query_handle.take() {
+            handle.abort();
         }
     }
 }
@@ -256,6 +279,81 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
                     tracing::error!("Failed to publish event to NATS: {}", e);
                 }
             }
+        }
+    }
+}
+
+// Processor for Router -> LocalKvIndexer query service
+async fn start_worker_kv_query_service(
+    component: Component,
+    worker_id: u64,
+    local_indexer: Arc<LocalKvIndexer>,
+) {
+    // NOTE: referenced discover/worker_monitor.rs for pub/sub pattern
+    let cancellation_token = component.drt().child_token();
+
+    // Create NATS subscriber on a subject specific to worker's id
+    let subject = format!("{}.{}", WORKER_KV_INDEXER_QUERY_SUBJECT, worker_id);
+    let mut subscriber = match component.namespace().subscribe(&subject).await {
+        Ok(sub) => sub,
+        Err(e) => {
+            tracing::error!("Failed to subscribe to {}: {}", subject, e);
+            return;  // No ? because function doesn't return Result
+        }
+    };
+    tracing::info!("Query service on worker {} listening on {}", worker_id, subject);
+
+    // Receive query request from router, retrieve event(s) from LocalKvIndexer, return response
+    // TODO: currently just dumps all events from LocalKvIndexer; need to implement
+    // event selection logic from buffer
+    loop {
+        tokio::select! {
+            _ = cancellation_token.cancelled() => {
+                tracing::info!("Router-Worker communication channel received cancellation signal");
+                break;
+            }
+
+            msg = subscriber.next() => {
+                let Some(msg) = msg else {
+                    tracing::debug!("Router-Worker stream ended.");
+                    break;
+                };
+
+                // deserialize from msg (async_nats::Message)
+                let request: WorkerKvQueryRequest = match serde_json::from_slice(&msg.payload) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        tracing::error!("Failed to deserialize WorkerKvQueryRequest: {}", e);
+                        continue;
+                    }
+                };
+
+                // TODO extract request event id range. For now, just debug print
+                tracing::debug!("Received WorkerKvQueryRequest: {:?}", request);
+
+                // Get events from local indexer (TODO for now, dump all events)
+                let events = local_indexer.get_all_buffered_events().into_iter().map(|(_worker_id, kv_event) | kv_event).collect();
+
+                // Build WorkerKvQueryResponse
+                let response = WorkerKvQueryResponse { worker_id, events };
+
+                // Send reply back (if reply subject exists)
+                if let Some(reply_subject) = msg.reply {
+                    let payload = match serde_json::to_vec(&response) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::error!("Failed to serialize response: {}", e);
+                            continue;
+                        }
+                    };
+
+                    if let Err(e) = component.namespace().publish(&reply_subject, &payload).await {
+                        tracing::error!("Failed to send reply: {}", e);
+                    }
+                }
+
+            }
+
         }
     }
 }
@@ -1518,6 +1616,90 @@ mod tests_startup_helpers {
         // Stop the listener
         token.cancel();
         let _ = listener_handle.await;
+    }
+}
+
+#[cfg(test)]
+mod tests_local_indexer_query {
+    use super::*;
+    use crate::kv_router::indexer::KvIndexerInterface;
+    use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
+
+    #[tokio::test]
+    async fn test_local_indexer_buffer_and_serialization() {
+        // Tests components of the LocalKvIndexer query without using nats
+
+        let worker_id = 42u64;
+
+        // Create a local indexer
+        let token = CancellationToken::new();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
+
+        // Add events to local indexer's buffer
+        let test_event_1 = RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(100),
+                        tokens_hash: LocalBlockHash(200),
+                    }],
+                }),
+                dp_rank: 0,
+            },
+        );
+
+        // Apply events with buffer
+        local_indexer
+            .apply_event_with_buffer(test_event_1)
+            .await
+            .unwrap();
+
+        // Wait for events to be processed
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Get buffered events (what the query service would return)
+        let buffered_events = local_indexer.get_all_buffered_events();
+
+        // Verify buffer contents
+        assert_eq!(buffered_events.len(), 1, "Buffer should have 1 event");
+        assert_eq!(buffered_events[0].0, worker_id);
+        assert_eq!(buffered_events[0].1.event_id, 1);
+
+        // Extract just the KvCacheEvents (what goes in response)
+        let events: Vec<KvCacheEvent> = buffered_events
+            .into_iter()
+            .map(|(_, kv_event)| kv_event)
+            .collect();
+
+        // Build the response that would be sent
+        let response = WorkerKvQueryResponse {
+            worker_id,
+            events: events.clone(),
+        };
+
+        // Test serialization/deserialization (simulating NATS round-trip)
+        let serialized = serde_json::to_vec(&response).unwrap();
+        let deserialized: WorkerKvQueryResponse =
+            serde_json::from_slice(&serialized).unwrap();
+
+        // Verify response correctness
+        assert_eq!(deserialized.worker_id, worker_id);
+        assert_eq!(deserialized.events.len(), 1);
+        assert_eq!(deserialized.events[0].event_id, 1);
+
+        // Verify event data
+        match &deserialized.events[0].data {
+            KvCacheEventData::Stored(store_data) => {
+                assert_eq!(store_data.blocks.len(), 1);
+                assert_eq!(store_data.blocks[0].block_hash.0, 100);
+                assert_eq!(store_data.blocks[0].tokens_hash.0, 200);
+            }
+            _ => panic!("Expected Stored event"),
+        }
     }
 }
 
