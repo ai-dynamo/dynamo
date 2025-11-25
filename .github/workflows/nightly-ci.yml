@@ -621,7 +621,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: cpu-amd-m5-4xlarge
-    if: always() && github.event_name == 'schedule' && !github.event.repository.fork
+    if: always() && !github.event.repository.fork #TODO: Add this back befpre merge && github.event_name == 'schedule'
     needs: results-summary
     permissions:
       contents: read
