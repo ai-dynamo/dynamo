@@ -48,7 +48,6 @@ class TargetReplica(BaseModel):
 class KubernetesConnector(PlannerConnector):
     def __init__(
         self,
-        dynamo_namespace: str,
         model_name: Optional[str] = None,
         k8s_namespace: Optional[str] = None,
     ):
@@ -216,6 +215,25 @@ class KubernetesConnector(PlannerConnector):
             self.graph_deployment_name,
         )
 
+    async def get_number_workers(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int]:
+        """Get the number of prefill and decode workers from the deployment"""
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        prefill_service = get_service_from_sub_component_type_or_name(
+            deployment,
+            SubComponentType.PREFILL,
+            component_name=prefill_component_name,
+        )
+        decode_service = get_service_from_sub_component_type_or_name(
+            deployment,
+            SubComponentType.DECODE,
+            component_name=decode_component_name,
+        )
+        return prefill_service.number_replicas(), decode_service.number_replicas()
+
     async def set_component_replicas(
         self, target_replicas: list[TargetReplica], blocking: bool = True
     ):
@@ -275,7 +293,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--blocking", action="store_true")
     args = parser.parse_args()
-    connector = KubernetesConnector(args.dynamo_namespace, args.k8s_namespace)
+    connector = KubernetesConnector(args.k8s_namespace)
 
     if args.action == "add":
         task = connector.add_component(SubComponentType(args.component), args.blocking)

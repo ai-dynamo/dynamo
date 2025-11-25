@@ -69,11 +69,16 @@ async def async_internal(distributed_runtime):
     # This is the client
     client = VirtualConnectorClient(distributed_runtime, NAMESPACE)
     event = await client.get()
+
     # Here the client would do the scaling
     assert event.num_prefill_workers == 1
     assert event.num_decode_workers == 2
     assert event.decision_id == 0
     await client.complete(event)
+
+    num_prefill_workers, num_decode_workers = await c.get_number_workers()
+    assert num_prefill_workers == 1
+    assert num_decode_workers == 2
 
     await c._wait_for_scaling_completion()
 
@@ -88,6 +93,10 @@ async def async_internal(distributed_runtime):
     assert event.num_decode_workers == 8
     assert event.decision_id == 1
     await client.complete(event)
+
+    num_prefill_workers, num_decode_workers = await c.get_number_workers()
+    assert num_prefill_workers == 5
+    assert num_decode_workers == 8
 
     await c._wait_for_scaling_completion()
 

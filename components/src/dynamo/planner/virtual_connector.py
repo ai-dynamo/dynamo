@@ -99,6 +99,16 @@ class VirtualConnector(PlannerConnector):
         if blocking:
             await self._wait_for_scaling_completion()
 
+    async def get_number_workers(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int]:
+        """Get the number of prefill and decode workers from the connector"""
+        state = self.connector.read_state()
+
+        return state.num_prefill_workers, state.num_decode_workers
+
     async def set_component_replicas(
         self, target_replicas: list[TargetReplica], blocking: bool = True
     ):
