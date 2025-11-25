@@ -252,7 +252,7 @@ export ARCH_ALT=$(uname -m)
 export TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 export TENSORRTLLM_PIP_WHEEL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc2-cp312-cp312-linux_${ARCH_ALT}.whl"
 
-uv pip install --no-cache --index-strategy=unsafe-best-match \
+uv pip install --index-strategy=unsafe-best-match \
   --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
   "${TENSORRTLLM_PIP_WHEEL}" \
   triton==3.5.0 \
