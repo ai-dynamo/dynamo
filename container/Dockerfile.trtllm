@@ -314,6 +314,7 @@ RUN uv pip install \
             uv pip install "$KVBM_WHEEL"; \
         else \
             echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
+            exit 1; \
         fi; \
        fi \
     && cd /opt/dynamo/benchmarks \

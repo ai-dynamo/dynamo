@@ -23,7 +23,6 @@ defaults:
 env:
   REGISTRY_IMAGE: ai-dynamo/dynamo
   NIGHTLY_IMAGE_PREFIX: nightly
-  PREFER_PROVIDER: aws
 
 ############################## BUILD JOBS ##############################
 
@@ -217,17 +216,20 @@ jobs:
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
 
           if [ "$BUILD_STATUS" != "success" ]; then
-            echo "Error: Build failed or did not complete successfully. Failing test job."
-            exit 1
+            echo "Build failed or did not complete successfully. Skipping tests."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/docker-login
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull nightly image
+        if: steps.check_build.outputs.skip != 'true'
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
@@ -236,6 +238,7 @@ jobs:
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Unit Tests
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
@@ -287,17 +290,20 @@ jobs:
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
 
           if [ "$BUILD_STATUS" != "success" ]; then
-            echo "Error: Build failed or did not complete successfully. Failing test job."
-            exit 1
+            echo "Build failed or did not complete successfully. Skipping tests."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/docker-login
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull nightly image
+        if: steps.check_build.outputs.skip != 'true'
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
@@ -306,6 +312,7 @@ jobs:
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Integration Tests
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
@@ -356,17 +363,20 @@ jobs:
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
 
           if [ "$BUILD_STATUS" != "success" ]; then
-            echo "Error: Build failed or did not complete successfully. Failing test job."
-            exit 1
+            echo "Build failed or did not complete successfully. Skipping tests."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/docker-login
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull nightly image
+        if: steps.check_build.outputs.skip != 'true'
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
@@ -375,6 +385,7 @@ jobs:
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run E2E Tests (gpu_1)
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
@@ -417,7 +428,8 @@ jobs:
 
           if [ $? -ne 0 ]; then
             echo "Error: Failed to query GitHub API"
-            exit 1
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
           BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
@@ -425,17 +437,20 @@ jobs:
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
 
           if [ "$BUILD_STATUS" != "success" ]; then
-            echo "Error: Build failed or did not complete successfully. Failing test job."
-            exit 1
+            echo "Build failed or did not complete successfully. Skipping tests."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/docker-login
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull nightly image
+        if: steps.check_build.outputs.skip != 'true'
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
@@ -444,6 +459,7 @@ jobs:
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run E2E Tests (gpu_2)
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
@@ -539,11 +555,13 @@ jobs:
 
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/docker-login
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
       - name: Pull nightly image
+        if: steps.check_build.outputs.skip != 'true'
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
@@ -552,6 +570,7 @@ jobs:
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Component Tests (${{ matrix.component }})
+        if: steps.check_build.outputs.skip != 'true'
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}

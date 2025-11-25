@@ -49,6 +49,9 @@ inputs:
   torch_backend:
     description: 'Optional override for TORCH_BACKEND build-arg (e.g., cu129)'
     required: false
+  enable_kvbm:
+    description: 'Enable KVBM support (optional)'
+    required: false
   dynamo_base_image:
     description: 'Pre-built Dynamo base image to use instead of building from scratch'
     required: false
