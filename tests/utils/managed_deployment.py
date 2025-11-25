@@ -492,7 +492,7 @@ class ManagedDeployment:
     # TODO: this should be determined by the deployment_spec
     # the service containing component_type: Frontend determines what is actually the frontend service
     frontend_service_name: str = "Frontend"
-    skip_restart_services: bool = False
+    skip_service_restart: bool = False
 
     _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[client.CoreV1Api] = None
@@ -1009,7 +1009,7 @@ class ManagedDeployment:
 
             # Run delete deployment and service restarts in parallel
             tasks = [self._delete_deployment()]
-            if not self.skip_restart_services:
+            if not self.skip_service_restart:
                 tasks.extend([self._restart_etcd(), self._restart_nats()])
             await asyncio.gather(*tasks)
 
