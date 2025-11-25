@@ -207,87 +207,68 @@ runs:
 
         cat "$METRICS_FILE"
 
-    - name: Generate BuildKit Report
-      id: buildkit-report
+    - name: Generate Comprehensive Build Metrics
+      id: comprehensive-metrics
       shell: bash
       run: |
         echo "=========================================="
-        echo "📊 GENERATING BUILDKIT STEP REPORT"
+        echo "📊 GENERATING COMPREHENSIVE BUILD METRICS"
         echo "=========================================="
         
         BUILD_LOG_FILE="${{ env.BUILD_LOG_FILE }}"
         
-        echo "Build log: ${BUILD_LOG_FILE}"
-        echo ""
-        
         if [ ! -f "$BUILD_LOG_FILE" ]; then
-          echo "⚠️  Build log not found, skipping BuildKit report"
+          echo "⚠️  Build log not found, skipping metrics generation"
           exit 0
         fi
         
-        # Create reports directory
-        mkdir -p build-metrics/buildkit-reports
+        # Create metrics directory
+        mkdir -p build-metrics
         
         PLATFORM_ARCH="${{ env.PLATFORM_ARCH }}"
         WORKFLOW_ID="${{ github.run_id }}"
         JOB_ID="${{ github.job }}"
         
-        # Determine image name and sanitize for filename
-        if [ "${{ inputs.target }}" == "runtime" ]; then
-          IMAGE_NAME="${{ inputs.framework }}-runtime"
-          IMAGE_DISPLAY="${{ inputs.framework }} Runtime Image"
-        elif [ "${{ inputs.target }}" == "dev" ]; then
-          IMAGE_NAME="${{ inputs.framework }}-dev"
-          IMAGE_DISPLAY="${{ inputs.framework }} Development Image"
-        else
-          IMAGE_NAME="${{ inputs.framework }}-${{ inputs.target }}"
-          IMAGE_DISPLAY="${{ inputs.framework }} (${{ inputs.target }})"
-        fi
+        # Path to container metadata created in previous step
+        CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${{ job.check_run_id }}.json"
         
-        REPORT_FILE="build-metrics/buildkit-reports/${IMAGE_NAME}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}-report.txt"
-        JSON_FILE="build-metrics/buildkit-reports/${IMAGE_NAME}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
+        # Output comprehensive JSON with workflow_id and job_id in filename
+        COMPREHENSIVE_JSON="build-metrics/build-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
         
-        echo "🚀 Parsing BuildKit output..."
-        echo "Image: ${IMAGE_DISPLAY}"
-        echo "Output report: ${REPORT_FILE}"
-        echo "Output data: ${JSON_FILE}"
+        echo "🚀 Parsing BuildKit output and merging with container metrics..."
+        echo "Input: ${BUILD_LOG_FILE}"
+        echo "Container Metadata: ${CONTAINER_METADATA}"
+        echo "Output: ${COMPREHENSIVE_JSON}"
         echo ""
         
         # Make parser executable
         chmod +x .github/scripts/parse_buildkit_output.py
         
-        # Run parser with image display name
+        # Run parser with container metadata
         set +e
         python3 .github/scripts/parse_buildkit_output.py \
           "$BUILD_LOG_FILE" \
-          "$JSON_FILE" \
-          "$REPORT_FILE" \
-          "$IMAGE_DISPLAY"
+          "$COMPREHENSIVE_JSON" \
+          "$CONTAINER_METADATA"
         PARSER_EXIT_CODE=$?
         set -e
         
         echo ""
         echo "📊 Parser exit code: ${PARSER_EXIT_CODE}"
         
-        if [ ${PARSER_EXIT_CODE} -eq 0 ] && [ -f "$REPORT_FILE" ]; then
-          echo "✅ BuildKit report generated successfully"
+        if [ ${PARSER_EXIT_CODE} -eq 0 ] && [ -f "$COMPREHENSIVE_JSON" ]; then
+          echo "✅ Comprehensive build metrics generated successfully"
+          echo "📄 Output file: ${COMPREHENSIVE_JSON}"
         else
-          echo "⚠️  BuildKit report generation had issues but continuing..."
+          echo "⚠️  Metrics generation had issues but continuing..."
         fi
 
-    # Upload job-specific build metrics as artifact
-    - name: Upload Build Metrics
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: build-metrics/metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
-        retention-days: 7
-
-    # Upload BuildKit reports as artifact
-    - name: Upload BuildKit Reports
+    # Upload comprehensive build metrics as artifact
+    - name: Upload Comprehensive Build Metrics
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: buildkit-reports-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: build-metrics/buildkit-reports/*
+        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ github.job }}
+        path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ github.job }}.json
         retention-days: 7
+
