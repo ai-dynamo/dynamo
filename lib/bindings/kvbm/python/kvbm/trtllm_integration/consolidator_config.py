@@ -73,34 +73,68 @@ def should_enable_consolidator(arg_map) -> bool:
     return True
 
 
-def get_consolidator_endpoints() -> str:
+def get_consolidator_endpoints() -> tuple[str, str, str]:
     """
-    Get consolidator bind endpoint for TensorRT-LLM.
+    Get consolidator endpoints for TensorRT-LLM (matching vLLM pattern).
 
-    This function determines ZMQ port from environment and returns the bind endpoint
-    for TensorRT-LLM's ZMQ publisher.
+    Returns a tuple of (trtllm_endpoint, output_bind_endpoint, output_connect_endpoint):
+    - trtllm_endpoint: ZMQ endpoint for consolidator to subscribe to TRTLLM events
+    - output_bind_endpoint: ZMQ endpoint for consolidator to bind and publish (tcp://0.0.0.0:PORT)
+    - output_connect_endpoint: ZMQ endpoint for workers to connect (tcp://127.0.0.1:PORT)
 
-    Port configuration:
-    - Users can set DYN_KVBM_TRTLLM_ZMQ_PORT=PORT (e.g., "20081") to specify the port
-    - If not set, raises ValueError
+    Port configuration (matching vLLM):
+    - Derives TRTLLM port from KVBM leader ZMQ pub port (DYN_KVBM_LEADER_ZMQ_PUB_PORT, default 56001)
+    - Uses offset of 1000 for consolidator output port (e.g., 56001 -> 57001)
+    - Can override TRTLLM port with DYN_KVBM_TRTLLM_ZMQ_PORT if needed
 
     Returns:
-        ZMQ endpoint for TensorRT-LLM to bind (e.g., "tcp://*:20081")
+        Tuple of (trtllm_endpoint, output_bind_endpoint, output_connect_endpoint)
     """
-    # Check for explicit port environment variable (for launch scripts)
-    env_port = os.getenv("DYN_KVBM_TRTLLM_ZMQ_PORT")
-    if env_port:
-        zmq_port = int(env_port)
-        logger.info(f"Using ZMQ port from DYN_KVBM_TRTLLM_ZMQ_PORT: {zmq_port}")
-    else:
-        raise ValueError("DYN_KVBM_TRTLLM_ZMQ_PORT is not set")
+    # Get KVBM leader ZMQ pub port (default 56001, matching vLLM)
+    kvbm_pub_port_str = os.getenv("DYN_KVBM_LEADER_ZMQ_PUB_PORT", "56001")
+    kvbm_pub_port = int(kvbm_pub_port_str)
 
-    # TensorRT-LLM binds to all interfaces
-    trtllm_bind_endpoint = f"tcp://*:{zmq_port}"
+    # Check for explicit TRTLLM port override
+    trtllm_port_env = os.getenv("DYN_KVBM_TRTLLM_ZMQ_PORT")
+    if trtllm_port_env:
+        trtllm_port = int(trtllm_port_env)
+        logger.info(
+            f"Using TRTLLM ZMQ port from DYN_KVBM_TRTLLM_ZMQ_PORT: {trtllm_port}"
+        )
+    else:
+        # Derive TRTLLM port from KVBM port (use same port as vLLM pattern)
+        # For TRTLLM, we use the base port directly (vLLM uses offset_endpoint_port for DP)
+        trtllm_port = kvbm_pub_port
+        logger.info(
+            f"Using TRTLLM ZMQ port {trtllm_port} (derived from KVBM port {kvbm_pub_port})"
+        )
+
+    # Derive consolidator output port deterministically (matching vLLM)
+    # Use 1000 offset to keep ports close together
+    consolidator_port_offset = 1000
+    output_port = kvbm_pub_port + consolidator_port_offset
+
+    # Validate the derived port is within valid range
+    if output_port > 65535:
+        raise ValueError(
+            f"Derived consolidator port {output_port} exceeds maximum (65535). "
+            f"KVBM port {kvbm_pub_port} is too high. Use a lower base port."
+        )
+
+    # Build endpoints
+    # TRTLLM binds to all interfaces, consolidator connects to 127.0.0.1
+    trtllm_bind_endpoint = f"tcp://*:{trtllm_port}"
+    trtllm_connect_endpoint = f"tcp://127.0.0.1:{trtllm_port}"
+
+    # Consolidator output: bind to 0.0.0.0 (all interfaces), workers connect to 127.0.0.1
+    output_bind_endpoint = f"tcp://0.0.0.0:{output_port}"
+    output_connect_endpoint = f"tcp://127.0.0.1:{output_port}"
 
     logger.info(
-        f"Consolidator bind endpoint: {trtllm_bind_endpoint} "
-        f"(consolidator will connect to tcp://127.0.0.1:{zmq_port})"
+        f"Consolidator endpoints: trtllm={trtllm_connect_endpoint}, "
+        f"output_bind={output_bind_endpoint}, output_connect={output_connect_endpoint} "
+        f"(derived from KVBM port {kvbm_pub_port})"
     )
 
-    return trtllm_bind_endpoint
+    # Return tuple matching vLLM format: (input_endpoint, output_bind_endpoint, output_connect_endpoint)
+    return trtllm_bind_endpoint, output_bind_endpoint, output_connect_endpoint

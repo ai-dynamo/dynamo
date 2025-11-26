@@ -240,9 +240,14 @@ impl KvBlockManagerConfigBuilder {
                 )
             }
             crate::block_manager::kv_consolidator::EventSource::Trtllm => {
-                // output_endpoint is not used for TensorRT-LLM (NATS publisher doesn't need it)
+                // output_endpoint is the ZMQ endpoint where consolidator publishes
+                // Worker-side publishers subscribe to this and forward to NATS
+                let output_ep = output_endpoint.expect(
+                    "output_endpoint (consolidated_event_endpoint) is required for TensorRT-LLM",
+                );
                 crate::block_manager::kv_consolidator::KvEventConsolidatorConfig::new_trtllm(
                     engine_endpoint,
+                    output_ep,
                 )
             }
             crate::block_manager::kv_consolidator::EventSource::Kvbm => {
