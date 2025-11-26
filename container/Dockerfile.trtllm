@@ -146,7 +146,7 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         fi; \
     else \
         # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel
-        TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p') && \
+        TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/.*==([0-9a-zA-Z.+-]+).*/\1/') && \
         (curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/v${TRTLLM_VERSION}/docker/common/install_tensorrt.sh" || \
          curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/${GITHUB_TRTLLM_COMMIT}/docker/common/install_tensorrt.sh") && \
         # Modify the script to use virtual environment pip instead of system pip3
@@ -155,8 +155,14 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
         # TRTLLM 1.2.0rc2 has issues installing from pypi with uv, installing from direct wheel link works best
         # explicitly installing triton 3.5.0 as trtllm only lists triton as dependency on x64_64 for some reason
-        export TENSORRTLLM_PIP_WHEEL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc2-cp312-cp312-linux_${ARCH_ALT}.whl"; \
-        uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.0; \
+        if echo "${TENSORRTLLM_PIP_WHEEL}" | grep -q '^tensorrt-llm=='; then \
+            TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \
+            PYTHON_TAG="cp$(echo ${PYTHON_VERSION} | tr -d '.')"; \
+            DIRECT_URL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-${TRTLLM_VERSION}-${PYTHON_TAG}-${PYTHON_TAG}-linux_${ARCH_ALT}.whl"; \
+            uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${DIRECT_URL}" triton==3.5.0; \
+        else \
+            uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.0; \
+        fi; \
     fi
 
 ##################################################
