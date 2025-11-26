@@ -11,7 +11,7 @@
 FROM nvcr.io/nvidia/cuda:12.3.0-devel-ubuntu22.04
 
 # Install system dependencies (nsenter, nvidia-smi, journalctl)
-RUN apt-get update && apt-get install -y \
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     curl \
