@@ -18,7 +18,7 @@
 name = "kvbm"
 version = "0.7.0"
 description = "Dynamo KVBM"
-readme = "README.md"
+readme = { file = "README.md", content-type = "text/markdown" } 
 authors = [
     { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
