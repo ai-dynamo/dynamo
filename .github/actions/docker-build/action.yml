@@ -215,59 +215,104 @@ runs:
         echo "📊 GENERATING COMPREHENSIVE BUILD METRICS"
         echo "=========================================="
         
-        BUILD_LOG_FILE="${{ env.BUILD_LOG_FILE }}"
-        
-        if [ ! -f "$BUILD_LOG_FILE" ]; then
-          echo "⚠️  Build log not found, skipping metrics generation"
-          exit 0
-        fi
-        
         # Create metrics directory
         mkdir -p build-metrics
         
         PLATFORM_ARCH="${{ env.PLATFORM_ARCH }}"
         WORKFLOW_ID="${{ github.run_id }}"
         JOB_ID="${{ github.job }}"
-        
-        # Path to container metadata created in previous step
-        CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${{ job.check_run_id }}.json"
-        
-        # Output comprehensive JSON with workflow_id and job_id in filename
-        COMPREHENSIVE_JSON="build-metrics/build-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
-        
-        echo "🚀 Parsing BuildKit output and merging with container metrics..."
-        echo "Input: ${BUILD_LOG_FILE}"
-        echo "Container Metadata: ${CONTAINER_METADATA}"
-        echo "Output: ${COMPREHENSIVE_JSON}"
-        echo ""
+        FRAMEWORK_LOWER=$(echo "${{ inputs.framework }}" | tr '[:upper:]' '[:lower:]')
         
         # Make parser executable
         chmod +x .github/scripts/parse_buildkit_output.py
         
-        # Run parser with container metadata
-        set +e
-        python3 .github/scripts/parse_buildkit_output.py \
-          "$BUILD_LOG_FILE" \
-          "$COMPREHENSIVE_JSON" \
-          "$CONTAINER_METADATA"
-        PARSER_EXIT_CODE=$?
-        set -e
-        
-        echo ""
-        echo "📊 Parser exit code: ${PARSER_EXIT_CODE}"
-        
-        if [ ${PARSER_EXIT_CODE} -eq 0 ] && [ -f "$COMPREHENSIVE_JSON" ]; then
-          echo "✅ Comprehensive build metrics generated successfully"
-          echo "📄 Output file: ${COMPREHENSIVE_JSON}"
+        # Process base image build log if it exists
+        BASE_BUILD_LOG="build-logs/base-image-build.log"
+        if [ -f "$BASE_BUILD_LOG" ]; then
           echo ""
-          echo "=========================================="
-          echo "📋 FULL JSON OUTPUT (for debugging)"
-          echo "=========================================="
-          cat "$COMPREHENSIVE_JSON"
-          echo ""
-          echo "=========================================="
+          echo "🔨 Processing Base Image Build..."
+          echo "Input: ${BASE_BUILD_LOG}"
+          
+          # Create metadata for base image
+          BASE_METADATA="build-metrics/base-metadata-temp.json"
+          cat > "$BASE_METADATA" << EOF
+        {
+          "framework": "${{ inputs.framework }}",
+          "target": "base",
+          "platform": "${{ inputs.platform }}",
+          "platform_arch": "${PLATFORM_ARCH}"
+        }
+        EOF
+          
+          # Output JSON for base build
+          BASE_JSON="build-metrics/build-${{ inputs.framework }}-base-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
+          
+          echo "Output: ${BASE_JSON}"
+          
+          # Run parser
+          set +e
+          python3 .github/scripts/parse_buildkit_output.py \
+            "$BASE_BUILD_LOG" \
+            "$BASE_JSON" \
+            "$BASE_METADATA"
+          BASE_PARSER_EXIT=$?
+          set -e
+          
+          if [ ${BASE_PARSER_EXIT} -eq 0 ] && [ -f "$BASE_JSON" ]; then
+            echo "✅ Base image metrics generated"
+            echo ""
+            echo "=========================================="
+            echo "📋 BASE IMAGE JSON OUTPUT (for debugging)"
+            echo "=========================================="
+            cat "$BASE_JSON"
+            echo ""
+            echo "=========================================="
+          else
+            echo "⚠️  Base image metrics generation had issues"
+          fi
         else
-          echo "⚠️  Metrics generation had issues but continuing..."
+          echo "ℹ️  No base image build log found, skipping base metrics"
+        fi
+        
+        # Process framework build log if it exists
+        FRAMEWORK_BUILD_LOG="build-logs/framework-${FRAMEWORK_LOWER}-build.log"
+        if [ -f "$FRAMEWORK_BUILD_LOG" ]; then
+          echo ""
+          echo "🔨 Processing Framework Image Build..."
+          echo "Input: ${FRAMEWORK_BUILD_LOG}"
+          
+          # Path to container metadata created in previous step
+          CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${{ job.check_run_id }}.json"
+          
+          # Output JSON for framework build
+          FRAMEWORK_JSON="build-metrics/build-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
+          
+          echo "Container Metadata: ${CONTAINER_METADATA}"
+          echo "Output: ${FRAMEWORK_JSON}"
+          
+          # Run parser with container metadata
+          set +e
+          python3 .github/scripts/parse_buildkit_output.py \
+            "$FRAMEWORK_BUILD_LOG" \
+            "$FRAMEWORK_JSON" \
+            "$CONTAINER_METADATA"
+          FRAMEWORK_PARSER_EXIT=$?
+          set -e
+          
+          if [ ${FRAMEWORK_PARSER_EXIT} -eq 0 ] && [ -f "$FRAMEWORK_JSON" ]; then
+            echo "✅ Framework image metrics generated"
+            echo ""
+            echo "=========================================="
+            echo "📋 FRAMEWORK IMAGE JSON OUTPUT (for debugging)"
+            echo "=========================================="
+            cat "$FRAMEWORK_JSON"
+            echo ""
+            echo "=========================================="
+          else
+            echo "⚠️  Framework image metrics generation had issues"
+          fi
+        else
+          echo "ℹ️  No framework build log found, skipping framework metrics"
         fi
 
     # Upload comprehensive build metrics as artifact
@@ -276,6 +321,6 @@ runs:
       if: always()
       with:
         name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ github.job }}
-        path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ github.job }}.json
+        path: build-metrics/build-${{ inputs.framework }}-*-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ github.job }}.json
         retention-days: 7
 
