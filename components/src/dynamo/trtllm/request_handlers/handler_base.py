@@ -19,7 +19,6 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
-from enum import Enum
 from typing import Any, AsyncGenerator, Optional, Union
 
 import torch
@@ -33,6 +32,7 @@ from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -43,14 +43,6 @@ from dynamo.trtllm.utils.disagg_utils import (
 )
 
 configure_dynamo_logging()
-
-
-class DisaggregationMode(Enum):
-    AGGREGATED = "prefill_and_decode"
-    PREFILL = "prefill"
-    DECODE = "decode"
-    ENCODE = "encode"
-
 
 @dataclass
 class RequestHandlerConfig:
@@ -171,6 +163,7 @@ class HandlerBase:
         request: dict,
         context: Context,
         embeddings: Optional[Union[torch.Tensor, dict]] = None,
+        ep_disaggregated_params: Optional[DisaggregatedParams] = None,
     ):
         """
         Generate responses based on the disaggregation mode in the request.
@@ -182,14 +175,106 @@ class HandlerBase:
         """
         logging.debug(f"Request: {request}")
 
+        # Decode the disaggregated params from the request FIRST
+        # This must happen before multimodal processing so that ep_disaggregated_params
+        # is available for full EPD flow
+        disaggregated_params = None
+
+        # Normalize OpenAI request format BEFORE processing
+        # This ensures max_tokens is in stop_conditions when we need to save it
+        if "stop_conditions" not in request:
+            request["stop_conditions"] = {}
+        if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
+            request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
+            logging.info(
+                f"Normalized OpenAI max_tokens to stop_conditions: {request['stop_conditions']['max_tokens']}"
+            )
+
+        if "sampling_options" not in request:
+            request["sampling_options"] = {}
+        if (
+            "temperature" in request
+            and "temperature" not in request["sampling_options"]
+        ):
+            request["sampling_options"]["temperature"] = request.pop("temperature")
+
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            # Save original max_tokens before modifying for prefill
+            # Store original max_tokens so decode worker can restore it
+            if "max_tokens" in request["stop_conditions"]:
+                request["_original_max_tokens"] = request["stop_conditions"][
+                    "max_tokens"
+                ]
+                logging.info(
+                    f"PREFILL: Saved original max_tokens: {request['_original_max_tokens']}"
+                )
+            else:
+                logging.info("PREFILL: No max_tokens in request stop_conditions")
+            request["stop_conditions"]["max_tokens"] = 1
+            if ep_disaggregated_params:
+                ep_disaggregated_params.request_type = "context_only"
+                disaggregated_params = ep_disaggregated_params
+            else:
+                disaggregated_params = LlmDisaggregatedParams(
+                    request_type="context_only"
+                )
+
+        if "disaggregated_params" in request:
+            # Decode from request dict (normal decode flow)
+            disaggregated_params = DisaggregatedParamsCodec.decode(
+                DisaggregatedParams(**request["disaggregated_params"])
+            )
+            # For full EPD flow, make decoded params available to multimodal processor
+            ep_disaggregated_params = disaggregated_params
+            disaggregated_params.request_type = "generation_only"
+
+
         # Default to text-based input. This will be overwritten if multimodal
         # content is found and processed.
         processed_input = None
+        # Now ep_disaggregated_params is properly set for both prefill and decode modes
+        if self.disaggregation_mode == DisaggregationMode.DECODE:
+            # Restore original max_tokens for decode phase
+            if "_original_max_tokens" in request:
+                if "stop_conditions" not in request:
+                    request["stop_conditions"] = {}
+                request["stop_conditions"]["max_tokens"] = request[
+                    "_original_max_tokens"
+                ]
+                logging.info(
+                    f"DECODE: Restored original max_tokens: {request['_original_max_tokens']}"
+                )
+            else:
+                logging.info(
+                    f"DECODE: No _original_max_tokens in request. Current max_tokens: {request.get('stop_conditions', {}).get('max_tokens', 'NOT SET')}"
+                )
+            # Decode worker with generation_only mode
+            # Pass the same inputs format as prefill
+            if "_epd_processed_prompt" in request:
+                processed_prompt = request["_epd_processed_prompt"]
+                # Use pre-computed token IDs from encoder for consistency
+                if (
+                    "_epd_prompt_token_ids" in request
+                    and request["_epd_prompt_token_ids"]
+                ):
+                    prompt_token_ids = request["_epd_prompt_token_ids"]
+                else:
+                    # Fallback: tokenize if token IDs not provided
+                    prompt_token_ids = self.engine.llm.tokenizer.encode(
+                        processed_prompt, add_special_tokens=False
+                    )
 
-        # Check for multimodal request and process it
-        if self.multimodal_processor:
+                processed_input = {
+                    "prompt": processed_prompt,
+                    "prompt_token_ids": prompt_token_ids,
+                }
+            else:
+                # Fallback for text-only requests
+                processed_input = request.get("token_ids")
+        elif self.multimodal_processor:
+            # Encode/Prefill worker: Process multimodal content normally
             processed_input = await self.multimodal_processor.process_openai_request(
-                request, embeddings
+                request, embeddings, ep_disaggregated_params
             )
 
         else:
@@ -203,23 +288,6 @@ class HandlerBase:
         if publishers_error:
             raise publishers_error
 
-        # Decode the disaggregated params from the request
-        disaggregated_params = None
-
-        if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            request["stop_conditions"]["max_tokens"] = 1
-            disaggregated_params = LlmDisaggregatedParams(request_type="context_only")
-
-        if "prefill_result" in request:
-            if self.disaggregation_mode == DisaggregationMode.PREFILL:
-                raise ValueError("Cannot provide disaggregated_params in prefill mode")
-            disaggregated_params = DisaggregatedParamsCodec.decode(
-                DisaggregatedParams(
-                    **request["prefill_result"].get("disaggregated_params")
-                )
-            )
-            disaggregated_params.request_type = "generation_only"
-
         if (
             self.disaggregation_mode == DisaggregationMode.DECODE
             and disaggregated_params is None
@@ -230,23 +298,26 @@ class HandlerBase:
 
         sampling_params = copy.deepcopy(self.default_sampling_params)
 
-        for key, value in request["sampling_options"].items():
-            if not value:
-                continue
-            if hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
+        # Only process sampling_options if present (may not exist for decode worker)
+        if "sampling_options" in request:
+            for key, value in request["sampling_options"].items():
+                if not value:
+                    continue
+                if hasattr(sampling_params, key):
+                    setattr(sampling_params, key, value)
+        # Only process stop_conditions if present
+        if "stop_conditions" in request:
+            max_tokens = request["stop_conditions"].get("max_tokens")
+            if max_tokens:
+                sampling_params.max_tokens = max_tokens
 
-        max_tokens = request["stop_conditions"]["max_tokens"]
-        if max_tokens:
-            sampling_params.max_tokens = max_tokens
+            ignore_eos = request["stop_conditions"].get("ignore_eos")
+            if ignore_eos:
+                sampling_params.ignore_eos = ignore_eos
 
-        ignore_eos = request["stop_conditions"].get("ignore_eos")
-        if ignore_eos:
-            sampling_params.ignore_eos = ignore_eos
-
-        min_tokens = request["stop_conditions"].get("min_tokens")
-        if min_tokens:
-            sampling_params.min_tokens = min_tokens
+            min_tokens = request["stop_conditions"].get("min_tokens")
+            if min_tokens:
+                sampling_params.min_tokens = min_tokens
 
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
@@ -303,10 +374,24 @@ class HandlerBase:
                         out["stop_reason"] = output.stop_reason
                     if self.disaggregation_mode == DisaggregationMode.PREFILL:
                         # Return the disaggregated params only when operating in prefill mode.
-                        out["disaggregated_params"] = asdict(
-                            DisaggregatedParamsCodec.encode(output.disaggregated_params)
+                        encoded_params = DisaggregatedParamsCodec.encode(
+                            output.disaggregated_params
                         )
+                        out["disaggregated_params"] = asdict(encoded_params)
+                        # Pass the processed prompt and token IDs for decode worker
+                        # Use the actual prompt and token IDs from the RequestOutput (res)
+                        # which includes all the image placeholder tokens processed by TRTLLM
+                        if "_epd_processed_prompt" in request and res.prompt:
+                            out["_epd_processed_prompt"] = res.prompt
+                        if "_epd_prompt_token_ids" in request and res.prompt_token_ids:
+                            out["_epd_prompt_token_ids"] = res.prompt_token_ids
 
+                        # Pass the original max_tokens to decode worker
+                        if "_original_max_tokens" in request:
+                            out["_original_max_tokens"] = request[
+                                "_original_max_tokens"
+                            ]
+                            
                     if out.get("finish_reason"):
                         num_input_tokens = len(request.get("token_ids", []))
 
