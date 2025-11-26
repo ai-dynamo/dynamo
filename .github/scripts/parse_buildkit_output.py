@@ -11,7 +11,7 @@ import json
 import re
 import sys
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 class BuildKitParser:
@@ -114,24 +114,23 @@ class BuildKitParser:
         steps = [step_data[num] for num in sorted(step_data.keys(), key=int)]
 
         # Calculate aggregate statistics
-        total_duration = sum(s["duration_sec"] for s in steps)
         cached_steps = sum(1 for s in steps if s["cached"])
         total_steps = len(steps)
-        cache_hit_rate = (
-            (cached_steps / total_steps * 100) if total_steps > 0 else 0.0
-        )
+        cache_hit_rate = (cached_steps / total_steps * 100) if total_steps > 0 else 0.0
         total_size = sum(s["size_transferred"] for s in steps)
 
         # Create single stage for this Docker build (stage name will be updated from metadata)
         build_duration_sec = sum(s["duration_sec"] for s in steps if not s["cached"])
-        stage_metrics = [{
-            "stage_name": "unknown",  # Will be set from container metadata
-            "total_steps": total_steps,
-            "cached_steps": cached_steps,
-            "built_steps": total_steps - cached_steps,
-            "build_duration_sec": round(build_duration_sec, 2),
-            "cache_hit_rate": round(cache_hit_rate, 2),
-        }]
+        stage_metrics = [
+            {
+                "stage_name": "unknown",  # Will be set from container metadata
+                "total_steps": total_steps,
+                "cached_steps": cached_steps,
+                "built_steps": total_steps - cached_steps,
+                "build_duration_sec": round(build_duration_sec, 2),
+                "cache_hit_rate": round(cache_hit_rate, 2),
+            }
+        ]
 
         return {
             "container": {
@@ -184,11 +183,11 @@ def main():
         sys.exit(1)
 
     output_json = sys.argv[1]
-    
+
     # Parse arguments to find stage logs and metadata
     stage_logs = []  # List of (stage_name, log_file) tuples
     container_metadata_file = None
-    
+
     for arg in sys.argv[2:]:
         if arg.startswith("--metadata="):
             container_metadata_file = arg.split("=", 1)[1]
@@ -205,11 +204,7 @@ def main():
                 stage_logs.append((f"stage{len(stage_logs)}", arg))
 
     # Initialize combined structure
-    combined_data = {
-        "container": {},
-        "stages": [],
-        "layers": []
-    }
+    combined_data = {"container": {}, "stages": [], "layers": []}
 
     total_steps = 0
     total_cached = 0
@@ -220,46 +215,54 @@ def main():
         try:
             with open(log_file, "r") as f:
                 log_content = f.read()
-            
+
             parser = BuildKitParser()
             stage_data = parser.parse_log(log_content)
-            
+
             # Add stage with custom name
             if stage_data.get("stages"):
                 stage_info = stage_data["stages"][0].copy()
                 stage_info["stage_name"] = stage_name
                 combined_data["stages"].append(stage_info)
-            
+
             # Add layers with stage identifier
             for layer in stage_data.get("layers", []):
                 layer["stage"] = stage_name
                 combined_data["layers"].append(layer)
-            
+
             # Accumulate metrics
             total_steps += stage_data["container"]["total_steps"]
             total_cached += stage_data["container"]["cached_steps"]
             total_size += stage_data["container"]["total_size_transferred_bytes"]
-            
-            print(f"✅ Parsed {stage_name} stage: {stage_data['container']['total_steps']} steps", file=sys.stderr)
+
+            print(
+                f"✅ Parsed {stage_name} stage: {stage_data['container']['total_steps']} steps",
+                file=sys.stderr,
+            )
         except FileNotFoundError:
-            print(f"⚠️  Log file not found for {stage_name} stage: {log_file}", file=sys.stderr)
+            print(
+                f"⚠️  Log file not found for {stage_name} stage: {log_file}",
+                file=sys.stderr,
+            )
         except Exception as e:
             print(f"Warning: Could not parse {stage_name} log: {e}", file=sys.stderr)
 
     # Calculate rolled-up container metrics
     total_built = total_steps - total_cached
-    overall_cache_hit_rate = (total_cached / total_steps * 100) if total_steps > 0 else 0.0
-    
+    overall_cache_hit_rate = (
+        (total_cached / total_steps * 100) if total_steps > 0 else 0.0
+    )
+
     combined_data["container"] = {
         "total_steps": total_steps,
         "cached_steps": total_cached,
         "built_steps": total_built,
         "overall_cache_hit_rate": round(overall_cache_hit_rate, 2),
-        "total_size_transferred_bytes": total_size
+        "total_size_transferred_bytes": total_size,
     }
-    
+
     build_data = combined_data
-    
+
     # Merge container metadata if provided
     if container_metadata_file:
         try:
@@ -298,5 +301,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
