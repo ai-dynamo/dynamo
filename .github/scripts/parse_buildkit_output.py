@@ -270,10 +270,8 @@ def main():
         try:
             with open(container_metadata_file, "r") as f:
                 container_metadata = json.load(f)
-                # Use "target" field as stage name (e.g., "base" or "runtime")
-                if "target" in container_metadata and build_data.get("stages"):
-                    build_data["stages"][0]["stage_name"] = container_metadata["target"]
                 # Merge into container section (overwrites BuildKit fields with action.yml values)
+                # Note: We don't overwrite stage names since they're explicitly set from log file names
                 build_data["container"].update(container_metadata)
         except Exception as e:
             print(f"Warning: Could not read container metadata: {e}", file=sys.stderr)
