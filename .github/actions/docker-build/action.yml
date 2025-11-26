@@ -215,8 +215,7 @@ runs:
 
         PLATFORM_ARCH="${{ env.PLATFORM_ARCH }}"
         WORKFLOW_ID="${{ github.run_id }}"
-        RUN_ATTEMPT="${{ github.run_attempt }}"
-        JOB_NAME="${{ github.job }}"
+        JOB_ID="${{ job.check_run_id }}"
         FRAMEWORK_LOWER=$(echo "${{ inputs.framework }}" | tr '[:upper:]' '[:lower:]')
 
         # Make parser executable
@@ -227,10 +226,10 @@ runs:
         FRAMEWORK_BUILD_LOG="build-logs/framework-${FRAMEWORK_LOWER}-build.log"
 
         # Path to container metadata created in previous step
-        CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${{ job.check_run_id }}.json"
+        CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
 
         # Output single comprehensive JSON with all build stages
-        COMPREHENSIVE_JSON="build-metrics/build-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${RUN_ATTEMPT}-${JOB_NAME}.json"
+        COMPREHENSIVE_JSON="build-metrics/build-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
 
         echo "🚀 Parsing BuildKit outputs and merging with container metrics..."
 
@@ -296,7 +295,7 @@ runs:
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
-        path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}.json
+        name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
         retention-days: 7
 
