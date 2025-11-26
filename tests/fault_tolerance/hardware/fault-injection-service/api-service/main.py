@@ -55,8 +55,12 @@ class NetworkPartitionType(str, Enum):
     """Types of network partitions"""
 
     FRONTEND_WORKER = "frontend_worker"
-    WORKER_NATS = "worker_nats"  # Partition between worker pods and NATS messaging service
-    WORKER_WORKER = "worker_worker"  # Partition between worker pods (inter-worker communication)
+    WORKER_NATS = (
+        "worker_nats"  # Partition between worker pods and NATS messaging service
+    )
+    WORKER_WORKER = (
+        "worker_worker"  # Partition between worker pods (inter-worker communication)
+    )
     CUSTOM = "custom"
 
 
@@ -136,9 +140,13 @@ class MetricsResponse(BaseModel):
 
     timestamp: str
     namespace: str
-    gpu_metrics: Optional[dict[str, Any]] = None  # GPU utilization, memory, temperature, power
+    gpu_metrics: Optional[
+        dict[str, Any]
+    ] = None  # GPU utilization, memory, temperature, power
     network_metrics: Optional[dict[str, Any]] = None  # Latency, packet loss, throughput
-    inference_metrics: Optional[dict[str, Any]] = None  # Inference latency, throughput, accuracy
+    inference_metrics: Optional[
+        dict[str, Any]
+    ] = None  # Inference latency, throughput, accuracy
     node_health: Optional[dict[str, Any]] = None  # Node status, resource availability
 
 
@@ -336,7 +344,9 @@ class KubernetesHelper:
         """Get full pod name by prefix. Returns first match if multiple pods found."""
         try:
             pods = await asyncio.to_thread(self.core_v1.list_namespaced_pod, namespace)
-            matching_pods = [p for p in pods.items if p.metadata.name.startswith(pod_prefix)]
+            matching_pods = [
+                p for p in pods.items if p.metadata.name.startswith(pod_prefix)
+            ]
             if matching_pods:
                 if len(matching_pods) > 1:
                     logger.warning(
