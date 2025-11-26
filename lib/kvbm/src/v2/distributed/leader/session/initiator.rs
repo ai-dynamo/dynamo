@@ -21,7 +21,7 @@ use crate::{
 
 use super::{
     super::{OnboardingStatus, SessionControl, StagingMode},
-    SessionId,
+    BlockHolder, SessionId,
     messages::OnboardMessage,
     transport::MessageTransport,
 };
@@ -42,9 +42,9 @@ pub struct InitiatorSession {
     transport: Arc<MessageTransport>,
     status_tx: watch::Sender<OnboardingStatus>,
 
-    // Held blocks from local search
-    local_g2_blocks: Vec<ImmutableBlock<G2>>,
-    local_g3_blocks: Vec<ImmutableBlock<G3>>,
+    // Held blocks from local search using BlockHolder for RAII semantics
+    local_g2_blocks: BlockHolder<G2>,
+    local_g3_blocks: BlockHolder<G3>,
 
     // Track remote blocks by tier
     remote_g2_blocks: HashMap<InstanceId, Vec<BlockId>>, // G2: track block IDs
@@ -82,8 +82,8 @@ impl InitiatorSession {
             worker,
             transport,
             status_tx,
-            local_g2_blocks: Vec::new(),
-            local_g3_blocks: Vec::new(),
+            local_g2_blocks: BlockHolder::empty(),
+            local_g3_blocks: BlockHolder::empty(),
             remote_g2_blocks: HashMap::new(),
             remote_g3_blocks: HashMap::new(),
             remote_g2_layouts: HashMap::new(),
@@ -146,13 +146,10 @@ impl InitiatorSession {
         sequence_hashes: &[SequenceHash],
     ) -> Result<()> {
         // Local G2 search
-        self.local_g2_blocks = self.g2_manager.match_blocks(sequence_hashes);
+        self.local_g2_blocks = BlockHolder::new(self.g2_manager.match_blocks(sequence_hashes));
 
-        let mut matched_hashes: HashSet<SequenceHash> = self
-            .local_g2_blocks
-            .iter()
-            .map(|b| b.sequence_hash())
-            .collect();
+        let mut matched_hashes: HashSet<SequenceHash> =
+            self.local_g2_blocks.sequence_hashes().into_iter().collect();
 
         // Local G3 search
         if let Some(ref g3_manager) = self.g3_manager {
@@ -163,9 +160,9 @@ impl InitiatorSession {
                 .collect();
 
             if !remaining.is_empty() {
-                self.local_g3_blocks = g3_manager.match_blocks(&remaining);
-                for block in &self.local_g3_blocks {
-                    matched_hashes.insert(block.sequence_hash());
+                self.local_g3_blocks = BlockHolder::new(g3_manager.match_blocks(&remaining));
+                for hash in self.local_g3_blocks.sequence_hashes() {
+                    matched_hashes.insert(hash);
                 }
             }
         }
@@ -345,8 +342,8 @@ impl InitiatorSession {
 
     /// Hold mode: Just hold blocks without staging.
     async fn hold_mode(&mut self) -> Result<()> {
-        let local_g2 = self.local_g2_blocks.len();
-        let local_g3 = self.local_g3_blocks.len();
+        let local_g2 = self.local_g2_blocks.count();
+        let local_g3 = self.local_g3_blocks.count();
         let remote_g2: usize = self.remote_g2_blocks.values().map(|v| v.len()).sum();
         let remote_g3: usize = self.remote_g3_blocks.values().map(|v| v.len()).sum();
 
@@ -391,7 +388,7 @@ impl InitiatorSession {
         // Wait for BlocksReady from all remotes
         // (simplified - would need proper tracking in production)
 
-        let local_g2 = self.local_g2_blocks.len();
+        let local_g2 = self.local_g2_blocks.count();
         let remote_g2: usize = self
             .remote_g2_blocks
             .values()
@@ -472,7 +469,12 @@ impl InitiatorSession {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Worker required for G3→G2 staging"))?;
 
-        let src_ids: Vec<BlockId> = self.local_g3_blocks.iter().map(|b| b.block_id()).collect();
+        let src_ids: Vec<BlockId> = self
+            .local_g3_blocks
+            .blocks()
+            .iter()
+            .map(|b| b.block_id())
+            .collect();
 
         // Allocate G2 blocks
         let dst_blocks = self
@@ -496,15 +498,15 @@ impl InitiatorSession {
         // Register new G2 blocks with G3 metadata
         let new_g2_blocks: Vec<ImmutableBlock<G2>> = dst_blocks
             .into_iter()
-            .zip(self.local_g3_blocks.iter())
+            .zip(self.local_g3_blocks.blocks().iter())
             .map(|(dst, src)| {
                 self.g2_manager
                     .register_mutable_block_from_existing(dst, src)
             })
             .collect();
 
-        // Replace G3 blocks with new G2 blocks
-        self.local_g3_blocks.clear();
+        // Clear G3 blocks (take_all releases them) and add new G2 blocks
+        let _ = self.local_g3_blocks.take_all();
         self.local_g2_blocks.extend(new_g2_blocks);
 
         Ok(())
@@ -560,7 +562,7 @@ impl InitiatorSession {
 
     /// Consolidate all G2 blocks into shared storage.
     async fn consolidate_blocks(&mut self) {
-        let all_blocks = std::mem::take(&mut self.local_g2_blocks);
+        let all_blocks = self.local_g2_blocks.take_all();
         let matched = all_blocks.len();
 
         *self.all_g2_blocks.lock().await = Some(all_blocks);

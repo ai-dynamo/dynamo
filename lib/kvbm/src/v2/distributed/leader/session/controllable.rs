@@ -26,7 +26,7 @@ use crate::{
 };
 
 use super::{
-    SessionId,
+    BlockHolder, SessionId,
     messages::{
         ControllableSessionOptions, G2BlockInfo, G3BlockInfo, RemoteSessionMessage,
         RemoteSessionPhase,
@@ -50,13 +50,15 @@ use super::{
 /// 7. Completes when all blocks pulled or session detached
 pub struct ControllableSession {
     session_id: SessionId,
+    #[allow(dead_code)] // Reserved for future use (e.g., logging, state reporting)
     instance_id: InstanceId,
     phase: RemoteSessionPhase,
     options: ControllableSessionOptions,
 
-    // Held blocks (RAII - released when session drops)
-    g2_blocks: Vec<ImmutableBlock<G2>>,
-    g3_blocks: Vec<ImmutableBlock<G3>>,
+    // Held blocks using BlockHolder for RAII semantics
+    // Blocks are automatically released when the session drops
+    g2_blocks: BlockHolder<G2>,
+    g3_blocks: BlockHolder<G3>,
 
     // G2 layout handles from workers (for RDMA source descriptors)
     // Blocks are allocated round-robin across workers
@@ -105,8 +107,8 @@ impl ControllableSession {
             instance_id,
             phase: RemoteSessionPhase::AwaitingAttachment,
             options,
-            g2_blocks,
-            g3_blocks,
+            g2_blocks: BlockHolder::new(g2_blocks),
+            g3_blocks: BlockHolder::new(g3_blocks),
             worker_g2_handles,
             controller: None,
             transport,
@@ -229,7 +231,7 @@ impl ControllableSession {
             let msg = RemoteSessionMessage::BlocksStaged {
                 session_id: self.session_id,
                 staged_blocks: staged_info,
-                g3_remaining_count: self.g3_blocks.len(),
+                g3_remaining_count: self.g3_blocks.count(),
             };
             self.transport.send_remote_session(controller, msg).await?;
         }
@@ -239,9 +241,8 @@ impl ControllableSession {
 
     /// Handle blocks pulled notification.
     fn handle_blocks_pulled(&mut self, pulled_hashes: &[SequenceHash]) -> Result<()> {
-        // Release pulled blocks
-        self.g2_blocks
-            .retain(|b| !pulled_hashes.contains(&b.sequence_hash()));
+        // Release pulled blocks using BlockHolder's release method
+        self.g2_blocks.release(pulled_hashes);
 
         // Check if session is complete
         if self.g2_blocks.is_empty() && self.g3_blocks.is_empty() {
@@ -271,6 +272,7 @@ impl ControllableSession {
         // Allocate blocks round-robin across workers
         let g2_blocks: Vec<G2BlockInfo> = self
             .g2_blocks
+            .blocks()
             .iter()
             .enumerate()
             .map(|(i, b)| {
@@ -295,6 +297,7 @@ impl ControllableSession {
         } else {
             Some(
                 self.g3_blocks
+                    .blocks()
                     .iter()
                     .map(|b| G3BlockInfo {
                         sequence_hash: b.sequence_hash(),
@@ -306,7 +309,7 @@ impl ControllableSession {
         RemoteSessionMessage::SessionState {
             session_id: self.session_id,
             g2_blocks,
-            g3_pending_count: self.g3_blocks.len(),
+            g3_pending_count: self.g3_blocks.count(),
             g3_blocks,
             phase: self.phase,
         }
@@ -326,7 +329,12 @@ impl ControllableSession {
             return Ok(Vec::new());
         }
 
-        let stage_block_ids: Vec<BlockId> = self.g3_blocks.iter().map(|b| b.block_id()).collect();
+        let stage_block_ids: Vec<BlockId> = self
+            .g3_blocks
+            .blocks()
+            .iter()
+            .map(|b| b.block_id())
+            .collect();
 
         // Allocate destination G2 blocks
         let dst_blocks = self
@@ -351,7 +359,7 @@ impl ControllableSession {
         // Register the new G2 blocks using the G3 blocks' metadata
         let new_g2_blocks: Vec<ImmutableBlock<G2>> = dst_blocks
             .into_iter()
-            .zip(self.g3_blocks.iter())
+            .zip(self.g3_blocks.blocks().iter())
             .map(|(dst, src)| {
                 self.g2_manager
                     .register_mutable_block_from_existing(dst, src)
@@ -360,7 +368,7 @@ impl ControllableSession {
 
         // Build result info for newly staged blocks
         // Continue round-robin allocation from where existing g2_blocks left off
-        let starting_index = self.g2_blocks.len();
+        let starting_index = self.g2_blocks.count();
         let staged_info: Vec<G2BlockInfo> = new_g2_blocks
             .iter()
             .enumerate()
@@ -382,8 +390,8 @@ impl ControllableSession {
             })
             .collect();
 
-        // Release G3 blocks and hold new G2 blocks
-        self.g3_blocks.clear();
+        // Clear G3 blocks (take_all releases them) and add new G2 blocks
+        let _ = self.g3_blocks.take_all();
         self.g2_blocks.extend(new_g2_blocks);
 
         self.staging_complete = true;

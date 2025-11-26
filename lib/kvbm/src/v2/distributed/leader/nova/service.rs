@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use crate::v2::distributed::leader::session::{
     OnboardMessage, OnboardSessionTx, RemoteSessionMessage, RemoteSessionTx, SessionId,
-    dispatch_onboard_message, dispatch_remote_session_message,
+    SessionMessage, SessionMessageTx, dispatch_onboard_message, dispatch_remote_session_message,
+    dispatch_session_message,
 };
 use crate::v2::physical::manager::SerializedLayout;
 
@@ -26,7 +27,8 @@ pub type ExportMetadataCallback = Arc<
 /// This service registers handlers for:
 /// 1. OnboardMessage: Standard find_matches flow (initiator → responder)
 /// 2. RemoteSessionMessage: Inverted control pattern (Prefill-Decode)
-/// 3. Export metadata RPC: Returns worker layout metadata for RDMA
+/// 3. SessionMessage: Unified session protocol (new)
+/// 4. Export metadata RPC: Returns worker layout metadata for RDMA
 pub struct NovaLeaderService {
     nova: Arc<Nova>,
     sessions: Arc<DashMap<SessionId, OnboardSessionTx>>,
@@ -39,6 +41,10 @@ pub struct NovaLeaderService {
     controllable_sessions: Option<Arc<DashMap<SessionId, RemoteSessionTx>>>,
     /// Map of remote session receivers (Prefill side).
     remote_sessions: Option<Arc<DashMap<SessionId, RemoteSessionTx>>>,
+
+    // Unified session protocol (new)
+    /// Map of unified session receivers.
+    session_sessions: Option<Arc<DashMap<SessionId, SessionMessageTx>>>,
 
     // RDMA metadata export
     /// Callback to export worker metadata for RDMA transfers.
@@ -53,6 +59,7 @@ impl NovaLeaderService {
             spawn_responder: None,
             controllable_sessions: None,
             remote_sessions: None,
+            session_sessions: None,
             export_metadata: None,
         }
     }
@@ -84,6 +91,15 @@ impl NovaLeaderService {
         self
     }
 
+    /// Set the unified session sessions map (new protocol).
+    pub fn with_session_sessions(
+        mut self,
+        sessions: Arc<DashMap<SessionId, SessionMessageTx>>,
+    ) -> Self {
+        self.session_sessions = Some(sessions);
+        self
+    }
+
     /// Set the callback for exporting worker metadata (RDMA).
     ///
     /// This callback is invoked when a remote leader requests metadata
@@ -101,6 +117,11 @@ impl NovaLeaderService {
         // Only register remote_session handler if inverted pattern is configured
         if self.controllable_sessions.is_some() || self.remote_sessions.is_some() {
             self.register_remote_session_handler()?;
+        }
+
+        // Register session handler if unified protocol is configured
+        if self.session_sessions.is_some() {
+            self.register_session_handler()?;
         }
 
         // Register export_metadata handler if callback is configured
@@ -198,6 +219,44 @@ impl NovaLeaderService {
                 // Dispatch to appropriate session map
                 dispatch_remote_session_message(&controllable_sessions, &remote_sessions, message)
                     .await?;
+
+                Ok(())
+            }
+        })
+        .build();
+
+        self.nova.register_handler(handler)?;
+
+        Ok(())
+    }
+
+    /// Register the "kvbm.leader.session" handler.
+    ///
+    /// This handler supports the new unified session protocol.
+    /// Routes SessionMessages to the appropriate session endpoint.
+    fn register_session_handler(&self) -> Result<()> {
+        let session_sessions = self
+            .session_sessions
+            .clone()
+            .expect("session_sessions required for handler registration");
+
+        let handler = NovaHandler::am_handler_async("kvbm.leader.session", move |ctx| {
+            let session_sessions = session_sessions.clone();
+
+            async move {
+                let message: SessionMessage = serde_json::from_slice(&ctx.payload)
+                    .map_err(|e| anyhow::anyhow!("failed to deserialize SessionMessage: {e}"))?;
+
+                let session_id = message.session_id();
+
+                eprintln!(
+                    "[HANDLER] Received session message: {:?} for session {}",
+                    std::mem::discriminant(&message),
+                    session_id
+                );
+
+                // Dispatch to session endpoint
+                dispatch_session_message(&session_sessions, message).await?;
 
                 Ok(())
             }

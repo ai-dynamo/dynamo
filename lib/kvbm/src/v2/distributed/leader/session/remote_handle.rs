@@ -3,6 +3,18 @@
 
 //! RemoteSessionHandle: Handle for Prefill to control a remote session on Decode.
 //!
+//! # Deprecation Notice
+//!
+//! This module is being replaced by [`super::handle::SessionHandle`].
+//! For new code, use `SessionHandle` instead of `RemoteSessionHandle`.
+//!
+//! Key differences:
+//! - `SessionHandle` uses unified [`SessionPhase`] instead of `RemoteSessionPhase`
+//! - `SessionHandle` uses [`SessionStateSnapshot`] instead of `RemoteSessionState`
+//! - `SessionHandle` supports bidirectional control transfer
+//!
+//! # Legacy Documentation
+//!
 //! This implements the "Prefill side" of the inverted control pattern where:
 //! 1. Decode creates a local session and sends session_id to Prefill
 //! 2. Prefill uses this handle to attach and control the remote session
@@ -25,10 +37,17 @@ use super::{
 
 /// Handle for controlling a remote session from Prefill.
 ///
+/// # Deprecation Notice
+///
+/// This struct is being replaced by [`super::SessionHandle`].
+/// For new code, use `SessionHandle` instead.
+///
+/// # Legacy Usage
+///
 /// Created by `attach_remote_session()` on Prefill's InstanceLeader.
 /// Provides methods to query state, trigger staging, and notify of pulled blocks.
 ///
-/// ## Usage
+/// ## Example
 ///
 /// ```ignore
 /// // Attach to remote session

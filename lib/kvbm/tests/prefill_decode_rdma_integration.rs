@@ -104,7 +104,10 @@ async fn test_metadata_exchange() -> Result<()> {
         .import_remote_metadata(pair.decode.instance_id, decode_metadata)
         .await?;
 
-    println!("Imported Decode metadata into Prefill's {} workers", NUM_WORKERS);
+    println!(
+        "Imported Decode metadata into Prefill's {} workers",
+        NUM_WORKERS
+    );
 
     // Now Prefill should have Decode's metadata
     assert!(

@@ -12,8 +12,8 @@ use crate::v2::InstanceId;
 use crate::v2::physical::manager::SerializedLayout;
 
 use super::{
-    OnboardSessionTx, SessionId, dispatch_onboard_message,
-    messages::{OnboardMessage, RemoteSessionMessage},
+    OnboardSessionTx, SessionId, SessionMessageTx, dispatch_onboard_message,
+    messages::{OnboardMessage, RemoteSessionMessage, SessionMessage},
 };
 
 /// Channel sender for remote session messages.
@@ -88,6 +88,17 @@ impl MessageTransport {
             MessageTransport::Local(_) => {
                 anyhow::bail!("request_metadata not supported for local transport")
             }
+        }
+    }
+
+    /// Send a SessionMessage to a target instance.
+    ///
+    /// This is the new unified session message protocol that replaces both
+    /// OnboardMessage and RemoteSessionMessage for session communication.
+    pub async fn send_session(&self, target: InstanceId, message: SessionMessage) -> Result<()> {
+        match self {
+            MessageTransport::Nova(transport) => transport.send_session(target, message).await,
+            MessageTransport::Local(transport) => transport.send_session(target, message).await,
         }
     }
 }
@@ -177,6 +188,30 @@ impl NovaTransport {
 
         Ok(metadata)
     }
+
+    /// Send a SessionMessage to a target instance.
+    ///
+    /// Uses the new unified "kvbm.leader.session" handler.
+    pub async fn send_session(&self, target: InstanceId, message: SessionMessage) -> Result<()> {
+        eprintln!(
+            "[TRANSPORT] Sending Session {:?} to instance {}",
+            std::mem::discriminant(&message),
+            target
+        );
+
+        let bytes = Bytes::from(serde_json::to_vec(&message)?);
+
+        self.nova
+            .am_send("kvbm.leader.session")?
+            .raw_payload(bytes)
+            .instance(target)
+            .send()
+            .await?;
+
+        eprintln!("[TRANSPORT] Successfully sent session msg to {}", target);
+
+        Ok(())
+    }
 }
 
 /// Local transport for testing or same-instance communication.
@@ -186,6 +221,8 @@ pub struct LocalTransport {
     sessions: Arc<DashMap<SessionId, OnboardSessionTx>>,
     controllable_sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
     remote_sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
+    /// Unified session message receivers (new protocol).
+    session_sessions: Arc<DashMap<SessionId, SessionMessageTx>>,
 }
 
 impl LocalTransport {
@@ -198,6 +235,22 @@ impl LocalTransport {
             sessions,
             controllable_sessions,
             remote_sessions,
+            session_sessions: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Create a LocalTransport with support for unified SessionMessage protocol.
+    pub fn with_session_sessions(
+        sessions: Arc<DashMap<SessionId, OnboardSessionTx>>,
+        controllable_sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
+        remote_sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
+        session_sessions: Arc<DashMap<SessionId, SessionMessageTx>>,
+    ) -> Self {
+        Self {
+            sessions,
+            controllable_sessions,
+            remote_sessions,
+            session_sessions,
         }
     }
 
@@ -239,5 +292,23 @@ impl LocalTransport {
         }
 
         anyhow::bail!("no remote session registered for session {session_id}");
+    }
+
+    /// Send a SessionMessage (new unified protocol).
+    ///
+    /// Routes to session_sessions by session ID.
+    pub async fn send_session(&self, _target: InstanceId, message: SessionMessage) -> Result<()> {
+        let session_id = message.session_id();
+
+        if let Some(entry) = self.session_sessions.get(&session_id) {
+            entry
+                .value()
+                .send(message)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to send to session {session_id}: {e}"))?;
+            return Ok(());
+        }
+
+        anyhow::bail!("no session registered for session {session_id}");
     }
 }

@@ -180,7 +180,8 @@ impl WorkerTransfers for ReplicatedWorker {
         let awaiter = self.events.awaiter(event.handle())?;
 
         // Spawn task to await all import responses and signal completion
-        self.runtime.spawn(await_import_responses(import_responses, event));
+        self.runtime
+            .spawn(await_import_responses(import_responses, event));
 
         Ok(ConnectRemoteResponse::from_awaiter(awaiter))
     }

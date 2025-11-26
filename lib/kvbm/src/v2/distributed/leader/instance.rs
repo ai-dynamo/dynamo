@@ -25,13 +25,36 @@ use crate::v2::physical::manager::{LayoutHandle, SerializedLayout};
 use super::{
     super::parallelism::{ParallelWorker, ReplicatedWorker},
     super::worker::Worker,
-    FindMatchesOptions, FindMatchesResult, Leader, OnboardingStatus, SessionHandle, SessionId,
+    FindMatchesOptions,
+    FindMatchesResult,
+    Leader,
+    OnboardingStatus,
+    // Legacy SessionHandle for deferred operations
+    SessionHandle as LegacySessionHandle,
+    SessionId,
     StagingMode,
     nova::{ExportMetadataCallback, NovaLeaderService},
     session::{
-        ControllableSession, ControllableSessionOptions, ControllableSessionResult,
-        InitiatorSession, MessageTransport, OnboardMessage, OnboardSessionTx, RemoteSessionHandle,
-        RemoteSessionMessage, RemoteSessionTx, ResponderSession, remote_session_state_channel,
+        ControlRole,
+        ControllableSession,
+        ControllableSessionOptions,
+        ControllableSessionResult,
+        InitiatorSession,
+        MessageTransport,
+        OnboardMessage,
+        OnboardSessionTx,
+        RemoteSessionHandle,
+        RemoteSessionMessage,
+        RemoteSessionTx,
+        ResponderSession,
+        // Import the new unified SessionHandle with an alias to distinguish from legacy
+        SessionHandle as UnifiedSessionHandle,
+        SessionMessage,
+        SessionMessageTx,
+        SessionPhase,
+        remote_session_state_channel,
+        session_handle_state_channel,
+        session_message_channel,
     },
 };
 
@@ -80,6 +103,13 @@ pub struct InstanceLeader {
     /// Map of remote session receivers (Prefill side).
     /// Used when this instance controls sessions on remote instances.
     remote_sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
+
+    // ========================================================================
+    // Unified Session Protocol (New)
+    // ========================================================================
+    /// Map of unified session message receivers.
+    /// Used by the new SessionHandle/SessionEndpoint protocol.
+    session_sessions: Arc<DashMap<SessionId, SessionMessageTx>>,
 }
 
 /// Builder for InstanceLeader.
@@ -144,6 +174,9 @@ impl InstanceLeaderBuilder {
         //     anyhow::bail!("At least one worker required");
         // }
 
+        // todo: we will need a common builder pattern for creating "general" parallel workers
+        // - we could also use an enum and match as the number of types will be limited
+
         // Create parallel worker if workers are provided
         let parallel_worker: Option<Arc<dyn ParallelWorker>> = if !self.workers.is_empty() {
             Some(Arc::new(ReplicatedWorker::new(
@@ -169,6 +202,7 @@ impl InstanceLeaderBuilder {
             transport,
             controllable_sessions: Arc::new(DashMap::new()),
             remote_sessions: Arc::new(DashMap::new()),
+            session_sessions: Arc::new(DashMap::new()),
         })
     }
 }
@@ -274,9 +308,14 @@ impl InstanceLeader {
     ///
     /// This is optional - sessions will naturally be cleaned up when the InstanceLeader
     /// is dropped. Call this explicitly if you need to release blocks earlier.
+    ///
+    /// This cleans up all session types: legacy onboard sessions, remote sessions,
+    /// and unified sessions.
     pub fn release_session(&self, session_id: SessionId) {
         self.session_states.remove(&session_id);
         self.sessions.remove(&session_id);
+        self.remote_sessions.remove(&session_id);
+        self.session_sessions.remove(&session_id);
     }
 
     // ========================================================================
@@ -472,6 +511,103 @@ impl InstanceLeader {
     /// Get the remote sessions map (for Nova handler registration).
     pub(crate) fn remote_sessions(&self) -> Arc<DashMap<SessionId, RemoteSessionTx>> {
         self.remote_sessions.clone()
+    }
+
+    // ========================================================================
+    // Unified Session Protocol (New)
+    // These methods use the new SessionHandle/SessionMessage protocol.
+    // ========================================================================
+
+    /// Attach to a remote session using the unified session protocol.
+    ///
+    /// This is the preferred method for new code, replacing `attach_remote_session`.
+    /// Returns a `SessionHandle` that uses `SessionMessage` for communication.
+    ///
+    /// # Arguments
+    /// * `remote_instance` - The instance hosting the session
+    /// * `session_id` - The session to attach to
+    ///
+    /// # Example
+    /// ```ignore
+    /// let handle = leader.attach_session(remote_id, session_id).await?;
+    /// let state = handle.wait_for_ready().await?;
+    /// handle.trigger_staging().await?;
+    /// ```
+    pub async fn attach_session(
+        &self,
+        remote_instance: InstanceId,
+        session_id: SessionId,
+    ) -> Result<UnifiedSessionHandle> {
+        // Create local channel for receiving state updates
+        let (state_tx, state_rx) = session_handle_state_channel();
+
+        // Register handler for this session's messages
+        let (msg_tx, msg_rx) = session_message_channel(100);
+        self.session_sessions.insert(session_id, msg_tx);
+
+        // Spawn receiver task to update state
+        tokio::spawn(Self::run_session_receiver(msg_rx, state_tx));
+
+        // Send attach message using new protocol
+        let msg = SessionMessage::Attach {
+            peer: self.nova.instance_id(),
+            session_id,
+            as_role: ControlRole::Controller,
+        };
+        self.transport.send_session(remote_instance, msg).await?;
+
+        let mut handle = UnifiedSessionHandle::new(
+            session_id,
+            remote_instance,
+            self.nova.instance_id(),
+            self.transport.clone(),
+            state_rx,
+        );
+
+        // Add RDMA support if parallel worker is configured
+        if let Some(parallel_worker) = &self.parallel_worker {
+            handle = handle.with_rdma_support(parallel_worker.clone());
+        }
+
+        Ok(handle)
+    }
+
+    /// Internal: Process incoming SessionMessage for a session.
+    async fn run_session_receiver(
+        mut rx: mpsc::Receiver<SessionMessage>,
+        state_tx: super::session::SessionHandleStateTx,
+    ) {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                SessionMessage::StateResponse { state, .. } => {
+                    state_tx.update(state);
+                }
+                SessionMessage::BlocksStaged {
+                    staged_blocks,
+                    remaining,
+                    ..
+                } => {
+                    state_tx.add_staged_blocks(staged_blocks, remaining);
+                }
+                SessionMessage::Error { message, .. } => {
+                    eprintln!("Session error: {}", message);
+                    state_tx.set_failed();
+                    break;
+                }
+                SessionMessage::Close { .. } => {
+                    state_tx.set_phase(SessionPhase::Complete);
+                    break;
+                }
+                _ => {
+                    // Ignore control commands (sent by controller, not received)
+                }
+            }
+        }
+    }
+
+    /// Get the session sessions map (for Nova handler registration).
+    pub(crate) fn session_sessions(&self) -> Arc<DashMap<SessionId, SessionMessageTx>> {
+        self.session_sessions.clone()
     }
 
     // ========================================================================
@@ -682,7 +818,7 @@ impl Leader for InstanceLeader {
             StagingMode::Hold | StagingMode::Prepare
         ) {
             let (control_tx, control_rx) = mpsc::channel(10);
-            let handle = SessionHandle::new(session_id, options.staging_mode, control_tx);
+            let handle = LegacySessionHandle::new(session_id, options.staging_mode, control_tx);
             (Some(handle), Some(control_rx))
         } else {
             (None, None)

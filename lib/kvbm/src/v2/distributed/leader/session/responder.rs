@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-use super::{SessionId, messages::OnboardMessage, transport::MessageTransport};
+use super::{BlockHolder, SessionId, messages::OnboardMessage, transport::MessageTransport};
 
 /// Responder-side session for handling block onboarding requests.
 ///
@@ -43,8 +43,10 @@ pub struct ResponderSession {
     g3_manager: Option<Arc<BlockManager<G3>>>,
     worker: Option<Arc<dyn Worker>>,
     transport: Arc<MessageTransport>,
-    held_g2_blocks: Vec<ImmutableBlock<G2>>,
-    held_g3_blocks: Vec<ImmutableBlock<G3>>,
+    // Held blocks using BlockHolder for RAII semantics
+    // Blocks are automatically released when the session drops
+    held_g2_blocks: BlockHolder<G2>,
+    held_g3_blocks: BlockHolder<G3>,
 }
 
 impl ResponderSession {
@@ -66,8 +68,8 @@ impl ResponderSession {
             g3_manager,
             worker,
             transport,
-            held_g2_blocks: Vec::new(),
-            held_g3_blocks: Vec::new(),
+            held_g2_blocks: BlockHolder::empty(),
+            held_g3_blocks: BlockHolder::empty(),
         }
     }
 
@@ -82,16 +84,17 @@ impl ResponderSession {
         // Phase 1: Immediate G2 search
         let g2_matches = self.g2_manager.match_blocks(&sequence_hashes);
 
-        // Hold the G2 blocks (RAII - will be released when session drops)
-        self.held_g2_blocks = g2_matches;
+        // Hold the G2 blocks using BlockHolder (RAII semantics)
+        self.held_g2_blocks = BlockHolder::new(g2_matches);
 
         // Send G2 results immediately (fire-and-forget) with parallel arrays
-        let g2_sequence_hashes: Vec<SequenceHash> = self
+        let g2_sequence_hashes: Vec<SequenceHash> = self.held_g2_blocks.sequence_hashes();
+        let g2_block_ids: Vec<BlockId> = self
             .held_g2_blocks
+            .blocks()
             .iter()
-            .map(|b| b.sequence_hash())
+            .map(|b| b.block_id())
             .collect();
-        let g2_block_ids: Vec<BlockId> = self.held_g2_blocks.iter().map(|b| b.block_id()).collect();
 
         // TODO: Get layout handle from G2 manager
         // Need to add layout_handle() method to BlockManager or store it
@@ -107,11 +110,8 @@ impl ResponderSession {
         self.transport.send(self.requester, g2_msg).await?;
 
         // Phase 2: Search G3 for remaining hashes (if G3 available)
-        let g2_matched_hashes: HashSet<SequenceHash> = self
-            .held_g2_blocks
-            .iter()
-            .map(|b| b.sequence_hash())
-            .collect();
+        let g2_matched_hashes: HashSet<SequenceHash> =
+            self.held_g2_blocks.sequence_hashes().into_iter().collect();
 
         let remaining_hashes: Vec<SequenceHash> = sequence_hashes
             .iter()
@@ -125,15 +125,11 @@ impl ResponderSession {
             let g3_matches = g3_manager.match_blocks(&remaining_hashes);
 
             if !g3_matches.is_empty() {
-                // Hold the G3 blocks
-                self.held_g3_blocks = g3_matches;
+                // Hold the G3 blocks using BlockHolder
+                self.held_g3_blocks = BlockHolder::new(g3_matches);
 
                 // Send G3 results (sequence hashes only, keep order)
-                let g3_sequence_hashes: Vec<SequenceHash> = self
-                    .held_g3_blocks
-                    .iter()
-                    .map(|b| b.sequence_hash())
-                    .collect();
+                let g3_sequence_hashes: Vec<SequenceHash> = self.held_g3_blocks.sequence_hashes();
 
                 let g3_msg = OnboardMessage::G3Results {
                     responder: self.instance_id,
@@ -159,11 +155,9 @@ impl ResponderSession {
                     drop_hashes: _,
                     ..
                 } => {
-                    // Filter by sequence hash - works across G2 and G3
-                    self.held_g2_blocks
-                        .retain(|b| hold_hashes.contains(&b.sequence_hash()));
-                    self.held_g3_blocks
-                        .retain(|b| hold_hashes.contains(&b.sequence_hash()));
+                    // Filter by sequence hash - BlockHolder's retain keeps only matching hashes
+                    self.held_g2_blocks.retain(&hold_hashes);
+                    self.held_g3_blocks.retain(&hold_hashes);
 
                     // Send acknowledgment
                     let ack = OnboardMessage::Acknowledged {
@@ -182,9 +176,8 @@ impl ResponderSession {
 
                 OnboardMessage::StageBlocks { stage_hashes, .. } => {
                     // Filter G3 blocks to only keep blocks to be staged
-                    // Implied: all held G3 blocks with these hashes should be staged to G2
-                    self.held_g3_blocks
-                        .retain(|b| stage_hashes.contains(&b.sequence_hash()));
+                    // BlockHolder's retain keeps only matching hashes
+                    self.held_g3_blocks.retain(&stage_hashes);
 
                     if !self.held_g3_blocks.is_empty() && self.worker.is_some() {
                         // Execute G3->G2 transfer
@@ -195,19 +188,19 @@ impl ResponderSession {
                 }
 
                 OnboardMessage::ReleaseBlocks { release_hashes, .. } => {
-                    // Release specific blocks by sequence hash - works across G2 and G3
-                    self.held_g2_blocks
-                        .retain(|b| !release_hashes.contains(&b.sequence_hash()));
-                    self.held_g3_blocks
-                        .retain(|b| !release_hashes.contains(&b.sequence_hash()));
+                    // Release specific blocks by sequence hash
+                    // BlockHolder's release removes blocks with given hashes
+                    self.held_g2_blocks.release(&release_hashes);
+                    self.held_g3_blocks.release(&release_hashes);
                 }
 
                 // todo: how does close session drop the session from the dashmap?
                 // todo: do we need to handle this in the handler rather than the session responder loop?
                 OnboardMessage::CloseSession { .. } => {
                     // Session complete - release all blocks and exit
-                    self.held_g2_blocks.clear();
-                    self.held_g3_blocks.clear();
+                    // take_all() explicitly releases the blocks
+                    let _ = self.held_g2_blocks.take_all();
+                    let _ = self.held_g3_blocks.take_all();
                     break;
                 }
 
@@ -250,8 +243,12 @@ impl ResponderSession {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Worker required for G3->G2 staging"))?;
 
-        let stage_block_ids: Vec<BlockId> =
-            self.held_g3_blocks.iter().map(|b| b.block_id()).collect();
+        let stage_block_ids: Vec<BlockId> = self
+            .held_g3_blocks
+            .blocks()
+            .iter()
+            .map(|b| b.block_id())
+            .collect();
 
         // Allocate destination G2 blocks
         let dst_blocks = self
@@ -276,7 +273,7 @@ impl ResponderSession {
         // Register the new G2 blocks using the G3 blocks' metadata
         let new_g2_blocks: Vec<ImmutableBlock<G2>> = dst_blocks
             .into_iter()
-            .zip(self.held_g3_blocks.iter())
+            .zip(self.held_g3_blocks.blocks().iter())
             .map(|(dst, src)| {
                 self.g2_manager
                     .register_mutable_block_from_existing(dst, src)
@@ -288,8 +285,8 @@ impl ResponderSession {
             new_g2_blocks.iter().map(|b| b.sequence_hash()).collect();
         let new_block_ids: Vec<BlockId> = new_g2_blocks.iter().map(|b| b.block_id()).collect();
 
-        // Release G3 blocks and hold new G2 blocks
-        self.held_g3_blocks.clear();
+        // Release G3 blocks (take_all releases them) and hold new G2 blocks
+        let _ = self.held_g3_blocks.take_all();
         self.held_g2_blocks.extend(new_g2_blocks);
 
         // TODO: Get layout handle from G2 manager
