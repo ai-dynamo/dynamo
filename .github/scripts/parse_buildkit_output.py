@@ -122,10 +122,10 @@ class BuildKitParser:
         )
         total_size = sum(s["size_transferred"] for s in steps)
 
-        # Create single stage representing this entire Docker build
+        # Create single stage for this Docker build (stage name will be updated from metadata)
         build_duration_sec = sum(s["duration_sec"] for s in steps if not s["cached"])
         stage_metrics = [{
-            "stage_name": "build",
+            "stage_name": "unknown",  # Will be set from container metadata
             "total_steps": total_steps,
             "cached_steps": cached_steps,
             "built_steps": total_steps - cached_steps,
@@ -202,6 +202,9 @@ def main():
         try:
             with open(container_metadata_file, "r") as f:
                 container_metadata = json.load(f)
+                # Use "target" field as stage name (e.g., "base" or "runtime")
+                if "target" in container_metadata and build_data.get("stages"):
+                    build_data["stages"][0]["stage_name"] = container_metadata["target"]
                 # Merge into container section (overwrites BuildKit fields with action.yml values)
                 build_data["container"].update(container_metadata)
         except Exception as e:
