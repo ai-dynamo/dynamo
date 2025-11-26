@@ -3,15 +3,15 @@
 ##################################
 
 # Base image configuration
-ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+ARG BASE_IMAGE={{ context.dynamo_base.base_image }}
 # TODO OPS-612: NCCL will hang with 25.03, so use 25.01 for now
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
-ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+ARG BASE_IMAGE_TAG={{ context.dynamo_base.base_image_tag }}
 
 # Build configuration
-ARG ENABLE_KVBM=false
+ARG ENABLE_KVBM={{ context.dynamo_base.enable_kvbm }}
 ARG CARGO_BUILD_JOBS
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -24,8 +24,8 @@ ARG CARGO_BUILD_JOBS
 # For arm64/aarch64, build with:
 #   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
 #TODO OPS-592: Leverage uname -m to determine ARCH instead of passing it as an arg
-ARG ARCH=amd64
-ARG ARCH_ALT=x86_64
+ARG ARCH={{ platform }}
+ARG ARCH_ALT={{ "x86_64" if platform == "amd64" else "aarch64" }}
 
 # SCCACHE configuration
 ARG USE_SCCACHE
@@ -33,12 +33,12 @@ ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
 
 # NIXL configuration
-ARG NIXL_UCX_REF=v1.19.0
-ARG NIXL_REF=0.7.1
-ARG NIXL_GDRCOPY_REF=v2.5.1
+ARG NIXL_UCX_REF={{ context.dynamo_base.nixl_ucx_ref }}
+ARG NIXL_REF={{ context.dynamo_base.nixl_ref }}
+ARG NIXL_GDRCOPY_REF={{ context.dynamo_base.nixl_gdrcopy_ref }}
 
 # Python configuration
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION={{ context.dynamo_base.python_version }}
 
 ##################################
 ########## Base Image ############
@@ -106,13 +106,13 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
 ##################################
 
 # Install NATS server
-ENV NATS_VERSION="v2.10.28"
+ENV NATS_VERSION={{ context.dynamo_base.nats_version }}
 RUN --mount=type=cache,target=/var/cache/apt \
     wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-${ARCH}.deb && \
     dpkg -i nats-server-${NATS_VERSION}-${ARCH}.deb && rm nats-server-${NATS_VERSION}-${ARCH}.deb
 
 # Install etcd
-ENV ETCD_VERSION="v3.5.21"
+ENV ETCD_VERSION={{ context.dynamo_base.etcd_version }}
 RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \

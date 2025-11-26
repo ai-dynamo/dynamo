@@ -268,8 +268,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     NVSHMEM_DIR=${NVSHMEM_DIR} TORCH_CUDA_ARCH_LIST="9.0;10.0" pip install --no-build-isolation .
 
 # Copy rust installation from dev to avoid duplication efforts
-COPY --from=dev /usr/local/rustup /usr/local/rustup
-COPY --from=dev /usr/local/cargo /usr/local/cargo
+COPY --from=dynamo_dev /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_dev /usr/local/cargo /usr/local/cargo
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \

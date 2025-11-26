@@ -2,22 +2,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+ARG VLLM_BASE_IMAGE={{ context.vllm[platform].base_image }}
 # TODO OPS-612: NCCL will hang with 25.03, so use 25.01 for now
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
-ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
-ARG ENABLE_KVBM=false
-ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
-ARG CUDA_VERSION="12.8"
+ARG VLLM_BASE_IMAGE_TAG={{ context.vllm[platform].base_image_tag }}
+ARG ENABLE_KVBM={{ context.dynamo_base.enable_kvbm }}
+ARG RUNTIME_IMAGE={{ context.vllm[platform].runtime_image }}
+ARG RUNTIME_IMAGE_TAG={{ context.vllm[platform].runtime_image_tag }}
+ARG CUDA_VERSION={{ context.vllm[platform].cuda_version }}
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.11.0"
+ARG VLLM_REF={{ context.vllm.ref }}
 # FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
-ARG FLASHINF_REF="v0.3.1"
-ARG TORCH_BACKEND="cu128"
+ARG FLASHINF_REF={{ context.vllm.flashinf_ref }}
+ARG TORCH_BACKEND={{ context.vllm[platform].torch_backend }}
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
@@ -39,10 +39,10 @@ ARG SCCACHE_REGION=""
 #
 # NOTE: There isn't an easy way to define one of these values based on the other value
 # without adding if statements everywhere, so just define both as ARGs for now.
-ARG ARCH=amd64
-ARG ARCH_ALT=x86_64
+ARG ARCH={{ platform }}
+ARG ARCH_ALT={{ "x86_64" if platform == "amd64" else "aarch64" }}
 # Python configuration
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION={{ context.dynamo_base.python_version }}
 
 ########################################################
 ########## Framework Development Image ################
@@ -63,7 +63,7 @@ ARG PYTHON_VERSION=3.12
 #
 
 # Use dynamo base image (see /container/Dockerfile for more details)
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
+FROM ${VLLM_BASE_IMAGE}:${VLLM_BASE_IMAGE_TAG} AS framework
 
 ARG PYTHON_VERSION
 

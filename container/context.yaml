@@ -1,26 +1,35 @@
 dynamo_base:
   base_image: nvcr.io/nvidia/cuda-dl-base
   base_image_tag: 25.01-cuda12.8-devel-ubuntu24.04
+  python_version: 3.12
+
+  nats_version: v2.10.28
+  etcd_version: v3.5.21
+
   nixl_ref: 0.7.1
   nixl_ucx_ref: v1.19.0
+  nixl_gdrcopy_ref: v2.5.1
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
+  enable_kvbm: "false"
   
-  local:
-    uid: ""
-    gid: ""
+  # local:
+  #   uid: ""
+  #   gid: ""
 
 vllm:
+  ref: v0.11.0
+  flashinf_ref: v0.3.1
   amd64:
     base_image: nvcr.io/nvidia/cuda-dl-base
     base_image_tag: 25.01-cuda12.8-devel-ubuntu24.04
-    runtime_image: ""
-    runtime_image_tag: 12.9.0-runtime-ubuntu24.04
-    cuda_version: 129
-    torch_backend: cu129
+    runtime_image: nvcr.io/nvidia/cuda
+    runtime_image_tag: 12.8.0-runtime-ubuntu24.04
+    cuda_version: 128
+    torch_backend: cu128
   arm64:
     base_image: nvcr.io/nvidia/cuda-dl-base
-    base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
-    runtime_image: ""
+    base_image_tag: 25.06-cuda12.8-devel-ubuntu24.04
+    runtime_image: nvcr.io/nvidia/cuda
     runtime_image_tag: 12.9.0-runtime-ubuntu24.04
     cuda_version: 129
     torch_backend: cu129

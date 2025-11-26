@@ -2,7 +2,7 @@
 ########## Dev entrypoint image ##############
 ##############################################
 
-FROM base AS dev
+FROM base AS dynamo_dev
 
 ARG ENABLE_KVBM
 ARG ARCH_ALT

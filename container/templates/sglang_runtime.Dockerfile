@@ -42,15 +42,15 @@ ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 
 # Copy NATS and ETCD from dev, and UCX/NIXL
-COPY --from=dev /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=dev /usr/local/bin/etcd/ /usr/local/bin/etcd/
-COPY --from=dev /usr/local/ucx /usr/local/ucx
-COPY --from=dev $NIXL_PREFIX $NIXL_PREFIX
+COPY --from=dynamo_dev /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_dev /usr/local/bin/etcd/ /usr/local/bin/etcd/
+COPY --from=dynamo_dev /usr/local/ucx /usr/local/ucx
+COPY --from=dynamo_dev $NIXL_PREFIX $NIXL_PREFIX
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:${HOME}/.local/bin:$PATH
 
 # Install Dynamo wheels from dev wheelhouse
 COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
-COPY --chown=dynamo: --from=dev /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: --from=dynamo_dev /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
 RUN python3 -m pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \

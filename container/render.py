@@ -10,7 +10,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Renders dynamo Dockerfiles from templates")
     parser.add_argument("--framework", type=str, default="vllm", help="Dockerfile framework to use.")
     parser.add_argument("--target", type=str, default="runtime", help="Dockerfile target to use.")
-    parser.add_argument("--platform", type=str, default="linux/amd64", help="Dockerfile platform to use.")
+    parser.add_argument("--platform", type=str, default="amd64", help="Dockerfile platform to use.")
     parser.add_argument("--show-result", action='store_true', help="Prints the rendered Dockerfile to stdout.")
     args = parser.parse_args()
     return args
