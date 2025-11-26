@@ -22,15 +22,17 @@ spec:
           env:
             - name: HF_HUB_ENABLE_HF_TRANSFER
               value: "1"
+            - name: HF_HOME
+              value: /opt/model
           args:
             - |
               set -eux
               pip install --no-cache-dir huggingface_hub hf_transfer
-              hf download nvidia/DeepSeek-R1-FP4 --local-dir /model-cache/deepseek-r1-fp4
-              hf download deepseek-ai/DeepSeek-R1 --local-dir /model-cache/deepseek-r1
+              hf download nvidia/DeepSeek-R1-FP4
+              hf download deepseek-ai/DeepSeek-R1
           volumeMounts:
             - name: model-cache
-              mountPath: /model-cache
+              mountPath: /opt/model
       volumes:
       - name: model-cache
         persistentVolumeClaim:

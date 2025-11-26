@@ -119,6 +119,8 @@ spec:
       value: "1"
     - name: TRTLLM_ENABLE_PDL
       value: "1"
+    - name: HF_HOME
+      value: /opt/model
   backendFramework: trtllm
   services:
     Frontend:
@@ -144,7 +146,7 @@ spec:
       #       and contributes to ComputeDomain.numNodes (see above)
       volumeMounts:
         - name: model-cache
-          mountPoint: /model-cache
+          mountPoint: /opt/model
       sharedMemory:
         size: 800Gi
       resources:
@@ -182,8 +184,8 @@ spec:
           args:
           - >-
             python3 -m dynamo.trtllm
-            --model-path /model-cache/deepseek-r1-fp4
-            --served-model-name deepseek-ai/DeepSeek-R1
+            --model-path nvidia/DeepSeek-R1-FP4
+            --served-model-name nvidia/DeepSeek-R1-FP4
             --extra-engine-args /config/prefill_config.yaml
             --disaggregation-mode prefill
         resourceClaims:
@@ -199,7 +201,7 @@ spec:
       replicas: 1
       volumeMounts:
         - name: model-cache
-          mountPoint: /model-cache
+          mountPoint: /opt/model
       multinode:
         # NOTE: This nodeCount contributes to ComputeDomain.numNodes (see above)
         nodeCount: 8
@@ -240,8 +242,8 @@ spec:
           args:
           - >-
             python3 -m dynamo.trtllm
-            --model-path /model-cache/deepseek-r1-fp4
-            --served-model-name deepseek-ai/DeepSeek-R1
+            --model-path nvidia/DeepSeek-R1-FP4
+            --served-model-name nvidia/DeepSeek-R1-FP4
             --extra-engine-args /config/decode_config_dep32.yaml
             --disaggregation-mode decode
         resourceClaims:
