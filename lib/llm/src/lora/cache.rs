@@ -133,7 +133,7 @@ mod tests {
     fn test_uri_to_cache_key() {
         assert_eq!(
             LoRACache::uri_to_cache_key("s3://bucket/path/to/lora"),
-            "s3_bucket_path_to_lora"
+            "s3__bucket_path_to_lora"
         );
         assert_eq!(
             LoRACache::uri_to_cache_key("file:///local/path"),
