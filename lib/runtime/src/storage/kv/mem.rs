@@ -11,9 +11,7 @@ use async_trait::async_trait;
 use rand::Rng as _;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::storage::key_value_store::{Key, KeyValue, WatchEvent};
-
-use super::{KeyValueBucket, KeyValueStore, StoreError, StoreOutcome};
+use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 
 #[derive(Clone, Debug)]
 enum MemoryEvent {
@@ -71,7 +69,7 @@ impl MemoryStore {
 }
 
 #[async_trait]
-impl KeyValueStore for MemoryStore {
+impl Store for MemoryStore {
     type Bucket = MemoryBucketRef;
 
     async fn get_or_create_bucket(
@@ -112,7 +110,7 @@ impl KeyValueStore for MemoryStore {
 }
 
 #[async_trait]
-impl KeyValueBucket for MemoryBucketRef {
+impl Bucket for MemoryBucketRef {
     async fn insert(
         &self,
         key: &Key,
@@ -233,11 +231,8 @@ impl KeyValueBucket for MemoryBucketRef {
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::kv::{Bucket as _, Key, MemoryStore, Store as _};
     use std::collections::HashSet;
-
-    use crate::storage::key_value_store::{
-        Key, KeyValueBucket as _, KeyValueStore as _, MemoryStore,
-    };
 
     #[tokio::test]
     async fn test_entries_full_path() {

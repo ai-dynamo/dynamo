@@ -12,19 +12,19 @@ use tokio_util::sync::CancellationToken;
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
 };
-use crate::storage::key_value_store::{KeyValueStoreManager, WatchEvent};
+use crate::storage::kv;
 
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
 
-/// Discovery implementation backed by a KeyValueStore
+/// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
-    store: Arc<KeyValueStoreManager>,
+    store: Arc<kv::Manager>,
     cancel_token: CancellationToken,
 }
 
 impl KVStoreDiscovery {
-    pub fn new(store: KeyValueStoreManager, cancel_token: CancellationToken) -> Self {
+    pub fn new(store: kv::Manager, cancel_token: CancellationToken) -> Self {
         Self {
             store: Arc::new(store),
             cancel_token,
@@ -184,7 +184,7 @@ impl Discovery for KVStoreDiscovery {
             key_path
         );
         let bucket = self.store.get_or_create_bucket(bucket_name, None).await?;
-        let key = crate::storage::key_value_store::Key::new(key_path.clone());
+        let key = kv::Key::new(key_path.clone());
 
         tracing::debug!(
             "KVStoreDiscovery::register: Inserting into bucket={}, key={}",
@@ -251,7 +251,7 @@ impl Discovery for KVStoreDiscovery {
             return Ok(());
         };
 
-        let key = crate::storage::key_value_store::Key::new(key_path.clone());
+        let key = kv::Key::new(key_path.clone());
 
         // Delete the entry from the bucket
         bucket.delete(&key).await?;
@@ -313,7 +313,7 @@ impl Discovery for KVStoreDiscovery {
         // Use the provided cancellation token, or fall back to the default token
         let cancel_token = cancel_token.unwrap_or_else(|| self.cancel_token.clone());
 
-        // Use the KeyValueStoreManager's watch mechanism
+        // Use the kv::Manager's watch mechanism
         let (_, mut rx) = self.store.clone().watch(
             bucket_name,
             None, // No TTL
@@ -324,7 +324,7 @@ impl Discovery for KVStoreDiscovery {
         let stream = async_stream::stream! {
             while let Some(event) = rx.recv().await {
                 let discovery_event = match event {
-                    WatchEvent::Put(kv) => {
+                    kv::WatchEvent::Put(kv) => {
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(kv.key_str(), &prefix, bucket_name) {
                             continue;
@@ -344,7 +344,7 @@ impl Discovery for KVStoreDiscovery {
                             }
                         }
                     }
-                    WatchEvent::Delete(kv) => {
+                    kv::WatchEvent::Delete(kv) => {
                         let key_str = kv.as_ref();
                         // Check if this key matches our prefix
                         if !Self::matches_prefix(key_str, &prefix, bucket_name) {
@@ -398,7 +398,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_register_endpoint() {
-        let store = KeyValueStoreManager::memory();
+        let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = KVStoreDiscovery::new(store, cancel_token);
 
@@ -423,7 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_list() {
-        let store = KeyValueStoreManager::memory();
+        let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = KVStoreDiscovery::new(store, cancel_token);
 
@@ -478,7 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_watch() {
-        let store = KeyValueStoreManager::memory();
+        let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = Arc::new(KVStoreDiscovery::new(store, cancel_token.clone()));
 

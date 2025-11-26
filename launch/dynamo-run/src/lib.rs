@@ -6,7 +6,7 @@ use dynamo_llm::entrypoint::EngineConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
-use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
+use dynamo_runtime::storage::kv;
 use dynamo_runtime::transports::nats;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
@@ -82,7 +82,7 @@ pub async fn run(
         DistributedConfig::process_local()
     } else {
         // Normal case
-        let selected_store: KeyValueStoreSelect = flags.store_kv.parse()?;
+        let selected_store: kv::Selector = flags.store_kv.parse()?;
         let request_plane: RequestPlaneMode = flags.request_plane.parse()?;
         DistributedConfig {
             store_backend: selected_store,

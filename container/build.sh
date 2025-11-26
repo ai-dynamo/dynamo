@@ -102,7 +102,7 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc2"
 TENSORRTLLM_PIP_WHEEL=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-# FIXME: NCCL will hang with 25.03, so use 25.01 for now
+# FIXME: OPS-612 NCCL will hang with 25.03, so use 25.01 for now
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
@@ -111,8 +111,13 @@ VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
+SGLANG_CUDA_VERSION="12.9.1"
+# This is for Dockerfile
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+# This is for Dockerfile.sglang. Unlike the other frameworks, it is using a different base image
+SGLANG_FRAMEWORK_IMAGE="nvcr.io/nvidia/cuda"
+SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
 
 NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
@@ -324,6 +329,9 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+        --no-tag-latest)
+            NO_TAG_LATEST=true
+            ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
             ;;
@@ -465,6 +473,7 @@ show_help() {
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
+    echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -792,6 +801,8 @@ fi
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
     ENABLE_KVBM=true
+else
+    ENABLE_KVBM=false
 fi
 
 if [  ! -z ${ENABLE_KVBM} ]; then
@@ -809,9 +820,16 @@ fi
 if [ -n "${MAX_JOBS}" ]; then
     BUILD_ARGS+=" --build-arg MAX_JOBS=${MAX_JOBS} "
 fi
+
 if [[ $FRAMEWORK == "SGLANG" ]]; then
-    echo "Forcing Python version to 3.10 for sglang image build"
+    echo "Customizing Python, CUDA, and framework images for sglang images"
     BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.10"
+    BUILD_ARGS+=" --build-arg CUDA_VERSION=${SGLANG_CUDA_VERSION}"
+    # Unlike the other two frameworks, SGLang's framework image is different from the base image, so we need to set it explicitly.
+    BUILD_ARGS+=" --build-arg FRAMEWORK_IMAGE=${SGLANG_FRAMEWORK_IMAGE}"
+    BUILD_ARGS+=" --build-arg FRAMEWORK_IMAGE_TAG=${SGLANG_FRAMEWORK_IMAGE_TAG}"
+else
+    BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.12"
 fi
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
@@ -825,9 +843,12 @@ if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
     # Add arguments required for sglang blackwell build
     BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=true --build-arg BUILD_TYPE=blackwell_aarch64"
 fi
-LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
-if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
-    LATEST_TAG="${LATEST_TAG}-${TARGET}"
+LATEST_TAG=""
+if [ -z "${NO_TAG_LATEST}" ]; then
+    LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
+    if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
+        LATEST_TAG="${LATEST_TAG}-${TARGET}"
+    fi
 fi
 
 show_image_options
@@ -841,8 +862,13 @@ fi
 if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
     # Follow 2-step build process for all frameworks
     if [[ $FRAMEWORK != "NONE" ]]; then
-        # Define base image tag before using it
-        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+        # Define base image tag with framework suffix to prevent clobbering
+        # Different frameworks require different base configurations:
+        # - VLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=cuda-dl-base
+        # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
+        # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
+        # Without unique tags, building different frameworks would overwrite each other's names
+        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}-${FRAMEWORK,,}"
         # Start base image build
         echo "======================================"
         echo "Starting Build 1: Base Image"
