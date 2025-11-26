@@ -1,13 +1,13 @@
-ARG CUDA_VERSION=12.9.1
+ARG CUDA_VERSION={{ context.sglang.cuda_version }}
 
 # Runtime image and build-time configuration (aligned with other backends)
 # TODO: OPS-<number>: Use the same runtime image as the other backends
-ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.9.1-cudnn-runtime-ubuntu24.04"
+ARG SGLANG_RUNTIME_IMAGE="{{ context.sglang.runtime_image }}"
+ARG SGLANG_RUNTIME_IMAGE_TAG="{{ context.sglang.runtime_image_tag }}"
 
-ARG PYTHON_VERSION=3.10
-ARG ARCH=amd64
-ARG ARCH_ALT=x86_64
+ARG PYTHON_VERSION={{ context.sglang.python_version }}
+ARG ARCH={{ platform}}
+ARG ARCH_ALT={{ "x86_64" if platform == "amd64" else "aarch64" }}
 ARG CARGO_BUILD_JOBS
 
 # sccache configuration - inherit from base build
@@ -35,15 +35,15 @@ ARG SCCACHE_REGION=""
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS framework
 
 # Declare all ARGs
-ARG BUILD_TYPE=all
-ARG DEEPEP_COMMIT=9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
-ARG DEEPEP_GB_COMMIT=1b14ad661c7640137fcfe93cccb2694ede1220b0
-ARG CMAKE_BUILD_PARALLEL_LEVEL=2
-ARG SGL_KERNEL_VERSION=0.3.16.post5
-ARG SGLANG_COMMIT=0.5.4.post3
-ARG GDRCOPY_COMMIT=v2.4.4
-ARG NVSHMEM_VERSION=3.3.9
-ARG GRACE_BLACKWELL=false
+ARG BUILD_TYPE={{ context.sglang.build_type }}
+ARG DEEPEP_COMMIT={{ context.sglang.deepep_commit }}
+ARG DEEPEP_GB_COMMIT={{ context.sglang.deepep_gb_commit }}
+ARG SGL_KERNEL_VERSION={{ context.sglang.kernel_version }}
+ARG SGLANG_COMMIT={{ context.sglang.commit }}
+ARG GDRCOPY_COMMIT={{ context.sglang.gdrcopy_commit }}
+ARG NVSHMEM_VERSION={{ context.sglang.nvshmem_version }}
+ARG GRACE_BLACKWELL={{ context.sglang.grace_blackwell }}
+ARG CMAKE_BUILD_PARALLEL_LEVEL={{ context.sglang.cmake_build_parallel_level }}
 ARG ARCH
 ARG ARCH_ALT
 ARG PYTHON_VERSION

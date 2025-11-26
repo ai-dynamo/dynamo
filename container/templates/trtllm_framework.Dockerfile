@@ -1,19 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-ARG BASE_IMAGE_TAG="25.10-cuda13.0-devel-ubuntu24.04"
+ARG TRTLLM_BASE_IMAGE={{ context.trtllm.base_image }}
+ARG TRTLLM_BASE_IMAGE_TAG={{ context.trtllm.base_image_tag }}
 
-ARG PYTORCH_BASE_IMAGE="nvcr.io/nvidia/pytorch"
-ARG PYTORCH_BASE_IMAGE_TAG="25.10-py3"
-ARG ENABLE_KVBM=false
-ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-ARG RUNTIME_IMAGE_TAG="25.10-cuda13.0-runtime-ubuntu24.04"
+ARG PYTORCH_BASE_IMAGE={{ context.trtllm.pytorch_base_image }}
+ARG PYTORCH_BASE_IMAGE_TAG={{ context.trtllm.pytorch_base_image_tag }}
+ARG ENABLE_KVBM={{ context.dynamo_base.enable_kvbm }}
+ARG TRTLLM_RUNTIME_IMAGE={{ context.trtllm.runtime_image }}
+ARG TRTLLM_RUNTIME_IMAGE_TAG={{ context.trtllm.runtime_image_tag }}
 
 # TensorRT-LLM specific configuration
 ARG HAS_TRTLLM_CONTEXT=0
-ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
-ARG TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
+ARG TENSORRTLLM_PIP_WHEEL={{ context.trtllm.pip_wheel }}
+ARG TENSORRTLLM_INDEX_URL={{ context.trtllm.index_url }}
 ARG GITHUB_TRTLLM_COMMIT
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -28,10 +28,10 @@ ARG GITHUB_TRTLLM_COMMIT
 #
 # NOTE: There isn't an easy way to define one of these values based on the other value
 # without adding if statements everywhere, so just define both as ARGs for now.
-ARG ARCH=amd64
-ARG ARCH_ALT=x86_64
+ARG ARCH={{ platform }}
+ARG ARCH_ALT={{ "x86_64" if platform == "amd64" else "aarch64" }}
 # Python configuration
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION={{ context.trtllm.python_version }}
 
 # Copy artifacts from NGC PyTorch image
 FROM ${PYTORCH_BASE_IMAGE}:${PYTORCH_BASE_IMAGE_TAG} AS pytorch_base
@@ -49,7 +49,7 @@ FROM ${PYTORCH_BASE_IMAGE}:${PYTORCH_BASE_IMAGE_TAG} AS pytorch_base
 #
 # The completed venv is then copied to runtime stage with dynamo ownership
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
+FROM ${TRTLLM_BASE_IMAGE}:${TRTLLM_BASE_IMAGE_TAG} AS framework
 
 ARG ARCH_ALT
 ARG PYTHON_VERSION
@@ -80,12 +80,12 @@ RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 
 # Copy pytorch installation from NGC PyTorch
-ARG TORCH_VER=2.9.0a0+145a3a7bda.nv25.10
-ARG TORCH_TENSORRT_VER=2.9.0a0
-ARG TORCHVISION_VER=0.24.0a0+094e7af5
-ARG JINJA2_VER=3.1.6
-ARG SYMPY_VER=1.14.0
-ARG FLASH_ATTN_VER=2.7.4.post1+25.10
+ARG TORCH_VER={{ context.trtllm.torch_version }}
+ARG TORCH_TENSORRT_VER={{ context.trtllm.torch_tensorrt_version }}
+ARG TORCHVISION_VER={{ context.trtllm.torchvision_version }}
+ARG JINJA2_VER={{ context.trtllm.jinja2_version }}
+ARG SYMPY_VER={{ context.trtllm.sympy_version }}
+ARG FLASH_ATTN_VER={{ context.trtllm.flash_attn_version }}
 
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch-${TORCH_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch-${TORCH_VER}.dist-info

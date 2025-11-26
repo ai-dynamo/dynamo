@@ -17,7 +17,7 @@
 # - Base for custom application containers
 #
 
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+FROM ${TRTLLM_RUNTIME_IMAGE}:${TRTLLM_RUNTIME_IMAGE_TAG} AS runtime
 
 ARG ARCH_ALT
 ARG ENABLE_KVBM

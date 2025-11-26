@@ -11,10 +11,6 @@ dynamo_base:
   nixl_gdrcopy_ref: v2.5.1
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
   enable_kvbm: "false"
-  
-  # local:
-  #   uid: ""
-  #   gid: ""
 
 vllm:
   ref: v0.11.0
@@ -37,16 +33,38 @@ vllm:
 sglang:
   base_image: nvcr.io/nvidia/cuda-dl-base
   base_image_tag: 25.01-cuda12.8-devel-ubuntu24.04
+  runtime_image: nvcr.io/nvidia/cuda
+  runtime_image_tag: 12.9.1-cudnn-runtime-ubuntu24.04
+  python_version: 3.10
+  cuda_version: 12.9.1
+  build_type: all
+  cmake_build_parallel_level: 2
+  deepep_commit: 9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
+  deepep_gb_commit: 1b14ad661c7640137fcfe93cccb2694ede1220b0
+  kernel_version: 0.3.16.post5
+  commit: 0.5.4.post3
+  gdrcopy_commit: v2.4.4
+  nvshmem_version: 3.3.9
+  grace_blackwell: false
 
 trtllm:
-  base_image: nvcr.io/nvidia/pytorch
-  base_image_tag: 25.10-py3
+  base_image: nvcr.io/nvidia/cuda-dl-base
+  base_image_tag: 25.10-cuda13.0-devel-ubuntu24.04
+  runtime_image: nvcr.io/nvidia/cuda-dl-base
+  runtime_image_tag: 25.10-cuda13.0-runtime-ubuntu24.04
+  pytorch_base_image: nvcr.io/nvidia/pytorch
+  pytorch_base_image_tag: 25.10-py3
+  python_version: 3.12
   index_url: https://pypi.nvidia.com/
   pip_wheel_dir: /tmp/trtllm_wheel/
   pip_wheel: tensorrt-llm==1.2.0rc2
-  commit: ""
-  git_url: ""
-  enable_experimental: false
-  experimental_commit: 31116825b39f4e6a6a1e127001f5204b73d1dc32
-  use_nixl_kvcache_experimental: false
-
+  torch_version: 2.9.0a0+145a3a7bda.nv25.10
+  torch_tensorrt_version: 2.9.0a0
+  torchvision_version: 0.24.0a0+094e7af5
+  jinja2_version: 3.1.6
+  sympy_version: 1.14.0
+  flash_attn_version: 2.7.4.post1+25.10
+  experimental:
+    enable: false
+    commit: 31116825b39f4e6a6a1e127001f5204b73d1dc32
+    use_nixl_kvcache_experimental: false
