@@ -141,6 +141,8 @@ if [[ $VLLM_REF =~ ^v ]] && { [ "$ARCH" = "amd64" ] || { [ "$ARCH" = "arm64" ] &
     echo "Installing vLLM $VLLM_REF from PyPI... (ARCH=$ARCH, TORCH_BACKEND=$TORCH_BACKEND)"
 
     uv pip install vllm[flashinfer]==$VLLM_REF --torch-backend=$TORCH_BACKEND
+    uv pip install flashinfer-cubin==$FLASHINF_REF
+    uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 else
     # VLLM_REF does not start with 'v' or amd64 - use git checkout path
