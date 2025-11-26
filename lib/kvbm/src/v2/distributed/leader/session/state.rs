@@ -47,6 +47,18 @@ impl ControlRole {
     pub fn is_neutral(&self) -> bool {
         matches!(self, ControlRole::Neutral)
     }
+
+    /// Get the opposite role.
+    ///
+    /// - `Controller` ↔ `Controllee`
+    /// - `Neutral` → `Neutral` (no opposite)
+    pub fn opposite(&self) -> ControlRole {
+        match self {
+            ControlRole::Controller => ControlRole::Controllee,
+            ControlRole::Controllee => ControlRole::Controller,
+            ControlRole::Neutral => ControlRole::Neutral,
+        }
+    }
 }
 
 /// Attachment state - whether a peer is connected.

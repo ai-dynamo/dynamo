@@ -31,6 +31,7 @@
 // Core session building blocks (new unified model)
 mod blocks;
 mod endpoint;
+mod endpoint_session;
 mod handle;
 mod state;
 
@@ -52,6 +53,11 @@ pub use blocks::BlockHolder;
 
 /// Point-to-point session endpoint with state machine.
 pub use endpoint::{SessionEndpoint, SessionMessageTx, session_message_channel};
+
+/// Server-side session that processes incoming SessionMessage.
+pub use endpoint_session::{
+    EndpointSession, EndpointSessionCommand, EndpointSessionHandle, create_endpoint_session,
+};
 
 /// Unified handle for controlling remote sessions.
 pub use handle::{SessionHandle, SessionHandleStateTx, session_handle_state_channel};

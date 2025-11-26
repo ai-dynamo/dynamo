@@ -88,6 +88,7 @@ impl SessionEndpoint {
             control_role: ControlRole::default(),
             g2_blocks: Vec::new(),
             g3_pending: 0,
+            ready_layer_range: None,
         };
         let (state_tx, _) = watch::channel(initial_state);
 
@@ -121,6 +122,7 @@ impl SessionEndpoint {
             control_role: role,
             g2_blocks: Vec::new(),
             g3_pending: 0,
+            ready_layer_range: None,
         };
         let (state_tx, _) = watch::channel(initial_state);
 
@@ -182,6 +184,14 @@ impl SessionEndpoint {
     /// Set the session phase.
     pub fn set_phase(&mut self, phase: SessionPhase) {
         self.phase = phase;
+    }
+
+    /// Set the control role.
+    ///
+    /// Use this for direct role changes (e.g., when processing YieldControl
+    /// or AcquireControl messages).
+    pub fn set_control_role(&mut self, role: ControlRole) {
+        self.control_role = role;
     }
 
     /// Accept an attachment from a peer.
@@ -344,6 +354,25 @@ impl SessionEndpoint {
             control_role: self.control_role,
             g2_blocks,
             g3_pending,
+            ready_layer_range: None,
+        });
+    }
+
+    /// Publish state with layer range information.
+    ///
+    /// Used for layerwise transfer where specific layers are ready.
+    pub fn publish_state_with_layer_range(
+        &self,
+        g2_blocks: Vec<BlockInfo>,
+        g3_pending: usize,
+        layer_range: Option<std::ops::Range<usize>>,
+    ) {
+        let _ = self.state_tx.send(SessionStateSnapshot {
+            phase: self.phase,
+            control_role: self.control_role,
+            g2_blocks,
+            g3_pending,
+            ready_layer_range: layer_range,
         });
     }
 

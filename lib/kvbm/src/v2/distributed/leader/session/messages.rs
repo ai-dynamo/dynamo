@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::ops::Range;
+
 use serde::{Deserialize, Serialize};
 
 use crate::v2::{BlockId, InstanceId, SequenceHash, physical::manager::LayoutHandle};
@@ -453,6 +455,10 @@ pub enum SessionMessage {
     },
 
     /// Notification that blocks have been staged.
+    ///
+    /// This message supports layerwise transfer by optionally specifying
+    /// which layer range is ready. When `layer_range` is `None`, all layers
+    /// of the staged blocks are ready for transfer.
     BlocksStaged {
         /// The session.
         session_id: SessionId,
@@ -460,6 +466,15 @@ pub enum SessionMessage {
         staged_blocks: Vec<BlockInfo>,
         /// Count of blocks remaining to stage.
         remaining: usize,
+        /// Layer range that is ready for transfer.
+        ///
+        /// - `None`: All layers are ready (default behavior)
+        /// - `Some(0..1)`: Only layer 0 is ready
+        /// - `Some(0..60)`: Layers 0-59 are ready
+        ///
+        /// This enables layerwise streaming where the sender computes
+        /// layer-by-layer and notifies the receiver as each layer completes.
+        layer_range: Option<Range<usize>>,
     },
 
     // =========================================================================
@@ -544,6 +559,16 @@ pub struct SessionStateSnapshot {
     pub g2_blocks: Vec<BlockInfo>,
     /// Count of blocks pending staging to G2.
     pub g3_pending: usize,
+    /// Layer range that is ready for transfer.
+    ///
+    /// - `None`: All layers are ready (or not applicable)
+    /// - `Some(0..1)`: Only layer 0 is ready
+    /// - `Some(0..60)`: Layers 0-59 are ready
+    ///
+    /// This is updated when receiving `BlocksStaged` messages with `layer_range`.
+    /// The controller can use this to know which layers can be pulled.
+    #[serde(default)]
+    pub ready_layer_range: Option<Range<usize>>,
 }
 
 /// Block information for session messages.

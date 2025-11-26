@@ -16,7 +16,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::watch;
 
-use crate::physical::transfer::TransferCompleteNotification;
+use crate::physical::transfer::{TransferCompleteNotification, TransferOptions};
 use crate::v2::distributed::parallelism::ParallelWorker;
 use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::{BlockId, InstanceId, SequenceHash};
@@ -194,6 +194,14 @@ impl SessionHandle {
         self.state_rx.borrow().g3_pending
     }
 
+    /// Get the layer range that is ready for transfer.
+    ///
+    /// Returns `None` if all layers are ready or layerwise tracking is not active.
+    /// Returns `Some(range)` if only specific layers are ready.
+    pub fn ready_layer_range(&self) -> Option<std::ops::Range<usize>> {
+        self.state_rx.borrow().ready_layer_range.clone()
+    }
+
     // =========================================================================
     // Control Commands
     // =========================================================================
@@ -356,6 +364,72 @@ impl SessionHandle {
             Default::default(),
         )
     }
+
+    /// Pull blocks from remote G2 to local G2 via RDMA with transfer options.
+    ///
+    /// This method allows specifying transfer options like layer range for
+    /// layerwise transfer. Use this when you only want to pull specific layers.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Pull only layer 0
+    /// let notification = handle.pull_blocks_rdma_with_options(
+    ///     &state.g2_blocks,
+    ///     &local_block_ids,
+    ///     TransferOptions::builder().layer_range(0..1).build(),
+    /// ).await?;
+    /// notification.await?;
+    /// ```
+    pub async fn pull_blocks_rdma_with_options(
+        &mut self,
+        blocks: &[BlockInfo],
+        local_dst_block_ids: &[BlockId],
+        options: TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        self.ensure_metadata_imported().await?;
+        self.pull_blocks_rdma_with_options_explicit(blocks, local_dst_block_ids, options)
+    }
+
+    /// Pull blocks with options and explicit metadata pre-import.
+    ///
+    /// Caller must have already ensured metadata is imported.
+    pub fn pull_blocks_rdma_with_options_explicit(
+        &self,
+        blocks: &[BlockInfo],
+        local_dst_block_ids: &[BlockId],
+        options: TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        let parallel_worker = self
+            .parallel_worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("RDMA support not configured"))?;
+
+        if !parallel_worker.has_remote_metadata(self.remote_instance) {
+            anyhow::bail!(
+                "Remote metadata not imported for instance {}",
+                self.remote_instance
+            );
+        }
+
+        if blocks.len() != local_dst_block_ids.len() {
+            anyhow::bail!(
+                "Block count mismatch: source={}, destination={}",
+                blocks.len(),
+                local_dst_block_ids.len()
+            );
+        }
+
+        let src_block_ids: Vec<BlockId> = blocks.iter().map(|b| b.block_id).collect();
+
+        parallel_worker.execute_remote_onboard_for_instance(
+            self.remote_instance,
+            LogicalLayoutHandle::G2,
+            src_block_ids,
+            LogicalLayoutHandle::G2,
+            local_dst_block_ids.to_vec().into(),
+            options,
+        )
+    }
 }
 
 /// Sender for state updates to SessionHandle.
@@ -389,11 +463,23 @@ impl SessionHandleStateTx {
     }
 
     /// Add newly staged blocks.
-    pub fn add_staged_blocks(&self, staged: Vec<BlockInfo>, g3_remaining: usize) {
+    ///
+    /// # Arguments
+    /// * `staged` - Blocks that have been staged
+    /// * `g3_remaining` - Count of G3 blocks still pending
+    /// * `layer_range` - Optional layer range that is ready for transfer
+    pub fn add_staged_blocks(
+        &self,
+        staged: Vec<BlockInfo>,
+        g3_remaining: usize,
+        layer_range: Option<std::ops::Range<usize>>,
+    ) {
         self.tx.send_modify(|state| {
             state.g2_blocks.extend(staged);
             state.g3_pending = g3_remaining;
-            if g3_remaining == 0 {
+            state.ready_layer_range = layer_range;
+            if g3_remaining == 0 && state.ready_layer_range.is_none() {
+                // All blocks staged and no layer tracking = fully ready
                 state.phase = SessionPhase::Ready;
             }
         });
@@ -415,6 +501,7 @@ pub fn session_handle_state_channel()
         control_role: ControlRole::Controllee,
         g2_blocks: Vec::new(),
         g3_pending: 0,
+        ready_layer_range: None,
     };
     let (tx, rx) = watch::channel(initial);
     (SessionHandleStateTx::new(tx), rx)

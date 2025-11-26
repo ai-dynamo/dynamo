@@ -35,10 +35,12 @@ use super::{
     StagingMode,
     nova::{ExportMetadataCallback, NovaLeaderService},
     session::{
+        BlockHolder,
         ControlRole,
         ControllableSession,
         ControllableSessionOptions,
         ControllableSessionResult,
+        EndpointSessionHandle,
         InitiatorSession,
         MessageTransport,
         OnboardMessage,
@@ -52,6 +54,7 @@ use super::{
         SessionMessage,
         SessionMessageTx,
         SessionPhase,
+        create_endpoint_session,
         remote_session_state_channel,
         session_handle_state_channel,
         session_message_channel,
@@ -286,7 +289,8 @@ impl InstanceLeader {
         let mut service = NovaLeaderService::new(self.nova.clone(), self.sessions.clone())
             .with_spawn_responder(spawn_responder)
             .with_controllable_sessions(self.controllable_sessions.clone())
-            .with_remote_sessions(self.remote_sessions.clone());
+            .with_remote_sessions(self.remote_sessions.clone())
+            .with_session_sessions(self.session_sessions.clone());
 
         if let Some(callback) = export_metadata_callback {
             service = service.with_export_metadata(callback);
@@ -572,6 +576,137 @@ impl InstanceLeader {
         Ok(handle)
     }
 
+    // ========================================================================
+    // Endpoint Session Creation (Server-Side)
+    // ========================================================================
+
+    /// Create an endpoint session that a remote peer can attach to.
+    ///
+    /// This searches local G2/G3 for blocks matching the given sequence hashes
+    /// and creates a session that exposes them for remote RDMA pull.
+    ///
+    /// Returns `(session_id, handle)` where:
+    /// - `session_id` - Send to remote peer for attachment
+    /// - `handle` - Use to control the session (send layer notifications, close)
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Create session for sequence hashes
+    /// let (session_id, handle) = leader.create_endpoint_session(&hashes)?;
+    ///
+    /// // Send session_id to remote peer out-of-band
+    /// // Remote attaches via: remote_leader.attach_session(local_id, session_id)
+    ///
+    /// // For layerwise transfer, notify when layers are ready
+    /// handle.notify_layers_ready(0..1).await?;
+    /// ```
+    pub fn create_endpoint_session(
+        &self,
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<(SessionId, EndpointSessionHandle)> {
+        let session_id = SessionId::from(uuid::Uuid::new_v4());
+
+        // Local search
+        let g2_matches = self.g2_manager.match_blocks(sequence_hashes);
+
+        // Collect layout handles from matched blocks
+        let layout_handles: Vec<LayoutHandle> = self
+            .workers
+            .iter()
+            .filter_map(|w| w.g2_handle())
+            .collect();
+
+        // Get sequence hashes from matched blocks
+        let matched_hashes: Vec<SequenceHash> =
+            g2_matches.iter().map(|b| b.sequence_hash()).collect();
+
+        // Create the session channel
+        let (msg_tx, msg_rx) = session_message_channel(100);
+        self.session_sessions.insert(session_id, msg_tx);
+
+        // Create BlockHolder from matched blocks
+        let block_holder = BlockHolder::new(g2_matches);
+
+        // Create the session and handle
+        let (session, handle) = create_endpoint_session(
+            session_id,
+            self.nova.instance_id(),
+            block_holder,
+            layout_handles,
+            matched_hashes,
+            self.transport.clone(),
+            msg_rx,
+        );
+
+        // Spawn the session task
+        let session_sessions = self.session_sessions.clone();
+        tokio::spawn(async move {
+            if let Err(e) = session.run().await {
+                eprintln!("EndpointSession error: {e}");
+            }
+            // Clean up when session completes
+            session_sessions.remove(&session_id);
+        });
+
+        Ok((session_id, handle))
+    }
+
+    /// Create an endpoint session for specific pre-allocated blocks.
+    ///
+    /// Unlike `create_endpoint_session`, this doesn't search - it uses the
+    /// provided blocks directly. Useful when the caller already has blocks
+    /// to expose (e.g., after prefill computation).
+    ///
+    /// # Arguments
+    /// * `blocks` - Blocks to expose for RDMA pull
+    /// * `sequence_hashes` - Sequence hashes for the blocks (must match block count)
+    /// * `layout_handles` - Layout handles for the blocks (must match block count)
+    ///
+    /// # Example
+    /// ```ignore
+    /// // After prefill computation, expose blocks for Decode to pull
+    /// let (session_id, handle) = leader.create_endpoint_session_for_blocks(
+    ///     prefill_blocks,
+    ///     &hashes,
+    ///     &layout_handles,
+    /// )?;
+    /// ```
+    pub fn create_endpoint_session_for_blocks(
+        &self,
+        blocks: BlockHolder<G2>,
+        sequence_hashes: &[SequenceHash],
+        layout_handles: &[LayoutHandle],
+    ) -> Result<(SessionId, EndpointSessionHandle)> {
+        let session_id = SessionId::from(uuid::Uuid::new_v4());
+
+        // Create the session channel
+        let (msg_tx, msg_rx) = session_message_channel(100);
+        self.session_sessions.insert(session_id, msg_tx);
+
+        // Create the session and handle
+        let (session, handle) = create_endpoint_session(
+            session_id,
+            self.nova.instance_id(),
+            blocks,
+            layout_handles.to_vec(),
+            sequence_hashes.to_vec(),
+            self.transport.clone(),
+            msg_rx,
+        );
+
+        // Spawn the session task
+        let session_sessions = self.session_sessions.clone();
+        tokio::spawn(async move {
+            if let Err(e) = session.run().await {
+                eprintln!("EndpointSession error: {e}");
+            }
+            // Clean up when session completes
+            session_sessions.remove(&session_id);
+        });
+
+        Ok((session_id, handle))
+    }
+
     /// Internal: Process incoming SessionMessage for a session.
     async fn run_session_receiver(
         mut rx: mpsc::Receiver<SessionMessage>,
@@ -585,9 +720,10 @@ impl InstanceLeader {
                 SessionMessage::BlocksStaged {
                     staged_blocks,
                     remaining,
+                    layer_range,
                     ..
                 } => {
-                    state_tx.add_staged_blocks(staged_blocks, remaining);
+                    state_tx.add_staged_blocks(staged_blocks, remaining, layer_range);
                 }
                 SessionMessage::Error { message, .. } => {
                     eprintln!("Session error: {}", message);
