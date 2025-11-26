@@ -1780,13 +1780,15 @@ mod tests_startup_helpers {
         // === STEP 4 & 5: Recovery - Apply buffered events to router ===
         // This simulates: router.query_worker_local_kv(worker_1_id)
         // followed by applying the returned events
+        // TODO be able to identify which event id is the last that Router has,
+        // and query worker(s) for buffer starting after it
         for (worker_id, event) in buffered {
             let router_event = RouterEvent::new(worker_id, event);
             router_indexer
                 .event_sender()
                 .send(router_event)
                 .await
-                .unwrap();
+                .unwrap(); // TODO use apply_event() instead?
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
