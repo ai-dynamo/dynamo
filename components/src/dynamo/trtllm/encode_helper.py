@@ -262,7 +262,7 @@ class EncodeHelper:
                 )
                 await readable_op.wait_for_completion()
                 logging.debug("EncodeHelper completed readable operation.")
-        else if image_urls and text_prompt:
+        elif image_urls and text_prompt:
             logging.info(
                 "========== ENCODE WORKER: Full EPD - Using MultimodalEncoder =========="
             )
