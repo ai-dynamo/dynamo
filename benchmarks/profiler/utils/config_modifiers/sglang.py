@@ -208,10 +208,15 @@ class SGLangConfigModifier:
         args = remove_valued_arguments(args, "--tp-size")
         args = remove_valued_arguments(args, "--tensor-parallel-size")
 
-        # Remove --ep-size / --ep if present
+        # Remove --ep if present
         args = remove_valued_arguments(args, "--ep")
         args = remove_valued_arguments(args, "--ep-size")
         args = remove_valued_arguments(args, "--expert-parallel-size")
+
+        # remove --dp if present
+        args = remove_valued_arguments(args, "--dp")
+        args = remove_valued_arguments(args, "--dp-size")
+        args = remove_valued_arguments(args, "--data-parallel-size")
 
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
