@@ -34,10 +34,10 @@ Learn fundamental Dynamo concepts through these introductory examples:
 
 These examples show how Dynamo broadly works using major inference engines.
 
-If you want to see advanced, framework-specific deployment patterns and best practices, check out the [Components Workflows](../components/backends/) directory:
-- **[vLLM](../components/backends/vllm/)** – vLLM-specific deployment and configuration
-- **[SGLang](../components/backends/sglang/)** – SGLang integration examples and workflows
-- **[TensorRT-LLM](../components/backends/trtllm/)** – TensorRT-LLM workflows and optimizations
+If you want to see advanced, framework-specific deployment patterns and best practices, check out the [Examples Backends](../examples/backends/) directory:
+- **[vLLM](backends/vllm/)** – vLLM-specific deployment and configuration
+- **[SGLang](backends/sglang/)** – SGLang integration examples and workflows
+- **[TensorRT-LLM](backends/trtllm/)** – TensorRT-LLM workflows and optimizations
 
 ## Deployment Examples
 

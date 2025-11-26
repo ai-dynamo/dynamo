@@ -418,7 +418,7 @@ def process_test_directory(test_dir, sla):
     }
 
 
-def main(logs_dir, tablefmt, log_paths=None, sla=None):
+def main(logs_dir, tablefmt, log_paths=None, sla=None, print_output=True):
     """Main entry point for parsing legacy client results.
 
     Args:
@@ -426,6 +426,7 @@ def main(logs_dir, tablefmt, log_paths=None, sla=None):
         tablefmt: Table format for output (e.g., "fancy_grid")
         log_paths: Optional list of specific log paths to process
         sla: Optional SLA threshold for latency violations
+        print_output: If True, print tables and summaries. If False, only return results.
     """
     results = []
 
@@ -542,19 +543,81 @@ def main(logs_dir, tablefmt, log_paths=None, sla=None):
                 ]
             rows.append(row)
 
-        print(f"\nTest Group: {test_prefix}")
-        print(
-            tabulate(
-                rows,
-                headers,
-                tablefmt=tablefmt,
-                floatfmt=".2f",
-                missingval="N/A",
-                numalign="right",
-                stralign="center",
+        if print_output:
+            logging.info(f"\nTest Group: {test_prefix}")
+            logging.info(
+                "\n"
+                + tabulate(
+                    rows,
+                    headers,
+                    tablefmt=tablefmt,
+                    floatfmt=".2f",
+                    missingval="N/A",
+                    numalign="right",
+                    stralign="center",
+                )
             )
-        )
-        print("\n" + "=" * 80)
+            logging.info("\n" + "=" * 80)
+
+    # Return results for programmatic use (e.g., validation)
+    # Transform legacy format to validation-compatible format
+    if results and len(results) == 1:
+        # Single test result - return in validation-compatible format
+        r = results[0]
+        success_before = r.get("success_before_requests") or 0
+        failed_before = r.get("failed_before_requests") or 0
+        success_after = r.get("success_after_requests") or 0
+        failed_after = r.get("failed_after_requests") or 0
+
+        return {
+            "log_dir": log_paths[0] if log_paths else logs_dir,
+            "num_clients": 10,  # Default from Load config
+            "startup_time": r.get("start_time"),
+            "recovery_time": r.get("recovery_time"),
+            "metrics": {
+                "total_requests": success_before
+                + failed_before
+                + success_after
+                + failed_after,
+                "successful_requests": success_before + success_after,
+                "failed_requests": failed_before + failed_after,
+                "latencies": [],  # Legacy doesn't track per-client latencies
+                "p50_latencies": [],
+                "p90_latencies": [],
+                "p99_latencies": [],
+                "ttft": [],
+                "itl": [],
+                "throughputs": [],
+                "num_clients": 10,
+            },
+        }
+    elif results:
+        # Multiple test results - return list
+        return [
+            {
+                "log_dir": r.get("test", ""),
+                "metrics": {
+                    "total_requests": (
+                        (r.get("success_before_requests") or 0)
+                        + (r.get("failed_before_requests") or 0)
+                        + (r.get("success_after_requests") or 0)
+                        + (r.get("failed_after_requests") or 0)
+                    ),
+                    "successful_requests": (
+                        (r.get("success_before_requests") or 0)
+                        + (r.get("success_after_requests") or 0)
+                    ),
+                    "failed_requests": (
+                        (r.get("failed_before_requests") or 0)
+                        + (r.get("failed_after_requests") or 0)
+                    ),
+                },
+                "recovery_time": r.get("recovery_time"),
+            }
+            for r in results
+        ]
+
+    return None
 
 
 if __name__ == "__main__":

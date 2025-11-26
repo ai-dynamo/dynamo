@@ -6,7 +6,7 @@ use axum::{http::Method, response::IntoResponse, routing::post, Json, Router};
 use serde_json::json;
 use std::sync::Arc;
 
-use dynamo_runtime::{pipeline::PushRouter, stream::StreamExt};
+use dynamo_runtime::{discovery::DiscoveryQuery, pipeline::PushRouter, stream::StreamExt};
 
 pub const CLEAR_KV_ENDPOINT: &str = "clear_kv_blocks";
 
@@ -150,7 +150,14 @@ async fn clear_kv_blocks_handler(
             }
         };
 
-        let instances = match component_obj.list_instances().await {
+        let discovery_client = distributed.discovery();
+        let discovery_key = DiscoveryQuery::Endpoint {
+            namespace: namespace.clone(),
+            component: component.clone(),
+            endpoint: CLEAR_KV_ENDPOINT.to_string(),
+        };
+
+        let discovery_instances = match discovery_client.list(discovery_key).await {
             Ok(instances) => instances,
             Err(e) => {
                 add_worker_result(
@@ -165,11 +172,11 @@ async fn clear_kv_blocks_handler(
             }
         };
 
-        if instances.is_empty() {
+        if discovery_instances.is_empty() {
             add_worker_result(
                 false,
                 entry_name,
-                "No instances found for worker group",
+                "No instances found for clear_kv_blocks endpoint",
                 namespace,
                 component,
                 None,
@@ -177,30 +184,13 @@ async fn clear_kv_blocks_handler(
             continue;
         }
 
-        let instances_filtered = instances
-            .clone()
+        let instances_filtered: Vec<dynamo_runtime::component::Instance> = discovery_instances
             .into_iter()
-            .filter(|instance| instance.endpoint == CLEAR_KV_ENDPOINT)
-            .collect::<Vec<_>>();
-
-        if instances_filtered.is_empty() {
-            let found_endpoints: Vec<String> = instances
-                .iter()
-                .map(|instance| instance.endpoint.clone())
-                .collect();
-            add_worker_result(
-                false,
-                entry_name,
-                &format!(
-                    "Worker group doesn't support clear_kv_blocks. Supported endpoints: {}",
-                    found_endpoints.join(", ")
-                ),
-                namespace,
-                component,
-                None,
-            );
-            continue;
-        }
+            .filter_map(|di| match di {
+                dynamo_runtime::discovery::DiscoveryInstance::Endpoint(instance) => Some(instance),
+                _ => None,
+            })
+            .collect();
 
         for instance in &instances_filtered {
             let instance_name = format!("{}-instance-{}", entry.name, instance.id());

@@ -30,6 +30,8 @@ spec:
           memory: "100Gi"
           gpu: "2"
       envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
         # MoE-specific environment variables
         - name: VLLM_ALL2ALL_BACKEND
           value: "pplx"
@@ -52,7 +54,7 @@ spec:
         - name: nvcr-imagepullsecret
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
           - python3
           - -m
@@ -95,6 +97,8 @@ spec:
           memory: "100Gi"
           gpu: "2"
       envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
         # MoE-specific environment variables
         - name: VLLM_ALL2ALL_BACKEND
           value: "pplx"
@@ -117,7 +121,7 @@ spec:
         - name: nvcr-imagepullsecret
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
           - python3
           - -m

@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                     @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                @@@@@@@@@@@@@@@     @@@@@@@@@@@@@@@@@@@@@@@@@
+             @@@@@@@@@@   @@@@@@@@@@    @@@@@@@@@@@@@@@@@@@@@
+          @@@@@@@@     @@@@@@@@@@@@@@@@   @@@@@@@@@@@@@@@@@@@
+        @@@@@@@    @@@@@@@@      @@@@@@@    @@@@@@@@@@@@@@@@@
+      @@@@@@@@   @@@@@@@  @@@@      @@@@@@    @@@@@@@@@@@@@@@
+      @@@@@@@   @@@@@@    @@@@@@   @@@@@@@   @@@@@@@@@@@@@@@@
+       @@@@@@@  @@@@@@    @@@@@@@@@@@@@@    @@@@@@@@@@@@@@@@@
+        @@@@@@   @@@@@@   @@@@@@@@@@@@    @@@@@@@@@@@@@@@@@@@
+         @@@@@@@  @@@@@@@ @@@@@@@@@@   @@@@@@@@@      @@@@@@@
+           @@@@@@   @@@@@@@@@@@@@    @@@@@@@@         @@@@@@@
+             @@@@@@    @@@@     @@@@@@@@@@          @@@@@@@@@
+               @@@@@@@    @@@@@@@@@@@@@        @@@@@@@@@@@@@@
+                 @@@@@@@@@@@@@@@@@        @@@@@@@@@@@@@@@@@@@
+                     @@@@@@       @@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                          @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+  @@@@@@@@@     @@@@      @@@@ @@@@  @@@@@@@@       @@@@       @@@@@
+ @@@@@@@@@@@@@  @@@@@    @@@@@ @@@@@ @@@@@@@@@@@@@  @@@@@     @@@@@@@
+ @@@@@@@@@@@@@@ @@@@@@  @@@@@  @@@@@ @@@@@@@@@@@@@@ @@@@@    @@@@@@@@@
+ @@@@@    @@@@@@@@@@@@  @@@@@  @@@@@ @@@@@    @@@@@ @@@@@   @@@@@ @@@@@
+ @@@@@     @@@@@ @@@@@@@@@@@   @@@@@ @@@@@    @@@@@ @@@@@  @@@@@  @@@@@@
+ @@@@@     @@@@@  @@@@@@@@@@   @@@@@ @@@@@   @@@@@@ @@@@@  @@@@@@@@@@@@@
+ @@@@@     @@@@@  @@@@@@@@@    @@@@@ @@@@@@@@@@@@@@ @@@@@ @@@@@@@@@@@@@@@
+ @@@@@     @@@@@   @@@@@@@     @@@@@ @@@@@@@@@@@@@  @@@@@@@@@@@     @@@@@@
+  @@@       @@@      @@@@       @@@   @@@@@@@        @@   @@@         @@@  ®
+
+Dynamo: A Datacenter Scale Distributed Inference Serving Framework
+
+This is a minimum runtime container for interacting with Dynamo via our CLI
+tools.
+
+Try the following to begin interacting with a model:
+> python -m dynamo.frontend [--http-port 8000]
+> python -m dynamo.{vllm,sglang,trtllm} --model Qwen/Qwen2.5-3B-Instruct
+
+To run more complete deployment examples, instances of etcd and nats need to be
+accessible within the container. This is generally done by connecting to
+existing etcd/nats services from the host or other containers. For simple
+cases, you can start them in the container as well:
+> nats-server -js &
+> etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
+
+With etcd/nats accessible, run the examples:
+> cd examples
+
+

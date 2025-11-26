@@ -119,6 +119,17 @@ The following failure types are defined in `scenarios.py`:
 | `sglang_prefill_scheduler`    | Terminate SGLang prefill scheduler process.        | `SIGKILL` to `sglang::scheduler`| sglang only         |
 | `sglang_prefill_detokenizer`  | Terminate SGLang prefill detokenizer process.      | `SIGKILL` to `sglang::detokenizer`| sglang only         |
 
+#### Token Overflow Tests
+
+In addition to process and pod failures, the suite includes tests for **token overflow**, where the model receives an input prompt larger than its configured `max_seq_len`. These tests are crucial for verifying that the system can gracefully reject invalid requests without crashing.
+
+- **Failure Injection**: Unlike other tests, this failure is injected from the **client side**. The `aiperf` client is configured to send a batch of requests with oversized token lengths.
+- **Two-Phase Execution**: These tests run in two distinct phases, creating separate log directories for each:
+  1.  **`overflow` Phase**: Sends oversized requests. The expected outcome is a high rate of failed requests (rejections) as the server correctly identifies and blocks them.
+  2.  **`recovery` Phase**: Immediately after the overflow phase, sends valid, normal-sized requests. The expected outcome is a high success rate, confirming that the system has recovered and remains operational.
+
+The combined results of these two phases demonstrate both the system's ability to reject invalid inputs and its stability after handling them.
+
 #### Example Scenario Breakdown
 
 **Scenario**: `sglang-agg-tp-2-dp-1-decode_worker`
@@ -130,10 +141,16 @@ The following failure types are defined in `scenarios.py`:
 
 #### Example Scenario Execution:
 
-Run all deployments and failure scenarios
+Run standard deployments and failure scenarios (excludes custom builds by default):
 
 ```bash
 pytest tests/fault_tolerance/deploy/test_deployment.py -s -v --namespace ${NAMESPACE}
+```
+
+To include all scenarios including custom builds (e.g., MoE models):
+
+```bash
+pytest tests/fault_tolerance/deploy/test_deployment.py -s -v --namespace ${NAMESPACE} --include-custom-build
 ```
 
 ### Test Results Directory
@@ -218,6 +235,179 @@ test_fault_scenario[sglang-agg-tp-1-dp-1-frontend]
 {"time": "2025-10-03T10:30:45", "results": [{"status": 200, "request_elapsed_time": 1.23, "url": "http://localhost:8000/v1/chat/completions", "pod": "frontend-pod"}], "total_time": 1.25}
 {"time": "2025-10-03T10:30:47", "results": [{"status": 200, "request_elapsed_time": 1.18, "url": "http://localhost:8000/v1/chat/completions", "pod": "frontend-pod"}], "total_time": 1.20}
 ```
+
+## Validation Framework
+
+### Overview
+
+The fault tolerance test suite includes an automated validation framework that verifies both the test execution and the results. Validation runs automatically after each test completes, ensuring that:
+
+1. **The failure was actually injected** (Stage 1: Scenario Verification)
+2. **The system recovered appropriately** (Stage 2: Results Verification)
+
+### Two-Stage Validation Approach
+
+#### Stage 1: Scenario Verification
+
+Verifies that the test scenario executed correctly by checking Kubernetes events and pod states:
+
+**For Pod Deletions (`*_pod` failures):**
+- Confirms specific pods were deleted via K8s events (`Killing`, `Terminating`)
+- Validates pod recreation and lifecycle transitions
+- Logs deletion confirmation with timestamps
+
+**For Process Terminations (non-`*_pod` failures):**
+- Checks container restart counts (`restartCount` field)
+- Looks for container restart events (`Started`, `BackOff`, `CrashLoopBackOff`)
+- **Main process terminations** (e.g., `decode_worker`) → container restarts (verifiable via `restartCount`)
+- **Subprocess terminations** (e.g., `sglang_*_scheduler`, `sglang_*_detokenizer`) → no container restart (subprocess becomes zombie/defunct). These produce warnings but are documented known limitations (see Backend-Specific Validations below)
+
+**Example Stage 1 Output:**
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    STAGE 1: SCENARIO VERIFICATION                            ║
+║          (Verify test scenario executed correctly)                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+────────────────────────────────────────────────────────────────────────────────
+1.1 Verifying Specific Pod Deletion via K8s Events
+────────────────────────────────────────────────────────────────────────────────
+Target pod(s) for deletion: ['fault-tolerance-test-0-vllmdecodeworker-abc123']
+
+✓ DELETION CONFIRMED: [Normal] Killing - Stopping container main
+✓ Pod fault-tolerance-test-0-vllmdecodeworker-abc123 deletion verified via K8s events
+✓ STAGE 1.1 PASSED: Pod deletion confirmed via K8s events
+```
+
+#### Stage 2: Results Verification
+
+Validates system behavior based on deployment redundancy:
+
+**High Availability (DP > 1):**
+- Success rate: ≥99%
+- Recovery time: <60 seconds
+- Minimal impact on ongoing requests
+
+**Single Worker (DP = 1):**
+- Success rate: ≥10% (allows for failures during recovery)
+- Recovery time: <180 seconds
+- System eventually recovers
+
+**Baseline (No Failures):**
+- Success rate: 100%
+- No failed requests
+
+**Example Stage 2 Output:**
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    STAGE 2: RESULTS VERIFICATION                             ║
+║                 (Single worker - no redundancy)                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+────────────────────────────────────────────────────────────────────────────────
+2.1 Basic Recovery Check
+────────────────────────────────────────────────────────────────────────────────
+✓ System recovered: 1470 requests succeeded
+
+────────────────────────────────────────────────────────────────────────────────
+2.2 Success Rate Validation (Single Worker)
+────────────────────────────────────────────────────────────────────────────────
+Success rate: 98.00% (1470/1500 requests)
+✓ STAGE 2.2 PASSED: Success rate meets threshold (10%)
+
+────────────────────────────────────────────────────────────────────────────────
+2.3 Recovery Time Validation
+────────────────────────────────────────────────────────────────────────────────
+Recovery time: 150.52 seconds
+✓ STAGE 2.3 PASSED: Recovery time within acceptable range (180s max)
+```
+
+### Validation Architecture
+
+The validation system uses a **factory pattern** for flexible, extensible validation:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              test_deployment.py                              │
+│           (validation_context fixture)                       │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ After test completes
+                       │
+          ┌────────────▼─────────────┐
+          │   checker_factory.py     │
+          │   (Checker Factory)      │
+          └──────┬───────────┬───────┘
+                 │           │
+    ┌────────────▼───┐  ┌───▼────────────────┐
+    │ Scenario       │  │ Results            │
+    │ Checkers       │  │ Checkers           │
+    │ (Stage 1)      │  │ (Stage 2)          │
+    └────────┬───────┘  └───┬────────────────┘
+             │              │
+    ┌────────▼───────┐  ┌───▼────────────────┐
+    │ k8s_utils.py   │  │ validation_checks  │
+    │ - Pod events   │  │ - Success rate     │
+    │ - Restart cnt  │  │ - Recovery time    │
+    └────────────────┘  └────────────────────┘
+```
+
+### Factory Functions
+
+#### `get_checkers_for_scenario(test_name, scenario)`
+
+Determines which checkers to run based on:
+
+1. **Explicit checkers** in `scenario.checkers` (highest priority)
+   - Allows scenarios to specify custom checker lists
+2. **Pattern matching** on test name:
+   - Delegates to `get_scenario_checker()` for Stage 1
+   - Delegates to `get_results_checker()` for Stage 2
+
+#### `get_scenario_checker(test_name, scenario)`
+
+Selects scenario checker (Stage 1) based on test name pattern:
+
+- `*-none]` → `NoFailureChecker` (baseline)
+- `*_pod]` → `PodDeletionChecker` (pod deletions)
+- `*decode_worker]`, `*prefill_worker]`, `*frontend]`, `*scheduler]`, `*detokenizer]`, `*engine_core]` → `ProcessTerminationChecker` (process terminations)
+
+#### `get_results_checker(test_name, scenario)`
+
+Selects results checker (Stage 2) based on deployment redundancy:
+
+- `*-none]` → `BaselineResultsChecker` (100% success required)
+- **DP > 1** → `HighAvailabilityResultsChecker` (≥90% success, ≤60s recovery)
+- **DP = 1** → `SingleWorkerResultsChecker` (≥10% success, ≤180s recovery)
+
+### Backend-Specific Validations
+
+#### SGLang Subprocess Limitations
+
+SGLang has a **known limitation** where subprocess termination leads to zombie processes without automatic recovery:
+
+**Affected Failures:**
+- `sglang_decode_scheduler` - Scheduler subprocess becomes `<defunct>`
+- `sglang_decode_detokenizer` - Detokenizer subprocess becomes `<defunct>`
+
+**Expected Behavior:**
+```
+Process killed → becomes zombie (PID exists with Z state, <defunct>)
+Container does NOT restart (main process PID 1 still running)
+No new subprocess spawned
+System does NOT recover automatically
+```
+
+**Validation Approach:**
+- Confirms container restart count = 0 (subprocess kill, not container crash)
+- Documents limitation in test output
+- Does not expect recovery
+
+#### vLLM Disaggregated Prefill Worker Resilience
+
+vLLM decode workers use `--kv-connector-role kv_both` by default, allowing them to handle both prefill and decode operations. When a prefill worker fails, decode workers automatically take over prefill requests, resulting in 100% success rate with minimal impact.
+
+**Expected Behavior:** Prefill worker failures don't cause request failures - this is vLLM's built-in fault tolerance, not a test issue.
 
 ### Summary Results
 
@@ -392,7 +582,6 @@ graph LR
     style DecodePool stroke:#000,stroke-width:2px
 ```
 
-
 #### Summary:
 
 
@@ -480,9 +669,53 @@ Then run the development container mounting the workspace and your kube config.
 
 ### Run the tests
 
+#### Default: Run Standard Tests Only
+
+By default, tests requiring custom builds (e.g., MoE models) are **automatically excluded**:
+
 ```bash
-pytest tests/fault_tolerance/deploy/test_deployment.py -s -v --namespace ${NAMESPACE} --image ${IMAGE}
+# Standard tests only
+pytest tests/fault_tolerance/deploy/test_deployment.py -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${IMAGE}
 ```
+
+#### Include Custom Build Tests
+
+To run ALL tests including those requiring custom builds (e.g., MoE models):
+
+```bash
+pytest tests/fault_tolerance/deploy/test_deployment.py -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${IMAGE} \
+  --include-custom-build
+```
+
+#### Run Only Custom Build Tests
+
+To run ONLY tests that require custom builds:
+
+```bash
+pytest tests/fault_tolerance/deploy/test_deployment.py -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${IMAGE} \
+  -m "custom_build"
+```
+
+#### List Available Tests
+
+```bash
+# See which tests will run by default (excludes custom_build)
+pytest tests/fault_tolerance/deploy/test_deployment.py --collect-only -q
+
+# See which tests are excluded
+pytest tests/fault_tolerance/deploy/test_deployment.py --collect-only -m "custom_build" -q
+```
+
+> **Note:** Tests requiring custom builds are marked with `@pytest.mark.custom_build` and include:
+> - MoE (Mixture-of-Experts) models like DeepSeek-V2-Lite
+> - Tests requiring special Docker image configurations
+> - Any scenario with `requires_custom_build=True` in scenarios.py
 
 
 ### Note on Running with Additional Credentials
@@ -596,3 +829,5 @@ Test Group: vllm-agg-tp-1-dp-2
 ╘═══════════════════╧═══════════╧═══════════╧══════════╧═══════════╧══════════╧═══════════╧═══════════╧════════════╛
 
 ```
+
+

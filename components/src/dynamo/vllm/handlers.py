@@ -4,24 +4,36 @@
 import asyncio
 import logging
 import os
+import tempfile
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Final
 
 from vllm.inputs import TokensPrompt
+from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from dynamo.llm import ZmqKvEventPublisher
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
+from .multimodal_utils.image_loader import ImageLoader
+
+# Multimodal data dictionary keys
+IMAGE_URL_KEY: Final = "image_url"
+VIDEO_URL_KEY: Final = "video_url"
+URL_VARIANT_KEY: Final = "Url"
+DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
 def build_sampling_params(
-    request: Dict[str, Any], default_sampling_params: Dict[str, Any]
+    request: Dict[str, Any],
+    default_sampling_params: Dict[str, Any],
+    model_max_len: int | None = None,
 ) -> SamplingParams:
     """
     Build SamplingParams from a PreprocessedRequest.
@@ -49,6 +61,15 @@ def build_sampling_params(
                 continue
             setattr(sampling_params, key, value)
 
+    # If max_tokens wasn't provided (None or missing), compute a dynamic default
+    provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
+    token_ids = request.get("token_ids", [])
+    input_length = len(token_ids)
+    if model_max_len is not None and (provided_max_tokens is None):
+        # Ensure at least 1 token generation by default when possible
+        dynamic_default = max(1, model_max_len - input_length)
+        sampling_params.max_tokens = dynamic_default
+
     return sampling_params
 
 
@@ -57,13 +78,25 @@ class BaseWorkerHandler(ABC):
     Request handler for the generate and clear_kv_blocks endpoints.
     """
 
-    def __init__(self, runtime, component, engine, default_sampling_params):
+    def __init__(
+        self,
+        runtime,
+        component,
+        engine,
+        default_sampling_params,
+        model_max_len: int | None = None,
+        enable_multimodal: bool = False,
+    ):
         self.runtime = runtime
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
-        self.kv_publishers = None
+        self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
+        self.image_loader = ImageLoader()
+        self.temp_dirs: list[tempfile.TemporaryDirectory] = []
+        self.model_max_len = model_max_len
+        self.enable_multimodal = enable_multimodal
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -106,9 +139,91 @@ class BaseWorkerHandler(ABC):
         except Exception as e:
             yield {"status": "error", "message": str(e)}
 
+    def add_temp_dir(self, temp_dir: tempfile.TemporaryDirectory) -> None:
+        """Add a temporary directory to be cleaned up later."""
+        if temp_dir is not None:
+            self.temp_dirs.append(temp_dir)
+
     def cleanup(self):
-        """Override in subclasses if cleanup is needed."""
-        pass
+        """Clean up resources including temporary directories."""
+        for temp_dir in self.temp_dirs:
+            try:
+                temp_dir.cleanup()
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp directory: {e}")
+
+    async def _extract_multimodal_data(
+        self, request: Dict[str, Any]
+    ) -> Dict[str, Any] | None:
+        """
+        Extract and decode multimodal data from PreprocessedRequest.
+        """
+        if "multi_modal_data" not in request or request["multi_modal_data"] is None:
+            return None
+
+        # Security check: reject multimodal data if not explicitly enabled
+        if not self.enable_multimodal:
+            raise ValueError(
+                "Received multimodal data but multimodal processing is not enabled. "
+                "Use --enable-multimodal flag to enable multimodal processing."
+            )
+
+        mm_map = request["multi_modal_data"]
+        vllm_mm_data = {}
+
+        # Process image_url entries
+        images = []
+        for item in mm_map.get(IMAGE_URL_KEY, []):
+            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                url = item[URL_VARIANT_KEY]
+                try:
+                    # ImageLoader supports both data: and http(s): URLs with caching
+                    image = await self.image_loader.load_image(url)
+                    images.append(image)
+                    logger.debug(f"Loaded image from URL: {url[:80]}...")
+                except Exception:
+                    logger.exception(f"Failed to load image from {url[:80]}...")
+                    raise
+            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
+                # Decoded support from PRs #3971/#3988 (frontend decoding + NIXL transfer)
+                # Will contain NIXL metadata for direct memory access
+                # TODO: Implement NIXL read when PRs merge
+                logger.warning(
+                    "Decoded multimodal data not yet supported in standard worker"
+                )
+
+        if images:
+            # vLLM expects single image or list
+            vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+            logger.debug(f"Extracted {len(images)} image(s) for multimodal processing")
+
+        # Handle video_url entries (future expansion)
+        if VIDEO_URL_KEY in mm_map:
+            logger.warning("Video multimodal data not yet supported in standard worker")
+
+        return vllm_mm_data if vllm_mm_data else None
+
+    @staticmethod
+    def _build_completion_usage(request_output: RequestOutput) -> Dict[str, Any]:
+        return {
+            "prompt_tokens": (
+                len(request_output.prompt_token_ids)
+                if request_output.prompt_token_ids
+                else None
+            ),
+            "completion_tokens": len(request_output.outputs[0].token_ids),
+            "total_tokens": (
+                len(request_output.prompt_token_ids)
+                + len(request_output.outputs[0].token_ids)
+                if request_output.prompt_token_ids
+                else None
+            ),
+            "prompt_tokens_details": (
+                {"cached_tokens": request_output.num_cached_tokens}
+                if request_output.num_cached_tokens
+                else None
+            ),
+        }
 
     async def generate_tokens(
         self, prompt, sampling_params, request_id, data_parallel_rank=None
@@ -135,6 +250,11 @@ class BaseWorkerHandler(ABC):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res
+                        )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
                     yield out
@@ -159,31 +279,53 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         component,
         engine,
         default_sampling_params,
+        model_max_len: int | None = None,
+        enable_multimodal: bool = False,
     ):
-        super().__init__(runtime, component, engine, default_sampling_params)
+        super().__init__(
+            runtime,
+            component,
+            engine,
+            default_sampling_params,
+            model_max_len,
+            enable_multimodal,
+        )
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
 
-        prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
+        # Extract and decode multimodal data if present
+        multi_modal_data = await self._extract_multimodal_data(request)
+
+        prompt = TokensPrompt(
+            prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
+        )
 
         # Build sampling params from request
-        sampling_params = build_sampling_params(request, self.default_sampling_params)
+        sampling_params = build_sampling_params(
+            request, self.default_sampling_params, self.model_max_len
+        )
 
-        # Extract disaggregated_params from request (set by prefill router in Rust frontend)
-        disaggregated_params = request.get("disaggregated_params")
-        if disaggregated_params:
-            # Prefill was performed - use the disaggregated params
-            if sampling_params.extra_args is None:
-                sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = disaggregated_params.get(
+        prefill_result = request.get("prefill_result")
+        if prefill_result and isinstance(prefill_result, dict):
+            kv_params = prefill_result.get("disaggregated_params", {}).get(
                 "kv_transfer_params"
             )
+        else:
+            kv_params = None
+
+        if kv_params is not None:
+            if sampling_params.extra_args is None:
+                sampling_params.extra_args = {}
+            sampling_params.extra_args["kv_transfer_params"] = kv_params
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"
             )
+        prefill_prompt_tokens_details = (
+            prefill_result.get("prompt_tokens_details") if prefill_result else None
+        )
 
         dp_rank = request.get("dp_rank", None)
 
@@ -192,6 +334,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for tok in self.generate_tokens(
                     prompt, sampling_params, request_id, data_parallel_rank=dp_rank
                 ):
+                    if prefill_result is not None and "completion_usage" in tok:
+                        tok["completion_usage"][
+                            "prompt_tokens_details"
+                        ] = prefill_prompt_tokens_details
                     yield tok
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
@@ -201,19 +347,41 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
-    def __init__(self, runtime, component, engine, default_sampling_params):
-        super().__init__(runtime, component, engine, default_sampling_params)
+    def __init__(
+        self,
+        runtime,
+        component,
+        engine,
+        default_sampling_params,
+        model_max_len: int | None = None,
+        enable_multimodal: bool = False,
+    ):
+        super().__init__(
+            runtime,
+            component,
+            engine,
+            default_sampling_params,
+            model_max_len,
+            enable_multimodal,
+        )
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
         logger.debug(f"Prefill Request ID: {request_id}")
 
+        # Extract and decode multimodal data if present
+        multi_modal_data = await self._extract_multimodal_data(request)
+
         token_ids = request["token_ids"]
-        prompt = TokensPrompt(prompt_token_ids=token_ids)
+        prompt = TokensPrompt(
+            prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
+        )
 
         # Build sampling params from request using shared utility
-        sampling_params = build_sampling_params(request, self.default_sampling_params)
+        sampling_params = build_sampling_params(
+            request, self.default_sampling_params, self.model_max_len
+        )
 
         # Configure for prefill-only mode with remote decode
         if sampling_params.extra_args is None:
@@ -221,6 +389,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         sampling_params.extra_args["kv_transfer_params"] = {
             "do_remote_decode": True,
         }
+        sampling_params_defaults = {
+            "do_remote_prefill": False,
+            "remote_engine_id": None,
+            "remote_block_ids": None,
+            "remote_host": None,
+            "remote_port": None,
+        }
+        # Add only missing keys
+        for k, v in sampling_params_defaults.items():
+            sampling_params.extra_args["kv_transfer_params"].setdefault(k, v)
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
@@ -250,6 +428,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                             {"kv_transfer_params": res.kv_transfer_params}
                             if res.kv_transfer_params
                             else None
+                        ),
+                        "completion_usage": BaseWorkerHandler._build_completion_usage(
+                            request_output=res
                         ),
                     }
 

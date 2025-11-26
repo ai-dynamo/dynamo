@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-disagg-planner
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: trtllm-disagg-planner
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/tensorrtllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/trtllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+            - --http-port
+            - "8000"
+            - --kv-cache-block-size
+            - "128"
+            - --router-mode
+            - kv
+            - --kv-overlap-score-weight
+            - "0.0"
+            - --router-temperature
+            - "0.0"
+            - --no-kv-events
+    Planner:
+      dynamoNamespace: trtllm-disagg-planner
+      envFromSecret: hf-token-secret
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/tensorrtllm-runtime:my-tag
+          workingDir: /workspace/components/src/dynamo/planner
+          ports:
+            - name: metrics
+              containerPort: 9085
+          command:
+            - python3
+          args:
+            - -m
+            - planner_sla
+            - --environment=kubernetes
+            - --backend=trtllm
+            - --adjustment-interval=60
+            - --profile-results-dir=/workspace/profiling_results
+            - --prometheus-port=9085
+          volumeMounts:
+            - name: planner-profile-data
+              mountPath: /workspace/profiling_results
+              readOnly: true
+        volumes:
+          - name: planner-profile-data
+            configMap:
+              # Must be pre-created before deployment by the profiler
+              # See docs/planner/sla_planner_quickstart.md for more details
+              name: planner-profile-data
+    TRTLLMDecodeWorker:
+      dynamoNamespace: trtllm-disagg-planner
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      livenessProbe:
+        httpGet:
+          path: /live
+          port: 9090
+        periodSeconds: 5
+        timeoutSeconds: 30
+        failureThreshold: 1
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 9090
+        periodSeconds: 10
+        timeoutSeconds: 30
+        failureThreshold: 60
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        terminationGracePeriodSeconds: 600
+        mainContainer:
+          image: my-registry/tensorrtllm-runtime:my-tag
+          workingDir: /workspace/
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.trtllm
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
+            - --disaggregation-mode
+            - decode
+    TRTLLMPrefillWorker:
+      dynamoNamespace: trtllm-disagg-planner
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        terminationGracePeriodSeconds: 600
+        mainContainer:
+          image: my-registry/tensorrtllm-runtime:my-tag
+          workingDir: /workspace/
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.trtllm
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
+            - --disaggregation-mode
+            - prefill

@@ -69,6 +69,7 @@ impl KvbmLeaderConfig {
                 "leader_pub_url and leader_ack_url must differ (same endpoint would fail to bind)."
             );
         }
+
         let cpu = &self.host_blocks_config;
         let disk = &self.disk_blocks_config;
         let cpu_configured = cpu.num_blocks_overriden > 0 || cpu.cache_size_in_gb > 0.0;

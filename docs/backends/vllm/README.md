@@ -86,18 +86,32 @@ This includes the specific commit [vllm-project/vllm#19790](https://github.com/v
 
 This figure shows an overview of the major components to deploy:
 
-```
-+------+      +-----------+      +------------------+             +---------------+
-| HTTP |----->| dynamo    |----->|   vLLM Worker    |------------>|  vLLM Prefill |
-|      |<-----| ingress   |<-----|                  |<------------|    Worker     |
-+------+      +-----------+      +------------------+             +---------------+
-                  |    ^                  |
-       query best |    | return           | publish kv events
-           worker |    | worker_id        v
-                  |    |         +------------------+
-                  |    +---------|     kv-router    |
-                  +------------->|                  |
-                                 +------------------+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'fontSize':'10px', 'primaryColor':'#2e8b57', 'primaryTextColor':'#fff', 'primaryBorderColor':'#333', 'lineColor':'#81b1db', 'secondaryColor':'#b35900', 'tertiaryColor':'#808080', 'edgeLabelBackground':'transparent'}}}%%
+graph TD
+    %% Node Definitions with custom shapes
+    HTTP[HTTP]
+    ROUTER[Router]
+    PREFILL[vLLM Prefill Worker]
+    DECODE[vLLM Decode Worker]
+
+    %% Class Definitions for color
+    classDef worker_style fill:#2e8b57,stroke:#333,stroke-width:2px,color:#fff;
+    classDef router_style fill:#b35900,stroke:#333,stroke-width:2px,color:#fff;
+
+    %% Applying classes to nodes
+    class PREFILL,DECODE worker_style
+    class ROUTER router_style
+
+    %% Request/Response flow
+    HTTP <--> |"request/response"| ROUTER
+    ROUTER --> |"1. send to prefill"| PREFILL
+    PREFILL --> |"2. return NIXL metadata"| ROUTER
+    ROUTER --> |"3. send with metadata"| DECODE
+    DECODE --> |"4. stream response"| ROUTER
+
+    %% KV Events publishing
+    PREFILL -.-> |"publish kv events"| ROUTER
 ```
 
 Note: The above architecture illustrates all the components. The final components that get spawned depend upon the chosen deployment pattern.
@@ -106,7 +120,7 @@ Note: The above architecture illustrates all the components. The final component
 
 ```bash
 # requires one gpu
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/agg.sh
 ```
 
@@ -114,7 +128,7 @@ bash launch/agg.sh
 
 ```bash
 # requires two gpus
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/agg_router.sh
 ```
 
@@ -122,7 +136,7 @@ bash launch/agg_router.sh
 
 ```bash
 # requires two gpus
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/disagg.sh
 ```
 
@@ -130,7 +144,7 @@ bash launch/disagg.sh
 
 ```bash
 # requires three gpus
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/disagg_router.sh
 ```
 
@@ -140,7 +154,7 @@ This example is not meant to be performant but showcases Dynamo routing to data 
 
 ```bash
 # requires four gpus
-cd components/backends/vllm
+cd examples/backends/vllm
 bash launch/dep.sh
 ```
 
@@ -160,7 +174,7 @@ This setup demonstrates how to use Dynamo to create an instance using Eagle-base
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../components/backends/vllm/deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../examples/backends/vllm/deploy/README.md)
 
 ## Configuration
 

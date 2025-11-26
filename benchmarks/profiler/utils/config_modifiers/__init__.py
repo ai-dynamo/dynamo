@@ -16,7 +16,9 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from benchmarks.profiler.utils.config import ConfigModifierProtocol
+    from benchmarks.profiler.utils.config_modifiers.protocol import (
+        ConfigModifierProtocol,
+    )
 
 from benchmarks.profiler.utils.config_modifiers.sglang import SGLangConfigModifier
 from benchmarks.profiler.utils.config_modifiers.trtllm import TrtllmConfigModifier

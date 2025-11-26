@@ -81,6 +81,8 @@ Leave this terminal running - it will show Decode Worker logs.
 
 ```bash
 export DYN_LOG=debug # Increase log verbosity to see disaggregation
+DYN_VLLM_KV_EVENT_PORT=20081 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker
 ```
 

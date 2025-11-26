@@ -34,7 +34,7 @@ spec:
             - |
               set -eux
               pip install --no-cache-dir huggingface_hub hf_transfer
-              hf download $MODEL_NAME --revision $MODEL_REVISION"
+              hf download $MODEL_NAME --revision $MODEL_REVISION
           volumeMounts:
             - name: model-cache
               mountPath: /model-store

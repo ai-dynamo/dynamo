@@ -17,7 +17,7 @@ limitations under the License.
 
 # Dynamo Architecture Flow
 
-This diagram shows the NVIDIA Dynamo disaggregated inference system as implemented in [components/backends/vllm](../../components/backends/vllm). Color-coded flows indicate different types of operations:
+This diagram shows the NVIDIA Dynamo disaggregated inference system as implemented in [examples/backends/vllm](../../examples/backends/vllm). Color-coded flows indicate different types of operations:
 
 ## 🔵 Main Request Flow (Blue)
 The primary user journey through the system:

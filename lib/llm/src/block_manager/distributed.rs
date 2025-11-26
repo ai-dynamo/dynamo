@@ -9,7 +9,7 @@ mod leader;
 mod worker;
 
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
-pub use transfer::BlockTransferHandler;
+pub use transfer::{BlockTransferHandler, BlockTransferHandlerV1, BlockTransferHandlerV2};
 pub use utils::{
     BlockTransferPool, BlockTransferRequest, ConnectorRequestLeader, ConnectorTransferType,
 };
@@ -113,12 +113,6 @@ mod tests {
             stride.reverse();
             stride
         }
-    }
-
-    fn get_unique_barrier_id() -> String {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-        COUNTER.fetch_add(1, Ordering::Relaxed).to_string()
     }
 
     async fn build_leader_and_workers(num_workers: usize) -> Result<(KvbmLeader, Vec<KvbmWorker>)> {

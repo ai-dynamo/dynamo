@@ -21,13 +21,12 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 
    # 1. Decorate a function to get the runtime
    #
-   @dynamo_worker(static=False)
+   @dynamo_worker()
    async def worker(runtime: DistributedRuntime):
 
     # 2. Register ourselves on the network
     #
     component = runtime.namespace("namespace").component("component")
-    await component.create_service()
     model_path = "Qwen/Qwen3-0.6B" # or "/data/models/Qwen3-0.6B"
     model_input = ModelInput.Tokens # or ModelInput.Text if engine handles pre-processing
     model_type = ModelType.Chat # or ModelType.Chat | ModelType.Completions if model can be deployed on chat and completions endpoints
@@ -77,7 +76,7 @@ The `model_type` can be:
 - `migration_limit`: Maximum number of times a request may be [migrated to another Instance](../fault_tolerance/request_migration.md). Defaults to 0.
 - `user_data`: Optional dictionary containing custom metadata for worker behavior (e.g., LoRA configuration). Defaults to None.
 
-See `components/backends` for full code examples.
+See `examples/backends` for full code examples.
 
 ## Component names
 

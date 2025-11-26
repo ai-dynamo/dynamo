@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use dynamo_async_openai::types::{
-    ChatChoiceStream, ChatCompletionStreamResponseDelta, FinishReason, Role,
+    ChatChoiceStream, ChatCompletionStreamResponseDelta, CompletionUsage, FinishReason, Role,
 };
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
@@ -46,6 +46,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
                 service_tier: None,
+                nvext: None,
             };
 
             Annotated {
@@ -84,6 +85,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
                 service_tier: None,
+                nvext: None,
             };
 
             Annotated {
@@ -126,6 +128,7 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
                 service_tier: None,
+                nvext: None,
             };
 
             Annotated {
@@ -169,6 +172,51 @@ mod tests {
                 object: "chat.completion.chunk".to_string(),
                 usage: None,
                 service_tier: None,
+                nvext: None,
+            };
+
+            Annotated {
+                data: Some(response),
+                id: None,
+                event: None,
+                comment: None,
+            }
+        }
+
+        /// Helper function to create a multi-choice finish_reason chunk
+        pub fn create_multi_choice_finish_chunk(
+            choice_indices: Vec<u32>,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            let choices: Vec<ChatChoiceStream> = choice_indices
+                .into_iter()
+                .map(|index| {
+                    #[allow(deprecated)]
+                    ChatChoiceStream {
+                        index,
+                        delta: ChatCompletionStreamResponseDelta {
+                            role: None,
+                            content: None,
+                            tool_calls: None,
+                            function_call: None,
+                            refusal: None,
+                            reasoning_content: None,
+                        },
+                        finish_reason: Some(FinishReason::Stop),
+                        logprobs: None,
+                    }
+                })
+                .collect();
+
+            let response = NvCreateChatCompletionStreamResponse {
+                id: "test-id".to_string(),
+                choices,
+                created: 1234567890,
+                model: "test-model".to_string(),
+                system_fingerprint: Some("test-fingerprint".to_string()),
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+                nvext: None,
             };
 
             Annotated {
@@ -336,8 +384,7 @@ mod tests {
             .jail_end_sequence("</jail>")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // We should only get 3 chunks now:
         // 1. "Hello " (before jail)
@@ -393,8 +440,7 @@ mod tests {
             .tool_call_parser("nemotron_deci")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should have jailed the content and parsed tool calls at the end
         assert!(!results.is_empty());
@@ -431,8 +477,7 @@ mod tests {
             .tool_call_parser("nemotron_deci")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // We should get 2 chunks:
         // 1. "Normal text " (before jail)
@@ -475,8 +520,7 @@ mod tests {
             .tool_call_parser("nemotron_deci")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should have exactly 2 chunks: tool call + trailing content
         assert_eq!(
@@ -518,8 +562,7 @@ mod tests {
             .jail_start_sequence("<NOTPRESENT>")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // === Verify chunk count ===
         assert_eq!(
@@ -572,8 +615,7 @@ mod tests {
         // Create JailedStream with Hermes parser
         let jail = JailedStream::builder().tool_call_parser("hermes").build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
@@ -618,8 +660,7 @@ mod tests {
         // Create JailedStream with Mistral parser
         let jail = JailedStream::builder().tool_call_parser("mistral").build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
@@ -660,8 +701,7 @@ mod tests {
         // Create JailedStream with Mistral parser
         let jail = JailedStream::builder().tool_call_parser("mistral").build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
@@ -709,8 +749,7 @@ mod tests {
         // Create JailedStream with Phi4 parser
         let jail = JailedStream::builder().tool_call_parser("phi4").build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
@@ -756,8 +795,7 @@ mod tests {
             .tool_call_parser("llama3_json")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should have exactly 3 chunks: content + tool call + content
         assert_eq!(
@@ -797,8 +835,7 @@ mod tests {
         // Create JailedStream with mistral parser (which specifically looks for [{ or [TOOL_CALLS] patterns)
         let jail = JailedStream::builder().tool_call_parser("mistral").build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // The "{" pattern triggers jailing, so some chunks get combined
         assert_eq!(results.len(), 2);
@@ -839,8 +876,7 @@ mod tests {
             .tool_call_parser("nemotron_deci")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Jailing combines the tool call content into fewer chunks
         assert_eq!(
@@ -884,8 +920,7 @@ mod tests {
             .tool_call_parser("nemotron_deci")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should handle partial tool call gracefully - releases accumulated content on stream end
         assert_eq!(
@@ -924,8 +959,7 @@ mod tests {
             .jail_end_sequence("</jail>")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // === Verify chunk count ===
         assert_eq!(
@@ -979,8 +1013,7 @@ mod tests {
             .tool_call_parser("nemotron_deci")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // === Verify chunk count ===
         assert_eq!(
@@ -1087,8 +1120,7 @@ mod tests {
             .tool_call_parser("nemotron_deci")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should consolidate extreme fragmentation into 3 clean chunks
         // Input: "I'll process your request. " + 54-char tool call + " Processing complete!"
@@ -1142,6 +1174,7 @@ mod tests {
             create_mock_response_chunk("\"arguments\": {\"query\": \"test\"}}".to_string(), 0),
             create_mock_response_chunk("</tool_call>".to_string(), 0),
             create_mock_response_chunk(" Processing complete.".to_string(), 0),
+            test_utils::create_final_response_chunk(0), // Backend finish_reason chunk
         ];
 
         let input_stream = stream::iter(chunks);
@@ -1149,8 +1182,7 @@ mod tests {
         // Create JailedStream with Hermes parser
         let jail = JailedStream::builder().tool_call_parser("hermes").build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should get 3 chunks: before jail, tool call response, after jail
         assert!(
@@ -1159,14 +1191,14 @@ mod tests {
             results.len()
         );
 
-        // Find the synthesized tool call response chunk
+        // Find the tool call chunk (the one with tool_calls, not the finish_reason chunk)
         let tool_call_chunk = results
             .iter()
             .find(|r| {
                 r.data
                     .as_ref()
                     .and_then(|d| d.choices.first())
-                    .map(|c| c.finish_reason == Some(FinishReason::ToolCalls))
+                    .map(|c| c.delta.tool_calls.is_some())
                     .unwrap_or(false)
             })
             .expect("Should have a tool call response chunk");
@@ -1232,8 +1264,7 @@ mod tests {
         // Create JailedStream with Hermes parser
         let jail = JailedStream::builder().tool_call_parser("hermes").build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should get 2 chunks: first chunk passes through, stream end releases accumulated
         assert_eq!(results.len(), 2, "Should have exactly 2 chunks");
@@ -1291,23 +1322,23 @@ mod tests {
             ),
             create_mock_response_chunk("{\"name\": \"test\", \"arguments\": {}}".to_string(), 0),
             create_mock_response_chunk("</tool_call>".to_string(), 0),
+            test_utils::create_final_response_chunk(0), // Backend finish_reason chunk
         ];
 
         let input_stream = stream::iter(chunks);
 
         let jail = JailedStream::builder().tool_call_parser("hermes").build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Find the tool call response
+        // Find the tool call chunk (the one with tool_calls, not the finish_reason chunk)
         let tool_call_chunk = results
             .iter()
             .find(|r| {
                 r.data
                     .as_ref()
                     .and_then(|d| d.choices.first())
-                    .map(|c| c.finish_reason == Some(FinishReason::ToolCalls))
+                    .map(|c| c.delta.tool_calls.is_some())
                     .unwrap_or(false)
             })
             .expect("Should have a tool call response chunk");
@@ -1352,8 +1383,7 @@ mod tests {
 
         let jail = JailedStream::builder().tool_call_parser("hermes").build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // === Verify chunk count ===
         assert_eq!(
@@ -1395,8 +1425,7 @@ mod tests {
 
         let jail = JailedStream::builder().tool_call_parser("hermes").build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should have exactly 3 chunks: content + tool call + trailing
         assert_eq!(
@@ -1453,14 +1482,15 @@ mod tests {
                 ("Done with B. ".to_string(), 1),  // Choice 1 continues
                 ("</tool_call>".to_string(), 2),   // Choice 2 unjails
             ]),
+            // Chunk 6: Backend finish_reason chunks for all choices
+            test_utils::create_multi_choice_finish_chunk(vec![0, 1, 2]),
         ];
 
         let input_stream = stream::iter(chunks);
 
         let jail = JailedStream::builder().tool_call_parser("hermes").build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // EXPECTED BEHAVIOR (will fail with current implementation):
         // - Choice 1 should stream continuously (never jailed)
@@ -1529,14 +1559,14 @@ mod tests {
                     2,
                 ),
             ]),
+            test_utils::create_multi_choice_finish_chunk(vec![0, 1, 2]),
         ];
 
         let input_stream = stream::iter(chunks);
 
         let jail = JailedStream::builder().tool_call_parser("hermes").build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Find all tool call responses
         let mut tool_call_responses: Vec<_> = results
@@ -1559,25 +1589,30 @@ mod tests {
 
         // Run this test multiple times to verify determinism
         for run in 0..5 {
-            let chunks = vec![create_multi_choice_chunk(vec![
-                (
-                    "<tool_call>{\"name\": \"tool_0\", \"arguments\": {}}</tool_call>".to_string(),
-                    0,
-                ),
-                (
-                    "<tool_call>{\"name\": \"tool_1\", \"arguments\": {}}</tool_call>".to_string(),
-                    1,
-                ),
-                (
-                    "<tool_call>{\"name\": \"tool_2\", \"arguments\": {}}</tool_call>".to_string(),
-                    2,
-                ),
-            ])];
+            let chunks = vec![
+                create_multi_choice_chunk(vec![
+                    (
+                        "<tool_call>{\"name\": \"tool_0\", \"arguments\": {}}</tool_call>"
+                            .to_string(),
+                        0,
+                    ),
+                    (
+                        "<tool_call>{\"name\": \"tool_1\", \"arguments\": {}}</tool_call>"
+                            .to_string(),
+                        1,
+                    ),
+                    (
+                        "<tool_call>{\"name\": \"tool_2\", \"arguments\": {}}</tool_call>"
+                            .to_string(),
+                        2,
+                    ),
+                ]),
+                test_utils::create_multi_choice_finish_chunk(vec![0, 1, 2]),
+            ];
 
             let input_stream = stream::iter(chunks);
             let jail = JailedStream::builder().tool_call_parser("hermes").build();
-            let jailed_stream = jail.apply(input_stream);
-            let run_results: Vec<_> = jailed_stream.collect().await;
+            let run_results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
             let run_responses: Vec<_> = run_results
                 .iter()
@@ -1599,6 +1634,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_usage_chunk_preserved() {
+        // Create one chunk with choices (content) and one chunk with only usage/no choices.
+        let content_chunk = create_mock_response_chunk("Hello, world!".to_string(), 0);
+        let mut usage_chunk = content_chunk.clone();
+
+        // Modify the inner data to be a usage-only chunk
+        if let Some(ref mut data) = usage_chunk.data {
+            data.choices.clear();
+            data.usage = Some(CompletionUsage {
+                prompt_tokens: 11,
+                completion_tokens: 3,
+                total_tokens: 14,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+        }
+
+        let input_chunks = vec![content_chunk, usage_chunk];
+        let input_stream = stream::iter(input_chunks);
+        let jail = JailedStream::builder().build();
+
+        let results: Vec<_> = jail.apply(input_stream).collect().await;
+
+        // Validate we have exactly 2 chunks
+        assert_eq!(results.len(), 2, "Should have exactly 2 chunks");
+
+        // First chunk should be content chunk
+        let content = results[0].data.as_ref().unwrap().choices[0]
+            .delta
+            .content
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            content, "Hello, world!",
+            "Content chunk should have 'Hello, world!'"
+        );
+
+        // Second chunk should be usage-only chunk
+        assert!(
+            results[1].data.as_ref().unwrap().choices.is_empty(),
+            "Usage chunk should have no choices"
+        );
+        let usage = results[1].data.as_ref().unwrap().usage.as_ref().unwrap();
+        assert_eq!(usage.prompt_tokens, 11);
+        assert_eq!(usage.completion_tokens, 3);
+        assert_eq!(usage.total_tokens, 14);
+    }
+
+    #[tokio::test]
     async fn test_multiple_choices_usage_aggregation() {
         // Test that usage is correctly aggregated across multiple choices
         // This test demonstrates how usage should work with n>1
@@ -1616,8 +1700,7 @@ mod tests {
 
         let jail = JailedStream::builder().build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // TODO: Once usage aggregation is implemented, verify:
         // - Usage chunk has choices: [] (empty array)
@@ -1652,8 +1735,7 @@ mod tests {
             .tool_call_parser("nemotron_deci")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // === Verify chunk count ===
         assert_eq!(
@@ -1708,8 +1790,7 @@ mod tests {
             .jail_end_sequence("</TOOLCALL>")
             .build();
 
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // === Verify chunk count ===
         assert_eq!(
@@ -1763,8 +1844,7 @@ mod tests {
         let input_stream = stream::iter(chunks);
 
         let jail = JailedStream::builder().tool_call_parser("harmony").build();
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should have at least one output containing both analysis text and parsed tool call
         assert!(!results.is_empty());
@@ -1793,6 +1873,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_deepseek_v3_1() {
+        // DeepSeek v3.1 format with two tool calls encoded in special tags
+        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Berlin", "units": "metric"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast<｜tool▁sep｜>{"location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality<｜tool▁sep｜>{"location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
+
+        let chunks = vec![create_mock_response_chunk(text.to_string(), 0)];
+
+        let input_stream = stream::iter(chunks);
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("deepseek_v3_1")
+            .build();
+        let jailed_stream = jail.apply_with_finish_reason(input_stream);
+        let results: Vec<_> = jailed_stream.collect().await;
+
+        // Should have at least one output containing both analysis text and parsed tool call
+        assert!(!results.is_empty());
+
+        // Verify a tool call was parsed with expected name and args
+        let tool_call_idx = results
+            .iter()
+            .position(test_utils::has_tool_call)
+            .expect("Should have a tool call result");
+        test_utils::assert_tool_call(
+            &results[tool_call_idx],
+            "get_current_weather",
+            json!({"location": "Berlin", "units": "metric"}),
+        );
+        for result in results {
+            let Some(data) = result.data else {
+                continue;
+            };
+            for choice in data.choices {
+                if let Some(content) = choice.delta.content {
+                    assert!(
+                        !content.contains("<｜tool▁calls▁end｜>"),
+                        "Should not contain deepseek special tokens in content"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_1_chunk() {
+        // DeepSeek v3.1 format with two tool calls encoded in special tags
+        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Berlin", "units": "metric"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast<｜tool▁sep｜>{"location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality<｜tool▁sep｜>{"location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
+
+        // Split text into words, treating angle-bracketed tokens as one word
+        let mut words = Vec::new();
+        let mut i = 0;
+        let chars: Vec<char> = text.chars().collect();
+        while i < chars.len() {
+            if chars[i] == '<' {
+                // Find the next '>'
+                if let Some(end) = chars[i..].iter().position(|&c| c == '>') {
+                    let word: String = chars[i..=i + end].iter().collect();
+                    words.push(word);
+                    i += end + 1;
+                } else {
+                    // Malformed, just push the rest
+                    words.push(chars[i..].iter().collect());
+                    break;
+                }
+            } else if chars[i].is_whitespace() {
+                i += 1;
+            } else {
+                // Collect until next whitespace or '<'
+                let start = i;
+                while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '<' {
+                    i += 1;
+                }
+                words.push(chars[start..i].iter().collect());
+            }
+        }
+
+        let chunks = words
+            .into_iter()
+            .map(|word| create_mock_response_chunk(word, 0))
+            .collect::<Vec<_>>();
+
+        let input_stream = stream::iter(chunks);
+
+        let jail = JailedStream::builder()
+            .tool_call_parser("deepseek_v3_1")
+            .build();
+        let jailed_stream = jail.apply_with_finish_reason(input_stream);
+        let results: Vec<_> = jailed_stream.collect().await;
+
+        // Should have at least one output containing both analysis text and parsed tool call
+        assert!(!results.is_empty());
+
+        // Verify a tool call was parsed with expected name and args
+        let tool_call_idx = results
+            .iter()
+            .position(test_utils::has_tool_call)
+            .expect("Should have a tool call result");
+        test_utils::assert_tool_call(
+            &results[tool_call_idx],
+            "get_current_weather",
+            json!({"location": "Berlin", "units": "metric"}),
+        );
+        for result in results {
+            let Some(data) = result.data else {
+                continue;
+            };
+            for choice in data.choices {
+                if let Some(content) = choice.delta.content {
+                    assert!(
+                        !content.contains("<｜tool▁calls▁end｜>"),
+                        "Should not contain deepseek special tokens in content"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_jailed_stream_mistral_false_positive_curly() {
         // Curly brace in normal text should not trigger tool call detection for mistral
         let chunks = vec![
@@ -1803,8 +2000,7 @@ mod tests {
 
         let input_stream = stream::iter(chunks);
         let jail = JailedStream::builder().tool_call_parser("mistral").build();
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         assert!(results.len() >= 2);
         assert_content(&results[0], "Hey How");
@@ -1839,8 +2035,7 @@ mod tests {
 
         let input_stream = stream::iter(chunks);
         let jail = JailedStream::builder().tool_call_parser("mistral").build();
-        let jailed_stream = jail.apply(input_stream);
-        let results: Vec<_> = jailed_stream.collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should preserve earlier content and also produce a tool call
         assert!(results.len() >= 2);
@@ -1909,6 +2104,7 @@ mod parallel_jail_tests {
             object: "chat.completion.chunk".to_string(),
             usage: None,
             service_tier: None,
+            nvext: None,
         };
 
         Annotated {
@@ -2013,7 +2209,7 @@ mod parallel_jail_tests {
         ];
 
         let input_stream = stream::iter(input_chunks);
-        let results: Vec<_> = jail.apply(input_stream).collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should have tool call results
         assert!(!results.is_empty(), "Should have results");
@@ -2086,7 +2282,7 @@ mod parallel_jail_tests {
         ];
 
         let input_stream = stream::iter(input_chunks);
-        let results: Vec<_> = jail.apply(input_stream).collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         assert!(!results.is_empty(), "Should have results");
 
@@ -2123,7 +2319,7 @@ mod parallel_jail_tests {
         ];
 
         let input_stream = stream::iter(input_chunks);
-        let results: Vec<_> = jail.apply(input_stream).collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         assert!(!results.is_empty(), "Should have results");
 
@@ -2193,7 +2389,7 @@ mod parallel_jail_tests {
         ];
 
         let input_stream = stream::iter(input_chunks);
-        let results: Vec<_> = jail.apply(input_stream).collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         assert!(!results.is_empty(), "Should have results");
 
@@ -2431,7 +2627,7 @@ mod parallel_jail_tests {
         ];
 
         let input_stream = stream::iter(input_chunks);
-        let results: Vec<_> = jail.apply(input_stream).collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         assert!(!results.is_empty(), "Should have results");
 
@@ -2476,7 +2672,7 @@ mod parallel_jail_tests {
         ];
 
         let input_stream = stream::iter(input_chunks);
-        let results: Vec<_> = jail.apply(input_stream).collect().await;
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         // Should still handle the incomplete stream gracefully
         assert!(

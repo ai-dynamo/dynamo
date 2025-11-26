@@ -24,6 +24,7 @@ The mocker engine now supports a vLLM-style CLI interface with individual argume
 - `--watermark`: KV cache watermark threshold as a fraction (default: 0.01)
 - `--speedup-ratio`: Speed multiplier for token generation (default: 1.0). Higher values make the simulation engines run faster
 - `--data-parallel-size`: Number of data parallel workers to simulate (default: 1)
+- `--num-workers`: Number of mocker workers to launch in the same process (default: 1). All workers share the same tokio runtime and thread pool
 
 ### Example with individual arguments (vLLM-style):
 ```bash
@@ -34,6 +35,7 @@ python -m dynamo.mocker \
   --block-size 16 \
   --speedup-ratio 10.0 \
   --max-num-seqs 512 \
+  --num-workers 4 \
   --enable-prefix-caching
 
 # Start frontend server
@@ -41,4 +43,26 @@ python -m dynamo.frontend --http-port 8000
 ```
 
 > [!Note]
-> Each mocker instance runs as a single process, and each DP worker (specified by `--data-parallel-size`) is spawned as a lightweight async task within that process. For benchmarking (e.g., router testing), you would much prefer launching one mocker instance with a large `--data-parallel-size` rather than multiple separate mocker instances to reduce overhead.
+> Each mocker instance runs as a single process, and each DP worker (specified by `--data-parallel-size`) is spawned as a lightweight async task within that process. For benchmarking (e.g., router testing), you can use `--num-workers` to launch multiple mocker engines in the same process, which is more efficient than launching separate processes since they all share the same tokio runtime and thread pool.
+
+## Performance modeling with planner profile data
+
+By default, the mocker uses hardcoded polynomial formulas to estimate prefill and decode timing. For more realistic simulations, you can load performance data from actual profiling results using `--planner-profile-data`:
+
+```bash
+python -m dynamo.mocker \
+  --model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
+  --planner-profile-data tests/planner/profiling_results/H200_TP1P_TP1D \
+  --speedup-ratio 1.0
+```
+
+The profile results directory should contain `selected_prefill_interpolation/` and `selected_decode_interpolation/` subdirectories with `raw_data.npz` files. This works seamlessly in Kubernetes where profile data is mounted via ConfigMap or PersistentVolume.
+
+To generate profiling data for your own model/hardware configuration, run the profiler (see [SLA-driven profiling documentation](../../../../docs/benchmarks/sla_driven_profiling.md) for details):
+
+```bash
+python benchmarks/profiler/profile_sla.py \
+  --profile-config your_profile_config.yaml
+```
+
+Then use the resulting profile results directory directly with `--planner-profile-data`.

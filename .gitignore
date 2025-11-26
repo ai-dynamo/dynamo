@@ -38,6 +38,10 @@ CMakeCache.txt
 *pytest_report.md
 *pytest_report.xml
 
+# Test artifacts and output directories
+*.shakespeare.txt
+test_determinism_*/
+
 **/__pycache__
 **/venv
 **/.venv

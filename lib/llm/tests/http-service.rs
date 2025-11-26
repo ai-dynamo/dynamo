@@ -277,6 +277,9 @@ async fn test_http_service() {
     let cancel_token = token.clone();
     let task = tokio::spawn(async move { service.run(token.clone()).await });
 
+    // Wait for the service to be ready before proceeding
+    wait_for_service_ready(port).await;
+
     let registry = Registry::new();
 
     // TODO: Shouldn't this test know the card before it registers a model?
@@ -770,6 +773,7 @@ async fn test_nv_custom_client() {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        unsupported_fields: Default::default(),
     };
 
     let result = nv_custom_client.chat_stream(request).await;
@@ -810,6 +814,7 @@ async fn test_nv_custom_client() {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        unsupported_fields: Default::default(),
     };
 
     let result = nv_custom_client.chat_stream(request).await;
@@ -851,6 +856,7 @@ async fn test_nv_custom_client() {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        unsupported_fields: Default::default(),
     };
 
     let result = nv_custom_client

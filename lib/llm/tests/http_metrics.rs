@@ -295,10 +295,10 @@ mod integration_tests {
     use super::*;
     use dynamo_llm::{
         discovery::ModelWatcher, engines::make_echo_engine, entrypoint::EngineConfig,
-        local_model::LocalModelBuilder, model_card,
+        local_model::LocalModelBuilder,
     };
     use dynamo_runtime::DistributedRuntime;
-    use dynamo_runtime::pipeline::RouterMode;
+    use dynamo_runtime::discovery::DiscoveryQuery;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -321,10 +321,9 @@ mod integration_tests {
             .unwrap();
 
         // Create EngineConfig with EchoEngine
-        let engine_config = EngineConfig::StaticFull {
+        let engine_config = EngineConfig::InProcessText {
             engine: make_echo_engine(),
             model: Box::new(local_model.clone()),
-            is_static: false, // This enables MDC registration!
         };
 
         let service = HttpService::builder()
@@ -333,34 +332,31 @@ mod integration_tests {
             .build()
             .unwrap();
 
-        // Set up model watcher to discover models from etcd (like production)
+        // Set up model watcher to discover models via discovery interface (like production)
         // This is crucial for the polling task to find model entries
 
         let model_watcher = ModelWatcher::new(
             distributed_runtime.clone(),
             service.state().manager_clone(),
-            RouterMode::RoundRobin,
-            None,
-            None,
+            dynamo_llm::entrypoint::RouterConfig::default(),
         );
+        // Start watching for model registrations via discovery interface
+        let discovery = distributed_runtime.discovery();
+        let discovery_stream = discovery
+            .list_and_watch(
+                DiscoveryQuery::AllModels,
+                Some(distributed_runtime.primary_token()),
+            )
+            .await
+            .unwrap();
 
-        // Start watching etcd for model registrations
-        if let Some(etcd_client) = distributed_runtime.etcd_client() {
-            let models_watcher = etcd_client
-                .kv_get_and_watch_prefix(model_card::ROOT_PATH)
-                .await
-                .unwrap();
-            let (_prefix, _watcher, receiver) = models_watcher.dissolve();
+        // Spawn watcher task to discover models
+        let _watcher_task = tokio::spawn(async move {
+            model_watcher.watch(discovery_stream, None).await;
+        });
 
-            // Spawn watcher task to discover models from etcd
-            let _watcher_task = tokio::spawn(async move {
-                model_watcher.watch(receiver, None).await;
-            });
-        }
-
-        // Set up the engine following the StaticFull pattern from http.rs
-        let EngineConfig::StaticFull { engine, model, .. } = engine_config else {
-            panic!("Expected StaticFull config");
+        let EngineConfig::InProcessText { engine, model, .. } = engine_config else {
+            panic!("Expected InProcessText config");
         };
 
         let card = local_model.card().clone();
@@ -376,7 +372,7 @@ mod integration_tests {
         let test_component = namespace.component("test-mdc-component").unwrap();
         let test_endpoint = test_component.endpoint("test-mdc-endpoint");
 
-        // This will store the MDC in etcd for discovery
+        // This will store the MDC in key-value store for discovery
         local_model
             .attach(
                 &test_endpoint,
@@ -512,9 +508,7 @@ mod integration_tests {
             let watcher = ModelWatcher::new(
                 distributed_runtime.clone(),
                 service.state().manager_clone(),
-                RouterMode::RoundRobin,
-                None,
-                None,
+                dynamo_llm::entrypoint::RouterConfig::default(),
             );
 
             // Get all model entries for our test model

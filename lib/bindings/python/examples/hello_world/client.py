@@ -20,7 +20,7 @@ import uvloop
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     await init(runtime, "dynamo")
 

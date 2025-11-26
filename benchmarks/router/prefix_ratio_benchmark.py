@@ -140,19 +140,16 @@ def run_benchmark_single_url(
     logger.info(f"Running command for URL {url}: {' '.join(aiperf_cmd)}")
 
     try:
-        aiperf_process = subprocess.run(
-            aiperf_cmd, capture_output=True, text=True, check=True
-        )
+        # Run aiperf and let it output directly to terminal
+        subprocess.run(aiperf_cmd, check=True)
 
         logger.info(f"AIPerf profiling completed successfully for URL {url}")
-        logger.info(aiperf_process.stdout)
 
         aiperf_result = get_aiperf_result(artifact_dir)
         return aiperf_result
 
     except subprocess.CalledProcessError as e:
         logger.error(f"AIPerf failed for URL {url} with error code: {e.returncode}")
-        logger.error(f"stderr: {e.stderr}")
         return None
 
 
@@ -255,19 +252,17 @@ def run_benchmark(
 
         logger.info(f"Launching process for URL {url}: {' '.join(aiperf_cmd)}")
 
-        process = subprocess.Popen(
-            aiperf_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
+        # Run process without capturing output - let it stream to terminal
+        process = subprocess.Popen(aiperf_cmd)
         processes.append((process, url, artifact_dir))
 
     # Wait for all processes to complete and collect results
     results: List[Optional[Dict]] = []
     for process, url, artifact_dir in processes:
-        stdout, stderr = process.communicate()
+        return_code = process.wait()
 
-        if process.returncode == 0:
+        if return_code == 0:
             logger.info(f"AIPerf completed successfully for URL {url}")
-            logger.info(stdout)
 
             try:
                 aiperf_result = get_aiperf_result(artifact_dir)
@@ -276,10 +271,7 @@ def run_benchmark(
                 logger.error(f"Failed to get results for URL {url}: {e}")
                 results.append(None)
         else:
-            logger.error(
-                f"AIPerf failed for URL {url} with error code: {process.returncode}"
-            )
-            logger.error(f"stderr: {stderr}")
+            logger.error(f"AIPerf failed for URL {url} with error code: {return_code}")
             results.append(None)
 
     # Aggregate results

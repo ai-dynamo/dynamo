@@ -1,31 +1,34 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use anyhow::Result;
+use rmp_serde as rmps;
+use serde::Deserialize;
+use serde::Serialize;
+use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use zeromq::{Socket, SocketRecv, SubSocket};
+
+use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
+use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
+use dynamo_runtime::{
+    component::{Component, Namespace},
+    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
+};
+
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT,
     indexer::{RouterEvent, compute_block_hash_for_seq},
     protocols::*,
     scoring::LoadEvent,
 };
-use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
-use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
-use dynamo_runtime::{
-    Result,
-    component::{Component, Namespace},
-    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
-};
-use std::sync::{Arc, OnceLock};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-
-use rmp_serde as rmps;
-use serde::Deserialize;
-use serde::Serialize;
-use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use std::fmt;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
-use zeromq::{Socket, SocketRecv, SubSocket};
+use dynamo_runtime::config::environment_names::nats as env_nats;
 
 // -------------------------------------------------------------------------
 // KV Event Publishers -----------------------------------------------------
@@ -97,13 +100,15 @@ pub struct KvEventPublisher {
 impl KvEventPublisher {
     pub fn new(
         component: Component,
-        worker_id: u64,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+
+        // Infer worker_id from component's connection
+        let worker_id = component.drt().connection_id();
 
         // Create our event source (if any)
         let mut source = None;
@@ -120,8 +125,8 @@ impl KvEventPublisher {
         let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
             .to_string()
             .replace("_", "-");
-        let nats_server =
-            std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+        let nats_server = std::env::var(env_nats::NATS_SERVER)
+            .unwrap_or_else(|_| "nats://localhost:4222".to_string());
         // Create NatsQueue without consumer since we're only publishing
         let mut nats_queue = NatsQueue::new_without_consumer(
             stream_name,
@@ -784,15 +789,7 @@ impl WorkerMetricsPublisher {
     }
 
     pub async fn create_endpoint(&self, component: Component) -> Result<()> {
-        let worker_id = component
-            .drt()
-            .primary_lease()
-            .map(|lease| lease.id())
-            .unwrap_or_else(|| {
-                tracing::warn!("Component is static, assuming worker_id of 0");
-                0
-            });
-
+        let worker_id = component.drt().connection_id();
         self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
         Ok(())
     }
@@ -867,6 +864,12 @@ impl WorkerMetricsPublisher {
                                 tracing::warn!("Failed to publish metrics over NATS: {}", e);
                             }
                         }
+
+                        // Reset timer to pending state to avoid tight loop
+                        // It will be reset to 1ms when metrics actually change
+                        publish_timer.as_mut().reset(
+                            tokio::time::Instant::now() + tokio::time::Duration::from_secs(3600)
+                        );
                     }
                 }
             }
@@ -1025,7 +1028,7 @@ mod tests_startup_helpers {
             &self,
             event_name: impl AsRef<str> + Send + Sync,
             event: &(impl serde::Serialize + Send + Sync),
-        ) -> dynamo_runtime::Result<()> {
+        ) -> anyhow::Result<()> {
             let bytes = rmp_serde::to_vec(event).unwrap();
             self.published
                 .lock()
@@ -1038,7 +1041,7 @@ mod tests_startup_helpers {
             &self,
             event_name: impl AsRef<str> + Send + Sync,
             bytes: Vec<u8>,
-        ) -> dynamo_runtime::Result<()> {
+        ) -> anyhow::Result<()> {
             self.published
                 .lock()
                 .unwrap()

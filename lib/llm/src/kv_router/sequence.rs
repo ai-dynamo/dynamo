@@ -43,6 +43,28 @@ use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::CancellationToken;
 
+/// Errors that can occur during sequence management operations
+#[derive(Debug, thiserror::Error)]
+pub enum SequenceError {
+    #[error("Worker {worker:?} not found")]
+    WorkerNotFound { worker: WorkerWithDpRank },
+
+    #[error("Request {request_id} already exists (assigned to worker {worker:?})")]
+    DuplicateRequest {
+        request_id: String,
+        worker: WorkerWithDpRank,
+    },
+
+    #[error("Request {request_id} not found")]
+    RequestNotFound { request_id: String },
+
+    #[error("Failed to publish event: {0}")]
+    PublishFailed(#[from] anyhow::Error),
+
+    #[error("Failed to send command to worker: channel closed")]
+    WorkerChannelClosed,
+}
+
 /// Duration after which stale requests are forcibly expired (5 minutes)
 const EXPIRY_DURATION: Duration = Duration::from_secs(300);
 
@@ -121,9 +143,10 @@ impl ActiveSequences {
         isl: usize,
         overlap: u32,
     ) -> HashSet<RequestId> {
-        // Check for double-add and panic early
+        // Check for double-add and log error, returning early
         if self.active_seqs.contains_key(&request_id) {
-            panic!("Request {request_id} is already active. Cannot accept double-add.");
+            tracing::error!("Request {request_id} is already active. Ignoring duplicate add.");
+            return HashSet::new();
         }
 
         // Lazily check and clean up expired requests, capturing removed IDs
@@ -160,8 +183,15 @@ impl ActiveSequences {
     }
 
     pub fn new_tokens(&self, isl: usize, overlap: u32) -> usize {
-        isl.checked_sub((overlap as usize) * self.block_size)
-            .unwrap_or_else(|| panic!("prefill_tokens < 0 with overlap {overlap} and ISL {isl}"))
+        let cached_tokens = (overlap as usize) * self.block_size;
+        isl.checked_sub(cached_tokens)
+            .unwrap_or_else(|| {
+                tracing::error!(
+                    "prefill_tokens < 0 with ISL {isl} < cached_tokens {cached_tokens} (overlap {overlap} * block_size {}), returning 0",
+                    self.block_size
+                );
+                0
+            })
     }
 
     pub fn potential_blocks_and_tokens(
@@ -612,9 +642,18 @@ impl ActiveSequencesMultiWorker {
         isl: usize,
         overlap: u32,
         worker: WorkerWithDpRank,
-    ) -> Result<()> {
+    ) -> Result<(), SequenceError> {
+        // Check for worker existence
         if !self.senders.contains_key(&worker) {
-            return Err(anyhow::anyhow!("Worker {:?} not found", worker));
+            return Err(SequenceError::WorkerNotFound { worker });
+        }
+
+        // Check for duplicate request
+        if let Some(existing_worker) = self.request_to_worker.get(&request_id) {
+            return Err(SequenceError::DuplicateRequest {
+                request_id,
+                worker: *existing_worker,
+            });
         }
 
         // Create response channel
@@ -650,12 +689,12 @@ impl ActiveSequencesMultiWorker {
                 overlap,
                 resp_tx,
             })
-            .map_err(|_| anyhow::anyhow!("Failed to send add_request command to worker"))?;
+            .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
         // Wait for response and handle removed requests
         let removed_requests = resp_rx
             .await
-            .map_err(|_| anyhow::anyhow!("Failed to receive response from worker"))?;
+            .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
         // Remove expired requests from request_to_worker mapping
         for expired_id in &removed_requests {
@@ -665,12 +704,21 @@ impl ActiveSequencesMultiWorker {
         Ok(())
     }
 
-    pub async fn free(&self, request_id: &RequestId) -> Result<()> {
-        let worker = self
-            .request_to_worker
-            .get(request_id)
-            .map(|entry| *entry)
-            .ok_or_else(|| anyhow::anyhow!("Request ID not found in request_to_worker mapping"))?;
+    /// Free all blocks associated with a request
+    ///
+    /// Note: This operation is idempotent. Calling it multiple times for the same request
+    /// will log a warning but not return an error (double free is allowed).
+    pub async fn free(&self, request_id: &RequestId) -> Result<(), SequenceError> {
+        // Check if request exists - if not, it's already been freed (idempotent)
+        let Some(worker) = self.request_to_worker.get(request_id).map(|entry| *entry) else {
+            tracing::debug!("Request {request_id} not found, already freed (idempotent)");
+            return Ok(());
+        };
+
+        // Verify worker still exists
+        if !self.senders.contains_key(&worker) {
+            return Err(SequenceError::WorkerNotFound { worker });
+        }
 
         // Publish event only if replica_sync is enabled
         if self.replica_sync {
@@ -692,7 +740,7 @@ impl ActiveSequencesMultiWorker {
             .send(UpdateSequences::Free {
                 request_id: request_id.clone(),
             })
-            .map_err(|_| anyhow::anyhow!("Failed to send free command to worker"))?;
+            .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
         self.request_to_worker.remove(request_id);
 
@@ -700,12 +748,25 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Mark prefill as completed for a request
-    pub async fn mark_prefill_completed(&self, request_id: &RequestId) -> Result<()> {
+    ///
+    /// Note: Calling this multiple times for the same request is allowed and will be a no-op
+    /// after the first call (idempotent).
+    pub async fn mark_prefill_completed(
+        &self,
+        request_id: &RequestId,
+    ) -> Result<(), SequenceError> {
         let worker = self
             .request_to_worker
             .get(request_id)
             .map(|entry| *entry)
-            .ok_or_else(|| anyhow::anyhow!("Request ID not found in request_to_worker mapping"))?;
+            .ok_or_else(|| SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            })?;
+
+        // Verify worker still exists
+        if !self.senders.contains_key(&worker) {
+            return Err(SequenceError::WorkerNotFound { worker });
+        }
 
         // Publish event only if replica_sync is enabled
         if self.replica_sync {
@@ -727,9 +788,7 @@ impl ActiveSequencesMultiWorker {
             .send(UpdateSequences::MarkPrefillCompleted {
                 request_id: request_id.clone(),
             })
-            .map_err(|_| {
-                anyhow::anyhow!("Failed to send mark_prefill_completed command to worker")
-            })?;
+            .map_err(|_| SequenceError::WorkerChannelClosed)?;
 
         Ok(())
     }
@@ -943,8 +1002,7 @@ mod tests {
 
         // Create namespace and shared component for both seq_managers
         let namespace = distributed.namespace("test_cross_instance_sync")?;
-        let mut component = namespace.component("sequences")?;
-        component.add_stats_service().await?;
+        let component = namespace.component("sequences")?;
 
         // Create multi-worker sequence managers with:
         // - Worker 0 with dp_size=2 (dp_ranks 0 and 1)
@@ -1109,8 +1167,7 @@ mod tests {
 
         // Create namespace and shared component for both seq_managers
         let namespace = distributed.namespace("test_no_token_seq_sync")?;
-        let mut component = namespace.component("sequences")?;
-        component.add_stats_service().await?;
+        let component = namespace.component("sequences")?;
 
         // Create multi-worker sequence managers with ALL workers [0, 1, 2]
         // Both use the same component to ensure event synchronization works

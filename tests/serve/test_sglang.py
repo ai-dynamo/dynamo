@@ -9,6 +9,7 @@ import pytest
 
 from tests.serve.common import (
     SERVE_TEST_DIR,
+    WORKSPACE_DIR,
     params_with_model_mark,
     run_serve_deployment,
 )
@@ -32,7 +33,9 @@ class SGLangConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["SGLANG:EngineCore"])
 
 
-sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/components/backends/sglang")
+sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
+    WORKSPACE_DIR, "examples/backends/sglang"
+)
 
 sglang_configs = {
     "aggregated": SGLangConfig(
@@ -59,7 +62,29 @@ sglang_configs = {
         model="Qwen/Qwen3-0.6B",
         env={},
         models_port=8000,
-        request_payloads=[chat_payload_default(), completion_payload_default()],
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
+    "disaggregated_same_gpu": SGLangConfig(
+        # Uses disagg_same_gpu.sh for single-GPU disaggregated testing
+        # Validates metrics from both prefill (port 8081) and decode (port 8082) workers
+        name="disaggregated_same_gpu",
+        directory=sglang_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.skip(reason="unstable")],
+        model="Qwen/Qwen3-0.6B",
+        env={},
+        models_port=8000,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            # Validate dynamo_component_* and sglang:* metrics from prefill worker (port 8081)
+            metric_payload_default(min_num_requests=6, backend="sglang", port=8081),
+            # Validate dynamo_component_* and sglang:* metrics from decode worker (port 8082)
+            metric_payload_default(min_num_requests=6, backend="sglang", port=8082),
+        ],
     ),
     "kv_events": SGLangConfig(
         name="kv_events",

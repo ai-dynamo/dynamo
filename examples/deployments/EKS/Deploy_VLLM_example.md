@@ -3,7 +3,7 @@
 ## 1. Deploy Dynamo Graph
 
 ```
-cd dynamo/components/backends/vllm/deploy
+cd dynamo/examples/backends/vllm/deploy
 vim agg_router.yaml    #under metadata add namespace: dynamo-cloud and change image to your built base image
 kubectl apply -f agg_router.yaml
 ```
@@ -11,7 +11,7 @@ kubectl apply -f agg_router.yaml
 Your pods should be running like below
 
 ```
-ubuntu@ip-192-168-83-157:~/dynamo/components/backends/vllm/deploy$ kubectl get pods -A
+ubuntu@ip-192-168-83-157:~/dynamo/examples/backends/vllm/deploy$ kubectl get pods -A
 NAMESPACE      NAME                                                              READY   STATUS    RESTARTS   AGE
 dynamo-cloud   dynamo-platform-dynamo-operator-controller-manager-86795c5f4j4k   2/2     Running   0          4h17m
 dynamo-cloud   dynamo-platform-etcd-0                                            1/1     Running   0          4h17m

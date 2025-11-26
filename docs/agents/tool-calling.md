@@ -35,6 +35,7 @@ Parser to Model Mapping
 | harmony | openai/gpt-oss-* |
 | nemotron_deci | nvidia/nemotron-* |
 | phi4 | Phi-4-* |
+| deepseek_v3 | deepseek-ai/DeepSeek-V3, deepseek-ai/DeepSeek-R1, deepseek-ai/DeepSeek-R1-0528 |
 | deepseek_v3_1 | deepseek-ai/DeepSeek-V3.1 |
 | pythonic |  meta-llama/Llama-4-* |
 

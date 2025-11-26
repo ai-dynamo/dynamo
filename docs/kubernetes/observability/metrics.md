@@ -37,6 +37,21 @@ helm install dynamo-platform ...
 ```
 
 
+### Node Exporter for CPU/Memory Metrics
+
+The Dynamo Grafana dashboard includes panels for node-level CPU utilization, system load, and container resource usage. These metrics are collected and exported to Prometheus via [node-exporter](https://github.com/prometheus/node_exporter), which exposes hardware and OS metrics from Linux systems.
+
+> [!Note]
+> The kube-prometheus-stack installation described above includes node-exporter by default. If you're using a custom Prometheus setup, you'll need to ensure node-exporter is deployed as a DaemonSet on your cluster nodes.
+
+To verify node-exporter is running:
+
+```bash
+kubectl get daemonset -A | grep node-exporter
+```
+
+If node-exporter is not running, you can install it via the kube-prometheus-stack or deploy it separately. For more information, see the [node-exporter documentation](https://github.com/prometheus/node_exporter).
+
 ### DCGM Metrics Collection (Optional)
 
 GPU utilization metrics are collected and exported to Prometheus via dcgm-exporter. The Dynamo Grafana dashboard includes a panel for GPU utilization related to your Dynamo deployment. For that panel to be populated, you need to ensure that the dcgm-exporter is running in your cluster. To check if the dcgm-exporter is running, please run the following command:
@@ -54,7 +69,7 @@ Let's start by deploying a simple vLLM aggregated deployment:
 
 ```bash
 export NAMESPACE=dynamo-system # namespace where dynamo operator is installed
-pushd components/backends/vllm/deploy
+pushd examples/backends/vllm/deploy
 kubectl apply -f agg.yaml -n $NAMESPACE
 popd
 ```
@@ -113,9 +128,7 @@ spec:
 
 Apply the Dynamo dashboard configuration to populate Grafana with the Dynamo dashboard:
 ```bash
-pushd deploy/metrics/k8s
-kubectl apply -n monitoring -f grafana-dynamo-dashboard-configmap.yaml
-popd
+kubectl apply -n monitoring -f deploy/observability/k8s/grafana-dynamo-dashboard-configmap.yaml
 ```
 
 The dashboard is embedded in the ConfigMap. Since it is labeled with `grafana_dashboard: "1"`, the Grafana will discover and populate it to its list of available dashboards. The dashboard includes panels for:
@@ -125,6 +138,9 @@ The dashboard is embedded in the ConfigMap. Since it is labeled with `grafana_da
 - Request duration
 - Input/Output sequence lengths
 - GPU utilization via DCGM
+- Node CPU utilization and system load
+- Container CPU usage per pod
+- Memory usage per pod
 
 ## Viewing the Metrics
 

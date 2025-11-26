@@ -5,6 +5,9 @@ use std::sync::Arc;
 
 use super::block::registry::RegistrationHandle;
 
+use crate::block_manager::kv_consolidator::EventSource;
+use crate::block_manager::kv_consolidator::KvEventConsolidator;
+
 /// The [EventManager] is not responsible for managing the history of the blocks, nor what
 /// events have been published.
 ///
@@ -139,6 +142,148 @@ impl EventPublisher for NullEventManager {
 
 impl EventReleaseManager for NullEventManager {
     fn block_release(&self, _registration_handle: &RegistrationHandle) {}
+}
+
+/// Event manager that sends KVBM events to the kv event consolidator
+pub struct DynamoEventManager {
+    consolidator_handle: Arc<crate::block_manager::kv_consolidator::KvEventConsolidatorHandle>,
+    #[allow(dead_code)]
+    _consolidator: Option<Arc<crate::block_manager::kv_consolidator::KvEventConsolidator>>,
+}
+
+impl DynamoEventManager {
+    /// Create a new DynamoEventManager with a consolidator handle
+    pub fn new(
+        consolidator_handle: Arc<crate::block_manager::kv_consolidator::KvEventConsolidatorHandle>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            consolidator_handle,
+            _consolidator: None,
+        })
+    }
+
+    /// Create a new DynamoEventManager with kv event consolidator configuration
+    ///
+    /// This creates and manages the kv event consolidator internally.
+    /// The kv event consolidator will be started asynchronously.
+    pub async fn new_with_config(
+        config: crate::block_manager::kv_consolidator::KvEventConsolidatorConfig,
+    ) -> anyhow::Result<Arc<Self>> {
+        let mut kv_event_consolidator = KvEventConsolidator::new(config)?;
+        kv_event_consolidator.start().await?;
+        let handle = kv_event_consolidator.get_handle();
+
+        Ok(Arc::new(Self {
+            consolidator_handle: Arc::new(handle),
+            _consolidator: Some(Arc::new(kv_event_consolidator)),
+        }))
+    }
+
+    /// Send store events to the kv event consolidator
+    ///
+    /// Called when KVBM registers/stores blocks. Sends events to the kv event consolidator
+    /// which will deduplicate them with vLLM events.
+    ///
+    fn publish_store_events(&self, handles: Vec<Arc<RegistrationHandle>>) {
+        if handles.is_empty() {
+            return;
+        }
+
+        tracing::debug!(
+            "DynamoEventManager::publish_store_events called with {} blocks",
+            handles.len()
+        );
+
+        // Send each block to the consolidator
+        let kv_event_consolidator = self.consolidator_handle.clone();
+
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                for handle in handles {
+                    // Extract block metadata from RegistrationHandle
+                    let block_hash = handle.sequence_hash().to_string();
+                    let parent_hash = handle.parent_sequence_hash().map(|h| h.to_string());
+
+                    // Extract block_size and tokens from RegistrationHandle
+                    let block_size = handle.block_size(); // usize
+                    let tokens: Vec<u32> = handle.tokens().iter().copied().collect();
+
+                    tracing::debug!(
+                        "DynamoEventManager sending store event to kv event consolidator: block_hash={}, block_size={}, tokens={}",
+                        block_hash,
+                        block_size,
+                        tokens.len()
+                    );
+
+                    // Send to consolidator with EventSource::Kvbm
+                    kv_event_consolidator
+                        .handle_store(
+                            block_hash,
+                            EventSource::Kvbm,
+                            tokens,
+                            parent_hash,
+                            block_size,
+                            None, // lora_id
+                            None, // tier
+                            None, // data_parallel_rank
+                        )
+                        .await;
+                }
+            });
+        } else {
+            tracing::error!(
+                "No Tokio runtime in context; dropping store events for {} blocks",
+                handles.len()
+            );
+        }
+    }
+
+    /// Send remove event to the kv event consolidator
+    ///
+    /// Called when a RegistrationHandle is dropped (block evicted from KVBM).
+    fn publish_remove_event(&self, registration_handle: &RegistrationHandle) {
+        let block_hash = registration_handle.sequence_hash().to_string();
+
+        tracing::debug!(
+            "DynamoEventManager::publish_remove_event called: block_hash={}",
+            block_hash
+        );
+
+        let kv_event_consolidator = self.consolidator_handle.clone();
+
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                kv_event_consolidator
+                    .handle_remove(&block_hash, EventSource::Kvbm)
+                    .await;
+            });
+        } else {
+            tracing::error!(
+                "No Tokio runtime in context; dropping remove event for block {}",
+                block_hash
+            );
+        }
+    }
+}
+
+impl std::fmt::Debug for DynamoEventManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DynamoEventManager(kv_event_consolidator)")
+    }
+}
+
+impl EventManager for DynamoEventManager {}
+
+impl EventPublisher for DynamoEventManager {
+    fn publish(&self, handles: Vec<Arc<RegistrationHandle>>) {
+        self.publish_store_events(handles);
+    }
+}
+
+impl EventReleaseManager for DynamoEventManager {
+    fn block_release(&self, registration_handle: &RegistrationHandle) {
+        self.publish_remove_event(registration_handle);
+    }
 }
 
 #[cfg(test)]

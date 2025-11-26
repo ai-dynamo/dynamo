@@ -47,7 +47,7 @@ Clients query the `find_best_worker` endpoint to determine which worker should p
 >
 > Use this manual setup if you need explicit control over prefill routing configuration or want to manage prefill and decode routers separately.
 
-See [`components/backends/vllm/launch/disagg_router.sh`](/components/backends/vllm/launch/disagg_router.sh) for a complete example.
+See [`examples/backends/vllm/launch/disagg_router.sh`](/examples/backends/vllm/launch/disagg_router.sh) for a complete example.
 
 ```bash
 # Start frontend router for decode workers

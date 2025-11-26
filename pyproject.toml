@@ -3,7 +3,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.6.0"
+version = "0.7.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -13,7 +13,8 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==0.6.0",
+    "ai-dynamo-runtime==0.7.0",
+    "transformers>=4.56.0,<=4.57.1",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
     "kubernetes>=32.0.1,<33.0.0",
@@ -49,19 +50,19 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.1.0rc5",
+    "tensorrt-llm==1.2.0rc2",
 ]
 
 vllm = [
     "uvloop",
-    "nixl<=0.6.0",
-    "vllm[flashinfer]==0.10.2",
+    "nixl[cu12]<=0.7.1",
+    "vllm[flashinfer]==0.11.0",
 ]
 
 sglang = [
     "uvloop",
-    "nixl<=0.6.0",
-    "sglang[all]==0.5.3.post2",
+    "nixl[cu12]<=0.7.1",
+    "sglang==0.5.4.post3",
 ]
 
 [dependency-groups]
@@ -79,6 +80,7 @@ docs = [
     "sphinx-book-theme>=1.1",
     "sphinxcontrib-mermaid>=1.0",
     "sphinxcontrib-bibtex>=2.6",
+    "sphinx-reredirects>=1.0.0",
     # Markdown and notebook support
     "myst-parser>=4.0",
     "myst-nb>=1.2",
@@ -135,7 +137,7 @@ minversion = "8.0"
 tmp_path_retention_policy = "failed"
 
 # NOTE
-# We ignore model.py explcitly here to avoid mypy errors with duplicate modules
+# We ignore model.py explicitly here to avoid mypy errors with duplicate modules
 # pytest overrides the default mypy exclude configuration and so we exclude here as well
 addopts = [
     "-ra",
@@ -146,12 +148,15 @@ addopts = [
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
+    "--ignore-glob=*kvbm/python/kvbm*",
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
     "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
     "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
-    "--ignore-glob=components/backends/sglang/slurm_jobs/*",
+    "--ignore-glob=components/src/dynamo/vllm/multimodal_utils/*",
+    "--ignore-glob=components/src/dynamo/vllm/multimodal_handlers/*",
+    "--ignore-glob=examples/backends/sglang/slurm_jobs/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
@@ -171,6 +176,8 @@ filterwarnings = [
     "ignore:Support for class-based `config`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:Using extra keyword arguments on `Field`.*:pydantic.warnings.PydanticDeprecatedSince20",
     "ignore:The `schema` method is deprecated.*:pydantic.warnings.PydanticDeprecatedSince20",
+    # pytest-benchmark automatically disables when xdist is active, ignore the warning
+    "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
 ]
 
 
@@ -178,6 +185,7 @@ filterwarnings = [
 asyncio_mode = "auto"
 markers = [
     "pre_merge: marks tests to run before merging",
+    "parallel: marks tests that can run in parallel with pytest-xdist",
     "nightly: marks tests to run nightly",
     "weekly: marks tests to run weekly",
     "gpu_1: marks tests to run on GPU",
@@ -192,10 +200,15 @@ markers = [
     "trtllm: marks tests as requiring trtllm",
     "trtllm_marker: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
+    "multimodal: marks tests as multimodal (image/video) tests",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
     "kvbm: marks tests for KV behavior and model determinism",
-    "model: model id used by a test or parameter"
+    "kvbm_v2: marks tests using KVBM V2",
+    "model: model id used by a test or parameter",
+    "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
+    "k8s: marks tests as requiring Kubernetes",
+    "fault_tolerance: marks tests as fault tolerance tests"
 ]
 
 # Linting/formatting

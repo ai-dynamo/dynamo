@@ -9,12 +9,16 @@ use std::{
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
 
-use dynamo_runtime::component::{Component, Endpoint};
-use dynamo_runtime::prelude::DistributedRuntimeProvider;
+use dynamo_runtime::{
+    component::{Endpoint, TransportType},
+    discovery::DiscoverySpec,
+    prelude::DistributedRuntimeProvider,
+    protocols::EndpointId,
+    transports::nats,
+};
 
 use crate::{
-    discovery::KV_ROUTERS_ROOT_PATH,
-    kv_router::{KvRouter, KvRouterConfig, scheduler::DefaultWorkerSelector},
+    kv_router::{KvRouter, KvRouterConfig, router_endpoint_id, scheduler::DefaultWorkerSelector},
     model_card::ModelDeploymentCard,
     model_type::ModelType,
     types::{
@@ -56,7 +60,7 @@ pub struct ModelManager {
 
     // These are Mutex because we read and write rarely and equally
     cards: Mutex<HashMap<String, ModelDeploymentCard>>,
-    kv_choosers: Mutex<HashMap<String, Arc<KvRouter>>>, // Key: component service_name
+    kv_choosers: Mutex<HashMap<EndpointId, Arc<KvRouter>>>,
     prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
 }
 
@@ -289,64 +293,69 @@ impl ModelManager {
 
     pub async fn kv_chooser_for(
         &self,
-        component: &Component,
+        endpoint: &Endpoint,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        let service_name = component.service_name();
+        let endpoint_id = endpoint.id();
 
-        if let Some(kv_chooser) = self.get_kv_chooser(&service_name) {
+        if let Some(kv_chooser) = self.get_kv_chooser(&endpoint_id) {
             // Check if the existing router has a different block size
             if kv_chooser.block_size() != kv_cache_block_size {
                 tracing::warn!(
-                    component = %service_name,
+                    endpoint = %endpoint_id,
                     existing_block_size = %kv_chooser.block_size(),
                     requested_block_size = %kv_cache_block_size,
-                    "KV Router block size mismatch! Component is requesting a different kv_cache_block_size than the existing router. \
+                    "KV Router block size mismatch! Endpoint is requesting a different kv_cache_block_size than the existing router. \
                      This will cause routing to fail silently. Consider using the same block size or restarting the router."
                 );
             }
             return Ok(kv_chooser);
         }
 
-        // Create new KV router with etcd registration
-        let etcd_client = component
-            .drt()
-            .etcd_client()
-            .ok_or_else(|| anyhow::anyhow!("KV routing requires etcd (dynamic mode)"))?;
-        let router_uuid = uuid::Uuid::new_v4();
-        let router_key = format!(
-            "{}/{}/{}",
-            KV_ROUTERS_ROOT_PATH,
-            component.path(),
-            router_uuid
-        );
-        etcd_client
-            .kv_create(
-                &router_key,
-                serde_json::to_vec_pretty(&kv_router_config.unwrap_or_default())?,
-                None, // use primary lease
-            )
-            .await?;
+        let client = endpoint.client().await?;
+
+        // Register router via discovery mechanism
+        let discovery = endpoint.component().drt().discovery();
+        let instance_id = discovery.instance_id();
+
+        // Build NATS transport subject for the router endpoint
+        // Use KV_ROUTER_COMPONENT as the component name to distinguish from the generate endpoint's component
+        let router_endpoint_id = router_endpoint_id(endpoint.id().namespace);
+        // Placeholder subject - router is not callable, only registered for lifecycle coordination
+        let nats_subject = nats::instance_subject(&router_endpoint_id, instance_id);
+
+        let discovery_spec = DiscoverySpec::Endpoint {
+            namespace: router_endpoint_id.namespace.clone(),
+            component: router_endpoint_id.component.clone(),
+            endpoint: router_endpoint_id.name.clone(),
+            transport: TransportType::Nats(nats_subject),
+        };
+
+        discovery.register(discovery_spec).await?;
+
+        // Use instance_id (hex) as the consumer ID for NATS consumer coordination
+        let consumer_id = instance_id.to_string();
 
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
         let chooser = KvRouter::new(
-            component.clone(),
+            endpoint.clone(),
+            client,
             kv_cache_block_size,
             Some(selector),
             kv_router_config,
-            router_uuid.to_string(),
+            consumer_id,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
         self.kv_choosers
             .lock()
-            .insert(service_name, new_kv_chooser.clone());
+            .insert(endpoint_id, new_kv_chooser.clone());
         Ok(new_kv_chooser)
     }
 
-    fn get_kv_chooser(&self, service_name: &str) -> Option<Arc<KvRouter>> {
-        self.kv_choosers.lock().get(service_name).cloned()
+    fn get_kv_chooser(&self, id: &EndpointId) -> Option<Arc<KvRouter>> {
+        self.kv_choosers.lock().get(id).cloned()
     }
 
     /// Register a prefill router for a decode model. Returns a receiver that will be
