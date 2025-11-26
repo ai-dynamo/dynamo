@@ -227,8 +227,14 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
 /// This is the main way you create a Dynamo worker / backend.
+///
+/// If `lora_name` is provided, this function will publish a LoRA adapter instead of a base model:
+/// - LoRA path: v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
+/// - Base model path: v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}
+///
+/// For LoRA mode, `base_model_path` must be provided to inherit configuration from the base model.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -246,6 +252,8 @@ fn register_llm<'p>(
     custom_template_path: Option<&str>,
     media_decoder: Option<MediaDecoder>,
     media_fetcher: Option<MediaFetcher>,
+    lora_name: Option<&str>,
+    base_model_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill {
@@ -294,51 +302,122 @@ fn register_llm<'p>(
             PyErr::new::<PyException, _>(format!("Failed to convert user_data: {}", err))
         })?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let model_path = if fs::exists(&inner_path)? {
-            PathBuf::from(inner_path)
-        } else {
-            // Preserve the model name
-            if model_name.is_none() {
-                model_name = Some(inner_path.clone());
-            }
-            // Likely it's a Hugging Face repo, download it
-            LocalModel::fetch(&inner_path, false)
-                .await
-                .map_err(to_pyerr)?
-        };
+    // Capture LoRA parameters for async block
+    let lora_name_owned = lora_name.map(|s| s.to_string());
+    let base_model_path_owned = base_model_path.map(|s| s.to_string());
 
-        let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
-        builder
-            .model_path(model_path)
-            .model_name(model_name)
-            .context_length(context_length)
-            .kv_cache_block_size(kv_cache_block_size)
-            .router_config(Some(router_config))
-            .migration_limit(Some(migration_limit))
-            .runtime_config(runtime_config.unwrap_or_default().inner)
-            .user_data(user_data_json)
-            .custom_template_path(custom_template_path_owned)
-            .media_decoder(media_decoder.map(|m| m.inner))
-            .media_fetcher(media_fetcher.map(|m| m.inner));
-        // Load the ModelDeploymentCard
-        let mut local_model = builder.build().await.map_err(to_pyerr)?;
-        // Advertise ourself so ingress can find us
-        local_model
-            .attach(&endpoint.inner, model_type_obj, model_input)
-            .await
-            .map_err(to_pyerr)?;
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        // Determine if this is a LoRA registration
+        if let Some(lora_name) = lora_name_owned {
+            // LoRA registration mode
+            let base_path = base_model_path_owned.ok_or_else(|| {
+                to_pyerr(anyhow::anyhow!(
+                    "base_model_path is required when lora_name is provided"
+                ))
+            })?;
+
+            // Resolve base model path
+            let resolved_base_path = if fs::exists(&base_path)? {
+                PathBuf::from(&base_path)
+            } else {
+                LocalModel::fetch(&base_path, false)
+                    .await
+                    .map_err(to_pyerr)?
+            };
+
+            tracing::info!(
+                "Registering LoRA '{}' at endpoint '{}'",
+                lora_name,
+                endpoint.inner.name()
+            );
+
+            // Build a LocalModel with the LoRA name
+            let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
+            builder
+                .model_path(resolved_base_path)
+                .model_name(Some(lora_name.clone())) // Use LoRA name as the model name
+                .kv_cache_block_size(kv_cache_block_size)
+                .user_data(user_data_json);
+
+            let mut local_model = builder.build().await.map_err(to_pyerr)?;
+            // Attach with lora_name to create unique MDC path
+            local_model
+                .attach(
+                    &endpoint.inner,
+                    model_type_obj,
+                    model_input,
+                    Some(&lora_name),
+                )
+                .await
+                .map_err(to_pyerr)?;
+
+            tracing::info!("Successfully registered LoRA '{}' MDC", lora_name);
+        } else {
+            // Base model registration mode (original behavior)
+            let model_path = if fs::exists(&inner_path)? {
+                PathBuf::from(inner_path)
+            } else {
+                // Preserve the model name
+                if model_name.is_none() {
+                    model_name = Some(inner_path.clone());
+                }
+                // Likely it's a Hugging Face repo, download it
+                LocalModel::fetch(&inner_path, false)
+                    .await
+                    .map_err(to_pyerr)?
+            };
+
+            let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
+            builder
+                .model_path(model_path)
+                .model_name(model_name)
+                .context_length(context_length)
+                .kv_cache_block_size(kv_cache_block_size)
+                .router_config(Some(router_config))
+                .migration_limit(Some(migration_limit))
+                .runtime_config(runtime_config.unwrap_or_default().inner)
+                .user_data(user_data_json)
+                .custom_template_path(custom_template_path_owned)
+                .media_decoder(media_decoder.map(|m| m.inner))
+                .media_fetcher(media_fetcher.map(|m| m.inner));
+            // Load the ModelDeploymentCard
+            let mut local_model = builder.build().await.map_err(to_pyerr)?;
+            // Advertise ourself so ingress can find us
+            local_model
+                .attach(&endpoint.inner, model_type_obj, model_input, None)
+                .await
+                .map_err(to_pyerr)?;
+        }
 
         Ok(())
     })
 }
 
-/// Unregister a model from the endpoint.
+/// Unregister a Model Deployment Card (MDC) from the service registry
+///
+/// This removes an LLM deployment from the discovery system.
+///
+/// # Arguments
+///
+/// * `endpoint` - The endpoint where the model is registered
+/// * `lora_name` - Optional LoRA adapter name (if unregistering a LoRA deployment)
+///
+/// # MDC Path Format
+///
+/// - Base model: `v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}`
+/// - LoRA model: `v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}`
 #[pyfunction]
-#[pyo3(signature = (endpoint))]
-fn unregister_llm<'p>(py: Python<'p>, endpoint: Endpoint) -> PyResult<Bound<'p, PyAny>> {
+#[pyo3(signature = (endpoint, lora_name=None))]
+fn unregister_llm<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    lora_name: Option<&str>,
+) -> PyResult<Bound<'p, PyAny>> {
+    let lora_name_owned = lora_name.map(|s| s.to_string());
+
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        LocalModel::detach_model_from_endpoint(&endpoint.inner)
+        // Unified detach method handles both base models and LoRA adapters
+        LocalModel::detach_from_endpoint(&endpoint.inner, lora_name_owned.as_deref())
             .await
             .map_err(to_pyerr)?;
         Ok(())
@@ -606,7 +685,7 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
+        let ingress = JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?;
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
@@ -637,6 +716,9 @@ impl Endpoint {
         if let Some(payload) = health_payload_json {
             builder = builder.health_check_payload(payload);
         }
+
+        // Register the engine in the local endpoint registry for in-process calls
+        builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

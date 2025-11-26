@@ -5,6 +5,6 @@
 LoRA management infrastructure
 """
 
-from .lora import LoRAManager, LoRASourceProtocol
+from .manager import LoRAManager, LoRASourceProtocol
 
 __all__ = ["LoRAManager", "LoRASourceProtocol"]

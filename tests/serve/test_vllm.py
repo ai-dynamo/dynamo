@@ -64,6 +64,30 @@ vllm_configs = {
             metric_payload_default(min_num_requests=6, backend="lmcache"),
         ],
     ),
+    "aggregated_lora_s3": VLLMConfig(
+        name="aggregated_lora_s3",
+        directory=vllm_dir,
+        script_name="lora/agg_lora_s3-math.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.lora,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        timeout=300,
+        env={
+            "AWS_ENDPOINT": "http://localhost:9000",
+            "AWS_ACCESS_KEY_ID": "minioadmin",
+            "AWS_SECRET_ACCESS_KEY": "minioadmin",
+            "AWS_REGION": "us-east-1",
+            "AWS_ALLOW_HTTP": "true",
+            "DYN_LORA_ENABLED": "true",
+            "DYN_LORA_PATH": "/tmp/dynamo_loras_minio",
+        },
+        request_payloads=[
+            # First verify base model works
+            chat_payload_default(),
+        ],
+    ),
     "agg-request-plane-tcp": VLLMConfig(
         name="agg-request-plane-tcp",
         directory=vllm_dir,

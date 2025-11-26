@@ -208,6 +208,7 @@ markers = [
     "model: model id used by a test or parameter",
     "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
     "k8s: marks tests as requiring Kubernetes",
+    "lora: marks tests as requiring LoRA adapter setup (e.g., MinIO)",
     "fault_tolerance: marks tests as fault tolerance tests"
 ]
 
