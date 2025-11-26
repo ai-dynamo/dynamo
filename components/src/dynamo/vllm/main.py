@@ -241,6 +241,26 @@ def setup_vllm_engine(config, stat_logger=None):
     return engine_client, vllm_config, default_sampling_params, prometheus_temp_dir
 
 
+def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
+    """Parse endpoint types string into ModelType flags."""
+    types = [t.strip().lower() for t in endpoint_types_str.split(",")]
+
+    result = None
+    for t in types:
+        if t == "chat":
+            flag = ModelType.Chat
+        elif t == "completions":
+            flag = ModelType.Completions
+        else:
+            raise ValueError(
+                f"Invalid endpoint type: '{t}'. Valid options: 'chat', 'completions'"
+            )
+
+        result = flag if result is None else result | flag
+
+    return result
+
+
 async def register_vllm_model(
     model_input: ModelInput,
     model_type: ModelType,
@@ -507,24 +527,17 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        # Determine model type based on --only-enable-completions flag
-        if config.only_enable_completions:
-            # Warn if a custom chat template was provided but won't be used
-            if config.custom_jinja_template:
-                logger.warning(
-                    "Custom Jinja template provided (--custom-jinja-template) but --only-enable-completions is set. "
-                    "The chat template will be loaded but the /v1/chat/completions endpoint will not be available. "
-                    "If you want to use the chat template, remove the --only-enable-completions flag."
-                )
+        # Parse endpoint types from --dyn-endpoint-types flag
+        model_type = parse_endpoint_types(config.dyn_endpoint_types)
+        logger.info(
+            f"Registering model with endpoint types: {config.dyn_endpoint_types}"
+        )
 
-            model_type = ModelType.Completions
-            logger.info(
-                "Registering model with completions-only support (--only-enable-completions flag set)"
-            )
-        else:
-            model_type = ModelType.Chat | ModelType.Completions
-            logger.info(
-                "Registering model with both chat and completions support (default)"
+        # Warn if custom template provided but chat endpoint not enabled
+        if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
+            logger.warning(
+                "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
+                "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
         await register_vllm_model(

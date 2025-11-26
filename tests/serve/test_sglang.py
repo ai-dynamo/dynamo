@@ -188,6 +188,22 @@ sglang_configs = {
             ),
         ],
     ),
+    "completions_only": SGLangConfig(
+        name="completions_only",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1],
+        model="meta-llama/Llama-3.1-8B",
+        script_args=[
+            "--model-path",
+            "meta-llama/Llama-3.1-8B",
+            "--dyn-endpoint-types",
+            "completions",
+        ],
+        request_payloads=[
+            completion_payload_default(),
+        ],
+    ),
 }
 
 

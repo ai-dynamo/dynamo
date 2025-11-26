@@ -34,6 +34,26 @@ from dynamo.sglang.request_handlers import (
 configure_dynamo_logging()
 
 
+def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
+    """Parse endpoint types string into ModelType flags."""
+    types = [t.strip().lower() for t in endpoint_types_str.split(",")]
+
+    result = None
+    for t in types:
+        if t == "chat":
+            flag = ModelType.Chat
+        elif t == "completions":
+            flag = ModelType.Completions
+        else:
+            raise ValueError(
+                f"Invalid endpoint type: '{t}'. Valid options: 'chat', 'completions'"
+            )
+
+        result = flag if result is None else result | flag
+
+    return result
+
+
 async def _handle_non_leader_node(
     engine: sgl.Engine,
     generate_endpoint,
@@ -156,6 +176,18 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
+    logging.info(
+        f"Registering model with endpoint types: {dynamo_args.dyn_endpoint_types}"
+    )
+    if (
+        dynamo_args.custom_jinja_template
+        and "chat" not in dynamo_args.dyn_endpoint_types
+    ):
+        logging.warning(
+            "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
+            "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
+        )
+
     try:
         # Start endpoint immediately and register model concurrently
         # Requests queue until ready_event is set (TODO: Part of new PR)
@@ -171,6 +203,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 generate_endpoint,
                 server_args,
                 dynamo_args,
+                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
                 readiness_gate=ready_event,
             ),
         )

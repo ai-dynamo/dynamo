@@ -117,6 +117,21 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
+    "completions_only": TRTLLMConfig(
+        name="completions_only",
+        directory=trtllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
+        model="meta-llama/Llama-3.1-8B",
+        script_args=["--dyn-endpoint-types", "completions"],
+        env={
+            "MODEL_PATH": "meta-llama/Llama-3.1-8B",
+            "SERVED_MODEL_NAME": "meta-llama/Llama-3.1-8B",
+        },
+        request_payloads=[
+            completion_payload_default(),
+        ],
+    ),
 }
 
 

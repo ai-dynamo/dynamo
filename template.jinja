@@ -1,0 +1,11 @@
+{% set system_prompt = system_prompt | default("You are a helpful AI assistant.") %}
+{% set user_prompt = user_prompt | default("Hello!") %}
+
+<|system|>
+{{ system_prompt }}
+
+<|user|>
+{{ user_prompt }}
+
+<|assistant|>
+
