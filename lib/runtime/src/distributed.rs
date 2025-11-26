@@ -7,7 +7,6 @@ use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv::{self, Store as _};
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
-use crate::utils::ip_resolver::get_http_rpc_host_from_env;
 use crate::{
     component::{self, ComponentBuilder, Endpoint, Namespace},
     discovery::Discovery,
@@ -24,7 +23,6 @@ use crate::runtime::Runtime;
 // Used instead of std::cell::OnceCell because get_or_try_init there is nightly
 use async_once_cell::OnceCell;
 
-use hostname::get as get_hostname;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock, Weak};
@@ -104,54 +102,6 @@ impl std::fmt::Debug for DistributedRuntime {
 }
 
 impl DistributedRuntime {
-    /// Resolve the hostname to advertise for metrics endpoints.
-    /// This function determines the best hostname to use when registering metrics endpoints
-    /// with discovery, preferring explicit pod identifiers over wildcard addresses.
-    ///
-    /// # Arguments
-    /// * `configured_host` - The host configured for the service (may be a wildcard like "0.0.0.0")
-    /// * `actual_addr` - The actual socket address the service is bound to
-    ///
-    /// # Returns
-    /// A string representing the hostname/IP to advertise in metrics endpoint URLs
-    pub fn resolve_metrics_advertise_host(
-        configured_host: &str,
-        actual_addr: &std::net::SocketAddr,
-    ) -> String {
-        if !Self::host_is_wildcard(configured_host) {
-            return configured_host.to_string();
-        }
-
-        // Prefer explicit pod identifiers for Kubernetes deployments
-        for key in ["POD_NAME", "HOSTNAME"] {
-            if let Ok(value) = std::env::var(key) {
-                let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    return trimmed.to_string();
-                }
-            }
-        }
-
-        // Use the bound address if it isn't unspecified (e.g. when binding to a concrete IP)
-        if !actual_addr.ip().is_unspecified() {
-            return actual_addr.ip().to_string();
-        }
-
-        if let Ok(host) = get_hostname() {
-            let host_str = host.to_string_lossy().trim().to_string();
-            if !host_str.is_empty() {
-                return host_str;
-            }
-        }
-
-        get_http_rpc_host_from_env()
-    }
-
-    /// Check if a host string represents a wildcard address
-    pub fn host_is_wildcard(host: &str) -> bool {
-        host.is_empty() || host == "0.0.0.0" || host == "::" || host == "[::]"
-    }
-
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
         let (selected_kv_store, nats_config, request_plane) = config.dissolve();
 
@@ -295,7 +245,7 @@ impl DistributedRuntime {
 
                     // Register metrics endpoint with discovery
                     // Use "system" namespace for the system status server's metrics endpoint
-                    let advertise_host = Self::resolve_metrics_advertise_host(&host, &addr);
+                    let advertise_host = system_status_server::resolve_advertise_host(&host);
                     let metrics_url = format!("http://{}:{}/metrics", advertise_host, addr.port());
                     let metrics_spec = crate::discovery::DiscoverySpec::MetricsEndpoint {
                         namespace: "system".to_string(),

@@ -150,10 +150,12 @@ pub async fn run(
     } else {
         "http"
     };
+    let advertise_host =
+        dynamo_runtime::system_status_server::resolve_advertise_host(http_service.host());
     let metrics_url = format!(
         "{}://{}:{}/metrics",
         protocol,
-        http_service.host(),
+        advertise_host,
         http_service.port()
     );
     let metrics_spec = dynamo_runtime::discovery::DiscoverySpec::MetricsEndpoint {

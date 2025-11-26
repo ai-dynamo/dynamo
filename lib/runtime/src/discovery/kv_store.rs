@@ -505,6 +505,7 @@ impl Discovery for KVStoreDiscovery {
 mod tests {
     use super::*;
     use crate::component::TransportType;
+    use crate::storage::key_value_store::KeyValueStoreManager;
 
     #[tokio::test]
     async fn test_kv_store_discovery_register_endpoint() {
