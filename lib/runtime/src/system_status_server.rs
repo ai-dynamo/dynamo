@@ -130,7 +130,9 @@ pub struct LoraResponse {
 
 /// Get local NVIDIA GPU UUIDs using NVML
 /// Returns an empty vector if NVML initialization fails or no GPUs are found
-/// Respects CUDA_VISIBLE_DEVICES if set, filtering to only the specified GPU indices
+/// Respects CUDA_VISIBLE_DEVICES if set, filtering to only the specified devices.
+/// CUDA_VISIBLE_DEVICES can contain either numeric indices (e.g., "0,1,2") or
+/// GPU UUIDs (e.g., "GPU-abc123,GPU-def456").
 pub fn get_local_gpu_uuids() -> Vec<String> {
     let visible_devices = std::env::var("CUDA_VISIBLE_DEVICES").ok();
 
@@ -146,22 +148,59 @@ pub fn get_local_gpu_uuids() -> Vec<String> {
 
             match visible_devices {
                 Some(visible) if !visible.is_empty() => {
-                    // Parse CUDA_VISIBLE_DEVICES indices and filter
-                    let visible_indices: std::collections::HashSet<u32> = visible
-                        .split(',')
-                        .filter_map(|s| s.trim().parse::<u32>().ok())
-                        .collect();
+                    // Parse CUDA_VISIBLE_DEVICES - can be indices or UUIDs
+                    let visible_entries: Vec<&str> = visible.split(',').map(|s| s.trim()).collect();
 
-                    all_gpus
-                        .into_iter()
-                        .filter(|(idx, _)| visible_indices.contains(idx))
-                        .map(|(_, uuid)| uuid)
-                        .collect()
+                    // Check if entries are numeric indices or UUIDs
+                    let has_uuid = visible_entries.iter().any(|s| s.starts_with("GPU-"));
+
+                    if has_uuid {
+                        // Filter by UUID match (exact or prefix match)
+                        let visible_set: std::collections::HashSet<&str> =
+                            visible_entries.into_iter().collect();
+                        all_gpus
+                            .into_iter()
+                            .filter(|(_, uuid)| visible_set.iter().any(|v| uuid.starts_with(v)))
+                            .map(|(_, uuid)| uuid)
+                            .collect()
+                    } else {
+                        // Filter by numeric index
+                        let visible_indices: std::collections::HashSet<u32> = visible_entries
+                            .into_iter()
+                            .filter_map(|s| s.parse::<u32>().ok())
+                            .collect();
+                        all_gpus
+                            .into_iter()
+                            .filter(|(idx, _)| visible_indices.contains(idx))
+                            .map(|(_, uuid)| uuid)
+                            .collect()
+                    }
                 }
                 _ => all_gpus.into_iter().map(|(_, uuid)| uuid).collect(),
             }
         }
         Err(_) => Vec::new(),
+    }
+}
+
+/// Resolve a hostname for advertising in discovery.
+/// If the configured host is a wildcard (0.0.0.0, ::, etc.), returns the system hostname.
+/// In Kubernetes, this returns the pod name; on bare metal, the machine hostname.
+pub fn resolve_advertise_host(configured_host: &str) -> String {
+    if configured_host.is_empty()
+        || configured_host == "0.0.0.0"
+        || configured_host == "::"
+        || configured_host == "[::]"
+    {
+        hostname::get()
+            .ok()
+            .and_then(|h| {
+                let s = h.to_string_lossy().trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            })
+            .unwrap_or_else(|| configured_host.to_string())
+    } else {
+        configured_host.to_string()
     }
 }
 
