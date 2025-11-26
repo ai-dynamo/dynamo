@@ -702,7 +702,7 @@ async def run_profile(args):
             logger.info("Deployment deleted")
 
         # generate DGD with planner based on profiling results
-        config = generate_dgd_config_with_planner(
+        config, mocker_config = generate_dgd_config_with_planner(
             config_path=args.config,
             config_modifier=config_modifier,
             output_dir=args.output_dir,
@@ -719,6 +719,15 @@ async def run_profile(args):
                 yaml.dump_all(config, f)
             else:
                 yaml.dump(config, f)
+
+        # save mocker config with planner for testing purposes
+        logger.debug(f"Mocker config with planner: {mocker_config}")
+        with open(f"{args.output_dir}/mocker_config_with_planner.yaml", "w") as f:
+            if isinstance(config, list):
+                # config[0] is the ConfigMap, reuse it for mocker config
+                yaml.dump_all([config[0], mocker_config], f)
+            else:
+                yaml.dump(mocker_config, f)
 
     except Exception as e:
         logger.error(f"Profile job failed with error: {e}")

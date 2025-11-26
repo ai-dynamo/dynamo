@@ -130,10 +130,21 @@ class TrtllmComponentName:
     decode_worker_endpoint = "generate"
 
 
+class MockerComponentName:
+    # Mocker backend for testing/simulation purposes
+    prefill_worker_k8s_name = "prefill"
+    prefill_worker_component_name = "prefill"
+    prefill_worker_endpoint = "generate"
+    decode_worker_k8s_name = "decode"
+    decode_worker_component_name = "backend"
+    decode_worker_endpoint = "generate"
+
+
 WORKER_COMPONENT_NAMES = {
     "vllm": VllmComponentName,
     "sglang": SGLangComponentName,
     "trtllm": TrtllmComponentName,
+    "mocker": MockerComponentName,
 }
 
 

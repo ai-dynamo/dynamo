@@ -13,19 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import json
+import os
 from typing import Optional
 
 import numpy as np
 import yaml
 
-from benchmarks.profiler.utils.config import Config, DgdPlannerServiceConfig
+from benchmarks.profiler.utils.config import (
+    Config,
+    DgdPlannerServiceConfig,
+    set_argument_value,
+)
 from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
     ParallelizationMapping,
 )
 from benchmarks.profiler.utils.planner_utils import build_planner_args_from_namespace
 from dynamo.common.utils.paths import get_workspace_dir
-from dynamo.planner.defaults import SubComponentType
+from dynamo.planner.defaults import MockerComponentName, SubComponentType
+
+# Path to mocker disagg config relative to workspace
+MOCKER_DISAGG_CONFIG_PATH = "examples/backends/mocker/deploy/disagg.yaml"
 
 
 def generate_dgd_config_with_planner(
@@ -49,8 +58,10 @@ def generate_dgd_config_with_planner(
         num_gpus_per_node: Number of GPUs per node (for TEP/DEP models)
 
     Returns:
-        list[dict] | dict: If a ConfigMap is generated for planner data, returns a list
-        of two YAML documents [ConfigMap, DGD]; otherwise returns a single DGD dict.
+        tuple: (dgd_config, mocker_config) where:
+            - dgd_config: list[dict] | dict - If a ConfigMap is generated for planner data,
+              returns a list of two YAML documents [ConfigMap, DGD]; otherwise returns a single DGD dict.
+            - mocker_config: dict - Mocker DGD config with planner for testing purposes.
     """
 
     # Load config from file
@@ -114,6 +125,7 @@ def generate_dgd_config_with_planner(
     planner_config = DgdPlannerServiceConfig()
     frontend_service = config.spec.services["Frontend"]
     planner_config.dynamoNamespace = getattr(frontend_service, "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
+    frontend_image: Optional[str] = None
     if frontend_service.extraPodSpec and frontend_service.extraPodSpec.mainContainer:
         frontend_image = frontend_service.extraPodSpec.mainContainer.image
         if frontend_image and planner_config.extraPodSpec.mainContainer:
@@ -239,7 +251,125 @@ def generate_dgd_config_with_planner(
     # Finalize DGD services
     config_dict["spec"]["services"]["Planner"] = planner_dict
 
+    # Generate mocker config with planner for testing purposes
+    mocker_config = _generate_mocker_config_with_planner(
+        args=args,
+        cm_mount_path=cm_mount_path,
+        config_map_obj=config_map_obj,
+        planner_dict=planner_dict,
+    )
+
     # Return multi-doc YAML (ConfigMap + DGD) when ConfigMap is created; else DGD only
     if config_map_obj is not None:
-        return [config_map_obj, config_dict]
-    return config_dict
+        dgd_config = [config_map_obj, config_dict]
+    else:
+        dgd_config = config_dict
+
+    return dgd_config, mocker_config
+
+
+def _generate_mocker_config_with_planner(
+    args,
+    cm_mount_path: str,
+    config_map_obj: Optional[dict],
+    planner_dict: dict,
+) -> dict:
+    """Generate mocker DGD config with planner for testing purposes.
+
+    This loads the mocker disagg.yaml, updates the worker image, mounts the
+    profiling ConfigMap, sets --planner-profile-data for workers, and adds the planner service.
+
+    Args:
+        args: Parsed arguments namespace from profile_sla
+        cm_mount_path: Mount path for the ConfigMap containing profiling data
+        config_map_obj: The ConfigMap object (if created)
+        planner_dict: The planner service dict to reuse (includes planner image)
+
+    Returns:
+        dict: Mocker DGD config with planner service
+    """
+    # Load mocker disagg config
+    workspace_dir = get_workspace_dir()
+    mocker_config_path = os.path.join(workspace_dir, MOCKER_DISAGG_CONFIG_PATH)
+
+    with open(mocker_config_path, "r") as f:
+        mocker_config = yaml.safe_load(f)
+
+    # Update worker image if provided
+    if args.dgd_image:
+        for service_name, service_config in (
+            mocker_config.get("spec", {}).get("services", {}).items()
+        ):
+            if service_config.get("extraPodSpec") and service_config[
+                "extraPodSpec"
+            ].get("mainContainer"):
+                service_config["extraPodSpec"]["mainContainer"][
+                    "image"
+                ] = args.dgd_image
+
+    # Update --planner-profile-data in prefill and decode workers
+    mocker_worker_names = [
+        MockerComponentName.prefill_worker_k8s_name,
+        MockerComponentName.decode_worker_k8s_name,
+    ]
+    for worker_name in mocker_worker_names:
+        service_config = (
+            mocker_config.get("spec", {}).get("services", {}).get(worker_name)
+        )
+        if service_config:
+            main_container = service_config.get("extraPodSpec", {}).get(
+                "mainContainer", {}
+            )
+            args_list = main_container.get("args", [])
+            args_list = set_argument_value(
+                args_list, "--planner-profile-data", cm_mount_path
+            )
+            main_container["args"] = args_list
+
+    # Mount the ConfigMap if it exists
+    if config_map_obj is not None:
+        for worker_name in mocker_worker_names:
+            service_config = (
+                mocker_config.get("spec", {}).get("services", {}).get(worker_name)
+            )
+            if service_config:
+                extra_pod_spec = service_config.setdefault("extraPodSpec", {})
+
+                # Add volume
+                volumes = extra_pod_spec.setdefault("volumes", [])
+                volumes.append(
+                    {
+                        "name": "planner-profile-data",
+                        "configMap": {"name": "planner-profile-data"},
+                    }
+                )
+
+                # Add volume mount
+                main_container = extra_pod_spec.setdefault("mainContainer", {})
+                volume_mounts = main_container.setdefault("volumeMounts", [])
+                volume_mounts.append(
+                    {
+                        "name": "planner-profile-data",
+                        "mountPath": cm_mount_path,
+                        "readOnly": True,
+                    }
+                )
+
+    # Add planner service (reuse the same planner config but with mocker backend)
+    mocker_planner_dict = copy.deepcopy(planner_dict)
+
+    # Override --backend to mocker for the planner
+    # Planner args use --key=value format, so we need to find and replace --backend=*
+    planner_main_container = mocker_planner_dict.get("extraPodSpec", {}).get(
+        "mainContainer", {}
+    )
+    planner_args = planner_main_container.get("args", [])
+    planner_args = [
+        "--backend=mocker" if arg.startswith("--backend=") else arg
+        for arg in planner_args
+    ]
+    planner_main_container["args"] = planner_args
+
+    mocker_config["spec"]["services"]["Planner"] = mocker_planner_dict
+
+    return mocker_config
