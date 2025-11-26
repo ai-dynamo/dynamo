@@ -67,8 +67,6 @@ class BuildKitParser:
                         "cached": False,
                         "duration_sec": 0.0,
                         "size_transferred": 0,
-                        "logs": [],
-                        "substeps": [],
                     }
                 current_step_num = step_num
                 continue
@@ -102,12 +100,7 @@ class BuildKitParser:
                     rf"^#{current_step_num}\s+([\d.]+)\s+(.*)", line
                 )
                 if substep_match:
-                    timestamp = substep_match.group(1)
                     message = substep_match.group(2)
-                    step_data[current_step_num]["substeps"].append(
-                        {"timestamp": float(timestamp), "message": message}
-                    )
-
                     # Extract size information
                     size_match = re.search(r"([\d.]+)\s*([KMGT]?i?B)", message)
                     if size_match:
@@ -117,17 +110,8 @@ class BuildKitParser:
                         step_data[current_step_num]["size_transferred"] += size_bytes
                     continue
 
-                # Other step-related information
-                if re.match(rf"^#{current_step_num}\s+", line):
-                    step_data[current_step_num]["logs"].append(
-                        line.replace(f"#{current_step_num} ", "")
-                    )
-
         # Convert to sorted list
         steps = [step_data[num] for num in sorted(step_data.keys(), key=int)]
-
-        # Enrich steps with stage information
-        steps = self._enrich_steps_with_stage_info(steps)
 
         # Calculate aggregate statistics
         total_duration = sum(s["duration_sec"] for s in steps)
@@ -138,8 +122,17 @@ class BuildKitParser:
         )
         total_size = sum(s["size_transferred"] for s in steps)
 
-        # Calculate per-stage metrics
-        stage_metrics = self._calculate_stage_metrics(steps)
+        # Create single stage representing this entire Docker build
+        build_duration_sec = sum(s["duration_sec"] for s in steps if not s["cached"])
+        stage_metrics = [{
+            "stage_name": "build",
+            "total_steps": total_steps,
+            "cached_steps": cached_steps,
+            "built_steps": total_steps - cached_steps,
+            "total_duration_sec": round(total_duration, 2),
+            "build_duration_sec": round(build_duration_sec, 2),
+            "cache_hit_rate": round(cache_hit_rate, 2),
+        }]
 
         return {
             "container": {
@@ -177,86 +170,6 @@ class BuildKitParser:
         }
 
         return int(val * multipliers.get(unit, 1))
-
-    def _extract_stage_name(self, step_name: str) -> str:
-        """Extract stage name from BuildKit step name"""
-        # Match patterns like "[base 1/5]" or "[vllm-builder 2/3]"
-        match = re.match(r"^\[?([a-zA-Z0-9_-]+)\s+\d+/\d+", step_name)
-        if match:
-            return match.group(1)
-        
-        # Handle internal steps
-        if "internal" in step_name.lower():
-            return "internal"
-        
-        # Handle unnamed stages (stage-0, stage-1, etc)
-        stage_match = re.search(r"stage-(\d+)", step_name)
-        if stage_match:
-            return f"stage-{stage_match.group(1)}"
-        
-        return "unknown"
-
-    def _calculate_stage_metrics(self, steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Calculate cache hit rate and timing per stage"""
-        stage_data = {}
-        stage_order = {}
-        order_counter = 0
-        
-        for step in steps:
-            stage = self._extract_stage_name(step["step_name"])
-            
-            if stage not in stage_data:
-                order_counter += 1
-                stage_order[stage] = order_counter
-                stage_data[stage] = {
-                    "stage_name": stage,
-                    "stage_order": order_counter,
-                    "total_steps": 0,
-                    "cached_steps": 0,
-                    "built_steps": 0,
-                    "total_duration_sec": 0.0,
-                    "build_duration_sec": 0.0,
-                    "cache_hit_rate": 0.0,
-                }
-            
-            stage_data[stage]["total_steps"] += 1
-            stage_data[stage]["total_duration_sec"] += step["duration_sec"]
-            
-            if step["cached"]:
-                stage_data[stage]["cached_steps"] += 1
-            else:
-                stage_data[stage]["built_steps"] += 1
-                stage_data[stage]["build_duration_sec"] += step["duration_sec"]
-        
-        # Calculate percentages and round
-        for stage in stage_data.values():
-            if stage["total_steps"] > 0:
-                stage["cache_hit_rate"] = round(
-                    (stage["cached_steps"] / stage["total_steps"]) * 100, 2
-                )
-            stage["total_duration_sec"] = round(stage["total_duration_sec"], 2)
-            stage["build_duration_sec"] = round(stage["build_duration_sec"], 2)
-        
-        # Convert to sorted list by stage order
-        return sorted(stage_data.values(), key=lambda x: x["stage_order"])
-
-    def _enrich_steps_with_stage_info(self, steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Add stage information to each step"""
-        stage_order = {}
-        order_counter = 0
-        
-        for step in steps:
-            stage = self._extract_stage_name(step["step_name"])
-            
-            if stage not in stage_order:
-                order_counter += 1
-                stage_order[stage] = order_counter
-            
-            # Add stage info to step
-            step["stage_name"] = stage
-            step["stage_order"] = stage_order[stage]
-        
-        return steps
 
 
 def main():
@@ -314,26 +227,13 @@ def main():
         file=sys.stderr,
     )
     print(
-        f"   Overall Cache Hit Rate: {container['overall_cache_hit_rate']:.1f}%",
+        f"   Cache Hit Rate: {container['overall_cache_hit_rate']:.1f}%",
         file=sys.stderr,
     )
     print(
         f"   Total Duration: {container['total_duration_sec']:.2f}s",
         file=sys.stderr,
     )
-    
-    # Print per-stage summary
-    if build_data.get("stages"):
-        print("", file=sys.stderr)
-        print("📦 Per-Stage Breakdown:", file=sys.stderr)
-        for stage in build_data["stages"]:
-            print(
-                f"   [{stage['stage_name']}] "
-                f"{stage['cached_steps']}/{stage['total_steps']} cached "
-                f"({stage['cache_hit_rate']:.1f}%), "
-                f"{stage['total_duration_sec']:.1f}s",
-                file=sys.stderr,
-            )
 
 
 if __name__ == "__main__":
