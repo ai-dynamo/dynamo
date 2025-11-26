@@ -101,7 +101,11 @@ async fn test_controllable_session_basic_flow() -> Result<()> {
         state.phase == RemoteSessionPhase::Attached || state.phase == RemoteSessionPhase::Ready,
         "Should be in Attached or Ready phase"
     );
-    assert_eq!(state.g2_blocks.len(), NUM_BLOCKS, "Should see all G2 blocks");
+    assert_eq!(
+        state.g2_blocks.len(),
+        NUM_BLOCKS,
+        "Should see all G2 blocks"
+    );
     assert_eq!(state.g3_pending_count, 0, "No G3 blocks pending");
 
     // Step 5: Verify G2 block metadata
@@ -113,11 +117,7 @@ async fn test_controllable_session_basic_flow() -> Result<()> {
     }
 
     // Step 6: Mark blocks as pulled (simulating RDMA pull completion)
-    let pulled_hashes: Vec<_> = state
-        .g2_blocks
-        .iter()
-        .map(|b| b.sequence_hash)
-        .collect();
+    let pulled_hashes: Vec<_> = state.g2_blocks.iter().map(|b| b.sequence_hash).collect();
 
     handle.mark_blocks_pulled(pulled_hashes.clone()).await?;
     println!("Prefill marked {} blocks as pulled", pulled_hashes.len());
@@ -269,10 +269,7 @@ async fn test_remote_session_handle_state_queries() -> Result<()> {
 
     let is_ready = handle.is_ready();
     let is_complete = handle.is_complete();
-    println!(
-        "State: is_ready={}, is_complete={}",
-        is_ready, is_complete
-    );
+    println!("State: is_ready={}, is_complete={}", is_ready, is_complete);
 
     // Clean up
     handle.detach().await?;

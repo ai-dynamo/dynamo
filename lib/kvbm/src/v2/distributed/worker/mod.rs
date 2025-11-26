@@ -4,7 +4,10 @@
 mod direct;
 mod nova;
 
+pub use direct::DirectWorker;
+
 use anyhow::Result;
+use dynamo_nova::events::LocalEventWaiter;
 use futures::future::{Either, Ready, ready};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -88,6 +91,69 @@ impl std::future::IntoFuture for ImportMetadataResponse {
     }
 }
 
+/// Response type for `connect_remote` operations.
+///
+/// This type represents the completion state of a remote metadata import
+/// with handle mapping storage. Like other response types, it can be awaited.
+///
+/// For direct workers, this is typically ready immediately.
+/// For replicated workers, this aggregates multiple underlying imports.
+pub struct ConnectRemoteResponse {
+    awaiter: ConnectRemoteAwaiter,
+}
+
+pub enum ConnectRemoteAwaiter {
+    Ready(Ready<Result<()>>),
+    Event(LocalEventWaiter),
+}
+
+impl std::future::Future for ConnectRemoteAwaiter {
+    type Output = Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.get_mut() {
+            Self::Ready(ready) => Pin::new(ready).poll(cx),
+            Self::Event(waiter) => Pin::new(waiter).poll(cx),
+        }
+    }
+}
+
+impl ConnectRemoteResponse {
+    /// Create a response that is already completed.
+    ///
+    /// This is used when the connect operation completes synchronously,
+    /// such as for DirectWorker with local metadata import.
+    pub fn ready() -> Self {
+        Self {
+            awaiter: ConnectRemoteAwaiter::Ready(ready(Ok(()))),
+        }
+    }
+
+    /// Create a response from an event waiter.
+    ///
+    /// This is used when the connect operation requires waiting for
+    /// multiple underlying operations to complete (e.g., ReplicatedWorker).
+    pub fn from_awaiter(awaiter: LocalEventWaiter) -> Self {
+        Self {
+            awaiter: ConnectRemoteAwaiter::Event(awaiter),
+        }
+    }
+
+    /// Check if the response can yield the current task.
+    pub fn could_yield(&self) -> bool {
+        matches!(self.awaiter, ConnectRemoteAwaiter::Event(_))
+    }
+}
+
+impl std::future::IntoFuture for ConnectRemoteResponse {
+    type Output = Result<()>;
+    type IntoFuture = ConnectRemoteAwaiter;
+
+    fn into_future(self) -> Self::IntoFuture {
+        self.awaiter
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub enum RemoteDescriptor {
     Layout {
@@ -159,9 +225,64 @@ pub trait WorkerTransfers: Send + Sync {
         src_block_ids: Arc<[BlockId]>,
         options: crate::physical::transfer::TransferOptions,
     ) -> Result<TransferCompleteNotification>;
+
+    /// Connect to a remote instance by importing its metadata and storing handle mappings.
+    ///
+    /// This method stores the handle mappings internally for later use by
+    /// `execute_remote_onboard_for_instance`. The metadata is also imported into
+    /// the underlying transfer manager so NIXL knows about the remote.
+    ///
+    /// # Arguments
+    /// * `instance_id` - The unique identifier of the remote instance
+    /// * `metadata` - Serialized layout metadata from the remote instance.
+    ///   For DirectWorker, expects exactly 1 element.
+    ///   For ReplicatedWorker, expects one element per worker (in rank order).
+    ///
+    /// # Returns
+    /// A response that completes when the metadata has been imported and mappings stored.
+    fn connect_remote(
+        &self,
+        instance_id: InstanceId,
+        metadata: Vec<SerializedLayout>,
+    ) -> Result<ConnectRemoteResponse>;
+
+    /// Check if remote metadata has been imported for an instance.
+    ///
+    /// Returns true if `connect_remote` has been successfully called for this instance.
+    fn has_remote_metadata(&self, instance_id: InstanceId) -> bool;
+
+    /// Execute a remote onboard transfer using stored handle mapping.
+    ///
+    /// This method looks up the remote handle from the stored mapping
+    /// (established via `connect_remote`) and executes the transfer.
+    ///
+    /// # Arguments
+    /// * `instance_id` - The remote instance to pull from
+    /// * `remote_logical_type` - The logical layout type on the remote (e.g., G2)
+    /// * `src_block_ids` - Block IDs on the remote to pull
+    /// * `dst` - Local destination logical layout
+    /// * `dst_block_ids` - Local destination block IDs
+    /// * `options` - Transfer options
+    ///
+    /// # Errors
+    /// Returns error if remote metadata hasn't been imported for this instance.
+    fn execute_remote_onboard_for_instance(
+        &self,
+        instance_id: InstanceId,
+        remote_logical_type: LogicalLayoutHandle,
+        src_block_ids: Vec<BlockId>,
+        dst: LogicalLayoutHandle,
+        dst_block_ids: Arc<[BlockId]>,
+        options: crate::physical::transfer::TransferOptions,
+    ) -> Result<TransferCompleteNotification>;
 }
 
 pub trait Worker: WorkerTransfers + Send + Sync {
+    /// Get the G2 layout handle for this worker (if configured).
+    ///
+    /// Returns None if no G2 layout has been registered with this worker.
+    fn g2_handle(&self) -> Option<LayoutHandle>;
+
     /// Export the local metadata for this worker.
     ///
     /// # Returns

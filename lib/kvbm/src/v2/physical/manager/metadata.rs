@@ -4,6 +4,7 @@
 //! Serialization types for exporting/importing layout metadata with NIXL integration.
 
 use super::handle::LayoutHandle;
+use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::physical::layout::LayoutDescriptor;
 use anyhow::Result;
 use bincode::{Decode, Encode};
@@ -29,24 +30,56 @@ impl WorkerAddress {
     }
 }
 
-/// Local layout descriptor with its assigned handle from the TransportManager.
+/// Layout descriptor with its assigned handle and logical type for RDMA metadata exchange.
+///
+/// This includes the logical layout type (G1, G2, G3, G4) so that remote instances
+/// know which physical handle corresponds to which tier.
 #[derive(Debug, Clone, Encode, Decode)]
-pub struct LocalLayoutDescriptor {
+pub struct LogicalLayoutDescriptor {
     /// Unique handle for this layout
     pub handle: LayoutHandle,
+    /// The logical layout type (G1, G2, G3, G4)
+    pub logical_type: LogicalLayoutHandle,
     /// Serialized layout data (uses Serde, bridged via bincode)
     #[bincode(with_serde)]
     pub layout: LayoutDescriptor,
 }
 
-impl LocalLayoutDescriptor {
-    /// Create a new serialized layout with handle.
-    pub fn new(handle: LayoutHandle, layout: LayoutDescriptor) -> Self {
-        Self { handle, layout }
+impl LogicalLayoutDescriptor {
+    /// Create a new layout descriptor with handle and logical type.
+    pub fn new(
+        handle: LayoutHandle,
+        logical_type: LogicalLayoutHandle,
+        layout: LayoutDescriptor,
+    ) -> Self {
+        Self {
+            handle,
+            logical_type,
+            layout,
+        }
+    }
+
+    /// Create a layout descriptor with G2 as the default logical type.
+    ///
+    /// This is provided for backwards compatibility with code that doesn't
+    /// track logical types. G2 is used as the default since it's the most
+    /// common tier for RDMA transfers (GPU memory for KV cache).
+    ///
+    /// For proper RDMA transfers between instances, use `new()` with the
+    /// correct logical type from the Worker's registered handles.
+    pub fn new_with_default_type(handle: LayoutHandle, layout: LayoutDescriptor) -> Self {
+        Self {
+            handle,
+            logical_type: LogicalLayoutHandle::G2,
+            layout,
+        }
     }
 }
 
-/// The set of [`LocalLayoutDescriptor`] that are RDMA enabled. This object packages the detail
+/// Type alias for backwards compatibility.
+pub type LocalLayoutDescriptor = LogicalLayoutDescriptor;
+
+/// The set of [`LogicalLayoutDescriptor`] that are RDMA enabled. This object packages the detail
 /// about the layouts and the NIXL RDMA metadata required to reconstruct the layouts and access
 /// the memory via NIXL RDMA.
 #[derive(Debug, Encode, Decode)]
@@ -55,8 +88,8 @@ pub struct RdmaLayoutDescriptors {
     pub worker_address: WorkerAddress,
     /// Exported NIXL metadata from nixl_sys::Agent::get_local_md()
     pub nixl_metadata: Vec<u8>,
-    /// Serialized layouts (handle + layout data)
-    pub layouts: Vec<LocalLayoutDescriptor>,
+    /// Serialized layouts (handle + logical type + layout data)
+    pub layouts: Vec<LogicalLayoutDescriptor>,
 }
 
 /// Managed memory metadata package for export/import.
@@ -74,14 +107,14 @@ impl SerializedLayout {
     /// # Arguments
     /// * `worker_address` - Worker identification
     /// * `nixl_metadata` - NIXL metadata blob from get_local_md()
-    /// * `layouts` - Vector of layouts with handles to export
+    /// * `layouts` - Vector of layouts with handles and logical types to export
     ///
     /// # Returns
     /// Packed metadata ready for transmission
     pub fn pack(
         worker_address: WorkerAddress,
         nixl_metadata: Vec<u8>,
-        layouts: Vec<LocalLayoutDescriptor>,
+        layouts: Vec<LogicalLayoutDescriptor>,
     ) -> Result<Self> {
         let inner = RdmaLayoutDescriptors {
             worker_address,
@@ -176,19 +209,25 @@ mod tests {
 
     #[test]
     fn test_serialized_layout_with_handle() {
+        use crate::v2::logical::LogicalLayoutHandle;
+
         let handle = LayoutHandle::new(1, 2);
         let layout = make_test_serialized_layout();
-        let with_handle = LocalLayoutDescriptor::new(handle, layout);
+        let with_handle = LogicalLayoutDescriptor::new(handle, LogicalLayoutHandle::G2, layout);
 
         assert_eq!(with_handle.handle, handle);
+        assert_eq!(with_handle.logical_type, LogicalLayoutHandle::G2);
     }
 
     #[test]
     fn test_metadata_pack_unpack() {
+        use crate::v2::logical::LogicalLayoutHandle;
+
         let worker_address = WorkerAddress::new(100, "worker_100".to_string());
         let nixl_metadata = vec![1, 2, 3, 4, 5];
-        let layouts = vec![LocalLayoutDescriptor::new(
+        let layouts = vec![LogicalLayoutDescriptor::new(
             LayoutHandle::new(100, 1),
+            LogicalLayoutHandle::G2,
             make_test_serialized_layout(),
         )];
 
@@ -205,16 +244,31 @@ mod tests {
         assert_eq!(unpacked.layouts.len(), 1);
         assert_eq!(unpacked.layouts[0].handle.worker_id(), 100);
         assert_eq!(unpacked.layouts[0].handle.layout_id(), 1);
+        assert_eq!(unpacked.layouts[0].logical_type, LogicalLayoutHandle::G2);
     }
 
     #[test]
     fn test_metadata_multiple_layouts() {
+        use crate::v2::logical::LogicalLayoutHandle;
+
         let worker_address = WorkerAddress::new(200, "worker_200".to_string());
         let nixl_metadata = vec![10, 20, 30];
         let layouts = vec![
-            LocalLayoutDescriptor::new(LayoutHandle::new(200, 1), make_test_serialized_layout()),
-            LocalLayoutDescriptor::new(LayoutHandle::new(200, 2), make_test_serialized_layout()),
-            LocalLayoutDescriptor::new(LayoutHandle::new(200, 3), make_test_serialized_layout()),
+            LogicalLayoutDescriptor::new(
+                LayoutHandle::new(200, 1),
+                LogicalLayoutHandle::G1,
+                make_test_serialized_layout(),
+            ),
+            LogicalLayoutDescriptor::new(
+                LayoutHandle::new(200, 2),
+                LogicalLayoutHandle::G2,
+                make_test_serialized_layout(),
+            ),
+            LogicalLayoutDescriptor::new(
+                LayoutHandle::new(200, 3),
+                LogicalLayoutHandle::G3,
+                make_test_serialized_layout(),
+            ),
         ];
 
         let packed =
@@ -222,9 +276,15 @@ mod tests {
         let unpacked = packed.unpack().unwrap();
 
         assert_eq!(unpacked.layouts.len(), 3);
+        let expected_logical_types = [
+            LogicalLayoutHandle::G1,
+            LogicalLayoutHandle::G2,
+            LogicalLayoutHandle::G3,
+        ];
         for (i, layout) in unpacked.layouts.iter().enumerate() {
             assert_eq!(layout.handle.worker_id(), 200);
             assert_eq!(layout.handle.layout_id(), (i + 1) as u16);
+            assert_eq!(layout.logical_type, expected_logical_types[i]);
         }
     }
 

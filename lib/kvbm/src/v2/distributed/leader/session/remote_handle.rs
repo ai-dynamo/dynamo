@@ -6,13 +6,16 @@
 //! This implements the "Prefill side" of the inverted control pattern where:
 //! 1. Decode creates a local session and sends session_id to Prefill
 //! 2. Prefill uses this handle to attach and control the remote session
-//! 3. Prefill can query state, trigger staging, and pull blocks
+//! 3. Prefill can query state, trigger staging, and pull blocks via RDMA
 
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::watch;
 
-use crate::v2::{InstanceId, SequenceHash};
+use crate::physical::transfer::TransferCompleteNotification;
+use crate::v2::distributed::parallelism::ParallelWorker;
+use crate::v2::logical::LogicalLayoutHandle;
+use crate::v2::{BlockId, InstanceId, SequenceHash};
 
 use super::{
     SessionId,
@@ -58,6 +61,12 @@ pub struct RemoteSessionHandle {
 
     // Receive channel for state updates from Decode
     state_rx: watch::Receiver<RemoteSessionState>,
+
+    // RDMA transfer support (optional - set via with_rdma_support)
+    /// Parallel worker abstraction that handles RDMA transfers and metadata mapping.
+    /// This encapsulates all parallelism knowledge - the handle doesn't need to know
+    /// about individual workers or handle mappings.
+    parallel_worker: Option<Arc<dyn ParallelWorker>>,
 }
 
 /// Current known state of the remote session.
@@ -88,7 +97,20 @@ impl RemoteSessionHandle {
             local_instance,
             transport,
             state_rx,
+            parallel_worker: None,
         }
+    }
+
+    /// Add RDMA support to this handle.
+    ///
+    /// This enables the `pull_blocks_rdma` methods by providing access to
+    /// the parallel worker abstraction.
+    ///
+    /// # Arguments
+    /// * `parallel_worker` - Parallel worker for executing RDMA transfers
+    pub fn with_rdma_support(mut self, parallel_worker: Arc<dyn ParallelWorker>) -> Self {
+        self.parallel_worker = Some(parallel_worker);
+        self
     }
 
     /// Wait for the initial state after attachment.
@@ -218,22 +240,148 @@ impl RemoteSessionHandle {
         self.state_rx.borrow().phase == RemoteSessionPhase::Ready
     }
 
-    // Note: RDMA pull implementation would go here, but requires Worker integration.
-    // For now, the caller can use the G2BlockInfo to perform RDMA pulls externally.
-    //
-    // Future implementation:
-    // pub async fn pull_blocks(
-    //     &self,
-    //     block_hashes: &[SequenceHash],
-    //     worker: &dyn Worker,
-    //     local_g2_manager: &BlockManager<G2>,
-    // ) -> Result<Vec<ImmutableBlock<G2>>> {
-    //     // 1. Look up remote G2BlockInfo for each hash
-    //     // 2. Allocate local G2 blocks
-    //     // 3. Use Worker.execute_remote_onboard() with RemoteDescriptor::Layout
-    //     // 4. Register and return the new local blocks
-    //     todo!()
-    // }
+    // ========================================================================
+    // RDMA Transfer Methods
+    // ========================================================================
+
+    /// Check if remote metadata has been imported.
+    pub fn has_remote_metadata(&self) -> bool {
+        self.parallel_worker
+            .as_ref()
+            .map(|pw| pw.has_remote_metadata(self.remote_instance))
+            .unwrap_or(false)
+    }
+
+    /// Ensure remote metadata is imported (lazy loading).
+    ///
+    /// This requests and imports metadata from the remote instance if not
+    /// already loaded. The metadata is cached so subsequent calls are no-ops.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - RDMA support was not configured (no parallel worker)
+    /// - Metadata request fails
+    /// - Worker count mismatch
+    pub async fn ensure_metadata_imported(&mut self) -> Result<()> {
+        let parallel_worker = self
+            .parallel_worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("RDMA support not configured"))?;
+
+        // Check if already loaded
+        if parallel_worker.has_remote_metadata(self.remote_instance) {
+            return Ok(());
+        }
+
+        // Request metadata from remote leader
+        let remote_metadata = self
+            .transport
+            .request_metadata(self.remote_instance)
+            .await?;
+
+        // Connect to remote - this imports metadata and stores handle mappings
+        parallel_worker
+            .connect_remote(self.remote_instance, remote_metadata)?
+            .await?;
+
+        Ok(())
+    }
+
+    /// Pull blocks from remote G2 to local G2 via RDMA (lazy metadata loading).
+    ///
+    /// This method:
+    /// 1. Ensures remote metadata is imported (if not already)
+    /// 2. Executes SPMD-aware transfer: worker N pulls from remote worker N
+    /// 3. Returns a notification that completes when all transfers done
+    ///
+    /// # Arguments
+    /// * `blocks` - G2 block info from the remote session state
+    /// * `local_dst_block_ids` - Local block IDs to transfer into
+    ///
+    /// # Returns
+    /// TransferCompleteNotification that completes when all workers finish
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - RDMA support not configured
+    /// - Metadata import fails
+    /// - Transfer execution fails
+    pub async fn pull_blocks_rdma(
+        &mut self,
+        blocks: &[G2BlockInfo],
+        local_dst_block_ids: &[BlockId],
+    ) -> Result<TransferCompleteNotification> {
+        // Ensure metadata is imported
+        self.ensure_metadata_imported().await?;
+
+        // Delegate to explicit version
+        self.pull_blocks_rdma_explicit(blocks, local_dst_block_ids)
+    }
+
+    /// Pull blocks with explicit metadata pre-import (no lazy loading).
+    ///
+    /// Caller must have already ensured metadata is imported (via
+    /// `ensure_metadata_imported()` or `leader.import_remote_metadata()`).
+    ///
+    /// # SPMD Behavior
+    ///
+    /// In SPMD (tensor parallelism), each worker holds a different tensor shard
+    /// of the same logical block. This method executes the SAME transfer on
+    /// EVERY worker: worker N pulls from remote worker N.
+    ///
+    /// # Arguments
+    /// * `blocks` - G2 block info from the remote session state
+    /// * `local_dst_block_ids` - Local block IDs to transfer into
+    ///
+    /// # Returns
+    /// TransferCompleteNotification that completes when ALL workers finish
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - RDMA support not configured
+    /// - Metadata not imported
+    /// - Transfer execution fails
+    pub fn pull_blocks_rdma_explicit(
+        &self,
+        blocks: &[G2BlockInfo],
+        local_dst_block_ids: &[BlockId],
+    ) -> Result<TransferCompleteNotification> {
+        let parallel_worker = self
+            .parallel_worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("RDMA support not configured"))?;
+
+        // Validate metadata is loaded
+        if !parallel_worker.has_remote_metadata(self.remote_instance) {
+            anyhow::bail!(
+                "Remote metadata not imported for instance {}. Call ensure_metadata_imported() first.",
+                self.remote_instance
+            );
+        }
+
+        // Validate block counts match
+        if blocks.len() != local_dst_block_ids.len() {
+            anyhow::bail!(
+                "Block count mismatch: source={}, destination={}",
+                blocks.len(),
+                local_dst_block_ids.len()
+            );
+        }
+
+        // Extract source block IDs
+        let src_block_ids: Vec<BlockId> = blocks.iter().map(|b| b.block_id).collect();
+
+        // Use the parallel worker's SPMD-aware transfer method
+        // This handles all the worker iteration and handle lookup internally
+        parallel_worker.execute_remote_onboard_for_instance(
+            self.remote_instance,
+            LogicalLayoutHandle::G2,
+            src_block_ids,
+            LogicalLayoutHandle::G2,
+            local_dst_block_ids.to_vec().into(),
+            Default::default(),
+        )
+    }
 }
 
 /// Sender for state updates to RemoteSessionHandle.

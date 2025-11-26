@@ -4,7 +4,7 @@
 mod controllable;
 mod initiator;
 mod messages;
-mod onboard; // Old implementation, will be replaced incrementally
+// mod onboard; // Old implementation, will be replaced incrementally
 mod remote_handle;
 mod responder;
 pub mod transport;
@@ -22,7 +22,7 @@ pub use responder::ResponderSession;
 pub use transport::{LocalTransport, MessageTransport, NovaTransport, RemoteSessionTx};
 
 // Re-export from onboard for backward compatibility (will be removed later)
-pub use onboard::OnboardingSession;
+// pub use onboard::OnboardingSession;
 
 use anyhow::Result;
 use dashmap::DashMap;

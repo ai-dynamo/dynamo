@@ -9,7 +9,7 @@ mod metadata;
 mod remote;
 
 pub use handle::LayoutHandle;
-pub use metadata::{SerializedLayout, WorkerAddress};
+pub use metadata::{LogicalLayoutDescriptor, SerializedLayout, WorkerAddress};
 
 pub(crate) use local::LocalLayout;
 pub(crate) use metadata::LocalLayoutDescriptor;
@@ -17,6 +17,7 @@ pub(crate) use remote::RemoteLayout;
 
 use crate::BlockId;
 use crate::physical::transfer::BounceBufferInternal;
+use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::physical::layout::PhysicalLayout;
 use crate::v2::physical::transfer::TransferContext;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
@@ -128,6 +129,45 @@ impl TransferManager {
     /// loading/reconstruction fails
     pub fn import_metadata(&self, metadata: SerializedLayout) -> Result<Vec<LayoutHandle>> {
         self.registry.write().unwrap().import_metadata(metadata)
+    }
+
+    /// Build a logical layout descriptor for a specific handle.
+    ///
+    /// This creates a descriptor that includes the logical layout type (G1, G2, G3, G4)
+    /// for use in RDMA metadata exchange. The caller must provide the logical type
+    /// mapping since only the caller (e.g., DirectWorker) knows which handle corresponds
+    /// to which logical tier.
+    ///
+    /// # Arguments
+    /// * `handle` - Handle to the local layout
+    /// * `logical_type` - The logical tier (G1, G2, G3, G4) this handle represents
+    ///
+    /// # Returns
+    /// A LogicalLayoutDescriptor ready for serialization
+    ///
+    /// # Errors
+    /// Returns an error if the handle is not found or serialization fails
+    pub fn build_logical_descriptor(
+        &self,
+        handle: LayoutHandle,
+        logical_type: LogicalLayoutHandle,
+    ) -> Result<LogicalLayoutDescriptor> {
+        self.registry
+            .read()
+            .unwrap()
+            .build_logical_descriptor(handle, logical_type)
+    }
+
+    /// Get the NIXL metadata for this worker.
+    ///
+    /// Returns the raw NIXL metadata bytes needed for remote registration.
+    pub fn get_nixl_metadata(&self) -> Result<Vec<u8>> {
+        self.registry.read().unwrap().get_nixl_metadata()
+    }
+
+    /// Get the worker address for this manager.
+    pub fn worker_address(&self) -> WorkerAddress {
+        self.registry.read().unwrap().worker_address()
     }
 
     // ===== Handle-Based Transfer API =====
@@ -254,6 +294,14 @@ impl TransferManager {
     /// Get the internal transfer context (for testing only).
     pub(crate) fn context(&self) -> &TransferContext {
         &self.context
+    }
+
+    /// Get access to the internal layout registry.
+    ///
+    /// This is primarily for testing utilities that need direct layout access
+    /// (e.g., fill patterns, checksum computation).
+    pub(crate) fn registry(&self) -> &RwLock<LayoutRegistry> {
+        &self.registry
     }
 
     /// Get the H2D stream (for testing only).
@@ -389,7 +437,9 @@ impl LayoutRegistry {
                     .to_descriptor()
                     .map_err(|e| anyhow!("failed to serialize layout {}: {}", handle, e))?;
 
-                serialized_layouts.push(LocalLayoutDescriptor::new(*handle, serialized));
+                serialized_layouts.push(LocalLayoutDescriptor::new_with_default_type(
+                    *handle, serialized,
+                ));
             }
         }
 
@@ -468,6 +518,48 @@ impl LayoutRegistry {
         self.loaded_remotes.insert(remote_key);
 
         Ok(imported_handles)
+    }
+
+    /// Build a logical layout descriptor for a specific handle.
+    ///
+    /// # Arguments
+    /// * `handle` - Handle to the local layout
+    /// * `logical_type` - The logical tier (G1, G2, G3, G4) this handle represents
+    ///
+    /// # Returns
+    /// A LogicalLayoutDescriptor ready for serialization
+    pub(crate) fn build_logical_descriptor(
+        &self,
+        handle: LayoutHandle,
+        logical_type: LogicalLayoutHandle,
+    ) -> Result<LogicalLayoutDescriptor> {
+        let local_layout = self
+            .local_layouts
+            .get(&handle)
+            .ok_or_else(|| anyhow!("Layout handle not found: {:?}", handle))?;
+
+        let layout_descriptor = local_layout
+            .layout()
+            .to_descriptor()
+            .map_err(|e| anyhow!("failed to serialize layout {}: {}", handle, e))?;
+
+        Ok(LogicalLayoutDescriptor::new(
+            handle,
+            logical_type,
+            layout_descriptor,
+        ))
+    }
+
+    /// Get the NIXL metadata for this worker.
+    pub(crate) fn get_nixl_metadata(&self) -> Result<Vec<u8>> {
+        self.nixl_agent
+            .get_local_md()
+            .map_err(|e| anyhow!("failed to get NIXL local metadata: {:?}", e))
+    }
+
+    /// Get the worker address for this registry.
+    pub(crate) fn worker_address(&self) -> WorkerAddress {
+        WorkerAddress::new(self.worker_id, self.nixl_agent.name().to_string())
     }
 
     /// Get a local layout by handle.

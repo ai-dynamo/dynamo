@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use dashmap::DashMap;
-use dynamo_nova::am::Nova;
+use dynamo_nova::{am::Nova, events::LocalEventSystem};
 use tokio::sync::{Mutex, mpsc, watch};
 use uuid::Uuid;
 
@@ -20,13 +20,14 @@ use crate::{
     },
 };
 
-use crate::v2::physical::manager::LayoutHandle;
+use crate::v2::physical::manager::{LayoutHandle, SerializedLayout};
 
 use super::{
+    super::parallelism::{ParallelWorker, ReplicatedWorker},
     super::worker::Worker,
     FindMatchesOptions, FindMatchesResult, Leader, OnboardingStatus, SessionHandle, SessionId,
     StagingMode,
-    nova::NovaLeaderService,
+    nova::{ExportMetadataCallback, NovaLeaderService},
     session::{
         ControllableSession, ControllableSessionOptions, ControllableSessionResult,
         InitiatorSession, MessageTransport, OnboardMessage, OnboardSessionTx, RemoteSessionHandle,
@@ -53,6 +54,10 @@ pub struct InstanceLeader {
     /// Multiple workers enable parallel transfers and redundancy.
     workers: Vec<Arc<dyn Worker>>,
 
+    /// Parallel worker abstraction wrapping the workers.
+    /// Used for RDMA transfers with proper handle mapping storage.
+    parallel_worker: Option<Arc<dyn ParallelWorker>>,
+
     /// Map of active sessions (session_id -> message channel).
     sessions: Arc<DashMap<SessionId, OnboardSessionTx>>,
 
@@ -68,7 +73,6 @@ pub struct InstanceLeader {
     // ========================================================================
     // Inverted Control Pattern (Prefill-Decode) Fields
     // ========================================================================
-
     /// Map of controllable sessions (Decode side).
     /// Used when this instance hosts sessions that can be controlled remotely.
     controllable_sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
@@ -128,10 +132,28 @@ impl InstanceLeaderBuilder {
             .ok_or_else(|| anyhow::anyhow!("Nova instance required"))?;
         let transport = Arc::new(MessageTransport::nova(nova.clone()));
 
+        // Create event system for notification aggregation
+        // worker_id is used for event handle generation - use 0 for the leader
+        let events = LocalEventSystem::new(0);
+
+        // Get current tokio runtime handle
+        let runtime = tokio::runtime::Handle::current();
+
         // // Validate at least one worker
         // if self.workers.is_empty() {
         //     anyhow::bail!("At least one worker required");
         // }
+
+        // Create parallel worker if workers are provided
+        let parallel_worker: Option<Arc<dyn ParallelWorker>> = if !self.workers.is_empty() {
+            Some(Arc::new(ReplicatedWorker::new(
+                self.workers.iter().cloned().collect(),
+                events.clone(),
+                runtime.clone(),
+            )))
+        } else {
+            None
+        };
 
         Ok(InstanceLeader {
             nova,
@@ -140,6 +162,7 @@ impl InstanceLeaderBuilder {
                 .ok_or_else(|| anyhow::anyhow!("g2_manager required"))?,
             g3_manager: self.g3_manager,
             workers: self.workers,
+            parallel_worker,
             sessions: self.sessions.unwrap_or_else(|| Arc::new(DashMap::new())),
             session_states: Arc::new(DashMap::new()),
             remote_leaders: self.remote_leaders.unwrap_or_default(),
@@ -208,11 +231,34 @@ impl InstanceLeader {
             }
         };
 
-        NovaLeaderService::new(self.nova.clone(), self.sessions.clone())
+        // Create export_metadata callback if we have workers
+        let export_metadata_callback: Option<ExportMetadataCallback> = if !self.workers.is_empty() {
+            let workers = self.workers.clone();
+            Some(Arc::new(move || {
+                let workers = workers.clone();
+                Box::pin(async move {
+                    let mut metadata = Vec::with_capacity(workers.len());
+                    for worker in &workers {
+                        let serialized = worker.export_metadata()?.await?;
+                        metadata.push(serialized);
+                    }
+                    Ok(metadata)
+                })
+            }))
+        } else {
+            None
+        };
+
+        let mut service = NovaLeaderService::new(self.nova.clone(), self.sessions.clone())
             .with_spawn_responder(spawn_responder)
             .with_controllable_sessions(self.controllable_sessions.clone())
-            .with_remote_sessions(self.remote_sessions.clone())
-            .register_handlers()?;
+            .with_remote_sessions(self.remote_sessions.clone());
+
+        if let Some(callback) = export_metadata_callback {
+            service = service.with_export_metadata(callback);
+        }
+
+        service.register_handlers()?;
 
         Ok(())
     }
@@ -289,8 +335,9 @@ impl InstanceLeader {
         let (tx, rx) = mpsc::channel(100);
         self.controllable_sessions.insert(session_id, tx);
 
-        // TODO: Get actual G2 layout handle from manager
-        let g2_layout_handle = LayoutHandle::new(0, 0); // Placeholder
+        // Collect G2 layout handles from workers for round-robin block allocation
+        let worker_g2_handles: Vec<LayoutHandle> =
+            self.workers.iter().filter_map(|w| w.g2_handle()).collect();
 
         // Create controllable session
         let session = ControllableSession::new(
@@ -298,7 +345,7 @@ impl InstanceLeader {
             self.nova.instance_id(),
             g2_matches,
             g3_matches,
-            g2_layout_handle,
+            worker_g2_handles,
             self.g2_manager.clone(),
             self.g3_manager.clone(),
             self.workers.first().cloned(),
@@ -329,7 +376,10 @@ impl InstanceLeader {
     /// This is the "Prefill side" of the inverted control pattern:
     /// 1. Send AttachSession to Decode
     /// 2. Receive RemoteSessionHandle for controlling the session
-    /// 3. Use handle to query state, trigger staging, pull blocks
+    /// 3. Use handle to query state, trigger staging, pull blocks via RDMA
+    ///
+    /// If workers are configured, the handle will have RDMA support enabled,
+    /// allowing use of `pull_blocks_rdma()` methods.
     pub async fn attach_remote_session(
         &self,
         remote_instance: InstanceId,
@@ -354,13 +404,20 @@ impl InstanceLeader {
             .send_remote_session(remote_instance, msg)
             .await?;
 
-        Ok(RemoteSessionHandle::new(
+        let mut handle = RemoteSessionHandle::new(
             session_id,
             remote_instance,
             self.nova.instance_id(),
             self.transport.clone(),
             state_rx,
-        ))
+        );
+
+        // Add RDMA support if parallel worker is configured
+        if let Some(parallel_worker) = &self.parallel_worker {
+            handle = handle.with_rdma_support(parallel_worker.clone());
+        }
+
+        Ok(handle)
     }
 
     /// Internal: Process incoming messages for a remote session.
@@ -415,6 +472,87 @@ impl InstanceLeader {
     /// Get the remote sessions map (for Nova handler registration).
     pub(crate) fn remote_sessions(&self) -> Arc<DashMap<SessionId, RemoteSessionTx>> {
         self.remote_sessions.clone()
+    }
+
+    // ========================================================================
+    // RDMA Metadata Management
+    // These methods handle layout metadata export/import for remote RDMA transfers.
+    // ========================================================================
+
+    /// Check if metadata for a remote instance has been loaded.
+    ///
+    /// Returns true if `import_remote_metadata` has been successfully called
+    /// for the given instance.
+    pub fn has_remote_metadata(&self, instance: InstanceId) -> bool {
+        self.parallel_worker
+            .as_ref()
+            .map(|pw| pw.has_remote_metadata(instance))
+            .unwrap_or(false)
+    }
+
+    /// Get the number of workers attached to this leader.
+    pub fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    /// Export metadata from all workers.
+    ///
+    /// Returns a Vec<SerializedLayout> where each element corresponds to a worker
+    /// in rank order. This metadata can be sent to remote instances to enable
+    /// RDMA transfers.
+    ///
+    /// # Returns
+    /// Vector of serialized layouts, one per worker
+    pub async fn export_worker_metadata(&self) -> Result<Vec<SerializedLayout>> {
+        let mut metadata = Vec::with_capacity(self.workers.len());
+
+        for worker in &self.workers {
+            let serialized = worker.export_metadata()?.await?;
+            metadata.push(serialized);
+        }
+
+        Ok(metadata)
+    }
+
+    /// Import metadata from a remote instance's workers.
+    ///
+    /// This imports layout metadata from a remote instance, enabling RDMA transfers
+    /// to pull data from that instance. Metadata is imported rank-by-rank:
+    /// - local worker 0 imports remote worker 0's metadata
+    /// - local worker 1 imports remote worker 1's metadata
+    /// - etc.
+    ///
+    /// # Arguments
+    /// * `remote_instance` - The instance ID of the remote leader
+    /// * `metadata` - Vector of SerializedLayout from remote workers (one per worker)
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - No parallel worker configured
+    /// - Metadata was already imported for this instance
+    /// - Worker count mismatch between local and remote
+    /// - Individual worker metadata import fails
+    pub async fn import_remote_metadata(
+        &self,
+        remote_instance: InstanceId,
+        metadata: Vec<SerializedLayout>,
+    ) -> Result<()> {
+        let parallel_worker = self
+            .parallel_worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No parallel worker configured"))?;
+
+        // Check if already loaded
+        if parallel_worker.has_remote_metadata(remote_instance) {
+            anyhow::bail!("Metadata already imported for instance {}", remote_instance);
+        }
+
+        // Connect to remote - this imports metadata and stores handle mappings
+        parallel_worker
+            .connect_remote(remote_instance, metadata)?
+            .await?;
+
+        Ok(())
     }
 
     // ========================================================================

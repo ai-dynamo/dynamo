@@ -164,9 +164,52 @@ impl WorkerTransfers for NovaWorkerClient {
 
         Ok(TransferCompleteNotification::from_awaiter(awaiter))
     }
+
+    fn connect_remote(
+        &self,
+        _instance_id: InstanceId,
+        _metadata: Vec<SerializedLayout>,
+    ) -> Result<ConnectRemoteResponse> {
+        // NovaWorkerClient is a remote proxy - it doesn't store handle mappings locally.
+        // The containing ReplicatedWorker handles mapping storage and calls import_metadata
+        // on this worker directly for the actual metadata exchange.
+        anyhow::bail!(
+            "connect_remote not supported on NovaWorkerClient - use ReplicatedWorker instead"
+        )
+    }
+
+    fn has_remote_metadata(&self, _instance_id: InstanceId) -> bool {
+        // NovaWorkerClient doesn't track remote metadata locally.
+        // The containing ReplicatedWorker tracks this.
+        false
+    }
+
+    fn execute_remote_onboard_for_instance(
+        &self,
+        _instance_id: InstanceId,
+        _remote_logical_type: LogicalLayoutHandle,
+        _src_block_ids: Vec<BlockId>,
+        _dst: LogicalLayoutHandle,
+        _dst_block_ids: Arc<[BlockId]>,
+        _options: TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        // NovaWorkerClient doesn't store handle mappings locally.
+        // The containing ReplicatedWorker handles mapping lookup and calls
+        // execute_remote_onboard with concrete handles.
+        anyhow::bail!(
+            "execute_remote_onboard_for_instance not supported on NovaWorkerClient - use ReplicatedWorker instead"
+        )
+    }
 }
 
 impl Worker for NovaWorkerClient {
+    fn g2_handle(&self) -> Option<LayoutHandle> {
+        // NovaWorkerClient is a remote worker proxy - it doesn't have direct
+        // access to layout handles. For RDMA transfers, the actual layout info
+        // comes through metadata exchange, not through this method.
+        None
+    }
+
     fn export_metadata(&self) -> Result<SerializedLayoutResponse> {
         let instance = self.remote;
 

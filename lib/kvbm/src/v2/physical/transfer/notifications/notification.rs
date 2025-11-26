@@ -4,10 +4,14 @@
 //! Transfer completion notification handle.
 
 use anyhow::Result;
-use dynamo_nova::{am::SyncResult, events::LocalEventWaiter};
+use dynamo_nova::{
+    am::SyncResult,
+    events::{LocalEvent, LocalEventSystem, LocalEventWaiter},
+};
 use futures::future::{Either, Ready, ready};
 use std::{
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -75,6 +79,76 @@ impl TransferCompleteNotification {
     /// The internal ::Left arm is guaranteed to be ready, while the ::Right arm is not.
     pub fn could_yield(&self) -> bool {
         matches!(self.awaiter, Either::Right(_))
+    }
+
+    /// Aggregate multiple notifications into one that completes when all are done.
+    ///
+    /// This is useful when a transfer is split across multiple workers and you want
+    /// to wait for all of them to complete.
+    ///
+    /// # Arguments
+    /// * `notifications` - The notifications to aggregate
+    /// * `events` - The event system to create the aggregate event
+    /// * `runtime` - The tokio runtime handle to spawn the aggregation task
+    ///
+    /// # Behavior
+    /// - If the list is empty, returns an already-completed notification
+    /// - If there's only one, returns it directly
+    /// - Otherwise, creates a new event and spawns a task to await all notifications
+    pub fn aggregate(
+        notifications: Vec<Self>,
+        events: &Arc<LocalEventSystem>,
+        runtime: &tokio::runtime::Handle,
+    ) -> Result<Self> {
+        if notifications.is_empty() {
+            return Ok(Self::completed());
+        }
+        if notifications.len() == 1 {
+            return Ok(notifications.into_iter().next().unwrap());
+        }
+
+        // Check if all notifications are already complete (no yielding needed)
+        if notifications.iter().all(|n| !n.could_yield()) {
+            return Ok(Self::completed());
+        }
+
+        // Create a new event for the aggregate completion
+        let event = events.new_event()?;
+        let awaiter = events.awaiter(event.handle())?;
+
+        // Spawn task that awaits all notifications and triggers/poisons the event
+        runtime.spawn(await_all_notifications(notifications, event));
+
+        Ok(Self::from_awaiter(awaiter))
+    }
+}
+
+/// Awaits all transfer notifications and signals completion via the event.
+///
+/// This function awaits ALL notifications regardless of individual failures,
+/// then triggers the event on success or poisons it with error details on failure.
+async fn await_all_notifications(
+    notifications: Vec<TransferCompleteNotification>,
+    local_event: LocalEvent,
+) {
+    // Await all notifications, collecting results
+    let results: Vec<Result<()>> =
+        futures::future::join_all(notifications.into_iter().map(|n| n.into_future())).await;
+
+    // Check for any failures
+    let errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
+
+    if errors.is_empty() {
+        // Ignore trigger error - if event system is shutdown, nothing to do
+        let _ = local_event.trigger();
+    } else {
+        let error_msg = errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        // Ignore poison error - if event system is shutdown, nothing to do
+        let _ = local_event.poison(error_msg);
     }
 }
 

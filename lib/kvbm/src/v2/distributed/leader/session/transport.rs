@@ -9,8 +9,12 @@ use dynamo_nova::am::Nova;
 use std::sync::Arc;
 
 use crate::v2::InstanceId;
+use crate::v2::physical::manager::SerializedLayout;
 
-use super::{OnboardSessionTx, SessionId, dispatch_onboard_message, messages::{OnboardMessage, RemoteSessionMessage}};
+use super::{
+    OnboardSessionTx, SessionId, dispatch_onboard_message,
+    messages::{OnboardMessage, RemoteSessionMessage},
+};
 
 /// Channel sender for remote session messages.
 pub type RemoteSessionTx = tokio::sync::mpsc::Sender<RemoteSessionMessage>;
@@ -35,7 +39,11 @@ impl MessageTransport {
         controllable_sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
         remote_sessions: Arc<DashMap<SessionId, RemoteSessionTx>>,
     ) -> Self {
-        Self::Local(LocalTransport::new(sessions, controllable_sessions, remote_sessions))
+        Self::Local(LocalTransport::new(
+            sessions,
+            controllable_sessions,
+            remote_sessions,
+        ))
     }
 
     /// Send an OnboardMessage to a target instance.
@@ -55,8 +63,31 @@ impl MessageTransport {
         message: RemoteSessionMessage,
     ) -> Result<()> {
         match self {
-            MessageTransport::Nova(transport) => transport.send_remote_session(target, message).await,
-            MessageTransport::Local(transport) => transport.send_remote_session(target, message).await,
+            MessageTransport::Nova(transport) => {
+                transport.send_remote_session(target, message).await
+            }
+            MessageTransport::Local(transport) => {
+                transport.send_remote_session(target, message).await
+            }
+        }
+    }
+
+    /// Request worker metadata from a remote leader for RDMA transfers.
+    ///
+    /// This makes a synchronous RPC call to the remote leader's export_metadata
+    /// handler and returns the Vec<SerializedLayout> from all remote workers.
+    ///
+    /// # Arguments
+    /// * `target` - Instance ID of the remote leader
+    ///
+    /// # Returns
+    /// Vec<SerializedLayout> containing metadata from each remote worker (in rank order)
+    pub async fn request_metadata(&self, target: InstanceId) -> Result<Vec<SerializedLayout>> {
+        match self {
+            MessageTransport::Nova(transport) => transport.request_metadata(target).await,
+            MessageTransport::Local(_) => {
+                anyhow::bail!("request_metadata not supported for local transport")
+            }
         }
     }
 }
@@ -113,9 +144,38 @@ impl NovaTransport {
             .send()
             .await?;
 
-        eprintln!("[TRANSPORT] Successfully sent remote session msg to {}", target);
+        eprintln!(
+            "[TRANSPORT] Successfully sent remote session msg to {}",
+            target
+        );
 
         Ok(())
+    }
+
+    /// Request worker metadata from a remote leader for RDMA transfers.
+    ///
+    /// Makes a unary RPC call to get Vec<SerializedLayout> from
+    /// the remote leader's workers.
+    pub async fn request_metadata(&self, target: InstanceId) -> Result<Vec<SerializedLayout>> {
+        eprintln!("[TRANSPORT] Requesting metadata from instance {}", target);
+
+        let response: Bytes = self
+            .nova
+            .unary("kvbm.leader.export_metadata")?
+            .instance(target)
+            .send()
+            .await?;
+
+        // Deserialize the response
+        let metadata: Vec<SerializedLayout> = serde_json::from_slice(&response)?;
+
+        eprintln!(
+            "[TRANSPORT] Received {} metadata entries from {}",
+            metadata.len(),
+            target
+        );
+
+        Ok(metadata)
     }
 }
 

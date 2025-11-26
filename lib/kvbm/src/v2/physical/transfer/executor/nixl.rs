@@ -240,10 +240,30 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
             }
         };
 
-        assert!(
-            nixl_agent.name() == src.nixl_metadata().agent_name(),
-            "the source must be local"
-        );
+        // Validate locality constraints based on operation type:
+        // - For Write operations (push): source must be local, we're writing FROM local TO remote
+        // - For Read operations (pull): destination must be local, we're reading FROM remote INTO local
+        let src_is_local = nixl_agent.name() == src.nixl_metadata().agent_name();
+        let dst_is_local = nixl_agent.name() == dst.nixl_metadata().agent_name();
+
+        match xfer_op {
+            XferOp::Write => {
+                assert!(
+                    src_is_local,
+                    "For NIXL Write (push), the source must be local. src_agent='{}', local_agent='{}'",
+                    src.nixl_metadata().agent_name(),
+                    nixl_agent.name()
+                );
+            }
+            XferOp::Read => {
+                assert!(
+                    dst_is_local,
+                    "For NIXL Read (pull), the destination must be local. dst_agent='{}', local_agent='{}'",
+                    dst.nixl_metadata().agent_name(),
+                    nixl_agent.name()
+                );
+            }
+        }
 
         // Capture NIXL metadata for both layouts
         let src_metadata = src.nixl_metadata();
@@ -298,11 +318,19 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
         }
 
         // Create transfer request
+        // The remote agent depends on operation type:
+        // - For Write (push): remote is the destination
+        // - For Read (pull): remote is the source
+        let remote_agent = match xfer_op {
+            XferOp::Write => dst_metadata.agent_name(),
+            XferOp::Read => src_metadata.agent_name(),
+        };
+
         let xfer_req = nixl_agent.create_xfer_req(
             xfer_op,
             &src_dl,
             &dst_dl,
-            dst_metadata.agent_name(),
+            remote_agent,
             None, // opt_args
         )?;
 

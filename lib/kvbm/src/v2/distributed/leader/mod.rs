@@ -9,8 +9,8 @@ pub use instance::InstanceLeader;
 pub use nova::NovaLeaderService;
 pub use session::{
     ControllableSession, ControllableSessionOptions, ControllableSessionResult, G2BlockInfo,
-    G3BlockInfo, InitiatorSession, OnboardingSession, RemoteSessionHandle, RemoteSessionMessage,
-    RemoteSessionPhase, RemoteSessionState, ResponderSession, SessionId,
+    G3BlockInfo, InitiatorSession, RemoteSessionHandle, RemoteSessionMessage, RemoteSessionPhase,
+    RemoteSessionState, ResponderSession, SessionId,
 };
 
 use anyhow::Result;

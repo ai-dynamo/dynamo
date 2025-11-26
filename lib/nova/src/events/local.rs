@@ -69,7 +69,11 @@ pub struct LocalEventSystem {
 }
 
 impl LocalEventSystem {
-    pub(crate) fn new(worker_id: u64) -> Arc<Self> {
+    /// Create a new LocalEventSystem with the specified worker_id.
+    ///
+    /// The worker_id should be derived from an InstanceId using `instance_id.worker_id().as_u64()`.
+    /// For Nova-managed systems, get the event system from `nova.events().local()` instead.
+    pub fn new(worker_id: u64) -> Arc<Self> {
         Arc::new(Self {
             worker_id,
             events: DashMap::new(),

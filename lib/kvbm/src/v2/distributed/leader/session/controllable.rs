@@ -58,8 +58,9 @@ pub struct ControllableSession {
     g2_blocks: Vec<ImmutableBlock<G2>>,
     g3_blocks: Vec<ImmutableBlock<G3>>,
 
-    // G2 layout for RDMA
-    g2_layout_handle: LayoutHandle,
+    // G2 layout handles from workers (for RDMA source descriptors)
+    // Blocks are allocated round-robin across workers
+    worker_g2_handles: Vec<LayoutHandle>,
 
     // Controller info (set on attach)
     controller: Option<InstanceId>,
@@ -91,7 +92,7 @@ impl ControllableSession {
         instance_id: InstanceId,
         g2_blocks: Vec<ImmutableBlock<G2>>,
         g3_blocks: Vec<ImmutableBlock<G3>>,
-        g2_layout_handle: LayoutHandle,
+        worker_g2_handles: Vec<LayoutHandle>,
         g2_manager: Arc<BlockManager<G2>>,
         g3_manager: Option<Arc<BlockManager<G3>>>,
         worker: Option<Arc<dyn Worker>>,
@@ -106,7 +107,7 @@ impl ControllableSession {
             options,
             g2_blocks,
             g3_blocks,
-            g2_layout_handle,
+            worker_g2_handles,
             controller: None,
             transport,
             worker,
@@ -207,7 +208,9 @@ impl ControllableSession {
                     session_id: self.session_id,
                     error: "No worker available for G3->G2 staging".to_string(),
                 };
-                self.transport.send_remote_session(controller, error_msg).await?;
+                self.transport
+                    .send_remote_session(controller, error_msg)
+                    .await?;
             }
             return Ok(());
         }
@@ -265,13 +268,25 @@ impl ControllableSession {
 
     /// Build current session state message.
     fn build_session_state(&self) -> RemoteSessionMessage {
+        // Allocate blocks round-robin across workers
         let g2_blocks: Vec<G2BlockInfo> = self
             .g2_blocks
             .iter()
-            .map(|b| G2BlockInfo {
-                block_id: b.block_id(),
-                sequence_hash: b.sequence_hash(),
-                layout_handle: self.g2_layout_handle,
+            .enumerate()
+            .map(|(i, b)| {
+                // Use round-robin allocation if we have worker handles
+                let layout_handle = if !self.worker_g2_handles.is_empty() {
+                    self.worker_g2_handles[i % self.worker_g2_handles.len()]
+                } else {
+                    // Fallback to placeholder if no workers (shouldn't happen in RDMA mode)
+                    LayoutHandle::new(0, 0)
+                };
+
+                G2BlockInfo {
+                    block_id: b.block_id(),
+                    sequence_hash: b.sequence_hash(),
+                    layout_handle,
+                }
             })
             .collect();
 
@@ -311,8 +326,7 @@ impl ControllableSession {
             return Ok(Vec::new());
         }
 
-        let stage_block_ids: Vec<BlockId> =
-            self.g3_blocks.iter().map(|b| b.block_id()).collect();
+        let stage_block_ids: Vec<BlockId> = self.g3_blocks.iter().map(|b| b.block_id()).collect();
 
         // Allocate destination G2 blocks
         let dst_blocks = self
@@ -345,12 +359,26 @@ impl ControllableSession {
             .collect();
 
         // Build result info for newly staged blocks
+        // Continue round-robin allocation from where existing g2_blocks left off
+        let starting_index = self.g2_blocks.len();
         let staged_info: Vec<G2BlockInfo> = new_g2_blocks
             .iter()
-            .map(|b| G2BlockInfo {
-                block_id: b.block_id(),
-                sequence_hash: b.sequence_hash(),
-                layout_handle: self.g2_layout_handle,
+            .enumerate()
+            .map(|(i, b)| {
+                // Use round-robin allocation if we have worker handles
+                let layout_handle = if !self.worker_g2_handles.is_empty() {
+                    let idx = (starting_index + i) % self.worker_g2_handles.len();
+                    self.worker_g2_handles[idx]
+                } else {
+                    // Fallback to placeholder if no workers
+                    LayoutHandle::new(0, 0)
+                };
+
+                G2BlockInfo {
+                    block_id: b.block_id(),
+                    sequence_hash: b.sequence_hash(),
+                    layout_handle,
+                }
             })
             .collect();
 

@@ -3,4 +3,4 @@
 
 mod service;
 
-pub use service::NovaLeaderService;
+pub use service::{ExportMetadataCallback, NovaLeaderService};
