@@ -815,6 +815,8 @@ if [  ! -z ${ENABLE_KVBM} ]; then
 fi
 
 # ENABLE_MEDIA_NIXL: Enable media processing with NIXL support
+# Used in base Dockerfile for maturin build feature flag.
+# Not needed in Dockerfile.{vllm,trtllm,sglang} - they use pre-built wheels.
 # Auto-enabled for frameworks that have NIXL support (VLLM, TRTLLM, SGLANG)
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
     if [[ -z "${ENABLE_MEDIA_NIXL}" ]]; then
