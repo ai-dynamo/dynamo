@@ -37,19 +37,31 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
-# Import LoRAManager if DYN_LORA_ENABLED is set
+# LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
+# None = not yet initialized, False = disabled/failed, LoRAManager = initialized
 _lora_manager = None
-if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
-    try:
-        from dynamo.common.lora import LoRAManager
 
-        _lora_manager = LoRAManager()
-        logger.info("LoRAManager initialized for URI-based LoRA loading")
-    except Exception as e:
-        logger.warning(
-            f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
-        )
-        _lora_manager = None
+
+def get_lora_manager():
+    """Get the LoRAManager singleton, initializing it on first call if enabled."""
+    global _lora_manager
+
+    if _lora_manager is not None:
+        return _lora_manager
+
+    if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
+        try:
+            from dynamo.common.lora import LoRAManager
+
+            _lora_manager = LoRAManager()
+            logger.info("LoRAManager initialized successfully")
+            return _lora_manager
+        except Exception as e:
+            logger.warning(
+                f"Failed to initialize LoRAManager: {e}. URI-based LoRA loading will be disabled."
+            )
+
+    return None
 
 
 def build_sampling_params(
@@ -123,8 +135,7 @@ class BaseWorkerHandler(ABC):
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.enable_multimodal = enable_multimodal
-        # LoRA tracking with thread-safe access
-        self._lora_lock = asyncio.Lock()
+        # LoRA tracking 
         self.lora_id_for_name: dict[str, int] = {}
         self.lora_name_to_path: dict[str, str] = {}
 
@@ -224,7 +235,8 @@ class BaseWorkerHandler(ABC):
                 return
 
             # Use LoRAManager to download from URI
-            if _lora_manager is None:
+            lora_manager = get_lora_manager()
+            if lora_manager is None:
                 yield {
                     "status": "error",
                     "message": "LoRAManager not initialized. Set DYN_LORA_ENABLED=true to enable URI-based LoRA loading.",
@@ -232,7 +244,7 @@ class BaseWorkerHandler(ABC):
                 return
 
             logger.info(f"Downloading LoRA adapter: {lora_name} from {lora_uri}")
-            download_result = await _lora_manager.download_lora(lora_uri)
+            download_result = await lora_manager.download_lora(lora_uri)
 
             if download_result["status"] != "success":
                 yield {
@@ -247,18 +259,16 @@ class BaseWorkerHandler(ABC):
             # Generate deterministic ID from lora_name before using it
             lora_id = lora_name_to_id(lora_name)
 
-            # Add the LoRA to the engine with lock to prevent race conditions
-            async with self._lora_lock:
-                # Add the LoRA to the engine
-                await self.engine_client.add_lora(
-                    LoRARequest(
-                        lora_name=lora_name, lora_int_id=lora_id, lora_path=lora_path
-                    )
+            # Add the LoRA to the engine
+            await self.engine_client.add_lora(
+                LoRARequest(
+                    lora_name=lora_name, lora_int_id=lora_id, lora_path=lora_path
                 )
+            )
 
-                # Track the LoRA
-                self.lora_id_for_name[lora_name] = lora_id
-                self.lora_name_to_path[lora_name] = lora_path
+            # Track the LoRA
+            self.lora_id_for_name[lora_name] = lora_id
+            self.lora_name_to_path[lora_name] = lora_path
             logger.info(
                 f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
             )
@@ -303,22 +313,21 @@ class BaseWorkerHandler(ABC):
                     logger.debug(f"Traceback: {traceback.format_exc()}")
 
                     # Rollback: remove the LoRA from the engine to maintain consistency
-                    async with self._lora_lock:
-                        try:
-                            logger.debug(
-                                f"Rolling back: removing LoRA '{lora_name}' from engine"
-                            )
-                            await self.engine_client.remove_lora(lora_id)
-                            # Remove from tracking dictionaries
-                            if lora_name in self.lora_id_for_name:
-                                del self.lora_id_for_name[lora_name]
-                            if lora_name in self.lora_name_to_path:
-                                del self.lora_name_to_path[lora_name]
-                            logger.debug(f"Successfully rolled back LoRA '{lora_name}'")
-                        except Exception as rollback_error:
-                            logger.error(
-                                f"Failed to rollback LoRA {lora_name}: {rollback_error}"
-                            )
+                    try:
+                        logger.debug(
+                            f"Rolling back: removing LoRA '{lora_name}' from engine"
+                        )
+                        await self.engine_client.remove_lora(lora_id)
+                        # Remove from tracking dictionaries
+                        if lora_name in self.lora_id_for_name:
+                            del self.lora_id_for_name[lora_name]
+                        if lora_name in self.lora_name_to_path:
+                            del self.lora_name_to_path[lora_name]
+                        logger.debug(f"Successfully rolled back LoRA '{lora_name}'")
+                    except Exception as rollback_error:
+                        logger.error(
+                            f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                        )
 
                     # Return error status since registration failed
                     yield {
@@ -365,25 +374,24 @@ class BaseWorkerHandler(ABC):
                 }
                 return
 
-            # Check if the LoRA exists (under lock)
-            async with self._lora_lock:
-                if lora_name not in self.lora_id_for_name:
-                    yield {
-                        "status": "error",
-                        "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.lora_id_for_name.keys())}",
-                    }
-                    return
+            # Check if the LoRA exists
+            if lora_name not in self.lora_id_for_name:
+                yield {
+                    "status": "error",
+                    "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.lora_id_for_name.keys())}",
+                }
+                return
 
-                logger.debug(f"Unloading LoRA adapter: {lora_name}")
-                lora_id = self.lora_id_for_name[lora_name]
-                lora_path = self.lora_name_to_path.get(lora_name)
+            logger.debug(f"Unloading LoRA adapter: {lora_name}")
+            lora_id = self.lora_id_for_name[lora_name]
+            lora_path = self.lora_name_to_path.get(lora_name)
 
-                await self.engine_client.remove_lora(lora_id)
+            await self.engine_client.remove_lora(lora_id)
 
-                # Remove from tracking dictionaries
-                del self.lora_id_for_name[lora_name]
-                if lora_name in self.lora_name_to_path:
-                    del self.lora_name_to_path[lora_name]
+            # Remove from tracking dictionaries
+            del self.lora_id_for_name[lora_name]
+            if lora_name in self.lora_name_to_path:
+                del self.lora_name_to_path[lora_name]
 
             # Unregister the LoRA model from the model registry (outside lock)
             if self.generate_endpoint is not None:
@@ -405,27 +413,26 @@ class BaseWorkerHandler(ABC):
                     logger.debug(f"Traceback: {traceback.format_exc()}")
 
                     # Rollback: re-add the LoRA to the engine to maintain consistency
-                    async with self._lora_lock:
-                        try:
-                            logger.debug(
-                                f"Rolling back: re-adding LoRA '{lora_name}' to engine"
+                    try:
+                        logger.debug(
+                            f"Rolling back: re-adding LoRA '{lora_name}' to engine"
+                        )
+                        await self.engine_client.add_lora(
+                            LoRARequest(
+                                lora_name=lora_name,
+                                lora_int_id=lora_id,
+                                lora_path=lora_path,
                             )
-                            await self.engine_client.add_lora(
-                                LoRARequest(
-                                    lora_name=lora_name,
-                                    lora_int_id=lora_id,
-                                    lora_path=lora_path,
-                                )
-                            )
-                            # Re-add to tracking dictionaries
-                            self.lora_id_for_name[lora_name] = lora_id
-                            if lora_path:
-                                self.lora_name_to_path[lora_name] = lora_path
-                            logger.debug(f"Successfully rolled back LoRA '{lora_name}'")
-                        except Exception as rollback_error:
-                            logger.error(
-                                f"Failed to rollback LoRA {lora_name}: {rollback_error}"
-                            )
+                        )
+                        # Re-add to tracking dictionaries
+                        self.lora_id_for_name[lora_name] = lora_id
+                        if lora_path:
+                            self.lora_name_to_path[lora_name] = lora_path
+                        logger.debug(f"Successfully rolled back LoRA '{lora_name}'")
+                    except Exception as rollback_error:
+                        logger.error(
+                            f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                        )
 
                     # Return error status since unregistration failed
                     yield {
@@ -458,9 +465,7 @@ class BaseWorkerHandler(ABC):
         Returns a dictionary of lora_name -> lora_id mappings.
         """
         try:
-            # Convert to regular dict under lock for thread-safe read
-            async with self._lora_lock:
-                loras = dict(self.lora_id_for_name)
+            loras = dict(self.lora_id_for_name)
             yield {
                 "status": "success",
                 "loras": loras,
