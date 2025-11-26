@@ -122,11 +122,11 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
-        model="meta-llama/Llama-3.1-8B",
+        model="deepseek-ai/deepseek-llm-7b-base",
         script_args=["--dyn-endpoint-types", "completions"],
         env={
-            "MODEL_PATH": "meta-llama/Llama-3.1-8B",
-            "SERVED_MODEL_NAME": "meta-llama/Llama-3.1-8B",
+            "MODEL_PATH": "deepseek-ai/deepseek-llm-7b-base",
+            "SERVED_MODEL_NAME": "deepseek-ai/deepseek-llm-7b-base",
         },
         request_payloads=[
             completion_payload_default(),

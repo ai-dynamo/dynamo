@@ -193,10 +193,10 @@ sglang_configs = {
         directory=sglang_dir,
         script_name="agg.sh",
         marks=[pytest.mark.gpu_1],
-        model="meta-llama/Llama-3.1-8B",
+        model="deepseek-ai/deepseek-llm-7b-base",
         script_args=[
             "--model-path",
-            "meta-llama/Llama-3.1-8B",
+            "deepseek-ai/deepseek-llm-7b-base",
             "--dyn-endpoint-types",
             "completions",
         ],
