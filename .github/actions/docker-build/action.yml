@@ -101,9 +101,7 @@ runs:
         fi
 
         BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        BUILD_START_EPOCH=$(date +%s)
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
-        echo "BUILD_START_EPOCH=${BUILD_START_EPOCH}" >> $GITHUB_ENV
 
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         
@@ -141,10 +139,7 @@ runs:
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
         
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        BUILD_END_EPOCH=$(date +%s)
-        
         echo "BUILD_END_TIME=${BUILD_END_TIME}" >> $GITHUB_ENV
-        echo "BUILD_END_EPOCH=${BUILD_END_EPOCH}" >> $GITHUB_ENV
         
         # Exit with the build's exit code
         exit ${BUILD_EXIT_CODE}
