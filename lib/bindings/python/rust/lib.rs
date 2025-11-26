@@ -635,18 +635,24 @@ impl DistributedRuntime {
                             })?;
 
                             // Call Python async function to get a coroutine
-                            let coroutine = callback
-                                .call1(py, (py_body,))
-                                .map_err(|e| anyhow::anyhow!("Failed to call Python callback: {}", e))?;
+                            let coroutine = callback.call1(py, (py_body,)).map_err(|e| {
+                                anyhow::anyhow!("Failed to call Python callback: {}", e)
+                            })?;
 
                             // Use asyncio.run_coroutine_threadsafe to schedule the coroutine
                             // on the running event loop from this thread
-                            let asyncio = py.import("asyncio")
+                            let asyncio = py
+                                .import("asyncio")
                                 .map_err(|e| anyhow::anyhow!("Failed to import asyncio: {}", e))?;
 
                             let concurrent_future = asyncio
-                                .call_method1("run_coroutine_threadsafe", (coroutine, event_loop.bind(py)))
-                                .map_err(|e| anyhow::anyhow!("Failed to schedule coroutine: {}", e))?;
+                                .call_method1(
+                                    "run_coroutine_threadsafe",
+                                    (coroutine, event_loop.bind(py)),
+                                )
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Failed to schedule coroutine: {}", e)
+                                })?;
 
                             // Wait for result with .result() - this blocks until the coroutine completes
                             let py_result = concurrent_future
@@ -663,7 +669,9 @@ impl DistributedRuntime {
                 })
             });
 
-        self.inner.engine_routes().register(&route_name, rust_callback);
+        self.inner
+            .engine_routes()
+            .register(&route_name, rust_callback);
         tracing::debug!("Registered engine route: /engine/{}", route_name);
         Ok(())
     }
