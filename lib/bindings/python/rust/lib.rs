@@ -534,7 +534,12 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    fn new(event_loop: PyObject, store_kv: String, request_plane: String) -> PyResult<Self> {
+    #[pyo3(signature = (event_loop, store_kv="etcd".to_string(), request_plane="nats".to_string()))]
+    fn new(
+        event_loop: PyObject,
+        store_kv: String,
+        request_plane: String,
+    ) -> PyResult<Self> {
         let selected_kv_store: kv::Selector = store_kv.parse().map_err(to_pyerr)?;
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
 
@@ -587,7 +592,6 @@ impl DistributedRuntime {
             .secondary()
             .block_on(rs::DistributedRuntime::new(runtime, runtime_config))
             .map_err(to_pyerr)?;
-
         Ok(DistributedRuntime { inner, event_loop })
     }
 

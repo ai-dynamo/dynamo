@@ -38,7 +38,21 @@ class DistributedRuntime:
     The runtime object for dynamo applications
     """
 
-    ...
+    def __init__(
+        self,
+        event_loop: Any,
+        store_kv: str = "etcd",
+        request_plane: str = "nats",
+    ) -> None:
+        """
+        Create a new DistributedRuntime instance.
+
+        Args:
+            event_loop: The asyncio event loop to use
+            store_kv: Storage backend ("etcd", "file", or "memory"). Defaults to "etcd"
+            request_plane: Request plane transport ("nats", "http", or "tcp"). Defaults to "nats"
+        """
+        ...
 
     def namespace(self, name: str) -> Namespace:
         """
