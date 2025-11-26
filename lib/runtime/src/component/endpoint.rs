@@ -256,7 +256,7 @@ impl EndpointConfigBuilder {
 /// - HTTP: Uses full URL path including endpoint name (e.g., http://host:port/v1/rpc/endpoint_name)
 /// - TCP: Includes endpoint name for routing (e.g., host:port/endpoint_name)
 /// - NATS: Uses subject-based addressing (unique per endpoint)
-fn build_transport_type(
+pub fn build_transport_type(
     mode: RequestPlaneMode,
     endpoint_id: &EndpointId,
     connection_id: u64,
