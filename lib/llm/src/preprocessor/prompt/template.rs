@@ -18,13 +18,13 @@ use tokcfg::{ChatTemplate, ChatTemplateValue};
 
 impl PromptFormatter {
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
-        // If no prompt formatter is available, use NoOpFormatter (for completions-only models)
+        // Prompt formatter is required for chat endpoints
         let Some(prompt_formatter) = mdc.prompt_formatter.as_ref() else {
-            tracing::info!(
-                "No prompt formatter found for model {}. Using NoOpFormatter (completions-only mode).",
+            anyhow::bail!(
+                "Model '{}' has no tokenizer_config.json. Cannot create chat template formatter. \
+                 This model only supports completions. Use --only-enable-completions flag when starting the backend.",
                 mdc.display_name
             );
-            return Ok(Self::no_op());
         };
 
         match prompt_formatter {
@@ -42,13 +42,13 @@ impl PromptFormatter {
                         crate::log_json_err(&file.display().to_string(), &contents, err)
                     })?;
 
-                // If chat_template is missing from tokenizer_config.json, use NoOpFormatter
+                // Chat template is required for chat endpoints
                 if config.chat_template.is_none() && mdc.chat_template_file.is_none() {
-                    tracing::info!(
-                        "No chat_template found in tokenizer_config.json for model {}. Using NoOpFormatter (completions-only mode).",
+                    anyhow::bail!(
+                        "Model '{}' has no 'chat_template' provided. \
+                         This model only supports completions. Use --only-enable-completions flag when starting the backend.",
                         mdc.display_name
                     );
-                    return Ok(Self::no_op());
                 }
 
                 // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
