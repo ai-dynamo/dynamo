@@ -10,29 +10,32 @@ CONTAINER_NAME=disaggr-test
 
 STREAMING=true
 CTX_GPU_FRAC=0.85
-CACHE_TRANSCEIVER_MAX_NUM_TOKENS=${CACHE_TRANSCEIVER_MAX_NUM_TOKENS:-4608}
 
 num_ctx_servers=$1
 ctx_tp_size=$2
-ctx_batch_size=$3
-ctx_max_num_tokens=$4
-ctx_enable_attention_dp=$5
-num_gen_servers=$6
-gen_tp_size=$7
-gen_batch_size=$8
-gen_max_num_tokens=$9
-gen_enable_attention_dp=${10}
-gen_gpu_memory_fraction=${11}
-eplb_num_slots=${12}
-mtp_size=${13}
-concurrency_list=${14}
-gen_nodes=${15}
-kind=${16}
-model_path=${17}
-served_model_name=${18}
-image=${19}
-isl=${20}
-osl=${21}
+ctx_ep_size=$3
+ctx_enable_attention_dp=$4
+ctx_batch_size=$5
+ctx_max_num_tokens=$6
+num_gen_servers=$7
+gen_tp_size=$8
+gen_ep_size=$9
+gen_batch_size=$10
+gen_max_num_tokens=${11}
+gen_enable_attention_dp=${12}
+gen_gpu_memory_fraction=${13}
+eplb_num_slots=${14}
+mtp_size=${15}
+concurrency_list=${16}
+gen_nodes=${17}
+kind=${18}
+model_path=${19}
+served_model_name=${20}
+image=${21}
+isl=${22}
+osl=${23}
+
+CACHE_TRANSCEIVER_MAX_NUM_TOKENS=${CACHE_TRANSCEIVER_MAX_NUM_TOKENS:-$((${isl} + ${osl} + 512))}
 
 ctx_max_seq_len=$((${isl} + 203))
 gen_max_seq_len=$((${isl} + ${osl} + 203))
@@ -44,7 +47,7 @@ set_clock_cmd="bash ${SCRIPTS_DIR}/set_clock.sh"
 mkdir -p ${LOG_DIR}
 echo "trying to submit job"
 
-sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_dep${gen_tp_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
+sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_dp${gen_tp_size}_ep${gen_ep_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
 
 echo "concurrency_list: ${concurrency_list}"
 
@@ -53,11 +56,8 @@ gen_gpus=$((num_gen_servers * gen_tp_size))
 
 echo "enable_attention_dp: ${ctx_enable_attention_dp}, ${gen_enable_attention_dp}, gpu_memory_fraction: ${gen_gpu_memory_fraction}"
 
-enable_pdl=false
 if [ "${gen_enable_attention_dp}" = "false" ]; then
-    enable_pdl=true
-    echo "enable_pdl: ${enable_pdl}"
-    sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_tep${gen_tp_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
+    sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_tp${gen_tp_size}_ep${gen_ep_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
 fi
 
 full_logdir=${sub_dir}
@@ -84,6 +84,8 @@ srun -l --container-name=${CONTAINER_NAME} \
             --model ${model_path} \
             --num_ctx_servers ${num_ctx_servers} \
             --ctx_tp_size ${ctx_tp_size} \
+            --ctx_ep_size ${ctx_ep_size} \
+            --ctx_enable_attention_dp ${ctx_enable_attention_dp} \
             --ctx_batch_size ${ctx_batch_size} \
             --ctx_max_num_tokens ${ctx_max_num_tokens} \
             --ctx_max_seq_len ${ctx_max_seq_len} \
@@ -91,6 +93,7 @@ srun -l --container-name=${CONTAINER_NAME} \
             --cache_transceiver_max_num_tokens ${CACHE_TRANSCEIVER_MAX_NUM_TOKENS} \
             --num_gen_servers ${num_gen_servers} \
             --gen_tp_size ${gen_tp_size} \
+            --gen_ep_size ${gen_ep_size} \
             --gen_batch_size ${gen_batch_size} \
             --gen_max_num_tokens ${gen_max_num_tokens} \
             --gen_max_seq_len ${gen_max_seq_len} \
@@ -177,7 +180,7 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --ntasks $gen_tp_size \
       --oversubscribe \
       --overlap \
-      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/decode_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'decode' &> ${full_logdir}/output_decode_worker_${i}.log &
+      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/decode_config.yaml ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'decode' &> ${full_logdir}/output_decode_worker_${i}.log &
   echo "$!" >> "$PID_FILE"
 done
 
@@ -200,7 +203,7 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
         --mpi=pmix --overlap -w ${nodes[node_idx]} \
         --oversubscribe \
         --overlap \
-        --ntasks 4 \
+        --ntasks $(( tp_size < 4 ? tp_size : 4 )) \
         --nodes 1 \
         bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'prefill' &> ${full_logdir}/output_prefill_worker_${i}.log &
   prefill_pids+=($!)

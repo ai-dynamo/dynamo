@@ -77,15 +77,19 @@ usage() {
 # Run single task
 run_single() {
     local ctx_num=$1
-    local gen_num=$2
-    local gen_tp_size=$3
-    local gen_batch_size=$4
-    local gen_max_num_tokens=$5
-    local gen_enable_attention_dp=$6
-    local gen_gpu_memory_fraction=$7
-    local gen_mtp_size=$8
-    local gen_eplb_num_slots=$9
-    local gen_concurrency_list=${10}
+    local ctx_tp_size=$2
+    local ctx_ep_size=$3
+    local ctx_enable_attention_dp=$4
+    local gen_num=$5
+    local gen_tp_size=$6
+    local gen_ep_size=$7
+    local gen_batch_size=$8
+    local gen_max_num_tokens=$9
+    local gen_enable_attention_dp=${10}
+    local gen_gpu_memory_fraction=${11}
+    local gen_eplb_num_slots=${12}
+    local gen_mtp_size=${13}
+    local gen_concurrency_list=${14}
 
     # TODO: expose kind to the command line
     local kind="dynamo_disagg"
@@ -94,11 +98,7 @@ run_single() {
     total_nodes=$((ctx_num + gen_nodes))
     total_tasks=$((total_nodes * 4))
     set -x
-    if (( ISL == OSL )); then
-        sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=${NTASKS_PER_NODE} --segment=${total_nodes} ${slurm_args} benchmark_disagg.slurm ${ctx_num} 4 4 4608 true ${gen_num} ${gen_tp_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE} ${ISL} ${OSL}
-    else
-        sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=${NTASKS_PER_NODE} --segment=${total_nodes} ${slurm_args} benchmark_disagg.slurm ${ctx_num} 4 1 8448 true ${gen_num} ${gen_tp_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE} ${ISL} ${OSL}
-    fi
+    sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=${NTASKS_PER_NODE} --segment=${total_nodes} ${slurm_args} benchmark_disagg.slurm ${ctx_num} ${ctx_tp_size} ${ctx_ep_size} ${ctx_enable_attention_dp} 30 20000 ${gen_num} ${gen_tp_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE} ${ISL} ${OSL}
     set +x
 }
 
@@ -373,45 +373,53 @@ main() {
             fi
             ;;
         "tep")
-            if [ $# -ne 11 ]; then
-                echo "Error: TEP mode requires 11 additional parameters (including mtp_mode)"
+            if [ $# -ne 15 ]; then
+                echo "Error: TEP mode requires 15 additional parameters (including mtp_mode)"
                 usage
             fi
 
             local ctx_num=$3
-            local gen_num=$4
-            local gen_tp_size=$5
-            local gen_batch_size=$6
-            local gen_max_num_tokens=$7
-            local gen_gpu_memory_fraction=$8
-            local gen_mtp_size=$9
-            local gen_eplb_num_slots=${10}
-            local gen_concurrency_list=${11}
+            local ctx_tp_size=$4
+            local ctx_ep_size=$5
+            local ctx_enable_attention_dp=$6
+            local gen_num=$7
+            local gen_tp_size=$8
+            local gen_ep_size=$9
+            local gen_batch_size=${10}
+            local gen_max_num_tokens=${11}
+            local gen_gpu_memory_fraction=${12}
+            local gen_mtp_size=${13}
+            local gen_eplb_num_slots=${14}
+            local gen_concurrency_list=${15}
 
-            echo "Running TEP mode ($mtp_mode) with ctx_num=$ctx_num, gen_num=$gen_num, gen_tp_size=$gen_tp_size, gen_batch_size=$gen_batch_size, gen_max_num_tokens=$gen_max_num_tokens, gen_gpu_memory_fraction=$gen_gpu_memory_fraction, gen_mtp_size=$gen_mtp_size, gen_eplb_num_slots=$gen_eplb_num_slots, gen_concurrency_list=\"$gen_concurrency_list\""
+            echo "Running TEP mode ($mtp_mode) with ctx_num=$ctx_num, gen_num=$gen_num, gen_tp_size=$gen_tp_size, gen_ep_size=$gen_ep_size, gen_batch_size=$gen_batch_size, gen_max_num_tokens=$gen_max_num_tokens, gen_gpu_memory_fraction=$gen_gpu_memory_fraction, gen_mtp_size=$gen_mtp_size, gen_eplb_num_slots=$gen_eplb_num_slots, gen_concurrency_list=\"$gen_concurrency_list\""
 
             # TEP mode: Use false to disable attention dp
-            run_single $ctx_num $gen_num $gen_tp_size $gen_batch_size $gen_max_num_tokens false $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
+            run_single $ctx_num $ctx_tp_size $ctx_ep_size $ctx_enable_attention_dp $gen_num $gen_tp_size $gen_ep_size $gen_batch_size $gen_max_num_tokens false $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
             ;;
         "dep")
-            if [ $# -ne 11 ]; then
-                echo "Error: DEP mode requires 11 additional parameters (including mtp_mode)"
+            if [ $# -ne 15 ]; then
+                echo "Error: DEP mode requires 15 additional parameters (including mtp_mode)"
                 usage
             fi
 
             local ctx_num=$3
-            local gen_num=$4
-            local gen_tp_size=$5
-            local gen_batch_size=$6
-            local gen_max_num_tokens=$7
-            local gen_gpu_memory_fraction=$8
-            local gen_mtp_size=$9
-            local gen_eplb_num_slots=${10}
-            local gen_concurrency_list=${11}
+            local ctx_tp_size=$4
+            local ctx_ep_size=$5
+            local ctx_enable_attention_dp=$6
+            local gen_num=$7
+            local gen_tp_size=$8
+            local gen_ep_size=$9
+            local gen_batch_size=${10}
+            local gen_max_num_tokens=${11}
+            local gen_gpu_memory_fraction=${12}
+            local gen_mtp_size=${13}
+            local gen_eplb_num_slots=${14}
+            local gen_concurrency_list=${15}
 
-            echo "Running DEP mode ($mtp_mode) with ctx_num=$ctx_num, gen_num=$gen_num, gen_tp_size=$gen_tp_size, gen_batch_size=$gen_batch_size, gen_max_num_tokens=$gen_max_num_tokens, gen_gpu_memory_fraction=$gen_gpu_memory_fraction, gen_mtp_size=$gen_mtp_size, gen_eplb_num_slots=$gen_eplb_num_slots, gen_concurrency_list=\"$gen_concurrency_list\""
+            echo "Running DEP mode ($mtp_mode) with ctx_num=$ctx_num, ctx_tp_size=$ctx_tp_size, ctx_enable_attention_dp=$ctx_enable_attention_dp, gen_num=$gen_num, gen_tp_size=$gen_tp_size, gen_ep_size=$gen_ep_size, gen_batch_size=$gen_batch_size, gen_max_num_tokens=$gen_max_num_tokens, gen_gpu_memory_fraction=$gen_gpu_memory_fraction, gen_mtp_size=$gen_mtp_size, gen_eplb_num_slots=$gen_eplb_num_slots, gen_concurrency_list=\"$gen_concurrency_list\""
 
-            run_single $ctx_num $gen_num $gen_tp_size $gen_batch_size $gen_max_num_tokens true $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
+            run_single $ctx_num $ctx_tp_size $ctx_ep_size $ctx_enable_attention_dp $gen_num $gen_tp_size $gen_ep_size $gen_batch_size $gen_max_num_tokens $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
             ;;
         *)
             echo "Error: Unknown mode '$mode'"
