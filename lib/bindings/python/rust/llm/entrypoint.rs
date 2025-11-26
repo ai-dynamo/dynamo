@@ -253,7 +253,7 @@ async fn select_engine(
     let inner = match args.engine_type {
         EngineType::Echo => {
             // There is no validation for the echo engine
-            RsEngineConfig::StaticFull {
+            RsEngineConfig::InProcessText {
                 model: Box::new(local_model),
                 engine: dynamo_llm::engines::make_echo_engine(),
             }
@@ -284,7 +284,7 @@ async fn select_engine(
             )
             .await?;
 
-            RsEngineConfig::StaticCore {
+            RsEngineConfig::InProcessTokens {
                 engine,
                 model: Box::new(local_model),
                 is_prefill: args.is_prefill,

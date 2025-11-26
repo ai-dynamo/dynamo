@@ -44,12 +44,13 @@ if [ "$ENABLE_OTEL" = true ]; then
 fi
 
 # run ingress
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
-python3 -m dynamo.frontend --http-port=8000 &
+python3 -m dynamo.frontend &
 DYNAMO_PID=$!
 
 # run worker
-OTEL_SERVICE_NAME=dynamo-worker-embedding DYN_SYSTEM_PORT=8081 \
+OTEL_SERVICE_NAME=dynamo-worker-embedding DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m dynamo.sglang \
   --embedding-worker \
   --model-path Qwen/Qwen3-Embedding-4B \

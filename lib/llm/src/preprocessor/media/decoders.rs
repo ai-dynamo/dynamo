@@ -2,51 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use super::common::EncodedMediaData;
-use ndarray::{ArrayBase, Dimension, OwnedRepr};
-mod image;
+use super::rdma::DecodedMediaData;
+pub mod image;
 
 pub use image::{ImageDecoder, ImageMetadata};
-
-#[derive(Debug)]
-pub enum DecodedMediaMetadata {
-    #[allow(dead_code)] // used in followup MR
-    Image(ImageMetadata),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum DataType {
-    UINT8,
-}
-
-// Decoded media data (image RGB, video frames pixels, ...)
-#[derive(Debug)]
-pub struct DecodedMediaData {
-    #[allow(dead_code)] // used in followup MR
-    pub(crate) data: Vec<u8>,
-    #[allow(dead_code)] // used in followup MR
-    pub(crate) shape: Vec<usize>,
-    #[allow(dead_code)] // used in followup MR
-    pub(crate) dtype: DataType,
-    #[allow(dead_code)] // used in followup MR
-    pub(crate) metadata: Option<DecodedMediaMetadata>,
-}
-
-// convert Array{N}<u8> to DecodedMediaData
-// TODO: Array1<f32> for audio
-impl<D: Dimension> From<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
-    fn from(array: ArrayBase<OwnedRepr<u8>, D>) -> Self {
-        let shape = array.shape().to_vec();
-        let (data, _) = array.into_raw_vec_and_offset();
-        Self {
-            data,
-            shape,
-            dtype: DataType::UINT8,
-            metadata: None,
-        }
-    }
-}
 
 #[async_trait::async_trait]
 pub trait Decoder: Clone + Send + 'static {
@@ -66,4 +28,9 @@ pub struct MediaDecoder {
     #[serde(default)]
     pub image_decoder: ImageDecoder,
     // TODO: video, audio decoders
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub enum DecodedMediaMetadata {
+    Image(ImageMetadata),
 }

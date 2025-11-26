@@ -38,7 +38,7 @@ pub async fn run(
     let endpoint = component.endpoint(&endpoint_id.name);
 
     let rt_fut: Pin<Box<dyn Future<Output = _> + Send + 'static>> = match engine_config {
-        EngineConfig::StaticFull { engine, mut model } => {
+        EngineConfig::InProcessText { engine, mut model } => {
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let ingress_chat = Ingress::<
                 Context<NvCreateChatCompletionRequest>,
@@ -51,7 +51,7 @@ pub async fn run(
 
             Box::pin(fut_chat)
         }
-        EngineConfig::StaticCore {
+        EngineConfig::InProcessTokens {
             engine: inner_engine,
             mut model,
             is_prefill,
@@ -127,7 +127,7 @@ mod integration_tests {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create distributed runtime: {}", e))?;
 
-        let engine_config = EngineConfig::StaticFull {
+        let engine_config = EngineConfig::InProcessText {
             engine: crate::engines::make_echo_engine(),
             model: Box::new(
                 crate::local_model::LocalModelBuilder::default()
