@@ -26,7 +26,6 @@ pub mod disconnect;
 pub mod error;
 pub mod health;
 pub mod metrics;
-pub mod metrics_endpoints;
 pub mod openapi_docs;
 pub mod service_v2;
 
