@@ -505,7 +505,6 @@ impl Discovery for KVStoreDiscovery {
 mod tests {
     use super::*;
     use crate::component::TransportType;
-    use crate::storage::key_value_store::KeyValueStoreManager;
 
     #[tokio::test]
     async fn test_kv_store_discovery_register_endpoint() {
@@ -632,7 +631,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_register_metrics_endpoint() {
-        let store = KeyValueStoreManager::memory();
+        let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = KVStoreDiscovery::new(store, cancel_token);
 
@@ -661,7 +660,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_list_metrics_endpoints() {
-        let store = KeyValueStoreManager::memory();
+        let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = KVStoreDiscovery::new(store, cancel_token);
 
@@ -723,7 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_watch_metrics_endpoints() {
-        let store = KeyValueStoreManager::memory();
+        let store = kv::Manager::memory();
         let cancel_token = CancellationToken::new();
         let client = Arc::new(KVStoreDiscovery::new(store, cancel_token.clone()));
 
