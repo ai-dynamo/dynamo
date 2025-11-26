@@ -14,6 +14,7 @@ ARG BASE_IMAGE_TAG
 
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
+ARG ENABLE_MEDIA_NIXL
 ARG CARGO_BUILD_JOBS
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -134,6 +135,7 @@ ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
+ARG ENABLE_MEDIA_NIXL
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
@@ -311,7 +313,11 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    maturin build --release --out /opt/dynamo/dist && \
+    if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
+        maturin build --release --features dynamo-llm/media-nixl --out /opt/dynamo/dist; \
+    else \
+        maturin build --release --out /opt/dynamo/dist; \
+    fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
@@ -332,6 +338,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 FROM base AS dev
 
 ARG ENABLE_KVBM
+ARG ENABLE_MEDIA_NIXL
 ARG ARCH_ALT
 
 # Application environment variables
