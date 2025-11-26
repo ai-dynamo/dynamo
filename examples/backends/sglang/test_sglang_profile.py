@@ -153,13 +153,12 @@ def test_profiling_endpoints():
     print("Testing /engine/start_profile and /engine/stop_profile")
     print("=" * 60)
 
-    # Test 1: Start profiling with parameters
+    # Test 1: Start profiling with parameters (no num_steps so we control stop manually)
     print("\n1. Starting profiling with parameters...")
     response = requests.post(
         f"{base_url}/engine/start_profile",
         json={
             "output_dir": PROFILER_OUTPUT_DIR,
-            "num_steps": 5,
             "activities": ["CPU", "GPU"],
             "with_stack": True,
             "record_shapes": True,

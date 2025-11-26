@@ -611,63 +611,59 @@ impl DistributedRuntime {
     /// runtime.register_engine_route("start_profile", start_profile)
     /// ```
     #[pyo3(signature = (route_name, callback))]
-    fn register_engine_route(&self, route_name: String, callback: PyObject) -> PyResult<()> {
-        // Wrap PyObjects in Arc so we can clone the Arc (not the PyObject) outside the GIL
-        let event_loop = Arc::new(self.event_loop.clone());
+    fn register_engine_route(
+        &self,
+        py: Python<'_>,
+        route_name: String,
+        callback: PyObject,
+    ) -> PyResult<()> {
+        // Capture TaskLocals at registration time when Python's event loop is running.
+        // This is needed because later, when the callback is invoked from an HTTP request,
+        // we'll be on a Rust thread without a running Python event loop.
+        let locals =
+            Arc::new(pyo3_async_runtimes::tokio::get_current_locals(py).map_err(to_pyerr)?);
         let callback = Arc::new(callback);
 
         // Wrap Python async callback in Rust async closure
         let rust_callback: rs::engine_routes::EngineRouteCallback =
             Arc::new(move |body: serde_json::Value| {
-                // Clone Arcs (safe without GIL), not PyObjects
                 let callback = callback.clone();
-                let event_loop = event_loop.clone();
-                let body_clone = body.clone();
+                let locals = locals.clone();
 
                 // Return a boxed future
                 Box::pin(async move {
-                    // Use spawn_blocking to avoid blocking tokio runtime with GIL acquisition
-                    // We use asyncio.run_coroutine_threadsafe to schedule the Python coroutine
-                    // on the running event loop from this blocking thread
-                    tokio::task::spawn_blocking(move || {
-                        Python::with_gil(|py| {
-                            // Convert body to Python dict
-                            let py_body = pythonize::pythonize(py, &body_clone).map_err(|e| {
-                                anyhow::anyhow!("Failed to convert request body to Python: {}", e)
-                            })?;
+                    // Acquire GIL to call Python callback and convert coroutine to future
+                    let py_future = Python::with_gil(|py| {
+                        // Convert body to Python dict
+                        let py_body = pythonize::pythonize(py, &body).map_err(|e| {
+                            anyhow::anyhow!("Failed to convert request body to Python: {}", e)
+                        })?;
 
-                            // Call Python async function to get a coroutine
-                            let coroutine = callback.call1(py, (py_body,)).map_err(|e| {
-                                anyhow::anyhow!("Failed to call Python callback: {}", e)
-                            })?;
+                        // Call Python async function to get a coroutine
+                        let coroutine = callback.call1(py, (py_body,)).map_err(|e| {
+                            anyhow::anyhow!("Failed to call Python callback: {}", e)
+                        })?;
 
-                            // Use asyncio.run_coroutine_threadsafe to schedule the coroutine
-                            // on the running event loop from this thread
-                            let asyncio = py
-                                .import("asyncio")
-                                .map_err(|e| anyhow::anyhow!("Failed to import asyncio: {}", e))?;
-
-                            let concurrent_future = asyncio
-                                .call_method1(
-                                    "run_coroutine_threadsafe",
-                                    (coroutine, event_loop.bind(py)),
-                                )
-                                .map_err(|e| {
-                                    anyhow::anyhow!("Failed to schedule coroutine: {}", e)
-                                })?;
-
-                            // Wait for result with .result() - this blocks until the coroutine completes
-                            let py_result = concurrent_future
-                                .call_method0("result")
-                                .map_err(|e| anyhow::anyhow!("Python callback failed: {}", e))?;
-
-                            // Convert result back to serde_json::Value
-                            pythonize::depythonize::<serde_json::Value>(&py_result)
-                                .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))
+                        // Use the TaskLocals captured at registration time
+                        pyo3_async_runtimes::into_future_with_locals(
+                            &locals,
+                            coroutine.into_bound(py),
+                        )
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to convert coroutine to future: {}", e)
                         })
+                    })?;
+
+                    // Await the Python coroutine (GIL is released during await)
+                    let py_result = py_future
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Python callback failed: {}", e))?;
+
+                    // Convert result back to serde_json::Value
+                    Python::with_gil(|py| {
+                        pythonize::depythonize::<serde_json::Value>(py_result.bind(py))
+                            .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))
                     })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
                 })
             });
 
