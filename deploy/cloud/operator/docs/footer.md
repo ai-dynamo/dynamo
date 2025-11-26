@@ -181,7 +181,7 @@ The operator automatically injects environment variables based on component type
 
 ### Worker Components
 
-- **`DYN_SYSTEM_PORT`**: `9090` (automatically enables the system metrics server)
+- **`DYN_SYSTEM_PORT`**: `9090` (automatically enables the system metrics server for backend workers only, NOT for frontend)
 - **`DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS`**: `["generate"]`
 - **`DYN_SYSTEM_ENABLED`**: `true` (needed for runtime images 0.6.1 and older)
 

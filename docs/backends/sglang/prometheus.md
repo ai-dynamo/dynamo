@@ -19,7 +19,7 @@ When running SGLang through Dynamo, SGLang engine metrics are automatically pass
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_SYSTEM_PORT` | System metrics/health port | `-1` (disabled) | `8081` |
+| `DYN_SYSTEM_PORT` | System metrics/health port. **Backend workers only, NOT for frontend.** | `-1` (disabled) | `8081` |
 
 ## Getting Started Quickly
 

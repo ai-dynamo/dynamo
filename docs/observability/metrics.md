@@ -17,7 +17,7 @@ Dynamo provides built-in metrics capabilities through the Dynamo metrics API, wh
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_SYSTEM_PORT` | Backend component metrics/health port | `-1` (disabled) | `8081` |
+| `DYN_SYSTEM_PORT` | Backend component metrics/health port (workers only, NOT for frontend) | `-1` (disabled) | `8081` |
 | `DYN_HTTP_PORT` | Frontend HTTP port (also configurable via `--http-port` flag) | `8000` | `8000` |
 
 ## Getting Started Quickly

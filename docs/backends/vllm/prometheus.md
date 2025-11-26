@@ -21,7 +21,7 @@ When running vLLM through Dynamo, vLLM engine metrics are automatically passed t
 
 | Variable/Flag | Description | Default | Example |
 |---------------|-------------|---------|---------|
-| `DYN_SYSTEM_PORT` | System metrics/health port. Required to expose `/metrics` endpoint. | `-1` (disabled) | `8081` |
+| `DYN_SYSTEM_PORT` | System metrics/health port. Required to expose `/metrics` endpoint. **Backend workers only, NOT for frontend.** | `-1` (disabled) | `8081` |
 | `--connector` | KV connector to use. Use `lmcache` to enable LMCache metrics. | `nixl` | `--connector lmcache` |
 
 ## Getting Started Quickly

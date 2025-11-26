@@ -21,7 +21,7 @@ This guide shows how to set up Prometheus and Grafana for visualizing Dynamo met
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_SYSTEM_PORT` | System metrics/health port | `-1` (disabled) | `8081` |
+| `DYN_SYSTEM_PORT` | System metrics/health port (backend workers only, NOT for frontend) | `-1` (disabled) | `8081` |
 
 ## Getting Started Quickly
 

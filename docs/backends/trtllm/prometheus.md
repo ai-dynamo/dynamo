@@ -21,7 +21,7 @@ As of the date of this documentation, the included TensorRT-LLM version 1.1.0rc5
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_SYSTEM_PORT` | System metrics/health port | `-1` (disabled) | `8081` |
+| `DYN_SYSTEM_PORT` | System metrics/health port. **Backend workers only, NOT for frontend.** | `-1` (disabled) | `8081` |
 
 ## Getting Started Quickly
 

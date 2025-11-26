@@ -158,6 +158,8 @@ when initializing and HTTP status code `HTTP/1.1 200 OK` once ready.
 
 ### Example Environment Setting
 
+> **Note**: These environment variables are for **backend workers only**. Do NOT set `DYN_SYSTEM_PORT` for the frontend.
+
 ```
 export DYN_SYSTEM_PORT=9090
 export DYN_SYSTEM_STARTING_HEALTH_STATUS="notready"
