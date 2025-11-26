@@ -596,6 +596,78 @@ impl DistributedRuntime {
         CancellationToken { inner }
     }
 
+    /// Register an async Python callback for /engine/{route_name}
+    ///
+    /// Args:
+    ///     route_name: Route path (e.g., "start_profile" → /engine/start_profile)
+    ///     callback: Async function with signature: async def(body: dict) -> dict
+    ///
+    /// Example:
+    ///     async def start_profile(body: dict) -> dict:
+    ///         await engine.start_profile(**body)
+    ///         return {"status": "ok"}
+    ///
+    ///     runtime.register_engine_route("start_profile", start_profile)
+    #[pyo3(signature = (route_name, callback))]
+    fn register_engine_route(&self, route_name: String, callback: PyObject) -> PyResult<()> {
+        // Wrap PyObjects in Arc so we can clone the Arc (not the PyObject) outside the GIL
+        let event_loop = Arc::new(self.event_loop.clone());
+        let callback = Arc::new(callback);
+
+        // Wrap Python async callback in Rust async closure
+        let rust_callback: rs::engine_routes::EngineRouteCallback =
+            Arc::new(move |body: serde_json::Value| {
+                // Clone Arcs (safe without GIL), not PyObjects
+                let callback = callback.clone();
+                let event_loop = event_loop.clone();
+                let body_clone = body.clone();
+
+                // Return a boxed future
+                Box::pin(async move {
+                    // Use spawn_blocking to avoid blocking tokio runtime with GIL acquisition
+                    // We use asyncio.run_coroutine_threadsafe to schedule the Python coroutine
+                    // on the running event loop from this blocking thread
+                    tokio::task::spawn_blocking(move || {
+                        Python::with_gil(|py| {
+                            // Convert body to Python dict
+                            let py_body = pythonize::pythonize(py, &body_clone).map_err(|e| {
+                                anyhow::anyhow!("Failed to convert request body to Python: {}", e)
+                            })?;
+
+                            // Call Python async function to get a coroutine
+                            let coroutine = callback
+                                .call1(py, (py_body,))
+                                .map_err(|e| anyhow::anyhow!("Failed to call Python callback: {}", e))?;
+
+                            // Use asyncio.run_coroutine_threadsafe to schedule the coroutine
+                            // on the running event loop from this thread
+                            let asyncio = py.import("asyncio")
+                                .map_err(|e| anyhow::anyhow!("Failed to import asyncio: {}", e))?;
+
+                            let concurrent_future = asyncio
+                                .call_method1("run_coroutine_threadsafe", (coroutine, event_loop.bind(py)))
+                                .map_err(|e| anyhow::anyhow!("Failed to schedule coroutine: {}", e))?;
+
+                            // Wait for result with .result() - this blocks until the coroutine completes
+                            let py_result = concurrent_future
+                                .call_method0("result")
+                                .map_err(|e| anyhow::anyhow!("Python callback failed: {}", e))?;
+
+                            // Convert result back to serde_json::Value
+                            pythonize::depythonize::<serde_json::Value>(&py_result)
+                                .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))
+                        })
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+                })
+            });
+
+        self.inner.engine_routes().register(&route_name, rust_callback);
+        tracing::debug!("Registered engine route: /engine/{}", route_name);
+        Ok(())
+    }
+
     // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
     // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
     // TODO: Create a separate crate "dynamo-python" so that all binding crates can import
