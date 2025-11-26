@@ -9,7 +9,9 @@ use std::sync::{Arc, RwLock};
 /// Callback type for engine routes (async)
 /// Takes JSON body, returns JSON response (or error) wrapped in a Future
 pub type EngineRouteCallback = Arc<
-    dyn Fn(serde_json::Value) -> Pin<Box<dyn Future<Output = anyhow::Result<serde_json::Value>> + Send>>
+    dyn Fn(
+            serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<serde_json::Value>> + Send>>
         + Send
         + Sync,
 >;
@@ -60,9 +62,8 @@ mod tests {
         let registry = EngineRouteRegistry::new();
 
         // Register a simple callback
-        let callback: EngineRouteCallback = Arc::new(|body| {
-            Box::pin(async move { Ok(serde_json::json!({"echo": body})) })
-        });
+        let callback: EngineRouteCallback =
+            Arc::new(|body| Box::pin(async move { Ok(serde_json::json!({"echo": body})) }));
 
         registry.register("test", callback);
 
@@ -102,9 +103,8 @@ mod tests {
     async fn test_clone_shares_routes() {
         let registry = EngineRouteRegistry::new();
 
-        let callback: EngineRouteCallback = Arc::new(|_| {
-            Box::pin(async { Ok(serde_json::json!({"ok": true})) })
-        });
+        let callback: EngineRouteCallback =
+            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"ok": true})) }));
         registry.register("test", callback);
 
         // Clone the registry
@@ -115,13 +115,11 @@ mod tests {
         assert!(cloned.get("test").is_some());
 
         // Register on clone
-        let callback2: EngineRouteCallback = Arc::new(|_| {
-            Box::pin(async { Ok(serde_json::json!({"ok": false})) })
-        });
+        let callback2: EngineRouteCallback =
+            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"ok": false})) }));
         cloned.register("test2", callback2);
 
         // Original should also see it (they share the Arc)
         assert!(registry.get("test2").is_some());
     }
 }
-
