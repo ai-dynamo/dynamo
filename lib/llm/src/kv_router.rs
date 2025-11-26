@@ -43,7 +43,8 @@ use crate::{
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{
-            LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult, WorkerWithDpRank,
+            LocalBlockHash, RouterRequest, RouterResponse, WorkerId, WorkerSelectionResult,
+            WorkerWithDpRank,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
@@ -249,6 +250,8 @@ pub struct KvRouter {
     cancellation_token: tokio_util::sync::CancellationToken,
 
     client: Client,
+
+    worker_query_client: Option<worker_query::WorkerQueryClient>,
 }
 
 impl KvRouter {
@@ -341,6 +344,20 @@ impl KvRouter {
             .await?;
         }
 
+        // Initialize worker query client by creating NATS client from env (same pattern as subscriber)
+        let worker_query_client = if let Ok(nats_server) =
+            std::env::var(dynamo_runtime::config::environment_names::nats::NATS_SERVER)
+        {
+            let client_options = dynamo_runtime::transports::nats::Client::builder()
+                .server(&nats_server)
+                .build()?;
+            let nats_client = client_options.connect().await?;
+            let namespace_name = component.namespace().name();
+            Some(worker_query::WorkerQueryClient::new(nats_client, namespace_name))
+        } else {
+            None
+        };
+
         tracing::info!("KV Routing initialized");
         Ok(Self {
             indexer,
@@ -349,6 +366,7 @@ impl KvRouter {
             kv_router_config,
             cancellation_token,
             client,
+            worker_query_client,
         })
     }
 
@@ -480,6 +498,19 @@ impl KvRouter {
     /// Dump all events from the indexer
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         self.indexer.dump_events().await
+    }
+
+    /// Query a specific worker's local KV indexer for its buffered events
+    pub async fn query_worker_local_kv(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<protocols::WorkerKvQueryResponse> {
+        let query_client = self
+            .worker_query_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Worker query client not available (NATS required)"))?;
+
+        query_client.query_worker(worker_id).await
     }
 }
 
