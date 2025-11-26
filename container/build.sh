@@ -903,6 +903,12 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
         
         FRAMEWORK_BUILD_LOG="${BUILD_LOG_DIR}/framework-${FRAMEWORK,,}-build.log"
         
+        # NOTE: To add additional build stages, follow this pattern:
+        # 1. Create a log file: STAGE3_BUILD_LOG="${BUILD_LOG_DIR}/stage3-custom-name.log"
+        # 2. Run docker build with: 2>&1 | tee "${STAGE3_BUILD_LOG}"
+        # 3. The action.yml will automatically discover logs matching build-logs/stage*.log
+        # 4. Or explicitly pass to parser: python3 parse_buildkit_output.py output.json base:base.log runtime:runtime.log custom:stage3.log
+        
         BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
         
         # Use BuildKit for enhanced metadata
