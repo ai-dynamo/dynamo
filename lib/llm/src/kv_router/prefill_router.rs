@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use futures::StreamExt;
+use rand::Rng;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -21,7 +22,7 @@ use crate::{
     discovery::ModelManager,
     kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
-    protocols::common::preprocessor::PrefillResult,
+    protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
 };
 
 /// Errors that can occur during prefill routing
@@ -176,7 +177,97 @@ impl PrefillRouter {
         Ok(())
     }
 
-    /// Call the prefill router and extract structured prefill result and worker ID
+    /// Generate a unique bootstrap room ID for disaggregated serving
+    fn generate_bootstrap_room() -> u64 {
+        rand::rng().random()
+    }
+
+    /// Query best worker upfront, build bootstrap_info, and spawn prefill in background
+    async fn build_bootstrap_info(
+        &self,
+        req: &PreprocessedRequest,
+    ) -> Option<(u64, BootstrapInfo)> {
+        let prefill_router = self.prefill_router.get()?;
+
+        // Only works with KvRouter
+        let kv_router = match prefill_router {
+            InnerPrefillRouter::KvRouter(r) => r,
+            InnerPrefillRouter::SimpleRouter(_) => return None,
+        };
+
+        // Query best worker without routing
+        let (worker_id, _dp_rank) = match kv_router
+            .chooser
+            .find_best_match(None, &req.token_ids, None, false)
+            .await
+        {
+            Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
+            Err(_) => return None,
+        };
+
+        // Look up bootstrap endpoint from discovery
+        let endpoint = kv_router.chooser.get_disaggregated_endpoint(worker_id).await?;
+        let host = endpoint.bootstrap_host?;
+        let port = endpoint.bootstrap_port?;
+
+        let bootstrap_room = Self::generate_bootstrap_room();
+
+        tracing::info!(
+            worker_id = worker_id,
+            bootstrap_host = %host,
+            bootstrap_port = port,
+            bootstrap_room = bootstrap_room,
+            "Built bootstrap_info upfront before prefill"
+        );
+
+        Some((
+            worker_id,
+            BootstrapInfo {
+                bootstrap_host: host,
+                bootstrap_port: port,
+                bootstrap_room,
+            },
+        ))
+    }
+
+    /// Spawn prefill as a background task
+    fn spawn_prefill_task(
+        &self,
+        prefill_request: SingleIn<PreprocessedRequest>,
+    ) {
+        let Some(prefill_router) = self.prefill_router.get() else {
+            return;
+        };
+
+        let router_clone = match prefill_router {
+            InnerPrefillRouter::KvRouter(r) => InnerPrefillRouter::KvRouter(r.clone()),
+            InnerPrefillRouter::SimpleRouter(r) => InnerPrefillRouter::SimpleRouter(r.clone()),
+        };
+
+        tokio::spawn(async move {
+            let result = match &router_clone {
+                InnerPrefillRouter::KvRouter(router) => router.generate(prefill_request).await,
+                InnerPrefillRouter::SimpleRouter(router) => router.generate(prefill_request).await,
+            };
+
+            match result {
+                Ok(mut stream) => {
+                    // Consume the stream to completion
+                    while let Some(output) = stream.next().await {
+                        if let Some(err) = output.err() {
+                            tracing::warn!("Prefill background task error: {:?}", err);
+                        }
+                    }
+                    tracing::debug!("Prefill background task completed");
+                }
+                Err(e) => {
+                    tracing::error!("Prefill background task failed: {}", e);
+                }
+            }
+        });
+    }
+
+    /// Original call_prefill: Call the prefill router and extract structured prefill result and worker ID
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
@@ -289,15 +380,37 @@ impl
         // Prepare prefill request with max_tokens = 1
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
-        let prefill_context = Context::with_id(prefill_req, request_id.clone());
 
-        // Link the prefill context as a child so that kill signals propagate
-        engine_ctx.link_child(prefill_context.context());
+        // Try build_bootstrap_info optimization
+        let prefill_result = if let Some((worker_id, bootstrap_info)) =
+            self.build_bootstrap_info(&prefill_req).await
+        {
+            let bootstrap_room = bootstrap_info.bootstrap_room;
 
-        let prefill_request = prefill_context;
+            // Prepare request with bootstrap_room and force routing to specific worker
+            prefill_req.backend_instance_id = Some(worker_id);
+            let extra_args = prefill_req.extra_args.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(obj) = extra_args.as_object_mut() {
+                obj.insert("bootstrap_room".to_string(), serde_json::json!(bootstrap_room));
+            }
 
-        // Attempt prefill
-        let prefill_result = self.call_prefill(prefill_request).await;
+            let prefill_context = Context::with_id(prefill_req, request_id.clone());
+            engine_ctx.link_child(prefill_context.context());
+
+            self.spawn_prefill_task(prefill_context);
+
+            Ok((None, Some(worker_id), Some(bootstrap_info)))
+        } else {
+            // Fallback to original: Wait for prefill to complete
+            tracing::debug!("Using original prefill path");
+
+            let prefill_context = Context::with_id(prefill_req, request_id.clone());
+            engine_ctx.link_child(prefill_context.context());
+
+            self.call_prefill(prefill_context)
+                .await
+                .map(|(result, worker_id)| (Some(result), worker_id, None))
+        };
 
         // Abort if cancelled during prefill
         if engine_ctx.is_stopped() || engine_ctx.is_killed() {
@@ -310,14 +423,23 @@ impl
 
         // Handle prefill result
         match prefill_result {
-            Ok((prefill_result, prefill_worker_id)) => {
-                tracing::debug!("Prefill succeeded, using disaggregated params for decode");
+            Ok((maybe_prefill_result, prefill_worker_id, bootstrap_info)) => {
+                tracing::debug!("Prefill completed, proceeding to decode");
 
                 let mut decode_req = req;
-                // Update request with prefill result
-                decode_req.prefill_result = Some(prefill_result.clone());
+
+                // Update request with prefill result if available (only in original path)
+                if let Some(prefill_result) = maybe_prefill_result {
+                    decode_req.prefill_result = Some(prefill_result);
+                }
+
                 // Restore original max_tokens for decode
                 decode_req.stop_conditions.max_tokens = original_max_tokens;
+
+                // Inject bootstrap_info for decode worker
+                if let Some(info) = bootstrap_info {
+                    decode_req.bootstrap_info = Some(info);
+                }
 
                 // Set router_config_override for decode: overlap_score_weight = 0
                 let existing_override = decode_req.router_config_override.take();

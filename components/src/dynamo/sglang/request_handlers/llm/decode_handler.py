@@ -116,43 +116,62 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         input_param = self._get_input_param(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
-            # request the bootstrap info from the target prefill worker
-            if (
-                self.prefill_router_client is not None
-                and self.prefill_router_client.instance_ids()
-            ):
-                token_ids = request["token_ids"]
-                stream = await self.prefill_router_client.generate(token_ids)
-                result = await anext(stream)
-                (
-                    worker_id,
-                    overlap,
-                ) = result.data()  # Returns tuple (worker_id, overlap_amount)
-                logging.info(f"Best prefill worker ID: {worker_id}, overlap: {overlap}")
+            # Check if bootstrap_info is in the request
+            bootstrap_info = request.get("bootstrap_info")
 
-                prefill_stream = await self.prefill_client.direct(
-                    DisaggPreprocessedRequest(
-                        request=request,
-                        sampling_params=sampling_params,
-                    ).model_dump(),
-                    worker_id,
+            if bootstrap_info:
+                # Use pre-computed bootstrap_info
+                logging.debug(
+                    f"Using pre-computed bootstrap_info: "
+                    f"host={bootstrap_info['bootstrap_host']}, "
+                    f"port={bootstrap_info['bootstrap_port']}, "
+                    f"room={bootstrap_info['bootstrap_room']}"
                 )
             else:
-                prefill_stream = await self.prefill_client.generate(
-                    DisaggPreprocessedRequest(
-                        request=request,
-                        sampling_params=sampling_params,
-                    ).model_dump(),
-                    context=context,
+                # Fall back to requesting bootstrap_info from prefill worker
+                logging.debug(
+                    "No pre-computed bootstrap_info, requesting from prefill worker"
                 )
+                if (
+                    self.prefill_router_client is not None
+                    and self.prefill_router_client.instance_ids()
+                ):
+                    token_ids = request["token_ids"]
+                    stream = await self.prefill_router_client.generate(token_ids)
+                    result = await anext(stream)
+                    (
+                        worker_id,
+                        overlap,
+                    ) = result.data()  # Returns tuple (worker_id, overlap_amount)
+                    logging.info(
+                        f"Best prefill worker ID: {worker_id}, overlap: {overlap}"
+                    )
 
-            bootstrap_info = None
-            async for info in prefill_stream:
-                bootstrap_info = info.data()
-                break
+                    prefill_stream = await self.prefill_client.direct(
+                        DisaggPreprocessedRequest(
+                            request=request,
+                            sampling_params=sampling_params,
+                        ).model_dump(),
+                        worker_id,
+                    )
+                else:
+                    prefill_stream = await self.prefill_client.generate(
+                        DisaggPreprocessedRequest(
+                            request=request,
+                            sampling_params=sampling_params,
+                        ).model_dump(),
+                        context=context,
+                    )
 
-            if not bootstrap_info:
-                raise RuntimeError("No bootstrap info received from prefill worker")
+                bootstrap_info = None
+                async for info in prefill_stream:
+                    data = info.data()
+                    if data and "disaggregated_params" in data:
+                        bootstrap_info = data["disaggregated_params"]
+                    break
+
+                if not bootstrap_info:
+                    raise RuntimeError("No bootstrap info received from prefill worker")
 
             decode = await self.engine.async_generate(
                 **input_param,
