@@ -187,7 +187,9 @@ fn test_decode_with_skip_special_tokens() {
     // Create a sequence with special tokens:
     // <s> (token_id: 1) + "Hello world" + </s> (token_id: 2)
     let text = "Hello world";
-    let encoding = tokenizer.encode(text, false).expect("Failed to encode text");
+    let encoding = tokenizer
+        .encode(text, false)
+        .expect("Failed to encode text");
     let mut token_ids = vec![1]; // <s>
     token_ids.extend(encoding.token_ids());
     token_ids.push(2); // </s>
