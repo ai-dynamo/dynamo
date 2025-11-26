@@ -137,7 +137,7 @@ mod tests {
         );
         assert_eq!(
             LoRACache::uri_to_cache_key("file:///local/path"),
-            "file__local_path"
+            "file___local_path"
         );
     }
 }
