@@ -16,7 +16,7 @@ limitations under the License.
 -->
 
 # Example: Multi-node TRTLLM Workers with Dynamo on Slurm for multimodal models
-a
+
 > **Note:** The scripts referenced in this example (such as `srun_aggregated.sh` and `srun_disaggregated.sh`) can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
 
 This guide demonstrates how to deploy large multimodal models that require a multi-node setup. It builds on the general multi-node deployment process described in the main [multinode-examples.md](./multinode-examples.md) guide.
