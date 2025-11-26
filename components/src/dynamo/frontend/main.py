@@ -265,15 +265,19 @@ async def async_main():
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
 
-    # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
+    # Warn and unset DYN_SYSTEM_PORT if set (frontend doesn't use system metrics server)
+    # The frontend creates a DRT but should NOT start a system metrics server
+    # Only backend workers should set DYN_SYSTEM_PORT
     if os.environ.get("DYN_SYSTEM_PORT"):
         logger.warning(
             "=" * 80 + "\n"
             "WARNING: DYN_SYSTEM_PORT is set but NOT used by the frontend!\n"
             "The frontend does not expose a system metrics server.\n"
             "Only backend workers should set DYN_SYSTEM_PORT.\n"
-            "Use --http-port to configure the frontend HTTP API port.\n" + "=" * 80
+            "Unsetting DYN_SYSTEM_PORT to prevent DRT from starting system server.\n"
+            + "=" * 80
         )
+        os.environ.pop("DYN_SYSTEM_PORT", None)
 
     # Configure Dynamo frontend HTTP service metrics prefix
     if flags.metrics_prefix is not None:

@@ -94,10 +94,6 @@ class DynamoWorkerProcess(ManagedProcess):
             log_dir=log_dir,
         )
 
-    def get_pid(self):
-        """Get the PID of the worker process"""
-        return self.proc.pid if self.proc else None
-
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
         try:

@@ -2,10 +2,61 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Test suite for profile_sla aiconfigurator functionality.
+Test suite for profile_sla with aiconfigurator functionality.
 
-profile_sla should be able to use aiconfigurator functionality
-even without access to any GPU system.
+These tests verify that profile_sla can use AI Configurator to estimate performance
+without requiring access to any GPU system or deploying actual services. Tests validate
+model performance estimation, database lookups, and error handling.
+
+All tests are marked as @pytest.mark.pre_merge and @pytest.mark.parallel.
+
+Parallel Execution:
+-------------------
+Install pytest-xdist for parallel test execution:
+    pip install pytest-xdist
+
+All tests in this file are designed for parallel execution with isolated namespaces
+and output directories. No network services or ports are required.
+
+Usage Examples:
+    # Run all tests serially
+    pytest tests/profiler/test_profile_sla_aiconfigurator.py -v
+
+    # Run all tests in parallel with 4 workers
+    pytest tests/profiler/test_profile_sla_aiconfigurator.py -v -n 4
+
+    # Run all tests in parallel with auto workers (recommended)
+    pytest tests/profiler/test_profile_sla_aiconfigurator.py -v -n auto
+
+    # Run specific test
+    pytest tests/profiler/test_profile_sla_aiconfigurator.py::TestProfileSlaAiconfigurator::test_trtllm_aiconfigurator_single_model -v
+
+    # Run parametrized tests with specific values
+    pytest tests/profiler/test_profile_sla_aiconfigurator.py -k "test_aiconfigurator_missing_args[aic_system]" -v
+
+Test Isolation:
+---------------
+Each test uses unique output directories and namespaces based on the test name:
+    - output_dir: /tmp/test_profiling_results_{test_name}
+    - namespace: test-namespace-{test_name}
+
+This ensures no conflicts when running tests in parallel.
+
+Requirements:
+-------------
+- No GPU required (uses AI Configurator for estimation)
+- No network services required (no NATS/Etcd)
+- No ports required (no service deployment)
+- HuggingFace API access required for some models
+- Note: Gated models (e.g., meta-llama/Llama-3.1-405B) require authentication
+
+Performance:
+------------
+Parallel execution provides moderate speedup (32-core machine):
+    Serial:              ~20s (13 tests)
+    Parallel (-n auto):  ~14s (1.5x faster, 24 workers)
+
+Note: Speedup is limited by HuggingFace API calls and database loading.
 """
 
 import sys
@@ -139,7 +190,9 @@ class TestProfileSlaAiconfigurator:
         "hf_model_id",
         [
             "Qwen/Qwen3-32B",
-            "meta-llama/Llama-3.1-405B",
+            pytest.param(
+                "meta-llama/Llama-3.1-405B", marks=pytest.mark.requires_hf_token
+            ),
         ],
     )
     async def test_aiconfigurator_dense_models(

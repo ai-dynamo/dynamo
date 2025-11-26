@@ -222,7 +222,8 @@ markers = [
     "model: model id used by a test or parameter",
     "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
     "k8s: marks tests as requiring Kubernetes",
-    "fault_tolerance: marks tests as fault tolerance tests"
+    "fault_tolerance: marks tests as fault tolerance tests",
+    "requires_hf_token: marks tests that require HuggingFace authentication token for gated models"
 ]
 
 # Linting/formatting

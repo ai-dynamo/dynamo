@@ -112,6 +112,13 @@ def runtime_services(request):
 @pytest.fixture(scope="module")
 def start_services(request, runtime_services):
     """Start frontend and worker processes once for this module's tests."""
+    # Extract runtime service ports
+    nats_process, etcd_process = runtime_services
+
+    # Set environment variables for runtime services before starting workers
+    os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
+    os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
+
     with DynamoFrontendProcess(request):
         logger.info("Frontend started for tests")
         with MockWorkerProcess(request):

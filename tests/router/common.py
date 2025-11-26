@@ -4,10 +4,11 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import string
 import time
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import aiohttp
 import nats
@@ -38,6 +39,8 @@ class KVRouterProcess(ManagedProcess):
         store_backend: str = "etcd",
         enforce_disagg: bool = False,
         busy_threshold: float | None = None,
+        nats_port: int = 4222,
+        etcd_port: int = 2379,
     ):
         command = [
             "python3",
@@ -61,8 +64,14 @@ class KVRouterProcess(ManagedProcess):
         if busy_threshold is not None:
             command.extend(["--busy-threshold", str(busy_threshold)])
 
+        # Set environment variables for NATS and Etcd connections
+        env = os.environ.copy()
+        env["NATS_SERVER"] = f"nats://localhost:{nats_port}"
+        env["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_port}"
+
         super().__init__(
             command=command,
+            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[frontend_port],
@@ -291,12 +300,14 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8)
     return False
 
 
-def get_runtime(store_backend="etcd", request_plane="nats"):
+def get_runtime(store_backend="etcd", request_plane="nats", env=None):
     """Create a DistributedRuntime instance for testing.
 
     Args:
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         request_plane: How frontend talks to backend ("tcp", "http" or "nats"). Defaults to "nats".
+        env: Optional dictionary of environment variables to use for runtime configuration.
+             Common keys: "NATS_SERVER", "ETCD_ENDPOINTS", ...
     """
     try:
         # Try to get running loop (works in async context)
@@ -305,15 +316,21 @@ def get_runtime(store_backend="etcd", request_plane="nats"):
         # No running loop, create a new one (sync context)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    return DistributedRuntime(loop, store_backend, request_plane)
+
+    # Create runtime with optional environment configuration
+    # The Rust implementation now handles environment variable setting/restoration internally
+    return DistributedRuntime(loop, store_backend, request_plane, env)
 
 
-async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):
+async def check_nats_consumers(
+    namespace: str, expected_count: Optional[int] = None, nats_port: int = 4222
+):
     """Check NATS consumers for the KV events stream.
 
     Args:
         namespace: The namespace to check consumers for
         expected_count: Optional expected number of consumers. If provided, asserts if count doesn't match.
+        nats_port: NATS port. Defaults to 4222.
 
     Returns:
         List of consumer names
@@ -323,7 +340,7 @@ async def check_nats_consumers(namespace: str, expected_count: Optional[int] = N
     stream_name = f"{slugified}-kv-events"
     logger.info(f"Checking consumers for stream: {stream_name}")
 
-    nc = await nats.connect("nats://localhost:4222")
+    nc = await nats.connect(f"nats://localhost:{nats_port}")
     try:
         js = nc.jetstream()
         consumer_infos = await js.consumers_info(stream_name)
@@ -516,6 +533,8 @@ def _test_router_basic(
     num_requests: int,
     frontend_timeout: int = 120,
     store_backend: str = "etcd",
+    nats_port: int = 4222,
+    etcd_port: int = 2379,
 ):
     """Basic router test: start router, wait for workers and send concurrent requests via HTTP frontend.
 
@@ -542,7 +561,13 @@ def _test_router_basic(
         # Start KV router frontend
         logger.info(f"Starting KV router frontend on port {frontend_port}")
         kv_router = KVRouterProcess(
-            request, block_size, frontend_port, engine_workers.namespace, store_backend
+            request,
+            block_size,
+            frontend_port,
+            engine_workers.namespace,
+            store_backend,
+            nats_port=nats_port,
+            etcd_port=etcd_port,
         )
         kv_router.__enter__()
 
@@ -583,6 +608,8 @@ def _test_router_two_routers(
     test_payload: dict,
     num_requests: int,
     store_backend: str = "etcd",
+    nats_port: int = 4222,
+    etcd_port: int = 2379,
 ):
     """Test two KV routers with alternating requests and consumer lifecycle verification.
 
@@ -615,7 +642,13 @@ def _test_router_two_routers(
         for i, port in enumerate(router_ports):
             logger.info(f"Starting KV router frontend on port {port}")
             kv_router = KVRouterProcess(
-                request, block_size, port, engine_workers.namespace, store_backend
+                request,
+                block_size,
+                port,
+                engine_workers.namespace,
+                store_backend,
+                nats_port=nats_port,
+                etcd_port=etcd_port,
             )
             kv_router.__enter__()
             kv_routers.append(kv_router)
@@ -672,7 +705,7 @@ def _test_router_two_routers(
             logger.info(f"Checking consumers for stream: {stream_name}")
 
             # Connect to NATS and list consumers
-            nc = await nats.connect("nats://localhost:4222")
+            nc = await nats.connect(f"nats://localhost:{nats_port}")
             try:
                 js = nc.jetstream()
 
@@ -881,6 +914,8 @@ def _test_router_query_instance_id(
     frontend_port: int,
     test_payload: dict,
     store_backend: str = "etcd",
+    nats_port: int = 4222,
+    etcd_port: int = 2379,
 ):
     """Test query_instance_id annotation returns worker_instance_id and token_data without routing.
 
@@ -913,7 +948,13 @@ def _test_router_query_instance_id(
         # Start KV router (frontend)
         logger.info(f"Starting KV router frontend on port {frontend_port}")
         kv_router = KVRouterProcess(
-            request, block_size, frontend_port, engine_workers.namespace, store_backend
+            request,
+            block_size,
+            frontend_port,
+            engine_workers.namespace,
+            store_backend,
+            nats_port=nats_port,
+            etcd_port=etcd_port,
         )
         kv_router.__enter__()
 
@@ -1067,6 +1108,8 @@ def _test_router_overload_503(
     frontend_port: int,
     test_payload: dict,
     busy_threshold: float = 0.2,
+    nats_port: int = 4222,
+    etcd_port: int = 2379,
 ):
     """Test that KV router returns 503 when all workers are busy.
 
@@ -1108,8 +1151,16 @@ def _test_router_overload_503(
             str(frontend_port),
         ]
 
+        # Set environment variables for NATS and Etcd connections if provided
+        env = None
+        if nats_port is not None and etcd_port is not None:
+            env = os.environ.copy()
+            env["NATS_SERVER"] = f"nats://localhost:{nats_port}"
+            env["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_port}"
+
         kv_router = ManagedProcess(
             command=command,
+            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[frontend_port],
@@ -1230,6 +1281,8 @@ def _test_router_indexers_sync(
     model_name: str,
     num_workers: int,
     store_backend: str = "etcd",
+    nats_port: int = 4222,
+    env: Optional[Dict[str, str]] = None,
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
@@ -1248,6 +1301,7 @@ def _test_router_indexers_sync(
         model_name: Model name to use for requests
         num_workers: Expected number of workers
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        env: Optional dictionary of environment variables to use for runtime configuration.
 
     Raises:
         AssertionError: If router states don't synchronize correctly or snapshot is missing
@@ -1296,7 +1350,7 @@ def _test_router_indexers_sync(
 
         # Create first runtime and endpoint for router 1
         logger.info("Creating first KV router with its own runtime")
-        runtime1 = get_runtime(store_backend)
+        runtime1 = get_runtime(store_backend, env=env)
         namespace1 = runtime1.namespace(engine_workers.namespace)
         component1 = namespace1.component(engine_workers.component_name)
         endpoint1 = component1.endpoint("generate")
@@ -1329,7 +1383,7 @@ def _test_router_indexers_sync(
 
         # Create second runtime and endpoint for router 2
         logger.info("Creating second KV router with its own runtime")
-        runtime2 = get_runtime(store_backend)
+        runtime2 = get_runtime(store_backend, env=env)
         namespace2 = runtime2.namespace(engine_workers.namespace)
         component2 = namespace2.component(engine_workers.component_name)
         endpoint2 = component2.endpoint("generate")
@@ -1367,7 +1421,7 @@ def _test_router_indexers_sync(
         snapshot_verified = False
         try:
             # Connect to NATS and check object store
-            nc = await nats.connect("nats://localhost:4222")
+            nc = await nats.connect(f"nats://localhost:{nats_port}")
             try:
                 js = nc.jetstream()
                 obj_store = await js.object_store(expected_bucket)
@@ -1477,7 +1531,8 @@ def _test_router_indexers_sync(
         slugified = component_subject.lower().replace(".", "-").replace("_", "-")
         stream_name = f"{slugified}-kv-events"
 
-        nc = await nats.connect("nats://localhost:4222")
+        nats_url = f"nats://localhost:{nats_port}"
+        nc = await nats.connect(nats_url)
         try:
             js = nc.jetstream()
             consumer_infos = await js.consumers_info(stream_name)
@@ -1506,6 +1561,8 @@ def _test_router_disagg_decisions(
     frontend_port: int,
     test_payload: dict,
     store_backend: str = "etcd",
+    nats_port: int = 4222,
+    etcd_port: int = 2379,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -1545,6 +1602,8 @@ def _test_router_disagg_decisions(
             decode_workers.namespace,
             store_backend,
             enforce_disagg=True,
+            nats_port=nats_port,
+            etcd_port=etcd_port,
         )
         kv_router.__enter__()
 
@@ -1895,6 +1954,8 @@ def _test_busy_threshold_endpoint(
     frontend_port: int,
     test_payload: dict,
     store_backend: str = "etcd",
+    nats_port: int = 4222,
+    etcd_port: int = 2379,
 ):
     """Test that the /busy_threshold endpoint can be hit and responds correctly.
 
@@ -1912,6 +1973,8 @@ def _test_busy_threshold_endpoint(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload (used to extract model name)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        nats_port: NATS port. Defaults to 4222.
+        etcd_port: Etcd port. Defaults to 2379.
 
     Raises:
         AssertionError: If endpoint responses are incorrect
@@ -1929,6 +1992,8 @@ def _test_busy_threshold_endpoint(
             engine_workers.namespace,
             store_backend,
             busy_threshold=initial_threshold,
+            nats_port=nats_port,
+            etcd_port=etcd_port,
         )
         kv_router.__enter__()
 

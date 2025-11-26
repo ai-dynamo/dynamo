@@ -15,6 +15,7 @@ from tests.router.common import (  # utilities
     get_runtime,
 )
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import allocate_free_port
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +27,6 @@ pytestmark = [
     pytest.mark.model(MODEL_NAME),
 ]
 SPEEDUP_RATIO = 10.0
-PORTS = [
-    8011,
-    8022,
-]  # Frontend ports: use PORTS[0] for single router, PORTS for multi-router
 NUM_REQUESTS = 10
 BLOCK_SIZE = 16
 
@@ -74,6 +71,7 @@ class VLLMProcess:
         num_workers: int = 2,
         single_gpu: bool = False,
         data_parallel_size: Optional[int] = None,
+        runtime_env: Optional[Dict[str, str]] = None,
     ):
         """Initialize vLLM workers with dynamo integration.
 
@@ -110,12 +108,17 @@ class VLLMProcess:
 
         self.model_name = model
 
+        # Allocate dynamic ports for all workers upfront to avoid conflicts
+        # Each worker needs 2 ports: KV event port and NIXL side channel port
+        kv_event_ports = [allocate_free_port(20080 + i) for i in range(num_workers)]
+        nixl_ports = [allocate_free_port(20090 + i) for i in range(num_workers)]
+
         # Create vLLM worker processes
         # Matches test.sh behavior:
         # - When data_parallel_size is set, launch one process per DP rank
         # - Each process gets --data-parallel-rank and --data-parallel-size
         # - Each process runs on its own GPU via CUDA_VISIBLE_DEVICES
-        # - --connector nixl enables KV cache transfer between ranks
+        # - --connector nixl enables KV cache transfer between DP ranks
 
         for worker_idx in range(num_workers):
             # Calculate GPU device for this process
@@ -179,12 +182,16 @@ class VLLMProcess:
                 )
 
             env = os.environ.copy()  # Copy parent environment
+            # Apply runtime environment configuration (NATS/ETCD endpoints)
+            if runtime_env:
+                env.update(runtime_env)
+            # Add worker-specific configuration with dynamically allocated ports
             env.update(
                 {
                     "CUDA_VISIBLE_DEVICES": gpu_device,
                     "DYN_NAMESPACE": self.namespace,
-                    "DYN_VLLM_KV_EVENT_PORT": str(20080 + worker_idx),
-                    "VLLM_NIXL_SIDE_CHANNEL_PORT": str(20090 + worker_idx),
+                    "DYN_VLLM_KV_EVENT_PORT": str(kv_event_ports[worker_idx]),
+                    "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_ports[worker_idx]),
                     "PYTHONHASHSEED": "0",  # for deterministic event id's
                 }
             )
@@ -306,6 +313,7 @@ class VLLMProcess:
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.timeout(130)  # Test takes ~42s, 3x buffer = 126s (rounded to 130s)
 def test_vllm_kv_router_basic(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -314,17 +322,32 @@ def test_vllm_kv_router_basic(
     """
 
     # runtime_services starts etcd and nats
+    nats_process, etcd_process = runtime_services
     N_VLLM_WORKERS = 2
     logger.info(f"Starting vLLM KV router test with {N_VLLM_WORKERS} workers")
+    logger.info(
+        f"Using runtime services - NATS port: {nats_process.port}, Etcd port: {etcd_process.port}"
+    )
+
+    # Create environment configuration for runtime services
+    runtime_env = {
+        "NATS_SERVER": f"nats://localhost:{nats_process.port}",
+        "ETCD_ENDPOINTS": f"http://localhost:{etcd_process.port}",
+    }
+
+    # Allocate dynamic frontend port
+    frontend_port = allocate_free_port(8100)
+    logger.info(f"Allocated dynamic frontend port: {frontend_port}")
 
     try:
-        # Start vLLM workers
+        # Start vLLM workers (pass runtime_env so workers can connect to NATS/ETCD)
         logger.info(f"Starting {N_VLLM_WORKERS} vLLM workers")
         vllm_workers = VLLMProcess(
             request,
             vllm_args=VLLM_ARGS,
             num_workers=N_VLLM_WORKERS,
             single_gpu=True,  # fit workers into one GPU
+            runtime_env=runtime_env,
         )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
@@ -334,11 +357,13 @@ def test_vllm_kv_router_basic(
             engine_workers=vllm_workers,
             block_size=BLOCK_SIZE,
             request=request,
-            frontend_port=PORTS[0],
+            frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
             store_backend="etcd",  # Explicit for clarity
+            nats_port=nats_process.port,
+            etcd_port=etcd_process.port,
         )
 
     finally:
@@ -348,12 +373,23 @@ def test_vllm_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.timeout(130)  # Test takes ~43s, 3x buffer = 129s (rounded to 130s)
 def test_router_decisions_vllm_multiple_workers(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
     # runtime_services starts etcd and nats
+    nats_process, etcd_process = runtime_services
     logger.info("Starting vLLM router prefix reuse test with two workers")
+    logger.info(
+        f"Using runtime services - NATS port: {nats_process.port}, Etcd port: {etcd_process.port}"
+    )
     N_WORKERS = 2
+
+    # Create environment configuration for runtime services
+    runtime_env = {
+        "NATS_SERVER": f"nats://localhost:{nats_process.port}",
+        "ETCD_ENDPOINTS": f"http://localhost:{etcd_process.port}",
+    }
 
     try:
         # Start 2 worker processes on the same GPU
@@ -363,14 +399,15 @@ def test_router_decisions_vllm_multiple_workers(
             vllm_args=VLLM_ARGS,
             num_workers=N_WORKERS,
             single_gpu=True,  # Worker uses GPU 0
+            runtime_env=runtime_env,
         )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
 
         # Initialize vLLM workers
         vllm_workers.__enter__()
 
-        # Get runtime and create endpoint
-        runtime = get_runtime()
+        # Get runtime and create endpoint (pass env to avoid modifying global os.environ)
+        runtime = get_runtime(env=runtime_env)
         namespace = runtime.namespace(vllm_workers.namespace)
         component = namespace.component("backend")
         endpoint = component.endpoint("generate")
@@ -396,8 +433,19 @@ def test_router_decisions_vllm_dp(
         * The (worker_id, dp_rank) with events should have exactly 4 events (one per request)
         * All events should be on the forced (worker_id, dp_rank=1) (verifying forced routing and prefix reuse)
     """
+    # runtime_services starts etcd and nats
+    nats_process, etcd_process = runtime_services
+    logger.info(
+        f"Using runtime services - NATS port: {nats_process.port}, Etcd port: {etcd_process.port}"
+    )
     N_WORKERS = 1
     DP_SIZE = 2
+
+    # Create environment configuration for runtime services
+    runtime_env = {
+        "NATS_SERVER": f"nats://localhost:{nats_process.port}",
+        "ETCD_ENDPOINTS": f"http://localhost:{etcd_process.port}",
+    }
 
     try:
         logger.info("Starting 2 vLLM DP ranks (dp_size=2) (gpu_mem=0.4)")
@@ -407,12 +455,13 @@ def test_router_decisions_vllm_dp(
             num_workers=N_WORKERS,  # Ignored when data_parallel_size is set
             single_gpu=False,
             data_parallel_size=DP_SIZE,  # Creates DP_SIZE processes (one per rank)
+            runtime_env=runtime_env,
         )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
 
-        # Get runtime and create endpoint
-        runtime = get_runtime()
+        # Get runtime and create endpoint (pass env to avoid modifying global os.environ)
+        runtime = get_runtime(env=runtime_env)
         # Use the namespace from the vLLM workers
         namespace = runtime.namespace(vllm_workers.namespace)
         component = namespace.component("backend")  # endpoint is backend.generate
@@ -430,6 +479,7 @@ def test_router_decisions_vllm_dp(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.timeout(130)  # Test takes ~43s, 3x buffer = 129s (rounded to 130s)
 def test_vllm_indexers_sync(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -437,17 +487,29 @@ def test_vllm_indexers_sync(
     Test that two KV routers have synchronized indexer states after processing requests
     with vLLM workers. This test verifies that both routers converge to the same internal state.
     """
+    # runtime_services starts etcd and nats
+    nats_process, etcd_process = runtime_services
     logger.info("Starting vLLM indexers sync test")
+    logger.info(
+        f"Using runtime services - NATS port: {nats_process.port}, Etcd port: {etcd_process.port}"
+    )
     N_VLLM_WORKERS = 2
 
+    # Create environment configuration for runtime services
+    runtime_env = {
+        "NATS_SERVER": f"nats://localhost:{nats_process.port}",
+        "ETCD_ENDPOINTS": f"http://localhost:{etcd_process.port}",
+    }
+
     try:
-        # Start vLLM workers
+        # Start vLLM workers (pass runtime_env so workers can connect to NATS/ETCD)
         logger.info(f"Starting {N_VLLM_WORKERS} vLLM workers")
         vllm_workers = VLLMProcess(
             request,
             vllm_args=VLLM_ARGS,
             num_workers=N_VLLM_WORKERS,
             single_gpu=True,  # fit workers into one GPU
+            runtime_env=runtime_env,
         )
         logger.info(f"All vLLM workers using namespace: {vllm_workers.namespace}")
         vllm_workers.__enter__()
@@ -460,6 +522,8 @@ def test_vllm_indexers_sync(
             model_name=MODEL_NAME,
             num_workers=N_VLLM_WORKERS,
             store_backend="etcd",
+            nats_port=nats_process.port,
+            env=runtime_env,
         )
 
         logger.info("vLLM indexers sync test completed successfully")

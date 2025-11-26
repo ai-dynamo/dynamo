@@ -43,7 +43,7 @@ class EngineConfig:
     script_name: Optional[str] = None
     command: Optional[List[str]] = None
     script_args: Optional[List[str]] = None
-    models_port: int = 8000
+    models_port: int = 8000  # default HTTP frontend port, if running serially
     timeout: int = 600
     delayed_start: int = 0
     env: Dict[str, str] = field(default_factory=dict)

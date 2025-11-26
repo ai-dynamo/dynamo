@@ -228,7 +228,7 @@ def setup_prometheus_registry(
     SGLang uses multiprocess architecture where metrics are stored in shared memory.
     MultiProcessCollector aggregates metrics from all worker processes. The Prometheus
     registry collects sglang:* metrics which are exposed via the metrics server endpoint
-    (set DYN_SYSTEM_PORT to a positive value to enable, e.g., DYN_SYSTEM_PORT=8081).
+    (typically port 8081) when DYN_SYSTEM_PORT is set to a positive value.
 
     Args:
         engine: The SGLang engine instance.

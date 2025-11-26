@@ -68,6 +68,13 @@ class EchoTensorWorkerProcess(ManagedProcess):
 @pytest.fixture()
 def start_services(request, runtime_services):
     """Start frontend and worker with fresh etcd/nats."""
+    # Extract runtime service ports
+    nats_process, etcd_process = runtime_services
+
+    # Set environment variables for runtime services before starting workers
+    os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
+    os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
+
     with DynamoFrontendProcess(request):
         with EchoTensorWorkerProcess(request):
             yield

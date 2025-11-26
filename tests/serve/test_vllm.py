@@ -533,7 +533,7 @@ def test_serve_deployment(
     Test dynamo serve deployments with different graph configurations.
     """
     config = vllm_config_test
-    run_serve_deployment(config, request)
+    run_serve_deployment(config, request, runtime_services=runtime_services)
 
 
 @pytest.mark.vllm

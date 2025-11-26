@@ -536,9 +536,36 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    fn new(event_loop: PyObject, store_kv: String, request_plane: String) -> PyResult<Self> {
+    #[pyo3(signature = (event_loop, store_kv="etcd".to_string(), request_plane="nats".to_string(), env=None))]
+    fn new(
+        event_loop: PyObject,
+        store_kv: String,
+        request_plane: String,
+        env: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        // Temporarily set environment variables if provided
+        let env_backup = if let Some(env_dict) = env {
+            let mut backup = std::collections::HashMap::new();
+            for (key, value) in env_dict.iter() {
+                let key_str: String = key.extract()?;
+                let value_str: String = value.extract()?;
+
+                // Backup existing value
+                backup.insert(key_str.clone(), std::env::var(&key_str).ok());
+
+                // Set new value (unsafe operations require unsafe block)
+                unsafe {
+                    std::env::set_var(&key_str, value_str);
+                }
+            }
+            Some(backup)
+        } else {
+            None
+        };
+
+        // Create the runtime with the temporarily set environment
         let selected_kv_store: kv::Selector = store_kv.parse().map_err(to_pyerr)?;
-        let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
+        let request_plane_mode: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
 
         // Try to get existing runtime first, create new Worker only if needed
         // This allows multiple DistributedRuntime instances to share the same tokio runtime
@@ -574,19 +601,36 @@ impl DistributedRuntime {
         let runtime_config = DistributedConfig {
             store_backend: selected_kv_store,
             // We only need NATS here to monitor it's metrics, so only if it's our request plane.
-            nats_config: if request_plane.is_nats() {
+            nats_config: if request_plane_mode.is_nats() {
                 Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {
                 None
             },
-            request_plane,
+            request_plane: request_plane_mode,
         };
         let inner = runtime
             .secondary()
             .block_on(rs::DistributedRuntime::new(runtime, runtime_config))
             .map_err(to_pyerr)?;
 
-        Ok(DistributedRuntime { inner, event_loop })
+        let result = Ok(DistributedRuntime { inner, event_loop });
+
+        // Restore original environment variables
+        if let Some(backup) = env_backup {
+            for (key, original_value) in backup {
+                if let Some(value) = original_value {
+                    unsafe {
+                        std::env::set_var(&key, value);
+                    }
+                } else {
+                    unsafe {
+                        std::env::remove_var(&key);
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     #[staticmethod]
