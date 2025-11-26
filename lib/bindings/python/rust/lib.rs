@@ -603,11 +603,13 @@ impl DistributedRuntime {
     ///     callback: Async function with signature: async def(body: dict) -> dict
     ///
     /// Example:
-    ///     async def start_profile(body: dict) -> dict:
-    ///         await engine.start_profile(**body)
-    ///         return {"status": "ok"}
+    /// ```python
+    /// async def start_profile(body: dict) -> dict:
+    ///     await engine.start_profile(**body)
+    ///     return {"status": "ok"}
     ///
-    ///     runtime.register_engine_route("start_profile", start_profile)
+    /// runtime.register_engine_route("start_profile", start_profile)
+    /// ```
     #[pyo3(signature = (route_name, callback))]
     fn register_engine_route(&self, route_name: String, callback: PyObject) -> PyResult<()> {
         // Wrap PyObjects in Arc so we can clone the Arc (not the PyObject) outside the GIL
