@@ -18,11 +18,16 @@ use tokcfg::{ChatTemplate, ChatTemplateValue};
 
 impl PromptFormatter {
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
-        match mdc
-            .prompt_formatter
-            .as_ref()
-            .ok_or(anyhow::anyhow!("MDC does not contain a prompt formatter"))?
-        {
+        // If no prompt formatter is available, use NoOpFormatter (for completions-only models)
+        let Some(prompt_formatter) = mdc.prompt_formatter.as_ref() else {
+            tracing::info!(
+                "No prompt formatter found for model {}. Using NoOpFormatter (completions-only mode).",
+                mdc.display_name
+            );
+            return Ok(Self::no_op());
+        };
+
+        match prompt_formatter {
             PromptFormatterArtifact::HfTokenizerConfigJson(checked_file) => {
                 let Some(file) = checked_file.path() else {
                     anyhow::bail!(
@@ -36,6 +41,15 @@ impl PromptFormatter {
                     serde_json::from_str(&contents).inspect_err(|err| {
                         crate::log_json_err(&file.display().to_string(), &contents, err)
                     })?;
+
+                // If chat_template is missing from tokenizer_config.json, use NoOpFormatter
+                if config.chat_template.is_none() && mdc.chat_template_file.is_none() {
+                    tracing::info!(
+                        "No chat_template found in tokenizer_config.json for model {}. Using NoOpFormatter (completions-only mode).",
+                        mdc.display_name
+                    );
+                    return Ok(Self::no_op());
+                }
 
                 // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
                 // stores the chat template in a separate file, we check if the file exists and

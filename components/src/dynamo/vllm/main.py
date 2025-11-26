@@ -507,9 +507,29 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        # Determine model type based on --only-enable-completions flag
+        if config.only_enable_completions:
+            # Warn if a custom chat template was provided but won't be used
+            if config.custom_jinja_template:
+                logger.warning(
+                    "Custom Jinja template provided (--custom-jinja-template) but --only-enable-completions is set. "
+                    "The chat template will be loaded but the /v1/chat/completions endpoint will not be available. "
+                    "If you want to use the chat template, remove the --only-enable-completions flag."
+                )
+
+            model_type = ModelType.Completions
+            logger.info(
+                "Registering model with completions-only support (--only-enable-completions flag set)"
+            )
+        else:
+            model_type = ModelType.Chat | ModelType.Completions
+            logger.info(
+                "Registering model with both chat and completions support (default)"
+            )
+
         await register_vllm_model(
             ModelInput.Tokens,
-            ModelType.Chat | ModelType.Completions,
+            model_type,
             generate_endpoint,
             config,
             engine_client,

@@ -55,6 +55,9 @@ class Config:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
 
+    # model capabilities
+    only_enable_completions: bool = False
+
     # multimodal options
     multimodal_processor: bool = False
     multimodal_encode_worker: bool = False
@@ -134,6 +137,12 @@ def parse_args() -> Config:
         type=str,
         default=None,
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
+    )
+    parser.add_argument(
+        "--only-enable-completions",
+        action="store_true",
+        default=False,
+        help="Only enable the /v1/completions endpoint (not /v1/chat/completions). Use this for models without chat templates. When set, the model will only support completions requests.",
     )
     parser.add_argument(
         "--multimodal-processor",
@@ -266,6 +275,7 @@ def parse_args() -> Config:
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
+    config.only_enable_completions = args.only_enable_completions
     config.multimodal_processor = args.multimodal_processor
     config.multimodal_encode_worker = args.multimodal_encode_worker
     config.multimodal_worker = args.multimodal_worker
