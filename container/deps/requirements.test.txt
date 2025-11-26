@@ -3,7 +3,7 @@
 
 # Version Pinning Strategy:
 # - Use == for packages that are pure Python and well-tested
-# - Use <= for packages that may have platform-specific versions
+# - Use <= or < for packages that may have platform-specific versions
 # - Never use >= as it allows untested future versions that may introduce breaking changes,
 #   create non-reproducible builds, and cause dependency conflicts. Every installed version
 #   should be explicitly tested, not an unknown future release.
@@ -17,10 +17,10 @@ pyright==1.1.407
 pytest==8.4.2
 pytest-asyncio==1.3.0
 pytest-benchmark==5.2.3
-pytest-codeblocks  # Not currently installed, will get latest when installed
+pytest-codeblocks==0.17.0
 pytest-cov==7.0.0
 pytest-forked==1.6.0
-pytest-httpserver  # Not currently installed, will get latest when installed
+pytest-httpserver==1.1.3
 pytest-md-report==0.7.0
 pytest-mypy==1.0.1
 pytest-timeout==2.4.0

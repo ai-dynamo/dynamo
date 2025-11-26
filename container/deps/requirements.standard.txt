@@ -3,7 +3,7 @@
 
 # Version Pinning Strategy:
 # - Use == for packages that are pure Python and well-tested
-# - Use <= for packages that may have platform-specific versions
+# - Use <= or < for packages that may have platform-specific versions
 # - Never use >= as it allows untested future versions that may introduce breaking changes,
 #   create non-reproducible builds, and cause dependency conflicts. Every installed version
 #   should be explicitly tested, not an unknown future release.
