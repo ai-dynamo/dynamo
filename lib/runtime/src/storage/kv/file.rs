@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
+use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -196,6 +197,11 @@ impl Directory {
         for path in owned_files {
             let file = match OpenOptions::new().write(true).open(&path) {
                 Ok(f) => f,
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    self.owned_files.lock().remove(&path);
+                    tracing::debug!(path = %path.display(), "FileStore::keep_alive removed missing file from owned_files");
+                    continue;
+                }
                 Err(err) => {
                     tracing::error!(path = %path.display(), error = %err, "FileStore::keep_alive failed opening owned file");
                     continue;
@@ -247,8 +253,11 @@ impl Directory {
             };
             if last_modified < deadline {
                 tracing::info!(path = ctx, ?last_modified, "Expired");
-                if let Err(err) = fs::remove_file(entry.path()) {
+                let entry_path = entry.path();
+                if let Err(err) = fs::remove_file(&entry_path) {
                     tracing::warn!(path = %ctx, error = %err, "Failed removing");
+                } else {
+                    self.owned_files.lock().remove(&entry_path);
                 }
             }
         }
