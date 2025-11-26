@@ -65,12 +65,16 @@ SYSTEM_HEALTH_TOOL = {
 class DynamoFrontendProcess(ManagedProcess):
     """Process manager for Dynamo frontend"""
 
-    def __init__(self, request):
+    def __init__(self, request, nats_server, etcd_server):
         command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
 
         # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
         env = os.environ.copy()
         env.pop("DYN_SYSTEM_PORT", None)
+
+        # Set NATS and etcd endpoints for dynamic port allocation
+        env["NATS_SERVER"] = f"nats://localhost:{nats_server.port}"
+        env["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_server.port}"
 
         log_dir = f"{request.node.name}_frontend"
 
@@ -94,7 +98,9 @@ class DynamoFrontendProcess(ManagedProcess):
 class VllmWorkerProcess(ManagedProcess):
     """Vllm Worker process for GPT-OSS model."""
 
-    def __init__(self, request, worker_id: str = "vllm-worker"):
+    def __init__(
+        self, request, nats_server, etcd_server, worker_id: str = "vllm-worker"
+    ):
         self.worker_id = worker_id
 
         command = [
@@ -115,6 +121,10 @@ class VllmWorkerProcess(ManagedProcess):
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = "8083"
+
+        # Set NATS and etcd endpoints for dynamic port allocation
+        env["NATS_SERVER"] = f"nats://localhost:{nats_server.port}"
+        env["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_server.port}"
 
         log_dir = f"{request.node.name}_{worker_id}"
 
@@ -180,9 +190,10 @@ def runtime_services(request):
 @pytest.fixture(scope="module")
 def start_services(request, runtime_services):
     """Start frontend and worker processes once for this module's tests."""
-    with DynamoFrontendProcess(request):
+    nats_server, etcd_server = runtime_services
+    with DynamoFrontendProcess(request, nats_server, etcd_server):
         logger.info("Frontend started for tests")
-        with VllmWorkerProcess(request):
+        with VllmWorkerProcess(request, nats_server, etcd_server):
             logger.info("Vllm Worker started for tests")
             yield
 
