@@ -88,31 +88,26 @@ XID_MESSAGES: Dict[int, str] = {
     119: "GSP RPC Timeout",
     120: "GSP Error",
     140: "ECC unrecovered error",
-    
     # Memory Subsystem XIDs (DCGM_HEALTH_WATCH_MEM)
     31: "MMU Error",
     32: "PBDMA Error",
     43: "Reset Channel Verification Error",
     63: "Pending Page Retirements",
     64: "Row Remap Failure",
-    
     # PCIe Subsystem XIDs (DCGM_HEALTH_WATCH_PCIE)
     38: "PCIe Bus Error",
     39: "PCIe Fabric Error",
     42: "PCIe Replay Rate exceeded",
     # 74 already defined above (can be PCIe or NVLink context)
-    
     # Thermal Subsystem XIDs (DCGM_HEALTH_WATCH_THERMAL)
     60: "Clocks Event: Thermal limit exceeded",
     61: "EDPP Power Brake: Thermal limit",
     62: "Thermal Violations detected",
     # 63 can be thermal or memory context ("Thermal diode detects short")
-    
     # Power Subsystem XIDs (DCGM_HEALTH_WATCH_POWER)
     54: "Power state change event",
     56: "Clock change event",
     57: "Clocks Event: Power limit exceeded",
-    
     # Common Graphics XIDs (often seen in test environments)
     13: "Graphics Engine Exception",
     31: "GPU stopped responding",  # Can be both MMU or timeout context
@@ -120,27 +115,28 @@ XID_MESSAGES: Dict[int, str] = {
     69: "Graphics Exception: Class Error",
 }
 
+
 class GPUXIDInjectorKernel:
     """
     XID injector via nsenter+kmsg (triggers NVSentinel detection).
-    
+
     Accepts ANY XID error code for maximum flexibility in testing.
     Pre-defined messages exist for common critical XIDs, but any XID value
     can be injected - NVSentinel will parse and handle based on its own rules.
-    
+
     Pre-defined messages for all DCGM/NVSentinel monitored XIDs:
-    
+
     Devastating XIDs (always trigger FAIL):
     - 79: GPU fell off bus, 74: NVLink error, 48: ECC DBE, 94/95: ECC errors
     - 119/120: GSP errors, 140: ECC unrecovered
-    
+
     Subsystem XIDs (trigger WARN, may escalate):
     - Memory (31, 32, 43, 63, 64): MMU, PBDMA, page retirement errors
     - PCIe (38, 39, 42): Bus, fabric, replay rate errors
     - Thermal (60, 61, 62, 63): Temperature limit violations
     - Power (54, 56, 57): Power/clock state changes
     - Graphics (13, 45, 69): SM exceptions, preemptive cleanup
-    
+
     Unknown XIDs use a generic error message format.
     """
 

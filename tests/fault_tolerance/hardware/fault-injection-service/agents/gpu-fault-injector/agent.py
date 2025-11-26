@@ -73,7 +73,7 @@ class XIDInjectRequest(BaseModel):
 class GPUFaultInjector:
     """
     GPU fault injection operations with DCGM integration.
-    
+
     Supports ANY XID injection via nsenter+kmsg (27+ pre-defined messages).
     Accepts any XID value (1-1000) for comprehensive fault tolerance testing.
     """
@@ -168,22 +168,22 @@ async def health_check():
 async def inject_xid(request: XIDInjectRequest):
     """
     Inject ANY XID error via nsenter+kmsg (triggers NVSentinel detection).
-    
+
     Accepts any XID error code (1-1000) for maximum testing flexibility.
-    
+
     Pre-defined messages for all DCGM/NVSentinel monitored XIDs:
-    
+
     Devastating (always FAIL):
     - 79: GPU fell off bus | 74: NVLink error | 48: ECC DBE | 94/95: ECC errors
     - 119/120: GSP errors | 140: ECC unrecovered
-    
+
     Subsystem (may WARN/escalate):
     - Memory: 31, 32, 43, 63, 64 (MMU, PBDMA, page retirement)
     - PCIe: 38, 39, 42 (bus, fabric, replay rate)
     - Thermal: 60, 61, 62 (temperature limits)
     - Power: 54, 56, 57 (power/clock state)
     - Graphics: 13, 45, 69 (SM exceptions)
-    
+
     Unknown XIDs use generic error message - NVSentinel will parse and handle
     based on its own XID database.
     """
@@ -192,7 +192,11 @@ async def inject_xid(request: XIDInjectRequest):
     )
 
     # Validate XID type is a reasonable integer (basic sanity check)
-    if not isinstance(request.xid_type, int) or request.xid_type < 1 or request.xid_type > 1000:
+    if (
+        not isinstance(request.xid_type, int)
+        or request.xid_type < 1
+        or request.xid_type > 1000
+    ):
         raise HTTPException(
             status_code=400,
             detail=(
