@@ -129,7 +129,6 @@ class BuildKitParser:
             "total_steps": total_steps,
             "cached_steps": cached_steps,
             "built_steps": total_steps - cached_steps,
-            "total_duration_sec": round(total_duration, 2),
             "build_duration_sec": round(build_duration_sec, 2),
             "cache_hit_rate": round(cache_hit_rate, 2),
         }]
@@ -140,7 +139,6 @@ class BuildKitParser:
                 "cached_steps": cached_steps,
                 "built_steps": total_steps - cached_steps,
                 "overall_cache_hit_rate": round(cache_hit_rate, 2),
-                "total_duration_sec": round(total_duration, 2),
                 "total_size_transferred_bytes": total_size,
             },
             "stages": stage_metrics,
@@ -215,7 +213,6 @@ def main():
 
     total_steps = 0
     total_cached = 0
-    total_duration = 0.0
     total_size = 0
 
     # Parse each stage log
@@ -241,7 +238,6 @@ def main():
             # Accumulate metrics
             total_steps += stage_data["container"]["total_steps"]
             total_cached += stage_data["container"]["cached_steps"]
-            total_duration += stage_data["container"]["total_duration_sec"]
             total_size += stage_data["container"]["total_size_transferred_bytes"]
             
             print(f"✅ Parsed {stage_name} stage: {stage_data['container']['total_steps']} steps", file=sys.stderr)
@@ -259,7 +255,6 @@ def main():
         "cached_steps": total_cached,
         "built_steps": total_built,
         "overall_cache_hit_rate": round(overall_cache_hit_rate, 2),
-        "total_duration_sec": round(total_duration, 2),
         "total_size_transferred_bytes": total_size
     }
     
@@ -297,10 +292,6 @@ def main():
     )
     print(
         f"   Cache Hit Rate: {container['overall_cache_hit_rate']:.1f}%",
-        file=sys.stderr,
-    )
-    print(
-        f"   Total Duration: {container['total_duration_sec']:.2f}s",
         file=sys.stderr,
     )
 
