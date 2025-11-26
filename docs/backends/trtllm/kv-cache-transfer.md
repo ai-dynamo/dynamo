@@ -31,27 +31,24 @@ TensorRT-LLM also supports using **NIXL** (NVIDIA Inference Xfer Library) for KV
 
 ## Using NIXL for KV Cache Transfer
 
-**Note:** NIXL backend for TensorRT-LLM is currently only supported on AMD64 (x86_64) architecture. If you're running on ARM64, you'll need to use the default UCX method for KV cache transfer.
+**Note:** NIXL version shipped with current dynamo is not supported by tensorrt-llm<=1.2.0rc2. In order to use NIXL backend for KV cache transfer, users are required to build container image with tensorrt-llm>=1.2.0rc3.
 
 To enable NIXL for KV cache transfer in disaggregated serving:
 
-1. **Build the container with NIXL support:**
-   The TensorRT-LLM wheel must be built from source with NIXL support. The `./container/build.sh` script caches previously built TensorRT-LLM wheels to reduce build time. If you have previously built a TensorRT-LLM wheel without NIXL support, you must delete the cached wheel to force a rebuild with NIXL support.
-
-   **Remove cached TensorRT-LLM wheel (only if previously built without NIXL support):**
-   ```bash
-   rm -rf /tmp/trtllm_wheel
-   ```
-
-   **Build the container with NIXL support:**
+1. **Build the container with NIXL support(tensorrt-llm==1.2.0rc3):**
    ```bash
    ./container/build.sh --framework trtllm \
-     --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git \
-     --tensorrtllm-commit v1.2.0rc2
+     --tensorrtllm-pip-wheel tensorrt-llm==1.2.0rc3
    ```
 
 2. **Run the containerized environment:**
    See [run container](./README.md#run-container) section to learn how to start the container image built in previous step.
+
+   Within container, unset `TRTLLM_USE_UCX_KVCACHE` variable so NIXL can be used instead of UCX.
+
+   ```bash
+    unset TRTLLM_USE_UCX_KVCACHE
+    ```
 
 3. **Start the disaggregated service:**
    See [disaggregated serving](./README.md#disaggregated-serving) to see how to start the deployment.
