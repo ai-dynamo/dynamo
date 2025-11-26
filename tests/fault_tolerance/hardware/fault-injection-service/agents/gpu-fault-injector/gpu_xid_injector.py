@@ -110,8 +110,6 @@ XID_MESSAGES: Dict[int, str] = {
     57: "Clocks Event: Power limit exceeded",
     # Common Graphics XIDs (often seen in test environments)
     13: "Graphics Engine Exception",
-    # 31: "GPU stopped responding",
-    # Note: XID 31 is already defined above as "MMU Error" (can also be GPU timeout)
     45: "Preemptive Cleanup, due to previous errors",
     69: "Graphics Exception: Class Error",
 }
