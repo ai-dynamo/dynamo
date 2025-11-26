@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-ARG BASE_IMAGE_TAG="25.10-cuda13.0-devel-ubuntu24.04"
+# This section contains build arguments that are common and shared with
+# the plain Dockerfile, so they should NOT have a default. The source of truth is from build.sh.
+ARG BASE_IMAGE
+ARG BASE_IMAGE_TAG
+
+ARG PYTHON_VERSION
+ARG ENABLE_KVBM
 
 ARG PYTORCH_BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG PYTORCH_BASE_IMAGE_TAG="25.10-py3"
-ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 ARG RUNTIME_IMAGE_TAG="25.10-cuda13.0-runtime-ubuntu24.04"
 
@@ -30,8 +34,6 @@ ARG GITHUB_TRTLLM_COMMIT
 # without adding if statements everywhere, so just define both as ARGs for now.
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
-# Python configuration
-ARG PYTHON_VERSION=3.12
 
 ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
 FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
@@ -137,7 +139,7 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Install from local wheel directory in build context
         WHEEL_FILE="$(find /trtllm_wheel -name "*.whl" | head -n 1)"; \
         if [ -n "$WHEEL_FILE" ]; then \
-            uv pip install --no-cache "$WHEEL_FILE"; \
+            uv pip install --no-cache "$WHEEL_FILE" triton==3.5.0; \
         else \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \

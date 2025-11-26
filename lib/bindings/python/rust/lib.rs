@@ -3,7 +3,7 @@
 
 use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
-use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
+use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
@@ -455,7 +455,7 @@ enum ModelInput {
 impl DistributedRuntime {
     #[new]
     fn new(event_loop: PyObject, store_kv: String, request_plane: String) -> PyResult<Self> {
-        let selected_kv_store: KeyValueStoreSelect = store_kv.parse().map_err(to_pyerr)?;
+        let selected_kv_store: kv::Selector = store_kv.parse().map_err(to_pyerr)?;
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
 
         // Try to get existing runtime first, create new Worker only if needed
