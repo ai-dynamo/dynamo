@@ -393,6 +393,7 @@ jobs:
           framework: ${{ matrix.framework }}
           test_type: e2e-single-gpu
           platform_arch: ${{ matrix.arch }}
+          dry_run: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}
 
   e2e-multi-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch }}-2gpu-e2e
@@ -467,6 +468,7 @@ jobs:
           framework: ${{ matrix.framework }}
           test_type: e2e-multi-gpu
           platform_arch: ${{ matrix.arch }}
+          dry_run: 'true'
 
   component-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch }}-${{ matrix.component }}
@@ -640,7 +642,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: cpu-amd-m5-4xlarge
-    if: always() && !github.event.repository.fork #TODO: Add this back befpre merge && github.event_name == 'schedule'
+    if: always() && github.event_name == 'schedule' && !github.event.repository.fork #TODO: Add this back befpre merge && github.event_name == 'schedule'
     needs: results-summary
     permissions:
       contents: read
