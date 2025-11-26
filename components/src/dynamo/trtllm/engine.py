@@ -41,7 +41,7 @@ class TensorRTLLMEngine:
 
     async def initialize(self):
         if not self._llm:
-            if self._disaggregation_mode == DisaggregationMode.ENCODE:
+            if self.disaggregation_mode == DisaggregationMode.ENCODE:
                 # Initialize the multimodal encoder for full EPD
                 max_batch_size = self.engine_args.pop("max_batch_size", 1)
                 model = self.engine_args.pop("model")
