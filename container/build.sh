@@ -102,7 +102,7 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc2"
 TENSORRTLLM_PIP_WHEEL=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-# FIXME: NCCL will hang with 25.03, so use 25.01 for now
+# FIXME: OPS-612 NCCL will hang with 25.03, so use 25.01 for now
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
@@ -111,9 +111,13 @@ VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-# For now, SGLang is using hardcoded framework image and tag (see the Dockerfile.sglang)
-#SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-#SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+SGLANG_CUDA_VERSION="12.9.1"
+# This is for Dockerfile
+SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+# This is for Dockerfile.sglang. Unlike the other frameworks, it is using a different base image
+SGLANG_FRAMEWORK_IMAGE="nvcr.io/nvidia/cuda"
+SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
 
 NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
@@ -797,6 +801,8 @@ fi
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
     ENABLE_KVBM=true
+else
+    ENABLE_KVBM=false
 fi
 
 if [  ! -z ${ENABLE_KVBM} ]; then
@@ -814,9 +820,16 @@ fi
 if [ -n "${MAX_JOBS}" ]; then
     BUILD_ARGS+=" --build-arg MAX_JOBS=${MAX_JOBS} "
 fi
+
 if [[ $FRAMEWORK == "SGLANG" ]]; then
-    echo "Forcing Python version to 3.10 for sglang image build"
+    echo "Customizing Python, CUDA, and framework images for sglang images"
     BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.10"
+    BUILD_ARGS+=" --build-arg CUDA_VERSION=${SGLANG_CUDA_VERSION}"
+    # Unlike the other two frameworks, SGLang's framework image is different from the base image, so we need to set it explicitly.
+    BUILD_ARGS+=" --build-arg FRAMEWORK_IMAGE=${SGLANG_FRAMEWORK_IMAGE}"
+    BUILD_ARGS+=" --build-arg FRAMEWORK_IMAGE_TAG=${SGLANG_FRAMEWORK_IMAGE_TAG}"
+else
+    BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.12"
 fi
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
