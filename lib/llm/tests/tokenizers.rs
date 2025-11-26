@@ -60,7 +60,7 @@ fn compute_hashes_for_tokenizer<E: Encoder>(tokenizer: &E, prompts: &[&str]) -> 
         .iter()
         .map(|&prompt| {
             tokenizer
-                .encode(prompt)
+                .encode(prompt, false)
                 .expect("Failed to encode prompt")
                 .get_hash()
             // Assuming `get_hash` returns a `u64`
@@ -93,7 +93,7 @@ fn test_hf_lifecycle() {
         .expect("Failed to load remote HuggingFace tokenizer");
 
     let encoding = tokenizer
-        .encode(TEST_PROMPTS[0])
+        .encode(TEST_PROMPTS[0], false)
         .expect("Failed to encode prompt");
 
     let decoded = tokenizer
@@ -113,7 +113,7 @@ fn test_sequence() {
     // let tokenizer = shared_tokenizer.read().unwrap();
 
     let encoding = shared_tokenizer
-        .encode(TEST_PROMPTS[0])
+        .encode(TEST_PROMPTS[0], false)
         .expect("Failed to encode prompt");
 
     let mut sequence = Sequence::new(shared_tokenizer.clone().into());
@@ -157,11 +157,11 @@ fn test_long_sequence_incremental_decode_with_prefill() {
 
     for (input_text, output_text) in LONG_TEST_PROMPTS.iter() {
         let input_encoding = shared_tokenizer
-            .encode(input_text)
+            .encode(input_text, false)
             .expect("Failed to encode prompt");
 
         let output_encoding = shared_tokenizer
-            .encode(output_text)
+            .encode(output_text, false)
             .expect("Failed to encode prompt");
 
         let mut decoder =
@@ -187,7 +187,7 @@ fn test_decode_with_skip_special_tokens() {
     // Create a sequence with special tokens:
     // <s> (token_id: 1) + "Hello world" + </s> (token_id: 2)
     let text = "Hello world";
-    let encoding = tokenizer.encode(text).expect("Failed to encode text");
+    let encoding = tokenizer.encode(text, false).expect("Failed to encode text");
     let mut token_ids = vec![1]; // <s>
     token_ids.extend(encoding.token_ids());
     token_ids.push(2); // </s>

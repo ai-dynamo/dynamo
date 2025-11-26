@@ -33,7 +33,7 @@ pub fn encode(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(test_str.len() as u64));
     group.bench_function("tokenizer_encode", |b| {
         b.iter(|| {
-            let _ = encoder.encode(black_box(test_str)).unwrap();
+            let _ = encoder.encode(black_box(test_str), false).unwrap();
         })
     });
     group.finish();
