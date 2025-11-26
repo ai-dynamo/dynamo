@@ -176,26 +176,102 @@ def main():
     """Main entry point"""
     if len(sys.argv) < 3:
         print(
-            "Usage: parse_buildkit_output.py <build_log_file> <output_json> [container_metadata_json]",
+            "Usage: parse_buildkit_output.py <output_json> <base_log_file> [framework_log_file] [container_metadata_json]",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    log_file = sys.argv[1]
-    output_json = sys.argv[2]
-    container_metadata_file = sys.argv[3] if len(sys.argv) > 3 else None
+    output_json = sys.argv[1]
+    base_log_file = sys.argv[2] if len(sys.argv) > 2 else None
+    framework_log_file = sys.argv[3] if len(sys.argv) > 3 else None
+    container_metadata_file = sys.argv[4] if len(sys.argv) > 4 else None
 
-    # Read build log
-    try:
-        with open(log_file, "r") as f:
-            log_content = f.read()
-    except Exception as e:
-        print(f"Error reading log file: {e}", file=sys.stderr)
-        sys.exit(1)
+    # Initialize combined structure
+    combined_data = {
+        "container": {},
+        "stages": [],
+        "layers": []
+    }
 
-    # Parse BuildKit output
-    parser = BuildKitParser()
-    build_data = parser.parse_log(log_content)
+    total_steps = 0
+    total_cached = 0
+    total_duration = 0.0
+    total_size = 0
+
+    # Parse base image build if provided
+    if base_log_file:
+        try:
+            with open(base_log_file, "r") as f:
+                base_log_content = f.read()
+            
+            parser = BuildKitParser()
+            base_data = parser.parse_log(base_log_content)
+            
+            # Add base stage
+            if base_data.get("stages"):
+                base_stage = base_data["stages"][0].copy()
+                base_stage["stage_name"] = "base"
+                combined_data["stages"].append(base_stage)
+            
+            # Add base layers with stage identifier
+            for layer in base_data.get("layers", []):
+                layer["stage"] = "base"
+                combined_data["layers"].append(layer)
+            
+            # Accumulate metrics
+            total_steps += base_data["container"]["total_steps"]
+            total_cached += base_data["container"]["cached_steps"]
+            total_duration += base_data["container"]["total_duration_sec"]
+            total_size += base_data["container"]["total_size_transferred_bytes"]
+            
+            print(f"✅ Parsed base image: {base_data['container']['total_steps']} steps", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Could not parse base log: {e}", file=sys.stderr)
+
+    # Parse framework image build if provided
+    if framework_log_file:
+        try:
+            with open(framework_log_file, "r") as f:
+                framework_log_content = f.read()
+            
+            parser = BuildKitParser()
+            framework_data = parser.parse_log(framework_log_content)
+            
+            # Add framework stage
+            if framework_data.get("stages"):
+                framework_stage = framework_data["stages"][0].copy()
+                framework_stage["stage_name"] = "runtime"
+                combined_data["stages"].append(framework_stage)
+            
+            # Add framework layers with stage identifier
+            for layer in framework_data.get("layers", []):
+                layer["stage"] = "runtime"
+                combined_data["layers"].append(layer)
+            
+            # Accumulate metrics
+            total_steps += framework_data["container"]["total_steps"]
+            total_cached += framework_data["container"]["cached_steps"]
+            total_duration += framework_data["container"]["total_duration_sec"]
+            total_size += framework_data["container"]["total_size_transferred_bytes"]
+            
+            print(f"✅ Parsed framework image: {framework_data['container']['total_steps']} steps", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Could not parse framework log: {e}", file=sys.stderr)
+
+    # Calculate rolled-up container metrics
+    total_built = total_steps - total_cached
+    overall_cache_hit_rate = (total_cached / total_steps * 100) if total_steps > 0 else 0.0
+    
+    combined_data["container"] = {
+        "total_steps": total_steps,
+        "cached_steps": total_cached,
+        "built_steps": total_built,
+        "overall_cache_hit_rate": round(overall_cache_hit_rate, 2),
+        "total_duration_sec": round(total_duration, 2),
+        "total_size_transferred_bytes": total_size
+    }
+    
+    build_data = combined_data
     
     # Merge container metadata if provided
     if container_metadata_file:
