@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// TODO: (DEP-635) this file should be renamed to system_http_server.rs
+//  it is being used not just for status, health, but others like loras management.
+
 use crate::config::HealthStatus;
 use crate::config::environment_names::logging as env_logging;
 use crate::config::environment_names::runtime::canary as env_canary;
