@@ -45,7 +45,11 @@ kubectl get pods -n monitoring
 # Step 6: Update Dynamo operator with Prometheus endpoint
 echo ""
 echo "Step 6: Updating Dynamo operator with Prometheus endpoint..."
+# Detect currently installed version to avoid accidental upgrades
+DYNAMO_VERSION=$(helm list -n dynamo -o json | jq -r '.[] | select(.name=="dynamo-platform") | .chart' | sed 's/dynamo-platform-//')
+echo "Detected Dynamo Platform version: ${DYNAMO_VERSION}"
 helm upgrade dynamo-platform nvidia-dynamo/dynamo-platform \
+  --version "${DYNAMO_VERSION}" \
   --namespace dynamo \
   --reuse-values \
   --set prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090 \
