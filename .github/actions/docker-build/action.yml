@@ -204,6 +204,7 @@ runs:
 
     - name: Generate Comprehensive Build Metrics
       id: comprehensive-metrics
+      if: always()
       shell: bash
       run: |
         echo "=========================================="
