@@ -5,16 +5,18 @@ import asyncio
 import logging
 import os
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
 
-from vllm.inputs import TokensPrompt
+from vllm.inputs import TokensPrompt, TextPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import (
     ModelInput,
     ModelType,
@@ -70,7 +72,7 @@ def build_sampling_params(
     model_max_len: int | None = None,
 ) -> SamplingParams:
     """
-    Build SamplingParams from a PreprocessedRequest.
+    Build SamplingParams from a PreprocessedRequest (internal protocol format).
 
     Args:
         request: The PreprocessedRequest dict with 'sampling_options' and 'stop_conditions'
@@ -128,6 +130,61 @@ def build_sampling_params(
     return sampling_params
 
 
+def build_sampling_params_openai(
+    request: Dict[str, Any],
+    default_sampling_params: Dict[str, Any],
+) -> SamplingParams:
+    """
+    Build SamplingParams from an OpenAI-compatible request format.
+
+    Args:
+        request: The OpenAI-style request dict with parameters like temperature, max_tokens, etc.
+        default_sampling_params: Default sampling parameters to initialize with
+
+    Returns:
+        SamplingParams configured from the request
+    """
+    sampling_params = SamplingParams(**default_sampling_params)
+    sampling_params.detokenize = True
+
+    # Map common OpenAI parameters to SamplingParams
+    openai_mapping = {
+        "temperature": "temperature",
+        "top_p": "top_p",
+        "presence_penalty": "presence_penalty",
+        "frequency_penalty": "frequency_penalty",
+        "seed": "seed",
+        "top_k": "top_k",
+        "repetition_penalty": "repetition_penalty",
+        "min_p": "min_p",
+        "length_penalty": "length_penalty",
+        "use_beam_search": "use_beam_search",
+    }
+
+    for req_key, param_key in openai_mapping.items():
+        if req_key in request and request[req_key] is not None:
+            if hasattr(sampling_params, param_key):
+                setattr(sampling_params, param_key, request[req_key])
+
+    # Handle max_tokens
+    if "max_tokens" in request and request["max_tokens"] is not None:
+        sampling_params.max_tokens = request["max_tokens"]
+
+    # Handle stop sequences
+    if "stop" in request and request["stop"] is not None:
+        sampling_params.stop = request["stop"]
+
+    # Handle ignore_eos (custom extension)
+    if "ignore_eos" in request and request["ignore_eos"] is not None:
+        sampling_params.ignore_eos = request["ignore_eos"]
+
+    # Handle min_tokens (custom extension)
+    if "min_tokens" in request and request["min_tokens"] is not None:
+        sampling_params.min_tokens = request["min_tokens"]
+
+    return sampling_params
+
+
 class BaseWorkerHandler(ABC):
     """
     Request handler for the generate and clear_kv_blocks endpoints.
@@ -143,6 +200,7 @@ class BaseWorkerHandler(ABC):
         enable_multimodal: bool = False,
         generate_endpoint=None,
         config=None,
+        use_vllm_tokenizer: bool = False,
     ):
         self.runtime = runtime
         self.component = component
@@ -159,6 +217,14 @@ class BaseWorkerHandler(ABC):
         # LoRA tracking
         self.lora_id_for_name: dict[str, int] = {}
         self.lora_name_to_path: dict[str, str] = {}
+
+        self.use_vllm_tokenizer = use_vllm_tokenizer
+
+        # Initialize InputParamManager for text-in-text-out mode
+        tokenizer = None
+        if use_vllm_tokenizer and hasattr(engine, "tokenizer"):
+            tokenizer = engine.tokenizer
+        self.input_param_manager = InputParamManager(tokenizer)
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -669,6 +735,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         enable_multimodal: bool = False,
         generate_endpoint=None,
         config=None,
+        use_vllm_tokenizer: bool = False,
     ):
         super().__init__(
             runtime,
@@ -679,6 +746,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             enable_multimodal,
             generate_endpoint,
             config,
+            use_vllm_tokenizer,
         )
 
     async def generate(self, request, context):
@@ -686,6 +754,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
 
+        if self.use_vllm_tokenizer:
+            # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
+            async for chunk in self._generate_text_mode(request, context, request_id):
+                yield chunk
+        else:
+            # Token-in-token-out mode: internal protocol format
+            async for chunk in self._generate_token_mode(request, context, request_id):
+                yield chunk
+
+    async def _generate_token_mode(self, request, context, request_id):
+        """Generate tokens using internal protocol format (token-in-token-out)."""
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
 
@@ -759,6 +838,81 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 self.runtime.shutdown()
                 os._exit(1)
 
+    async def _generate_text_mode(self, request, context, request_id):
+        """Generate text using OpenAI-compatible format (text-in-text-out)."""
+        # Get text input using InputParamManager
+        input_text = self.input_param_manager.get_input_param(
+            request, use_tokenizer=True
+        )
+
+        # Build prompt for vLLM
+        prompt = TextPrompt(prompt=input_text)
+
+        # Build sampling params from OpenAI-style request
+        sampling_params = build_sampling_params_openai(
+            request, self.default_sampling_params
+        )
+
+        dp_rank = request.get("dp_rank", None)
+        openai_request_id = request.get("id") or request.get("request_id", request_id)
+        previous_text = ""
+
+        async with self._abort_monitor(context, request_id):
+            try:
+                gen = self.engine_client.generate(
+                    prompt,
+                    sampling_params,
+                    request_id,
+                    data_parallel_rank=dp_rank,
+                )
+
+                async for res in gen:
+                    if not res.outputs:
+                        yield {
+                            "id": openai_request_id,
+                            "created": int(time.time()),
+                            "object": "chat.completion.chunk",
+                            "model": "unknown",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"role": "assistant", "content": ""},
+                                    "finish_reason": "error",
+                                }
+                            ],
+                        }
+                        break
+
+                    output = res.outputs[0]
+                    # Calculate the delta text (new text since last chunk)
+                    delta_text = output.text[len(previous_text) :]
+                    previous_text = output.text
+
+                    choice_data = {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": delta_text,
+                        },
+                        "finish_reason": output.finish_reason,
+                    }
+
+                    chunk = {
+                        "id": openai_request_id,
+                        "created": int(time.time()),
+                        "object": "chat.completion.chunk",
+                        "model": "unknown",
+                        "choices": [choice_data],
+                    }
+
+                    yield chunk
+
+            except EngineDeadError as e:
+                logger.error(f"vLLM EngineDeadError: {e}")
+                logger.warning("Initiating Dynamo Runtime shutdown.")
+                self.runtime.shutdown()
+                os._exit(1)
+
 
 class PrefillWorkerHandler(BaseWorkerHandler):
     def __init__(
@@ -771,6 +925,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         enable_multimodal: bool = False,
         generate_endpoint=None,
         config=None,
+        use_vllm_tokenizer: bool = False,
     ):
         super().__init__(
             runtime,
@@ -781,6 +936,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             enable_multimodal,
             generate_endpoint,
             config,
+            use_vllm_tokenizer,
         )
 
     async def generate(self, request, context):
@@ -788,6 +944,17 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Prefill Request ID: {request_id}")
 
+        if self.use_vllm_tokenizer:
+            # Text-in-text-out mode: use InputParamManager
+            async for chunk in self._generate_text_mode(request, context, request_id):
+                yield chunk
+        else:
+            # Token-in-token-out mode: internal protocol format
+            async for chunk in self._generate_token_mode(request, context, request_id):
+                yield chunk
+
+    async def _generate_token_mode(self, request, context, request_id):
+        """Generate prefill using internal protocol format (token-in-token-out)."""
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
 
@@ -884,6 +1051,80 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                             f"generated {len(token_ids)} token(s), "
                             f"has_kv_params={res.kv_transfer_params is not None}"
                         )
+
+                    yield output
+            except asyncio.CancelledError:
+                # raise the error because we cannot migrate prefill requests
+                raise GeneratorExit(
+                    "Prefill engine was shut down during token generation"
+                ) from None
+
+    async def _generate_text_mode(self, request, context, request_id):
+        """Generate prefill using OpenAI-compatible format (text-in-text-out)."""
+        # Get text input using InputParamManager
+        input_text = self.input_param_manager.get_input_param(
+            request, use_tokenizer=True
+        )
+
+        # Build prompt for vLLM
+        prompt = TextPrompt(prompt=input_text)
+
+        # Build sampling params from OpenAI-style request
+        sampling_params = build_sampling_params_openai(
+            request, self.default_sampling_params
+        )
+        sampling_params.detokenize = False  # Prefill doesn't need detokenization
+
+        # Configure for prefill-only mode with remote decode
+        if sampling_params.extra_args is None:
+            sampling_params.extra_args = {}
+        sampling_params.extra_args["kv_transfer_params"] = {
+            "do_remote_decode": True,
+        }
+        sampling_params_defaults = {
+            "do_remote_prefill": False,
+            "remote_engine_id": None,
+            "remote_block_ids": None,
+            "remote_host": None,
+            "remote_port": None,
+        }
+        # Add only missing keys
+        for k, v in sampling_params_defaults.items():
+            sampling_params.extra_args["kv_transfer_params"].setdefault(k, v)
+        # Override for prefill: only generate 1 token
+        sampling_params.max_tokens = 1
+        sampling_params.min_tokens = 1
+
+        dp_rank = request.get("dp_rank", None)
+
+        async with self._abort_monitor(context, request_id, is_prefill=True):
+            try:
+                gen = self.engine_client.generate(
+                    prompt, sampling_params, request_id, data_parallel_rank=dp_rank
+                )
+            except EngineDeadError as e:
+                logger.error(f"vLLM EngineDeadError: {e}")
+                logger.warning("Initiating Dynamo Runtime shutdown.")
+                self.runtime.shutdown()
+                os._exit(1)
+
+            try:
+                async for res in gen:
+                    logger.debug(f"kv transfer params: {res.kv_transfer_params}")
+
+                    token_ids = res.outputs[0].token_ids if res.outputs else []
+
+                    output: Dict[str, Any] = {
+                        "token_ids": list(token_ids),
+                        "disaggregated_params": (
+                            {"kv_transfer_params": res.kv_transfer_params}
+                            if res.kv_transfer_params
+                            else None
+                        ),
+                        "completion_usage": BaseWorkerHandler._build_completion_usage(
+                            request_output=res
+                        ),
+                    }
 
                     yield output
             except asyncio.CancelledError:

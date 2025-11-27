@@ -295,7 +295,7 @@ def cmd_line_args():
         "--use-trtllm-tokenizer",
         action="store_true",
         default=False,
-        help="Use TensorRT-LLM's tokenizer. This will skip tokenization of the input and output and only v1/chat/completions will be available when using the dynamo frontend.",
+        help="Use TensorRT-LLM's tokenizer. This will perform all pre and post processing inside TensorRT-LLM instead of Dynamo.",
     )
     parser.add_argument(
         "--store-kv",
