@@ -22,6 +22,8 @@ ARG TORCH_BACKEND="cu129"
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
+# LMCache version - 0.3.9+ required for vLLM 0.11.2 compatibility
+ARG LMCACHE_REF="0.3.9.post2"
 
 # sccache configuration - inherit from base build
 ARG USE_SCCACHE
@@ -110,6 +112,7 @@ ARG VLLM_REF
 ARG VLLM_GIT_URL
 ARG DEEPGEMM_REF
 ARG FLASHINF_REF
+ARG LMCACHE_REF
 ARG TORCH_BACKEND
 ARG CUDA_VERSION
 
@@ -144,7 +147,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
         cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
         chmod +x /tmp/install_vllm.sh && \
-        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} --torch-backend $TORCH_BACKEND --cuda-version $CUDA_VERSION && \
+        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} --torch-backend $TORCH_BACKEND --cuda-version $CUDA_VERSION && \
         /tmp/use-sccache.sh show-stats "vLLM";
 
 ENV LD_LIBRARY_PATH=\

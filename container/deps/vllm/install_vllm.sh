@@ -30,6 +30,8 @@ CUDA_VERSION="12.9" # For DEEPGEMM
 EDITABLE=true
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 FLASHINF_REF="v0.5.2"
+# LMCache version - 0.3.9+ required for vLLM 0.11.2 compatibility
+LMCACHE_REF="0.3.9.post2"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -69,6 +71,10 @@ while [[ $# -gt 0 ]]; do
             FLASHINF_REF="$2"
             shift 2
             ;;
+        --lmcache-ref)
+            LMCACHE_REF="$2"
+            shift 2
+            ;;
         --torch-backend)
             TORCH_BACKEND="$2"
             shift 2
@@ -92,6 +98,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --installation-dir DIR  Directory to install vllm (default: ${INSTALLATION_DIR})"
             echo "  --deepgemm-ref REF  Git reference for DeepGEMM (default: ${DEEPGEMM_REF})"
             echo "  --flashinf-ref REF  Git reference for Flash Infer (default: ${FLASHINF_REF})"
+            echo "  --lmcache-ref REF   Version for LMCache (default: ${LMCACHE_REF})"
             echo "  --torch-backend BACKEND  Torch backend to use (default: ${TORCH_BACKEND})"
             echo "  --torch-cuda-arch-list LIST  CUDA architectures to compile for (default: ${TORCH_CUDA_ARCH_LIST})"
             echo "  --cuda-version VERSION  CUDA version to use (default: ${CUDA_VERSION})"
@@ -121,7 +128,7 @@ echo "\n=== Configuration Summary ==="
 echo "  VLLM_REF=$VLLM_REF | EDITABLE=$EDITABLE | ARCH=$ARCH"
 echo "  MAX_JOBS=$MAX_JOBS | TORCH_BACKEND=$TORCH_BACKEND | CUDA_VERSION=$CUDA_VERSION"
 echo "  TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST"
-echo "  DEEPGEMM_REF=$DEEPGEMM_REF | FLASHINF_REF=$FLASHINF_REF"
+echo "  DEEPGEMM_REF=$DEEPGEMM_REF | FLASHINF_REF=$FLASHINF_REF | LMCACHE_REF=$LMCACHE_REF"
 echo "  INSTALLATION_DIR=$INSTALLATION_DIR | VLLM_GIT_URL=$VLLM_GIT_URL"
 
 echo "\n=== Cloning vLLM repository ==="
@@ -222,9 +229,10 @@ if [ "$ARCH" = "amd64" ]; then
     # OSError: CUDA_HOME environment variable is not set. Please set it to your CUDA install root.
     # TODO: Re-enable for arm64 after verifying lmcache compatibility and resolving the build issue.
 
-    # Alec: Likely lmcache was compiled witha different version of torch and need to install it from source for arm64
-    uv pip install lmcache==0.3.7
-    echo "✓ LMCache installed"
+    # Alec: Likely lmcache was compiled with a different version of torch and need to install it from source for arm64
+    # Use --no-deps to prevent lmcache from overwriting pinned torch/nvidia/nixl packages
+    uv pip install lmcache==${LMCACHE_REF} --no-deps
+    echo "✓ LMCache ${LMCACHE_REF} installed"
 else
     echo "⚠ Skipping LMCache on ARM64 (compatibility issues)"
 fi
