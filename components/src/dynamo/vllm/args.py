@@ -208,7 +208,7 @@ def parse_args() -> Config:
         "--use-vllm-tokenizer",
         action="store_true",
         default=False,
-        help="Use vLLM's tokenizer for pre and post processing. This will perform all tokenization/detokenization inside vLLM instead of Dynamo.",
+        help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
     )
     add_config_dump_args(parser)
 
