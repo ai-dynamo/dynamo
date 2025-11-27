@@ -232,7 +232,8 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 /// - LoRA path: v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
 /// - Base model path: v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}
 ///
-/// For LoRA mode, `base_model_path` must be provided to inherit configuration from the base model.
+/// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
+/// Providing only one of them will result in an error.
 #[pyfunction]
 #[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
 #[allow(clippy::too_many_arguments)]
@@ -302,6 +303,13 @@ fn register_llm<'p>(
             PyErr::new::<PyException, _>(format!("Failed to convert user_data: {}", err))
         })?;
 
+    // Validate LoRA parameters: both or neither must be provided
+    if lora_name.is_some() ^ base_model_path.is_some() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "lora_name and base_model_path must both be provided together, or neither",
+        ));
+    }
+
     // Capture LoRA parameters for async block
     let lora_name_owned = lora_name.map(|s| s.to_string());
     let base_model_path_owned = base_model_path.map(|s| s.to_string());
@@ -310,11 +318,8 @@ fn register_llm<'p>(
         // Determine if this is a LoRA registration
         if let Some(lora_name) = lora_name_owned {
             // LoRA registration mode
-            let base_path = base_model_path_owned.ok_or_else(|| {
-                to_pyerr(anyhow::anyhow!(
-                    "base_model_path is required when lora_name is provided"
-                ))
-            })?;
+            // Validation above guarantees base_model_path is present when lora_name is provided
+            let base_path = base_model_path_owned.unwrap();
 
             // Resolve base model path
             let resolved_base_path = if fs::exists(&base_path)? {
