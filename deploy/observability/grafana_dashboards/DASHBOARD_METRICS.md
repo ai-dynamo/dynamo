@@ -106,7 +106,7 @@ These metrics track NATS client communication from worker pods. NATS is used for
 
 ## Metric Collection Architecture
 
-```
+```text
 ┌─────────────────┐
 │  Frontend Pod   │ ──► dynamo_frontend_* metrics (HTTP port)
 └─────────────────┘
@@ -210,7 +210,7 @@ The DCGM ServiceMonitor must be manually created (see `dcgm-servicemonitor.yaml`
    ```
 
 2. **Calculate maximum concurrent requests**:
-   ```
+   ```text
    Max Concurrency = KV Cache Size ÷ Tokens Per Request
    # For ISL=8192: 254,336 ÷ 131,072 = 1.94 requests per prefill worker
    ```
