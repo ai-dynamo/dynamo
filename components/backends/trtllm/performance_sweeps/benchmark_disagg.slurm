@@ -85,7 +85,6 @@ srun -l --container-name=${CONTAINER_NAME} \
             --num_ctx_servers ${num_ctx_servers} \
             --ctx_tp_size ${ctx_tp_size} \
             --ctx_ep_size ${ctx_ep_size} \
-            --ctx_enable_attention_dp ${ctx_enable_attention_dp} \
             --ctx_batch_size ${ctx_batch_size} \
             --ctx_max_num_tokens ${ctx_max_num_tokens} \
             --ctx_max_seq_len ${ctx_max_seq_len} \
@@ -180,7 +179,7 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --ntasks $gen_tp_size \
       --oversubscribe \
       --overlap \
-      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/decode_config.yaml ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'decode' &> ${full_logdir}/output_decode_worker_${i}.log &
+      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/decode_config.yaml ${ctx_gpus} ${served_model_name} ${model_path} 'decode' &> ${full_logdir}/output_decode_worker_${i}.log &
   echo "$!" >> "$PID_FILE"
 done
 
@@ -203,9 +202,9 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
         --mpi=pmix --overlap -w ${nodes[node_idx]} \
         --oversubscribe \
         --overlap \
-        --ntasks $(( tp_size < 4 ? tp_size : 4 )) \
+        --ntasks $(( ctx_tp_size < 4 ? ctx_tp_size : 4 )) \
         --nodes 1 \
-        bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'prefill' &> ${full_logdir}/output_prefill_worker_${i}.log &
+        bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml ${ctx_gpus} ${served_model_name} ${model_path} 'prefill' &> ${full_logdir}/output_prefill_worker_${i}.log &
   prefill_pids+=($!)
   echo "$!" >> "$PID_FILE"
 done

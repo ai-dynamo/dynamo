@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 config_file=$1
-ctx_gpus=$3
-model_name=$4
-model_path=$5
-disaggregation_mode=$6
+ctx_gpus=$2
+model_name=$3
+model_path=$4
+disaggregation_mode=$5
 unset UCX_TLS
 echo "config_file: ${config_file}, ctx_gpus: ${ctx_gpus}, disaggregation_mode: ${disaggregation_mode}"
 

@@ -15,17 +15,14 @@ class ModelType(Enum):
     """
     GPT_OSS = "gpt_oss"
     DSR1 = "dsr1"
-
-    def infer_model_type(self, model_path: str) -> str:
-        if "r1" in model_path.lower():
-            return self.DSR1
-        else:
-            return self.GPT_OSS
-
-CONFIG_MAPPING = {
-    ModelType.GPT_OSS: None,
-    ModelType.DSR1: generate_dsr1_config,
-}
+    
+def get_model_type(model_path: str) -> str:
+    if "r1" in model_path.lower():
+        print("Inferring DSR1-type model")
+        return ModelType.DSR1
+    else:
+        print("Inferring GPT-oss-type model")
+        return ModelType.GPT_OSS
 
 def generate_dsr1_config(    
     config_path: str,
@@ -89,7 +86,7 @@ def generate_dsr1_config(
         "max_seq_len": args.gen_max_seq_len,
         "cuda_graph_config": {
             "enable_padding": True,
-            "batch_sizes": args.gen_cuda_graph_batch_sizes,
+            "batch_sizes": gen_cuda_graph_batch_sizes,
         },
         "print_iter_log": True,
         "kv_cache_config": {
@@ -160,7 +157,7 @@ def generate_gpt_oss_config(
         768,
         1024,
         2048,
-        gen_batch_size,
+        args.gen_batch_size,
     ]
 
     gen_moe_backend = "TRTLLM"
@@ -210,7 +207,7 @@ def generate_gpt_oss_config(
         "max_seq_len": args.gen_max_seq_len,
         "cuda_graph_config": {
             "enable_padding": True,
-            "batch_sizes": args.gen_cuda_graph_batch_sizes,
+            "batch_sizes": gen_cuda_graph_batch_sizes,
         },
         "print_iter_log": True,
         "kv_cache_config": {
@@ -256,6 +253,11 @@ def generate_gpt_oss_config(
         }
     
     return prefill_config, decode_config
+
+CONFIG_MAPPING = {
+    ModelType.GPT_OSS: generate_gpt_oss_config,
+    ModelType.DSR1: generate_dsr1_config,
+}
 
 def process_node_and_task() -> tuple[int, List[str], List[str]]:
     """
@@ -429,7 +431,7 @@ def gen_config_file(
         server_port: Server port
     """
 
-    model_type = ModelType.get_model_type(model_path)
+    model_type = get_model_type(model_path)
 
     prefill_config, decode_config = CONFIG_MAPPING[model_type](
         config_path,
@@ -472,12 +474,6 @@ if __name__ == "__main__":
         help="Expert parallel size for context servers",
     )
     parser.add_argument(
-        "--ctx_enable_attention_dp",
-        dest="ctx_enable_attention_dp",
-        action="store_true",
-        help="Enable attention DP for context servers",
-    )
-    parser.add_argument(
         "--ctx_batch_size",
         type=int,
         required=True,
@@ -518,6 +514,12 @@ if __name__ == "__main__":
         type=int,
         required=True,
         help="Tensor parallel size for generation servers",
+    )
+    parser.add_argument(
+        "--gen_ep_size",
+        type=int,
+        required=True,
+        help="Expert parallel size for generation servers",
     )
     parser.add_argument(
         "--gen_batch_size",
