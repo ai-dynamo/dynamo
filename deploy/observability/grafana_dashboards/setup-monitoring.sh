@@ -48,7 +48,8 @@ echo "Step 6: Updating Dynamo operator with Prometheus endpoint..."
 helm upgrade dynamo-platform nvidia-dynamo/dynamo-platform \
   --namespace dynamo \
   --reuse-values \
-  --set prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+  --set prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090 \
+  --set dynamo-operator.discoveryBackend=""
 
 # Step 7: Configure DCGM custom metrics for NVLink profiling
 echo ""
@@ -84,9 +85,15 @@ else
     echo "  --set dcgmExporter.serviceMonitor.additionalLabels.release=prometheus"
 fi
 
-# Step 9: Get Grafana credentials
+# Step 9: Deploy Grafana dashboard ConfigMap
 echo ""
-echo "Step 9: Retrieving Grafana credentials..."
+echo "Step 9: Deploying Grafana disaggregated dashboard ConfigMap..."
+kubectl apply -f "$SCRIPT_DIR/../k8s/grafana-disagg-dashboard-configmap.yaml"
+echo "✅ Dashboard ConfigMap deployed - Grafana sidecar will auto-import it within a few seconds"
+
+# Step 10: Get Grafana credentials
+echo ""
+echo "Step 10: Retrieving Grafana credentials..."
 GRAFANA_USER=$(kubectl get secret -n monitoring prometheus-grafana -o jsonpath="{.data.admin-user}" | base64 --decode)
 GRAFANA_PASSWORD=$(kubectl get secret -n monitoring prometheus-grafana -o jsonpath="{.data.admin-password}" | base64 --decode)
 
@@ -108,9 +115,7 @@ echo "  kubectl port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090
 echo "  Then visit: http://localhost:9090"
 echo ""
 echo "Next Steps:"
-echo "  1. Deploy the Grafana dashboard ConfigMap:"
-echo "     kubectl apply -f \"\$SCRIPT_DIR/../k8s/grafana-disagg-dashboard-configmap.yaml\""
-echo "  2. Deploy or redeploy your DynamoGraphDeployment with DYN_SYSTEM_ENABLED=true"
-echo "  3. The Dynamo operator will automatically create PodMonitors for metrics collection"
-echo "  4. View metrics in Grafana under Dashboards → General → Dynamo Disaggregated Analysis"
+echo "  1. Deploy or redeploy your DynamoGraphDeployment with DYN_SYSTEM_ENABLED=true"
+echo "  2. The Dynamo operator will automatically create PodMonitors for metrics collection"
+echo "  3. View metrics in Grafana under Dashboards → General → Dynamo Disaggregated Analysis"
 echo ""
