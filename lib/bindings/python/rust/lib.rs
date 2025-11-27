@@ -310,88 +310,57 @@ fn register_llm<'p>(
         ));
     }
 
-    // Capture LoRA parameters for async block
-    let lora_name_owned = lora_name.map(|s| s.to_string());
-    let base_model_path_owned = base_model_path.map(|s| s.to_string());
+    // Determine source_path and lora_identifier based on registration mode
+    let (source_path, lora_identifier) = match (lora_name, base_model_path) {
+        (Some(lora), Some(base)) => (base.to_string(), Some(lora.to_string())),
+        _ => (inner_path, None),
+    };
+
+    // Model name: use lora name if present, otherwise provided name or default to source path
+    let model_name = lora_identifier
+        .clone()
+        .or(model_name)
+        .or_else(|| Some(source_path.clone()));
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        // Determine if this is a LoRA registration
-        if let Some(lora_name) = lora_name_owned {
-            // LoRA registration mode
-            // Validation above guarantees base_model_path is present when lora_name is provided
-            let base_path = base_model_path_owned.unwrap();
-
-            // Resolve base model path
-            let resolved_base_path = if fs::exists(&base_path)? {
-                PathBuf::from(&base_path)
-            } else {
-                LocalModel::fetch(&base_path, false)
-                    .await
-                    .map_err(to_pyerr)?
-            };
-
-            tracing::info!(
-                "Registering LoRA '{}' at endpoint '{}'",
-                lora_name,
-                endpoint.inner.name()
-            );
-
-            // Build a LocalModel with the LoRA name
-            let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
-            builder
-                .model_path(resolved_base_path)
-                .model_name(Some(lora_name.clone())) // Use LoRA name as the model name
-                .kv_cache_block_size(kv_cache_block_size)
-                .user_data(user_data_json);
-
-            let mut local_model = builder.build().await.map_err(to_pyerr)?;
-            // Attach with lora_name to create unique MDC path
-            local_model
-                .attach(
-                    &endpoint.inner,
-                    model_type_obj,
-                    model_input,
-                    Some(&lora_name),
-                )
-                .await
-                .map_err(to_pyerr)?;
-
-            tracing::info!("Successfully registered LoRA '{}' MDC", lora_name);
+        // Resolve the model path (local or fetch from HuggingFace)
+        let model_path = if fs::exists(&source_path)? {
+            PathBuf::from(&source_path)
         } else {
-            // Base model registration mode (original behavior)
-            let model_path = if fs::exists(&inner_path)? {
-                PathBuf::from(inner_path)
-            } else {
-                // Preserve the model name
-                if model_name.is_none() {
-                    model_name = Some(inner_path.clone());
-                }
-                // Likely it's a Hugging Face repo, download it
-                LocalModel::fetch(&inner_path, false)
-                    .await
-                    .map_err(to_pyerr)?
-            };
-
-            let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
-            builder
-                .model_path(model_path)
-                .model_name(model_name)
-                .context_length(context_length)
-                .kv_cache_block_size(kv_cache_block_size)
-                .router_config(Some(router_config))
-                .migration_limit(Some(migration_limit))
-                .runtime_config(runtime_config.unwrap_or_default().inner)
-                .user_data(user_data_json)
-                .custom_template_path(custom_template_path_owned)
-                .media_decoder(media_decoder.map(|m| m.inner))
-                .media_fetcher(media_fetcher.map(|m| m.inner));
-            // Load the ModelDeploymentCard
-            let mut local_model = builder.build().await.map_err(to_pyerr)?;
-            // Advertise ourself so ingress can find us
-            local_model
-                .attach(&endpoint.inner, model_type_obj, model_input, None)
+            LocalModel::fetch(&source_path, false)
                 .await
-                .map_err(to_pyerr)?;
+                .map_err(to_pyerr)?
+        };
+
+        let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
+        builder
+            .model_path(model_path)
+            .model_name(model_name)
+            .context_length(context_length)
+            .kv_cache_block_size(kv_cache_block_size)
+            .router_config(Some(router_config))
+            .migration_limit(Some(migration_limit))
+            .runtime_config(runtime_config.unwrap_or_default().inner)
+            .user_data(user_data_json)
+            .custom_template_path(custom_template_path_owned)
+            .media_decoder(media_decoder.map(|m| m.inner))
+            .media_fetcher(media_fetcher.map(|m| m.inner));
+
+        let mut local_model = builder.build().await.map_err(to_pyerr)?;
+        local_model
+            .attach(
+                &endpoint.inner,
+                model_type_obj,
+                model_input,
+                lora_identifier.as_deref(),
+            )
+            .await
+            .map_err(to_pyerr)?;
+
+        if let Some(lora_name) = lora_identifier {
+            tracing::info!("Registered LoRA '{}' MDC", lora_name);
+        } else {
+            tracing::info!("Registered base model '{}' MDC", model_name);
         }
 
         Ok(())
