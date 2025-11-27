@@ -64,7 +64,8 @@ else
 fi
 
 # Start frontend (HTTP endpoint)
-python -m dynamo.frontend --http-port=8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python -m dynamo.frontend &
 
 # To make Qwen2.5-VL fit in A100 40GB, set the following extra arguments
 EXTRA_ARGS=""

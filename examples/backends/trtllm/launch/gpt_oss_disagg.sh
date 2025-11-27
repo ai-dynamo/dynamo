@@ -14,7 +14,8 @@ trap 'echo Cleaning up...; kill 0' EXIT
 
 
 # run frontend
-python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python3 -m dynamo.frontend --router-mode round-robin &
 
 # With tensor_parallel_size=4, each worker needs 4 GPUs
 # run prefill worker

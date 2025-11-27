@@ -6,7 +6,7 @@ use dynamo_llm::entrypoint::EngineConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
-use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
+use dynamo_runtime::storage::kv;
 use dynamo_runtime::transports::nats;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
@@ -82,7 +82,7 @@ pub async fn run(
         DistributedConfig::process_local()
     } else {
         // Normal case
-        let selected_store: KeyValueStoreSelect = flags.store_kv.parse()?;
+        let selected_store: kv::Selector = flags.store_kv.parse()?;
         let request_plane: RequestPlaneMode = flags.request_plane.parse()?;
         DistributedConfig {
             store_backend: selected_store,
@@ -148,12 +148,12 @@ async fn engine_for(
             // Auto-discover backends
             Ok(EngineConfig::Dynamic(Box::new(local_model)))
         }
-        Output::Echo => Ok(EngineConfig::StaticFull {
+        Output::Echo => Ok(EngineConfig::InProcessText {
             model: Box::new(local_model),
             engine: dynamo_llm::engines::make_echo_engine(),
         }),
         #[cfg(feature = "mistralrs")]
-        Output::MistralRs => Ok(EngineConfig::StaticFull {
+        Output::MistralRs => Ok(EngineConfig::InProcessText {
             engine: dynamo_engine_mistralrs::make_engine(&local_model).await?,
             model: Box::new(local_model),
         }),
@@ -164,7 +164,7 @@ async fn engine_for(
             let engine =
                 dynamo_llm::mocker::engine::make_mocker_engine(drt, endpoint, args).await?;
 
-            Ok(EngineConfig::StaticCore {
+            Ok(EngineConfig::InProcessTokens {
                 engine,
                 model: Box::new(local_model),
                 is_prefill: false,

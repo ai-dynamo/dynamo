@@ -72,7 +72,8 @@ echo "=================================================="
 
 # Start frontend (no router mode)
 echo "Starting frontend..."
-python -m dynamo.frontend --http-port=8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python -m dynamo.frontend &
 
 # Start processor
 echo "Starting processor..."
