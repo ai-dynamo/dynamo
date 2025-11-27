@@ -307,7 +307,7 @@ def _generate_mocker_config_with_planner(
                     "image"
                 ] = args.dgd_image
 
-    # Update --planner-profile-data in prefill and decode workers
+    # Update worker args: --planner-profile-data, --model-path, --model-name
     mocker_worker_names = [
         MockerComponentName.prefill_worker_k8s_name,
         MockerComponentName.decode_worker_k8s_name,
@@ -324,6 +324,9 @@ def _generate_mocker_config_with_planner(
             args_list = set_argument_value(
                 args_list, "--planner-profile-data", cm_mount_path
             )
+            # Update model path and name if available in args
+            args_list = set_argument_value(args_list, "--model-path", args.model)
+            args_list = set_argument_value(args_list, "--model-name", args.model)
             main_container["args"] = args_list
 
     # Mount the ConfigMap if it exists
