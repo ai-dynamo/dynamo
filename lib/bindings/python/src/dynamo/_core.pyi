@@ -1072,9 +1072,11 @@ async def register_llm(
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
-
-    If lora_name is provided, registers a LoRA adapter instead of a base model.
-    For LoRA registration, base_model_path must be provided.
+    LoRA Registration:
+        The `lora_name` and `base_model_path` parameters must be provided together or not at all.
+        Providing only one of these parameters will raise a ValueError.
+        - `lora_name`: The served model name for the LoRA model
+        - `base_model_path`: Path to the base model that the LoRA extends
     """
     ...
 
