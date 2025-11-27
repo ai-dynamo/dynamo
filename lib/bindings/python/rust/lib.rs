@@ -279,7 +279,7 @@ fn register_llm<'p>(
     let model_type_obj = model_type.inner;
 
     let inner_path = model_path.to_string();
-    let mut model_name = model_name.map(|n| n.to_string());
+    let model_name = model_name.map(|n| n.to_string());
     let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
     let router_config = RouterConfig::new(router_mode.into(), KvRouterConfig::default());
 
@@ -335,7 +335,7 @@ fn register_llm<'p>(
         let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
         builder
             .model_path(model_path)
-            .model_name(model_name)
+            .model_name(model_name.clone())
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(Some(router_config))
@@ -360,7 +360,7 @@ fn register_llm<'p>(
         if let Some(lora_name) = lora_identifier {
             tracing::info!("Registered LoRA '{}' MDC", lora_name);
         } else {
-            tracing::info!("Registered base model '{}' MDC", model_name);
+            tracing::info!("Registered base model '{:?}' MDC", model_name);
         }
 
         Ok(())
