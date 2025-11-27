@@ -149,7 +149,7 @@ pub async fn spawn_system_status_server(
         .to_string();
 
     // Check if LoRA feature is enabled
-    let lora_enabled = std::env::var("DYN_LORA_ENABLED")
+    let lora_enabled = std::env::var(crate::config::environment_names::llm::DYN_LORA_ENABLED)
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
 
