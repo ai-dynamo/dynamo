@@ -33,12 +33,8 @@ This script will:
 3. Update Dynamo operator with Prometheus endpoint
 4. Configure DCGM custom metrics for NVLink profiling
 5. Verify DCGM ServiceMonitor exists (created by GPU operator)
-6. Provide Grafana credentials
-
-After running the script, deploy the Grafana dashboard ConfigMap:
-```bash
-kubectl apply -f ../k8s/grafana-disagg-dashboard-configmap.yaml
-```
+6. Deploy Grafana disaggregated dashboard ConfigMap (auto-imported by Grafana sidecar)
+7. Provide Grafana credentials
 
 ## Verification
 
