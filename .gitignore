@@ -109,3 +109,7 @@ profiling_results*
 
 # Direnv
 .envrc
+
+# macOS
+.DS_Store
+**/.DS_Store
