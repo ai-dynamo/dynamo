@@ -26,7 +26,7 @@ helm repo update
 echo ""
 echo "Step 3: Installing kube-prometheus-stack..."
 echo "This includes: Prometheus Operator, Prometheus, Grafana, Alertmanager"
-helm install prometheus -n monitoring --create-namespace prometheus-community/kube-prometheus-stack \
+helm upgrade --install prometheus -n monitoring --create-namespace prometheus-community/kube-prometheus-stack \
   --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
   --set-json 'prometheus.prometheusSpec.podMonitorNamespaceSelector={}' \
   --set-json 'prometheus.prometheusSpec.probeNamespaceSelector={}'
