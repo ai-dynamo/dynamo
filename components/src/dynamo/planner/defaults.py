@@ -84,13 +84,13 @@ def _get_default_prometheus_endpoint(port: str, namespace: str):
 
 class SLAPlannerDefaults(BasePlannerDefaults):
     port = os.environ.get("PROMETHEUS_PORT", "9090")
-    namespace = os.environ.get("DYNAMO_NAMESPACE", "vllm-disagg-planner")
+    namespace = os.environ.get("DYN_NAMESPACE", "vllm-disagg-planner")
     prometheus_endpoint = _get_default_prometheus_endpoint(port, namespace)
     profile_results_dir = "profiling_results"
     isl = 3000  # in number of tokens
     osl = 150  # in number of tokens
-    ttft = 0.5  # in seconds
-    itl = 0.05  # in seconds
+    ttft = 500.0  # in milliseconds
+    itl = 50.0  # in milliseconds
     load_predictor = "arima"  # ["constant", "arima", "prophet"]
     load_prediction_window_size = 50  # predict load using how many recent load samples
     no_correction = False  # disable correction factor, might be useful under some conditions like long cold start time
@@ -119,16 +119,14 @@ class SGLangComponentName:
 
 
 class TrtllmComponentName:
-    # Note: Planner only supports DECODE_FIRST strategy in TRT-LLM:
-    # - Decode worker is the first worker (tensorrt_llm)
-    # - Prefill worker is the next worker (tensorrt_llm_next)
+    # Unified frontend architecture (consistent with vLLM/SGLang):
+    # - Prefill workers use "prefill" component
+    # - Decode workers use "tensorrt_llm" component
     prefill_worker_k8s_name = "TRTLLMPrefillWorker"
-    prefill_worker_component_name = (
-        "tensorrt_llm_next"  # Prefill is "next" with DECODE_FIRST
-    )
+    prefill_worker_component_name = "prefill"
     prefill_worker_endpoint = "generate"
     decode_worker_k8s_name = "TRTLLMDecodeWorker"
-    decode_worker_component_name = "tensorrt_llm"  # Decode is "first" with DECODE_FIRST
+    decode_worker_component_name = "tensorrt_llm"
     decode_worker_endpoint = "generate"
 
 

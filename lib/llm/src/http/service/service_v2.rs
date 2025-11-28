@@ -18,19 +18,21 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::discovery::{Discovery, KVStoreDiscovery};
 use dynamo_runtime::logging::make_request_span;
-use dynamo_runtime::transports::etcd;
+use dynamo_runtime::metrics::prometheus_names::name_prefix;
+use dynamo_runtime::storage::kv;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 /// HTTP service shared state
-#[derive(Default)]
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    etcd_client: Option<etcd::Client>,
+    store: kv::Manager,
+    discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
 }
 
@@ -71,11 +73,19 @@ impl StateFlags {
 }
 
 impl State {
-    pub fn new(manager: Arc<ModelManager>) -> Self {
+    pub fn new(manager: Arc<ModelManager>, store: kv::Manager) -> Self {
+        // Initialize discovery backed by KV store
+        // Create a cancellation token for the discovery's watch streams
+        let discovery_client = {
+            let cancel_token = CancellationToken::new();
+            Arc::new(KVStoreDiscovery::new(store.clone(), cancel_token)) as Arc<dyn Discovery>
+        };
+
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            etcd_client: None,
+            store,
+            discovery_client,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
@@ -85,19 +95,6 @@ impl State {
         }
     }
 
-    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: Option<etcd::Client>) -> Self {
-        Self {
-            manager,
-            metrics: Arc::new(Metrics::default()),
-            etcd_client,
-            flags: StateFlags {
-                chat_endpoints_enabled: AtomicBool::new(false),
-                cmpl_endpoints_enabled: AtomicBool::new(false),
-                embeddings_endpoints_enabled: AtomicBool::new(false),
-                responses_endpoints_enabled: AtomicBool::new(false),
-            },
-        }
-    }
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
     pub fn metrics_clone(&self) -> Arc<Metrics> {
         self.metrics.clone()
@@ -111,8 +108,12 @@ impl State {
         self.manager.clone()
     }
 
-    pub fn etcd_client(&self) -> Option<&etcd::Client> {
-        self.etcd_client.as_ref()
+    pub fn store(&self) -> &kv::Manager {
+        &self.store
+    }
+
+    pub fn discovery(&self) -> Arc<dyn Discovery> {
+        self.discovery_client.clone()
     }
 
     // TODO
@@ -133,6 +134,12 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
+
+    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
+    pub(crate) custom_backend_namespace_component_endpoint: Option<String>,
+    pub(crate) custom_backend_metrics_polling_interval: Option<f64>,
+    pub(crate) custom_backend_registry:
+        Option<Arc<super::custom_backend_metrics::CustomBackendMetricsRegistry>>,
 }
 
 #[derive(Clone, Builder)]
@@ -170,8 +177,15 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
+    #[builder(default)]
+    store: kv::Manager,
+
+    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
     #[builder(default = "None")]
-    etcd_client: Option<etcd::Client>,
+    custom_backend_namespace_component_endpoint: Option<String>,
+
+    #[builder(default = "None")]
+    custom_backend_metrics_polling_interval: Option<f64>,
 }
 
 impl HttpService {
@@ -244,9 +258,27 @@ impl HttpService {
                 }
             }
         } else {
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .unwrap_or_else(|_| panic!("could not bind to address: {address}"));
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                tracing::error!(
+                    protocol = %protocol,
+                    address = %address,
+                    error = %e,
+                    "Failed to bind server to address"
+                );
+                match e.kind() {
+                    std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
+                        "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
+                        protocol,
+                        self.port
+                    ),
+                    _ => anyhow::anyhow!(
+                        "Failed to start {} server on {}: {}",
+                        protocol,
+                        address,
+                        e
+                    ),
+                }
+            })?;
 
             axum::serve(listener, router)
                 .with_graceful_shutdown(observer.cancelled_owned())
@@ -294,9 +326,7 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let etcd_client = config.etcd_client;
-        let state = Arc::new(State::new_with_etcd(model_manager, etcd_client));
-
+        let state = Arc::new(State::new(model_manager, config.store));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -314,7 +344,21 @@ impl HttpServiceConfigBuilder {
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
 
-        // Note: Metrics polling task will be started in run() method to have access to cancellation token
+        // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
+        // Setup custom backend metrics if configured
+        let custom_backend_registry =
+            if config.custom_backend_namespace_component_endpoint.is_some()
+                && config.custom_backend_metrics_polling_interval.is_some()
+            {
+                Some(Arc::new(
+                    super::custom_backend_metrics::CustomBackendMetricsRegistry::new(
+                        name_prefix::COMPONENT.to_string(),
+                        registry.clone(),
+                    ),
+                ))
+            } else {
+                None
+            };
 
         let mut router = axum::Router::new();
 
@@ -335,6 +379,13 @@ impl HttpServiceConfigBuilder {
             all_docs.extend(route_docs);
         }
 
+        // Add OpenAPI documentation routes (must be after all other routes so it can document them)
+        // Note: The path parameter is currently unused as SwaggerUi requires static paths
+        let (openapi_docs, openapi_route) =
+            super::openapi_docs::openapi_router(all_docs.clone(), None);
+        router = router.merge(openapi_route);
+        all_docs.extend(openapi_docs);
+
         // Add span for tracing
         router = router.layer(TraceLayer::new_for_http().make_span_with(make_request_span));
 
@@ -347,6 +398,10 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
+            custom_backend_namespace_component_endpoint: config
+                .custom_backend_namespace_component_endpoint,
+            custom_backend_metrics_polling_interval: config.custom_backend_metrics_polling_interval,
+            custom_backend_registry,
         })
     }
 
@@ -355,8 +410,14 @@ impl HttpServiceConfigBuilder {
         self
     }
 
-    pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
-        self.etcd_client = Some(etcd_client);
+    // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
+    pub fn with_custom_backend_config(
+        mut self,
+        namespace_component_endpoint: Option<String>,
+        polling_interval: Option<f64>,
+    ) -> Self {
+        self.custom_backend_namespace_component_endpoint = Some(namespace_component_endpoint);
+        self.custom_backend_metrics_polling_interval = Some(polling_interval);
         self
     }
 

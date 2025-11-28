@@ -26,13 +26,13 @@ RUN_PREFIX=
 PLATFORM=linux/amd64
 
 # Get short commit hash
-commit_id=$(git rev-parse --short HEAD)
+commit_id=${commit_id:-$(git rev-parse --short HEAD)}
 
 # if COMMIT_ID matches a TAG use that
-current_tag=$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//') || true
+current_tag=${current_tag:-$($(git describe --tags --exact-match 2>/dev/null | sed 's/^v//') || true)}
 
 # Get latest TAG and add COMMIT_ID for dev
-latest_tag=$(git describe --tags --abbrev=0 "$(git rev-list --tags --max-count=1 main)" | sed 's/^v//') || true
+latest_tag=${latest_tag:-$(git describe --tags --abbrev=0 "$(git rev-list --tags --max-count=1)" | sed 's/^v//' || true)}
 if [[ -z ${latest_tag} ]]; then
     latest_tag="0.0.1"
     echo "No git release tag found, setting to unknown version: ${latest_tag}"
@@ -59,7 +59,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TRTLLM_BASE_IMAGE_TAG=25.06-py3
+TRTLLM_BASE_IMAGE_TAG=25.10-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -84,26 +84,25 @@ TRTLLM_BASE_IMAGE_TAG=25.06-py3
 # By default, we will use option 1. If you want to use option 2, you can set
 # TENSORRTLLM_PIP_WHEEL to the TensorRT-LLM wheel on artifactory.
 #
-# Path to the local TensorRT-LLM wheel directory or the wheel on artifactory.
-TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
+DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
+
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="0c9430e5a530ba958fc9dca561a3ad865ad9f492"
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="31116825b39f4e6a6a1e127001f5204b73d1dc32" # 1.2.0rc2
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
 
 # TensorRT-LLM PyPI index URL
-TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.1.0rc5"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc3"
 TENSORRTLLM_PIP_WHEEL=""
 
-
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-# FIXME: NCCL will hang with 25.03, so use 25.01 for now
+# FIXME: OPS-612 NCCL will hang with 25.03, so use 25.01 for now
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
@@ -112,10 +111,15 @@ VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
+SGLANG_CUDA_VERSION="12.9.1"
+# This is for Dockerfile
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+# This is for Dockerfile.sglang. Unlike the other frameworks, it is using a different base image
+SGLANG_FRAMEWORK_IMAGE="nvcr.io/nvidia/cuda"
+SGLANG_FRAMEWORK_IMAGE_TAG="${SGLANG_CUDA_VERSION}-cudnn-devel-ubuntu24.04"
 
-NIXL_REF=0.4.1
+NIXL_REF=0.7.1
 NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
@@ -164,20 +168,6 @@ get_options() {
             else
                 missing_requirement "$1"
             fi
-            ;;
-        --use-default-experimental-tensorrtllm-commit)
-            if [ -n "$2" ] && [[ "$2" != --* ]]; then
-                echo "ERROR: --use-default-experimental-tensorrtllm-commit does not take any argument"
-                exit 1
-            fi
-            USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT=true
-            ;;
-        --trtllm-use-nixl-kvcache-experimental)
-            if [ -n "$2" ] && [[ "$2" != --* ]]; then
-                echo "ERROR: --trtllm-use-nixl-kvcache-experimental does not take any argument"
-                exit 1
-            fi
-            TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="1"
             ;;
         --tensorrtllm-pip-wheel)
             if [ "$2" ]; then
@@ -270,6 +260,7 @@ get_options() {
             ;;
         --dry-run)
             RUN_PREFIX="echo"
+            DRY_RUN="true"
             echo ""
             echo "=============================="
             echo "DRY RUN: COMMANDS PRINTED ONLY"
@@ -303,9 +294,6 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-        --release-build)
-            RELEASE_BUILD=true
-            ;;
         --enable-kvbm)
             ENABLE_KVBM=true
             ;;
@@ -332,14 +320,17 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-
         --vllm-max-jobs)
+            # Set MAX_JOBS for vLLM compilation (only used by Dockerfile.vllm)
             if [ "$2" ]; then
                 MAX_JOBS=$2
                 shift
             else
                 missing_requirement "$1"
             fi
+            ;;
+        --no-tag-latest)
+            NO_TAG_LATEST=true
             ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
@@ -437,7 +428,7 @@ show_image_options() {
     echo "   Base: '${BASE_IMAGE}'"
     echo "   Base_Image_Tag: '${BASE_IMAGE_TAG}'"
     if [[ $FRAMEWORK == "TRTLLM" ]]; then
-        echo "   Tensorrtllm_Pip_Wheel: '${TENSORRTLLM_PIP_WHEEL}'"
+        echo "   Tensorrtllm_Pip_Wheel: '${PRINT_TRTLLM_WHEEL_FILE}'"
     fi
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
@@ -461,8 +452,7 @@ show_help() {
     echo "  [--platform platform for docker build]"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--tensorrtllm-pip-wheel-dir path to tensorrtllm pip wheel directory]"
-    echo "  [--tensorrtllm-commit tensorrtllm commit to use for building the trtllm wheel if the wheel is not provided]"
-    echo "  [--use-default-experimental-tensorrtllm-commit] Use the default experimental commit (${DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT}) to build TensorRT-LLM. This is a flag (no argument). Do not combine with --tensorrtllm-commit or --tensorrtllm-pip-wheel."
+    echo "  [--tensorrtllm-commit tensorrtllm commit/tag/branch to use for building the trtllm wheel if the wheel is not provided]"
     echo "  [--tensorrtllm-pip-wheel tensorrtllm pip wheel on artifactory]"
     echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
     echo "  [--tensorrtllm-git-url tensorrtllm git repository URL for cloning]"
@@ -479,10 +469,11 @@ show_help() {
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
-    echo "  [--trtllm-use-nixl-kvcache-experimental Enables NIXL KVCACHE experimental support for TensorRT-LLM]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
+    echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
+    echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -506,6 +497,36 @@ ARCH="amd64"
 if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     ARCH="arm64"
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
+fi
+
+# Set the commit sha in the container so we can inspect what build this relates to
+DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA:-$(git rev-parse HEAD)}
+BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA "
+
+# Special handling for vLLM on ARM64 - set required defaults if not already specified by user
+if [[ $FRAMEWORK == "VLLM" ]] && [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+    # Set base image tag to CUDA 12.9 if using the default value (user didn't override)
+    if [ "$BASE_IMAGE_TAG" == "$VLLM_BASE_IMAGE_TAG" ]; then
+        BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
+        echo "INFO: Automatically setting base-image-tag to $BASE_IMAGE_TAG for vLLM ARM64"
+    fi
+
+    # Add required build args if not already present
+    if [[ "$BUILD_ARGS" != *"RUNTIME_IMAGE_TAG"* ]]; then
+        BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 "
+        echo "INFO: Automatically setting RUNTIME_IMAGE_TAG=12.9.0-runtime-ubuntu24.04 for vLLM ARM64"
+    fi
+
+    if [[ "$BUILD_ARGS" != *"CUDA_VERSION"* ]]; then
+        BUILD_ARGS+=" --build-arg CUDA_VERSION=129 "
+        echo "INFO: Automatically setting CUDA_VERSION=129 for vLLM ARM64"
+    fi
+
+    if [[ "$BUILD_ARGS" != *"TORCH_BACKEND"* ]]; then
+        BUILD_ARGS+=" --build-arg TORCH_BACKEND=cu129 "
+        echo "INFO: Automatically setting TORCH_BACKEND=cu129 for vLLM ARM64"
+    fi
+
 fi
 
 # Update DOCKERFILE if framework is VLLM
@@ -546,7 +567,7 @@ build_local_dev_with_header() {
     fi
 
     echo "Building new local-dev image from: $dev_base_image"
-    echo "User 'ubuntu' will have UID: $USER_UID, GID: $USER_GID"
+    echo "User 'dynamo' will have UID: $USER_UID, GID: $USER_GID"
 
     # Show the docker command being executed if not in dry-run mode
     if [ -z "$RUN_PREFIX" ]; then
@@ -593,7 +614,7 @@ fi
 
 # BUILD DEV IMAGE
 
-BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG --build-arg FRAMEWORK=$FRAMEWORK --build-arg ${FRAMEWORK}_FRAMEWORK=1 --build-arg VERSION=$VERSION --build-arg PYTHON_PACKAGE_VERSION=$PYTHON_PACKAGE_VERSION"
+BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG"
 
 if [ -n "${GITHUB_TOKEN}" ]; then
     BUILD_ARGS+=" --build-arg GITHUB_TOKEN=${GITHUB_TOKEN} "
@@ -622,68 +643,98 @@ check_wheel_file() {
         echo "Warning: Multiple wheel files found in '$wheel_dir'. Will use first one found."
         find "$wheel_dir" -name "*.whl" | head -n 1
         return 0
-    else
-        echo "Found $wheel_count wheel files in '$wheel_dir'"
-        # Check if commit file exists
-        commit_file="$wheel_dir/commit.txt"
-        if [ ! -f "$commit_file" ]; then
-            echo "Error: Commit file '$commit_file' does not exist"
-            return 1
-        fi
+    fi
+    echo "Found $wheel_count wheel in $wheel_dir"
+    return 0
+}
 
-        # Check if commit ID matches, otherwise re-build the wheel
-        # Commit ID is of the form <arch>_<commit_id>
-        commit_id=$(cat "$commit_file")
-        if [ "$commit_id" != "$2" ]; then
-            echo "Error: Commit ID mismatch. Expected '$2', got '$commit_id'"
-            rm -rf $wheel_dir/*.whl
-            return 1
-        fi
-        return 0
+function determine_user_intention_trtllm() {
+    # The tensorrt llm installation flags are not quite mutually exclusive
+    # since the user should be able to point at a directory of their choosing
+    # for storing a trtllm wheel built from source.
+    #
+    # This function attempts to discern the intention of the user by
+    # applying checks, or rules, for each of the scenarios.
+    #
+    # /return: Calculated intention. One of "download", "install", "build".
+    #
+    # The three different methods of installing TRTLLM with build.sh are:
+    # 1. Download
+    # required: --tensorrtllm-pip-wheel
+    # optional: --tensorrtllm-index-url
+    # optional: --tensorrtllm-commit
+    #
+    # 2. Install from pre-built
+    # required: --tensorrtllm-pip-wheel-dir
+    # optional: --tensorrtllm-commit
+    #
+    # 3. Build from source
+    # required: --tensorrtllm-git-url
+    # optional: --tensorrtllm-commit
+    # optional: --tensorrtllm-pip-wheel-dir
+    local intention_download="false"
+    local intention_install="false"
+    local intention_build="false"
+    local intention_count=0
+    TRTLLM_INTENTION=${TRTLLM_INTENTION}
+
+    # Install from pre-built
+    if [[ -n "$TENSORRTLLM_PIP_WHEEL_DIR"  && ! -n "$TRTLLM_GIT_URL" ]]; then
+        intention_install="true";
+        intention_count=$((intention_count+1))
+        TRTLLM_INTENTION="install"
+    fi
+    echo "  Intent to Install TRTLLM: $intention_install"
+
+    # Build from source
+    if [[ -n "$TRTLLM_GIT_URL" ]]; then
+        intention_build="true";
+        intention_count=$((intention_count+1))
+        TRTLLM_INTENTION="build"
+    fi
+    echo "  Intent to Build TRTLLM: $intention_build"
+
+    # Download from repository
+    if [[ -n "$TENSORRTLLM_INDEX_URL" ]] && [[ -n "$TENSORRTLLM_PIP_WHEEL" ]]; then
+        intention_download="true";
+        intention_count=$((intention_count+1));
+        TRTLLM_INTENTION="download"
+        echo "INFO: Installing $TENSORRTLLM_PIP_WHEEL trtllm version from index: $TENSORRTLLM_INDEX_URL"
+    elif [[ -n "$TENSORRTLLM_PIP_WHEEL" ]]; then
+        intention_download="true";
+        intention_count=$((intention_count+1));
+        TRTLLM_INTENTION="download"
+        echo "INFO: Installing $TENSORRTLLM_PIP_WHEEL trtllm version from default pip index."
+    fi
+
+    # If nothing is set then we default to downloading the wheel
+    # with the defaults sepcified at the top this file.
+    if [[ -z "${TENSORRTLLM_INDEX_URL}" ]] && [[ -z "${TENSORRTLLM_PIP_WHEEL}" ]] && [[ "${intention_count}" -eq 0 ]]; then
+        intention_download="true";
+        intention_count=$((intention_count+1))
+        TRTLLM_INTENTION="download"
+        echo "INFO: Inferring download because both TENSORRTLLM_PIP_WHEEL and TENSORRTLLM_INDEX_URL are not set."
+    fi
+    echo "  Intent to Download TRTLLM: $intention_download"
+
+    if [[ ! "$intention_count" -eq 1 ]]; then
+        echo -e "[ERROR] Could not figure out the trtllm installation intent from the current flags. Please check your build.sh command against the following"
+        echo -e "  The grouped flags are mutually exclusive:"
+        echo -e "  To download and install use both: --tensorrtllm-index-url, --tensorrtllm-pip-wheel"
+        echo -e "  To install from a pre-built wheel use: --tensorrtllm-pip-wheel-dir"
+        echo -e "  To build from source and install use both: --tensorrtllm-commit, --tensorrtllm-git-url"
+        exit 1
     fi
 }
 
+
 if [[ $FRAMEWORK == "TRTLLM" ]]; then
-    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
-    if [ "$USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT" = true ]; then
-        if [ -n "$TRTLLM_COMMIT" ] || [ -n "$TENSORRTLLM_PIP_WHEEL" ]; then
-            echo "ERROR: When using --use-default-experimental-trtllm-commit, do not set --tensorrtllm-commit or --tensorrtllm-pip-wheel."
-            exit 1
-        fi
-        TRTLLM_COMMIT="$DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT"
-    fi
+    echo -e "Determining the user's TRTLLM installation intent..."
+    determine_user_intention_trtllm   # From this point forward, can assume correct TRTLLM flags
 
-    if [ -n "${TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL}" ]; then
-        BUILD_ARGS+=" --build-arg TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL=${TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL} "
-    fi
-
-    # If user didn't set both wheel and commit, use default tensorrt_llm pip wheel
-    if [ -z "$TENSORRTLLM_PIP_WHEEL" ] && [ -z "$TRTLLM_COMMIT" ]; then
-        TENSORRTLLM_PIP_WHEEL="$DEFAULT_TENSORRTLLM_PIP_WHEEL"
-    fi
-
-    if [ -z "${TENSORRTLLM_PIP_WHEEL}" ]; then
-        # Use option 1
-        if [ ! -d "${TENSORRTLLM_PIP_WHEEL_DIR}" ]; then
-            # Create the directory if it doesn't exist
-            mkdir -p ${TENSORRTLLM_PIP_WHEEL_DIR}
-        fi
-        BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
-        echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
-        if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
-            echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}, attempting to build from source"
-            GIT_URL_ARG=""
-            if [ -n "${TRTLLM_GIT_URL}" ]; then
-                GIT_URL_ARG="-u ${TRTLLM_GIT_URL}"
-            fi
-            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
-                error "ERROR: Failed to build TensorRT-LLM wheel"
-            fi
-        fi
-        echo "Installing TensorRT-LLM from local wheel directory"
-        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
-
-    else
+    if [[ "$TRTLLM_INTENTION" == "download" ]]; then
+        TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL:-$DEFAULT_TENSORRTLLM_INDEX_URL}
+        TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL:-$DEFAULT_TENSORRTLLM_PIP_WHEEL}
         BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
         BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
         BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
@@ -692,35 +743,94 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         # There is no way to conditionally copy the build context in dockerfile.
         mkdir -p /tmp/dummy_dir
         BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/dummy_dir"
+        PRINT_TRTLLM_WHEEL_FILE=${TENSORRTLLM_PIP_WHEEL}
+    elif [[ "$TRTLLM_INTENTION" == "install" ]]; then
+        echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
+        if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}"; then
+            echo "ERROR: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}"
+            echo "      If this is not intended you can try building from source with the following variables set instead:"
+            echo ""
+            echo "      --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM --tensorrtllm-commit $TRTLLM_COMMIT"
+            exit 1
+        fi
+        echo "Installing TensorRT-LLM from local wheel directory"
+        BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
+        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
+        PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
+    elif [[ "$TRTLLM_INTENTION" == "build" ]]; then
+        TENSORRTLLM_PIP_WHEEL_DIR=${TENSORRTLLM_PIP_WHEEL_DIR:=$DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR}
+        echo "TRTLLM pip wheel output directory is: ${TENSORRTLLM_PIP_WHEEL_DIR}"
+        if [ "$DRY_RUN" != "true" ]; then
+            GIT_URL_ARG=""
+            if [ -n "${TRTLLM_GIT_URL}" ]; then
+                GIT_URL_ARG="-u ${TRTLLM_GIT_URL}"
+            fi
+            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
+                error "ERROR: Failed to build TensorRT-LLM wheel"
+            fi
+            BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
+            BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}"
+            PRINT_TRTLLM_WHEEL_FILE=$(find $TENSORRTLLM_PIP_WHEEL_DIR -name "*.whl" | head -n 1)
+        fi
+    else
+        echo 'No intention was set. This error should have been detected in "determine_user_intention_trtllm()". Exiting...'
+        exit 1
     fi
+
+    # Need to know the commit of TRTLLM so we can determine the
+    # TensorRT installation associated with TRTLLM.
+    if [[ -z "$TRTLLM_COMMIT" ]]; then
+        # Attempt to default since the commit will work with a hash or a tag/branch
+        if [[ ! -z "$TENSORRTLLM_PIP_WHEEL" ]]; then
+            TRTLLM_COMMIT=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p')
+            echo "Attempting to default TRTLLM_COMMIT to \"$TRTLLM_COMMIT\" for installation of TensorRT."
+        else
+            echo -e "[ERROR] TRTLLM framework was set as a target but the TRTLLM_COMMIT variable was not set."
+            echo -e "  Could not find a suitible default by infering from TENSORRTLLM_PIP_WHEEL."
+            echo -e "  TRTLLM_COMMIT is needed to install the correct version of TensorRT associated with TensorRT-LLM."
+            exit 1
+        fi
+    fi
+    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
+
+
 fi
 
-if [ -n "${HF_TOKEN}" ]; then
-    BUILD_ARGS+=" --build-arg HF_TOKEN=${HF_TOKEN} "
-fi
-if [  ! -z ${RELEASE_BUILD} ]; then
-    echo "Performing a release build!"
-    BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
-fi
-
+# ENABLE_KVBM: Used in base Dockerfile for block-manager feature.
+#              Declared but not currently used in Dockerfile.{vllm,trtllm}.
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
     echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
     ENABLE_KVBM=true
+else
+    ENABLE_KVBM=false
 fi
 
 if [  ! -z ${ENABLE_KVBM} ]; then
-    echo "Enabling the KVBM in the ai-dynamo-runtime"
+    echo "Enabling the KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
 
+# NIXL_UCX_REF: Used in base Dockerfile only.
+#               Passed to framework Dockerfile.{vllm,sglang,...} where it's NOT used.
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
 fi
 
+# MAX_JOBS is only used by Dockerfile.vllm
 if [ -n "${MAX_JOBS}" ]; then
     BUILD_ARGS+=" --build-arg MAX_JOBS=${MAX_JOBS} "
 fi
 
+if [[ $FRAMEWORK == "SGLANG" ]]; then
+    echo "Customizing Python, CUDA, and framework images for sglang images"
+    BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.10"
+    BUILD_ARGS+=" --build-arg CUDA_VERSION=${SGLANG_CUDA_VERSION}"
+    # Unlike the other two frameworks, SGLang's framework image is different from the base image, so we need to set it explicitly.
+    BUILD_ARGS+=" --build-arg FRAMEWORK_IMAGE=${SGLANG_FRAMEWORK_IMAGE}"
+    BUILD_ARGS+=" --build-arg FRAMEWORK_IMAGE_TAG=${SGLANG_FRAMEWORK_IMAGE_TAG}"
+else
+    BUILD_ARGS+=" --build-arg PYTHON_VERSION=3.12"
+fi
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
@@ -729,10 +839,16 @@ if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"
     BUILD_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
 fi
-
-LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
-if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
-    LATEST_TAG="${LATEST_TAG}-${TARGET}"
+if [[ "$PLATFORM" == *"linux/arm64"* && "${FRAMEWORK}" == "SGLANG" ]]; then
+    # Add arguments required for sglang blackwell build
+    BUILD_ARGS+=" --build-arg GRACE_BLACKWELL=true --build-arg BUILD_TYPE=blackwell_aarch64"
+fi
+LATEST_TAG=""
+if [ -z "${NO_TAG_LATEST}" ]; then
+    LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
+    if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
+        LATEST_TAG="${LATEST_TAG}-${TARGET}"
+    fi
 fi
 
 show_image_options
@@ -746,8 +862,13 @@ fi
 if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
     # Follow 2-step build process for all frameworks
     if [[ $FRAMEWORK != "NONE" ]]; then
-        # Define base image tag before using it
-        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+        # Define base image tag with framework suffix to prevent clobbering
+        # Different frameworks require different base configurations:
+        # - VLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=cuda-dl-base
+        # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
+        # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
+        # Without unique tags, building different frameworks would overwrite each other's names
+        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}-${FRAMEWORK,,}"
         # Start base image build
         echo "======================================"
         echo "Starting Build 1: Base Image"

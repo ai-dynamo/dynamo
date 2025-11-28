@@ -15,36 +15,28 @@
 
 
 import asyncio
+import json
+import threading
 from typing import List
 
 import pytest
 
-from dynamo.llm import (
-    ApproxKvIndexer,
-    ForwardPassMetrics,
-    KvEventPublisher,
-    KvIndexer,
-    KvMetricsAggregator,
-    KvStats,
-    RadixTree,
-    WorkerMetricsPublisher,
-    WorkerStats,
-)
+from dynamo.llm import ApproxKvIndexer, KvEventPublisher, KvIndexer, RadixTree
 from dynamo.runtime import Component, DistributedRuntime
 
 pytestmark = pytest.mark.pre_merge
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def distributed_runtime():
-    """TODO: This should not use scope='module' as DistributedRuntime has singleton requirements.
-    and blocks any tests with DistributedRuntime(loop, True) from running in the same process, or any forked process.
-    """
+    """Function-scoped runtime fixture for distributed runtime tests."""
     loop = asyncio.get_running_loop()
-    return DistributedRuntime(loop, False)
+    runtime = DistributedRuntime(loop, "etcd", "nats")
+    yield runtime
+    runtime.shutdown()
 
 
-# TODO: enable pytest.mark.forked + scope='function' runtime.
+@pytest.mark.asyncio
 async def test_radix_tree_binding(distributed_runtime):
     """Test RadixTree binding directly with store event and find matches"""
     import json
@@ -81,36 +73,149 @@ async def test_radix_tree_binding(distributed_runtime):
     overlap_scores = radix_tree.find_matches([0])
 
     # Verify the results
+    # Note: scores is now Dict[(worker_id, dp_rank), score]
     assert overlap_scores.scores is not None
     assert (
         len(overlap_scores.scores) == 1
     ), f"Expected 1 worker in scores, got {len(overlap_scores.scores)}"
-    assert worker_id in overlap_scores.scores, f"Worker {worker_id} not found in scores"
+    worker_key = (worker_id, 0)  # (worker_id, dp_rank)
     assert (
-        overlap_scores.scores[worker_id] == 1
-    ), f"Expected score 1 for worker {worker_id}, got {overlap_scores.scores[worker_id]}"
+        worker_key in overlap_scores.scores
+    ), f"Worker {worker_key} not found in scores"
+    assert (
+        overlap_scores.scores[worker_key] == 1
+    ), f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
+
+    blocks = radix_tree.dump_tree_as_events()
+    assert len(blocks) == 1, f"Expected 1 block event, got {len(blocks)}"
+    json.loads(blocks[0])  # check valid json
+
+    # cleanup
+    radix_tree.remove_worker(worker_id)
+    blocks_empty = radix_tree.dump_tree_as_events()
+    assert (
+        len(blocks_empty) == 0
+    ), f"Expected 0 block events after removal, got {len(blocks_empty)}"
 
     print(
-        f"✓ RadixTree test passed: worker {worker_id} has score {overlap_scores.scores[worker_id]}"
+        f"✓ RadixTree test passed: worker {worker_key} has score {overlap_scores.scores[worker_key]}"
     )
 
 
-# TODO Figure out how to test with different kv_block_size
-# Right now I get an error in EventPublisher init when I run this test
-# back to back. It occurs when calling dynamo_llm_init and I think is related to the
-# OnceCell initializations not being reset.
-# The test works individually if I run it with 32, then 11, then 64.
-# @pytest.mark.parametrize("kv_block_size", [11, 32, 64])
-@pytest.mark.skip(reason="Flakey in CI. Likely race condition going on.")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("num_threads", [2, 3, 5, 128])
+@pytest.mark.parametrize("prepopulate_worker_ids", [True, False])
+@pytest.mark.parametrize("expiration_duration_secs", [None])
+@pytest.mark.parametrize("is_threaded", [True, False])
+async def test_radix_tree_thread_safety(
+    distributed_runtime,
+    num_threads,
+    prepopulate_worker_ids,
+    expiration_duration_secs,
+    is_threaded,
+):
+    """Test RadixTree thread safety by applying events from multiple threads."""
+    radix_tree = RadixTree(expiration_duration_secs=expiration_duration_secs)
+    threads = []
+    done_counter = 0
+    exception_counter = 0
+
+    def worker(worker_id, prepopulate_worker_ids: bool = False):
+        try:
+            nonlocal done_counter
+            worker_id = worker_id
+            hash = worker_id
+            if prepopulate_worker_ids:
+                hash = (
+                    2**32 - worker_id
+                )  # use different hash for prepopulate_worker_ids
+            assert 0 <= hash < 2**64  # needs to be valid u64
+            store_event = {
+                "event_id": worker_id,
+                "data": {
+                    "stored": {
+                        "parent_hash": None,
+                        "blocks": [
+                            {
+                                "block_hash": hash,
+                                "tokens_hash": hash,
+                            }
+                        ],
+                    }
+                },
+            }
+            event_bytes = json.dumps(store_event).encode("utf-8")
+            radix_tree.apply_event(worker_id, event_bytes)
+            if not prepopulate_worker_ids:
+                done_counter += 1
+        except Exception as e:
+            print(f"Exception in worker {worker_id}: {e}")
+            nonlocal exception_counter
+            exception_counter += 1
+
+    if prepopulate_worker_ids:
+        for i in range(num_threads):
+            worker(i, prepopulate_worker_ids=True)
+        assert (
+            exception_counter == 0
+        ), f"Warmup: expected 0 exceptions, got {exception_counter}"
+
+    for i in range(num_threads):
+        if is_threaded:
+            t = threading.Thread(target=worker, args=(i,))
+            threads.append(t)
+            t.start()
+        else:
+            worker(i)
+    if is_threaded:
+        timeout = 10  # seconds
+        for t in threads:
+            t.join(timeout)
+            assert not t.is_alive(), "Thread timed out"
+    assert exception_counter == 0, f"Expected 0 exceptions, got {exception_counter}"
+    assert (
+        done_counter == num_threads
+    ), f"Expected {num_threads} done, got {done_counter}"
+
+    for i in range(num_threads):
+        overlap_scores = radix_tree.find_matches([i])
+        assert overlap_scores.scores is not None
+        worker_key = (i, 0)
+        assert (
+            worker_key in overlap_scores.scores
+        ), f"Worker {worker_key} not found in scores"
+        assert (
+            overlap_scores.scores[worker_key] == 1
+        ), f"Expected score 1 for worker {worker_key}, got {overlap_scores.scores[worker_key]}"
+    # get all blocks
+    blocks = radix_tree.dump_tree_as_events()
+    expected_blocks = num_threads + (prepopulate_worker_ids * num_threads)
+    assert (
+        len(blocks) == expected_blocks
+    ), f"Expected {expected_blocks} block events, got {len(blocks)}"
+    # remove single worker
+    radix_tree.remove_worker(0)
+    expected_blocks_after_removal = expected_blocks - (
+        2 if prepopulate_worker_ids else 1
+    )
+    blocks_after_removal = radix_tree.dump_tree_as_events()
+    assert (
+        len(blocks_after_removal) == expected_blocks_after_removal
+    ), f"Expected {expected_blocks_after_removal} block events after removal, got {len(blocks_after_removal)}"
+
+
+@pytest.mark.asyncio
 async def test_event_handler(distributed_runtime):
     kv_block_size = 32
     namespace = "kv_test"
     component = "event"
     kv_listener = distributed_runtime.namespace(namespace).component(component)
-    await kv_listener.create_service()
 
     # publisher
-    worker_id = 233
+    # Get actual worker_id from component (KvEventPublisher ignores the passed worker_id and uses component's connection_id)
+    # Create a dummy endpoint to access connection_id since Component doesn't expose it directly
+    dummy_endpoint = kv_listener.endpoint("dummy")
+    worker_id = dummy_endpoint.connection_id()
     event_publisher = EventPublisher(kv_listener, worker_id, kv_block_size)
 
     # indexer
@@ -122,64 +227,53 @@ async def test_event_handler(distributed_runtime):
     assert not scores.scores
 
     event_publisher.store_event(test_token, lora_id)
-    # wait for the event to be processed as it is sent asynchronously
-    # Retry loop for CI environments where processing may take longer
-    for retry in range(10):  # Try up to 10 times
-        await asyncio.sleep(0.5)  # Wait 500ms between retries
-        scores = await indexer.find_matches_for_request(test_token, lora_id)
-        if (
-            scores.scores
-            and worker_id in scores.scores
-            and scores.scores[worker_id] == 1
-        ):
-            break
-        if retry == 9:  # Last iteration
-            # Provide detailed error message for debugging
-            assert scores.scores, f"No scores found after {(retry+1)*0.5}s"
-            assert (
-                worker_id in scores.scores
-            ), f"Worker {worker_id} not in scores after {(retry+1)*0.5}s"
-            assert (
-                scores.scores[worker_id] == 1
-            ), f"Expected score 1, got {scores.scores.get(worker_id)} after {(retry+1)*0.5}s"
+    # Wait for the event to be processed (sent asynchronously)
+    await asyncio.sleep(0.2)
 
-    # remove event
+    scores = await indexer.find_matches_for_request(test_token, lora_id)
+    worker_key = (worker_id, 0)  # (worker_id, dp_rank)
+    assert scores.scores, "No scores found"
+    assert worker_key in scores.scores, f"Worker {worker_key} not found in scores"
+    assert (
+        scores.scores[worker_key] == 1
+    ), f"Expected score 1, got {scores.scores[worker_key]}"
+
+    # Remove event and verify
     event_publisher.remove_event()
-    # Retry loop for event removal verification
-    for retry in range(10):  # Try up to 10 times
-        await asyncio.sleep(0.5)  # Wait 500ms between retries
-        scores = await indexer.find_matches_for_request(test_token, lora_id)
-        if not scores.scores:
-            break
-        if retry == 9:  # Last iteration
-            assert (
-                not scores.scores
-            ), f"Scores still present after {(retry+1)*0.5}s: {scores.scores}"
+    await asyncio.sleep(0.2)
+
+    scores = await indexer.find_matches_for_request(test_token, lora_id)
+    assert not scores.scores, f"Scores still present: {scores.scores}"
 
 
-# TODO: enable pytest.mark.forked + scope='function' runtime.
+@pytest.mark.asyncio
 async def test_approx_kv_indexer(distributed_runtime):
+    """Test ApproxKvIndexer with TTL-based block tracking"""
     kv_block_size = 32
     namespace = "kv_test"
     component = "approx_kv"
     kv_listener = distributed_runtime.namespace(namespace).component(component)
-    await kv_listener.create_service()
 
-    indexer = ApproxKvIndexer(kv_listener, kv_block_size, 30.0)
+    # Create ApproxKvIndexer with default TTL (120s)
+    indexer = ApproxKvIndexer(kv_listener, kv_block_size)
 
     tokens = [0] * (kv_block_size * 2)
 
+    # Initially no matches
     scores = await indexer.find_matches_for_request(tokens)
     assert not scores.scores
 
     worker_id = 0
 
+    # Process routing decision - this should add blocks to the indexer
     await indexer.process_routing_decision_for_request(tokens, worker_id)
 
+    # Now we should have matches
     scores = await indexer.find_matches_for_request(tokens)
     assert scores.scores
-    assert worker_id in scores.scores
-    assert scores.scores[worker_id] == 2
+    worker_key = (worker_id, 0)  # (worker_id, dp_rank)
+    assert worker_key in scores.scores
+    assert scores.scores[worker_key] == 2  # 2 blocks (tokens is 2 blocks long)
 
 
 class EventPublisher:
@@ -213,79 +307,3 @@ class EventPublisher:
             ],  # block_hashes
         )
         self.event_id_counter += 1
-
-
-# TODO: enable pytest.mark.forked + scope='function' runtime.
-async def test_metrics_aggregator(distributed_runtime):
-    namespace = "kv_test"
-    component = "metrics"
-    kv_listener = distributed_runtime.namespace(namespace).component(component)
-    await kv_listener.create_service()
-
-    # aggregator
-    metrics_aggregator = KvMetricsAggregator(kv_listener)
-
-    # has nothing to aggregate as worker has not started
-    metrics = await metrics_aggregator.get_metrics()
-    assert not metrics.endpoints
-
-    expected_metrics = {
-        "request_active_slots": 0,
-        "request_total_slots": 1024,
-        "kv_active_blocks": 523,
-        "kv_total_blocks": 777,
-        "num_requests_waiting": 10,
-        "gpu_cache_usage_perc": 0.5,
-        "gpu_prefix_cache_hit_rate": 0.75,
-    }
-
-    # need 'create_task' to put publisher task in the background
-    asyncio.create_task(metrics_publisher_task(kv_listener, expected_metrics))
-
-    # needs time for publisher to spawn up
-    # Using shorter intervals for faster detection in normal cases
-    for i in range(20):  # Try up to 20 times (10 seconds total)
-        await asyncio.sleep(0.5)  # Wait 500ms between retries
-        metrics = await metrics_aggregator.get_metrics()
-        if metrics.endpoints:
-            break
-    assert metrics.endpoints, f"No metrics endpoints found after {(i+1)*0.5}s"
-    for endpoint in metrics.endpoints:
-        # [TODO] not really checking id for now, can't get it as create_endpoint()
-        # create and serve the endpoint internally
-        assert endpoint.worker_id != 0
-        assert endpoint.request_active_slots == expected_metrics["request_active_slots"]
-        assert endpoint.request_total_slots == expected_metrics["request_total_slots"]
-        assert endpoint.kv_active_blocks == expected_metrics["kv_active_blocks"]
-        assert endpoint.kv_total_blocks == expected_metrics["kv_total_blocks"]
-
-
-async def metrics_publisher_task(kv_listener, expected_metrics):
-    # Construct the structured ForwardPassMetrics payload expected by the
-    # current Rust bindings instead of passing the individual scalar values
-    # directly. The API for `WorkerMetricsPublisher.publish`
-    # changed from a list of positional scalars to a single
-    # `ForwardPassMetrics` object.
-
-    metrics_publisher = WorkerMetricsPublisher()
-
-    worker_stats = WorkerStats(
-        expected_metrics["request_active_slots"],
-        expected_metrics["request_total_slots"],
-        expected_metrics["num_requests_waiting"],
-        None,
-    )
-
-    kv_stats = KvStats(
-        expected_metrics["kv_active_blocks"],
-        expected_metrics["kv_total_blocks"],
-        expected_metrics["gpu_cache_usage_perc"],
-        expected_metrics["gpu_prefix_cache_hit_rate"],
-    )
-
-    metrics = ForwardPassMetrics(worker_stats, kv_stats, None)
-
-    # Publish and expose the metrics via the endpoint so that the aggregator
-    # test can discover them.
-    metrics_publisher.publish(metrics)
-    await metrics_publisher.create_endpoint(kv_listener)

@@ -24,7 +24,6 @@ pub enum EngineType {
     Echo = 1,
     Dynamic = 2,
     Mocker = 3,
-    Static = 4,
 }
 
 #[pyclass]
@@ -42,7 +41,8 @@ impl KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, router_replica_sync=false, router_track_active_blocks=true, router_snapshot_threshold=1000000, router_reset_states=false))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, router_replica_sync=false, router_track_active_blocks=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1024, router_prune_target_ratio=0.8))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: f64,
         router_temperature: f64,
@@ -51,6 +51,9 @@ impl KvRouterConfig {
         router_track_active_blocks: bool,
         router_snapshot_threshold: Option<u32>,
         router_reset_states: bool,
+        router_ttl_secs: f64,
+        router_max_tree_size: usize,
+        router_prune_target_ratio: f64,
     ) -> Self {
         KvRouterConfig {
             inner: RsKvRouterConfig {
@@ -61,6 +64,9 @@ impl KvRouterConfig {
                 router_track_active_blocks,
                 router_snapshot_threshold,
                 router_reset_states,
+                router_ttl_secs,
+                router_max_tree_size,
+                router_prune_target_ratio,
             },
         }
     }
@@ -72,21 +78,24 @@ pub struct RouterConfig {
     router_mode: RouterMode,
     kv_router_config: KvRouterConfig,
     busy_threshold: Option<f64>,
+    enforce_disagg: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, busy_threshold=None))]
+    #[pyo3(signature = (mode, config=None, busy_threshold=None, enforce_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
         busy_threshold: Option<f64>,
+        enforce_disagg: bool,
     ) -> Self {
         Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
             busy_threshold,
+            enforce_disagg,
         }
     }
 }
@@ -97,6 +106,7 @@ impl From<RouterConfig> for RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
             busy_threshold: rc.busy_threshold,
+            enforce_disagg: rc.enforce_disagg,
         }
     }
 }
@@ -107,7 +117,6 @@ pub(crate) struct EntrypointArgs {
     engine_type: EngineType,
     model_path: Option<PathBuf>,
     model_name: Option<String>,
-    model_config: Option<PathBuf>,
     endpoint_id: Option<EndpointId>,
     context_length: Option<u32>,
     template_file: Option<PathBuf>,
@@ -119,18 +128,20 @@ pub(crate) struct EntrypointArgs {
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
     namespace: Option<String>,
+    custom_backend_metrics_endpoint: Option<String>,
+    custom_backend_metrics_polling_interval: Option<f64>,
+    is_prefill: bool,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, model_config=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, namespace=None, custom_backend_metrics_endpoint=None, custom_backend_metrics_polling_interval=None, is_prefill=false))]
     pub fn new(
         engine_type: EngineType,
         model_path: Option<PathBuf>,
         model_name: Option<String>, // e.g. "dyn://namespace.component.endpoint"
-        model_config: Option<PathBuf>,
         endpoint_id: Option<String>,
         context_length: Option<u32>,
         template_file: Option<PathBuf>,
@@ -142,6 +153,9 @@ impl EntrypointArgs {
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
         namespace: Option<String>,
+        custom_backend_metrics_endpoint: Option<String>,
+        custom_backend_metrics_polling_interval: Option<f64>,
+        is_prefill: bool,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -155,7 +169,6 @@ impl EntrypointArgs {
             engine_type,
             model_path,
             model_name,
-            model_config,
             endpoint_id: endpoint_id_obj,
             context_length,
             template_file,
@@ -167,6 +180,9 @@ impl EntrypointArgs {
             tls_key_path,
             extra_engine_args,
             namespace,
+            custom_backend_metrics_endpoint,
+            custom_backend_metrics_polling_interval,
+            is_prefill,
         })
     }
 }
@@ -177,6 +193,8 @@ pub(crate) struct EngineConfig {
     inner: RsEngineConfig,
 }
 
+/// Create the backend engine wrapper to run the model.
+/// Download the model if necessary.
 #[pyfunction]
 #[pyo3(signature = (distributed_runtime, args))]
 pub fn make_engine<'p>(
@@ -186,9 +204,11 @@ pub fn make_engine<'p>(
 ) -> PyResult<Bound<'p, PyAny>> {
     let mut builder = LocalModelBuilder::default();
     builder
-        .model_path(args.model_path.clone())
-        .model_name(args.model_name.clone())
-        .model_config(args.model_config.clone())
+        .model_name(
+            args.model_name
+                .clone()
+                .or_else(|| args.model_path.clone().map(|p| p.display().to_string())),
+        )
         .endpoint_id(args.endpoint_id.clone())
         .context_length(args.context_length)
         .request_template(args.template_file.clone())
@@ -200,8 +220,23 @@ pub fn make_engine<'p>(
         .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
-        .namespace(args.namespace.clone());
+        .namespace(args.namespace.clone())
+        .custom_backend_metrics_endpoint(args.custom_backend_metrics_endpoint.clone())
+        .custom_backend_metrics_polling_interval(args.custom_backend_metrics_polling_interval);
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        if let Some(model_path) = args.model_path.clone() {
+            let local_path = if model_path.exists() {
+                model_path
+            } else {
+                // Mocker only needs tokenizer, not weights
+                let ignore_weights = matches!(args.engine_type, EngineType::Mocker);
+                LocalModel::fetch(&model_path.display().to_string(), ignore_weights)
+                    .await
+                    .map_err(to_pyerr)?
+            };
+            builder.model_path(local_path);
+        }
+
         let local_model = builder.build().await.map_err(to_pyerr)?;
         let inner = select_engine(distributed_runtime, args, local_model)
             .await
@@ -218,14 +253,12 @@ async fn select_engine(
     let inner = match args.engine_type {
         EngineType::Echo => {
             // There is no validation for the echo engine
-            RsEngineConfig::StaticFull {
+            RsEngineConfig::InProcessText {
                 model: Box::new(local_model),
                 engine: dynamo_llm::engines::make_echo_engine(),
-                is_static: false,
             }
         }
         EngineType::Dynamic => RsEngineConfig::Dynamic(Box::new(local_model)),
-        EngineType::Static => RsEngineConfig::StaticRemote(Box::new(local_model)),
         EngineType::Mocker => {
             let mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
                 MockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
@@ -251,10 +284,10 @@ async fn select_engine(
             )
             .await?;
 
-            RsEngineConfig::StaticCore {
+            RsEngineConfig::InProcessTokens {
                 engine,
                 model: Box::new(local_model),
-                is_static: false,
+                is_prefill: args.is_prefill,
             }
         }
     };
@@ -273,7 +306,7 @@ pub fn run_input<'p>(
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         dynamo_llm::entrypoint::input::run_input(
-            either::Either::Right(distributed_runtime.inner.clone()),
+            distributed_runtime.inner.clone(),
             input_enum,
             engine_config.inner,
         )

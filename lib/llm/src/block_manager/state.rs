@@ -5,22 +5,21 @@ mod local;
 mod logical;
 mod resources;
 
-use crate::block_manager::block::{MutableBlock, factory::IntoBlocks};
-use crate::block_manager::locality::LogicalResources;
-use crate::block_manager::offload::request::BlockResult;
-
 use super::*;
 
 // use super::offload::{OffloadManager, OffloadManagerConfig};
 use super::{
     block::{
-        Block, GlobalRegistry, ImmutableBlock, factory::LocalBlockDataFactory,
-        locality::LocalityProvider,
+        Block, GlobalRegistry, ImmutableBlock, MutableBlock, factory::IntoBlocks,
+        factory::LocalBlockDataFactory, locality::LocalityProvider,
     },
     config::NixlOptions,
     events::{EventManager, NullEventManager},
-    metrics::BlockManagerMetrics,
-    offload::{OffloadManager, OffloadManagerConfig},
+    locality::LogicalResources,
+    offload::{
+        OffloadFilters, OffloadManager, OffloadManagerConfig, filter::OffloadFilter,
+        request::BlockResult,
+    },
 };
 use derive_getters::Dissolve;
 use std::sync::Arc;
@@ -42,9 +41,6 @@ pub(crate) struct Resources {
 
     // event manager for block manager events
     pub event_manager: Arc<dyn EventManager>,
-
-    // metrics for the block manager
-    pub metrics: Arc<BlockManagerMetrics>,
 
     // config for the block manager
     pub config: KvBlockManagerConfig,
@@ -104,60 +100,71 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 {
     pub async fn new(config: KvBlockManagerConfig, logical_resources: R) -> Result<Arc<Self>> {
         let model_config = config.model.clone();
-        let mut resources = Resources::new(config)?;
+        let mut resources = Resources::new(config).await?;
         let block_data_factories =
             logical::LogicalBlockFactories::new(&mut resources, logical_resources)?;
 
         let (disk_factory, host_factory, device_factory) = block_data_factories.dissolve();
 
-        let (disk_pool, disk_blocks) = match disk_factory {
+        let (disk_pool, disk_blocks, disk_offload_filter) = match disk_factory {
             Some(factory) => {
-                let (pool, blocks) =
+                let (pool, blocks, offload_filter) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
-                (Some(pool), Some(blocks))
+                (Some(pool), Some(blocks), offload_filter)
             }
             None => {
                 tracing::debug!("No disk layout provided; will not allocate disk blocks.");
-                (None, None)
+                (None, None, None)
             }
         };
 
-        let (host_pool, host_blocks) = match host_factory {
+        let (host_pool, host_blocks, host_offload_filter) = match host_factory {
             Some(factory) => {
-                let (pool, blocks) =
+                let (pool, blocks, offload_filter) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "host")?;
-                (Some(pool), Some(blocks))
+                (Some(pool), Some(blocks), offload_filter)
             }
             None => {
                 tracing::debug!("No host layout provided; will not allocate host blocks.");
-                (None, None)
+                (None, None, None)
             }
         };
 
-        let (device_pool, device_blocks) = match device_factory {
+        let (device_pool, device_blocks, device_offload_filter) = match device_factory {
             Some(factory) => {
-                let (pool, blocks) =
+                let (pool, blocks, offload_filter) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "device")?;
-                (Some(pool), Some(blocks))
+                (Some(pool), Some(blocks), offload_filter)
             }
             None => {
                 tracing::debug!("No device layout provided; will not allocate device blocks.");
-                (None, None)
+                (None, None, None)
             }
         };
+
+        // Determine if we should bypass CPU memory (G2) and offload directly from GPU (G1) to Disk (G3)
+        let bypass_cpu_mem = config::should_bypass_cpu_cache();
+
+        let offload_filters = OffloadFilters::builder()
+            .device(device_offload_filter)
+            .host(host_offload_filter)
+            .disk(disk_offload_filter)
+            .build()?;
 
         let offload_config = OffloadManagerConfig {
             nixl_agent: resources.nixl_agent.clone(),
             async_rt_handle: resources.async_rt_handle.clone(),
-            metrics: resources.metrics.clone(),
             cancellation_token: resources.cancellation_token.clone(),
             model_config,
+            kvbm_metrics: resources.config.kvbm_metrics.clone(),
+            bypass_cpu_mem,
         };
 
         let offload_manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
+            offload_filters,
             offload_config,
         )?;
 
@@ -213,45 +220,45 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
     pub async fn new(config: KvBlockManagerConfig) -> Result<Arc<Self>> {
         let model_config = config.model.clone();
-        let mut resources = Resources::new(config)?;
+        let mut resources = Resources::new(config).await?;
         let block_data_factories = local::LocalBlockDataFactories::new(&mut resources)?;
 
         let (mut local_block_set, disk_factory, host_factory, device_factory) =
             block_data_factories.dissolve();
 
-        let (disk_pool, disk_blocks) = match disk_factory {
+        let (disk_pool, disk_blocks, disk_offload_filter) = match disk_factory {
             Some(factory) => {
-                let (pool, blocks) =
+                let (pool, blocks, offload_filter) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
-                (Some(pool), Some(blocks))
+                (Some(pool), Some(blocks), offload_filter)
             }
             None => {
                 tracing::debug!("No disk layout provided; will not allocate disk blocks.");
-                (None, None)
+                (None, None, None)
             }
         };
 
-        let (host_pool, host_blocks) = match host_factory {
+        let (host_pool, host_blocks, host_offload_filter) = match host_factory {
             Some(factory) => {
-                let (pool, blocks) =
+                let (pool, blocks, offload_filter) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "host")?;
-                (Some(pool), Some(blocks))
+                (Some(pool), Some(blocks), offload_filter)
             }
             None => {
-                tracing::debug!("No disk layout provided; will not allocate disk blocks.");
-                (None, None)
+                tracing::debug!("No host layout provided; will not allocate host blocks.");
+                (None, None, None)
             }
         };
 
-        let (device_pool, device_blocks) = match device_factory {
+        let (device_pool, device_blocks, device_offload_filter) = match device_factory {
             Some(factory) => {
-                let (pool, blocks) =
+                let (pool, blocks, offload_filter) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
-                (Some(pool), Some(blocks))
+                (Some(pool), Some(blocks), offload_filter)
             }
             None => {
-                tracing::debug!("No disk layout provided; will not allocate disk blocks.");
-                (None, None)
+                tracing::debug!("No device layout provided; will not allocate device blocks.");
+                (None, None, None)
             }
         };
 
@@ -261,18 +268,29 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             local_block_set.set_nixl_metadata(nixl_agent.get_local_md()?);
         }
 
+        let offload_filters = OffloadFilters::builder()
+            .device(device_offload_filter)
+            .host(host_offload_filter)
+            .disk(disk_offload_filter)
+            .build()?;
+
+        // Determine if we should bypass CPU memory (G2) and offload directly from GPU (G1) to Disk (G3)
+        let bypass_cpu_mem = config::should_bypass_cpu_cache();
+
         let offload_config = OffloadManagerConfig {
             nixl_agent: resources.nixl_agent.clone(),
             async_rt_handle: resources.async_rt_handle.clone(),
-            metrics: resources.metrics.clone(),
             cancellation_token: resources.cancellation_token.clone(),
             model_config,
+            kvbm_metrics: resources.config.kvbm_metrics.clone(),
+            bypass_cpu_mem,
         };
 
         let offload_manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
+            offload_filters,
             offload_config,
         )?;
 
@@ -505,18 +523,21 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> std::fmt::Debug
 pub(crate) fn create_block_pool<S: Storage, L: LocalityProvider, M: BlockMetadata>(
     factory: impl IntoBlocks<S, L>,
     resources: &Resources,
-    pool_name: &str,
-) -> Result<(Arc<dyn BlockPool<S, L, M>>, Vec<Block<S, L, M>>)> {
+    _pool_name: &str,
+) -> Result<(
+    Arc<dyn BlockPool<S, L, M>>,
+    Vec<Block<S, L, M>>,
+    Option<Arc<dyn OffloadFilter>>,
+)> {
     let pool = ManagedBlockPool::<S, L, M>::builder()
         .cancel_token(resources.cancellation_token.clone())
         .global_registry(resources.global_registry.clone())
         .async_runtime(resources.async_rt_handle.clone())
         .event_manager(resources.event_manager.clone())
-        .pool_metrics(resources.metrics.pool(pool_name))
         .build()?;
 
+    let offload_filter = factory.offload_filter();
     let blocks = factory.into_blocks()?;
-    Ok((Arc::new(pool), blocks))
-}
 
-// Block state operations moved to block.rs for better organization and private field access
+    Ok((Arc::new(pool), blocks, offload_filter))
+}

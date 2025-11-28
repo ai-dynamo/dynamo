@@ -19,6 +19,9 @@ reviews:
     auto_incremental_review: false
   suggested_labels: false
   suggested_reviewers: false
+  sequence_diagrams: false
+  related_issues: false
+  related_prs: false
   finishing_touches:
     docstrings:
       enabled: false

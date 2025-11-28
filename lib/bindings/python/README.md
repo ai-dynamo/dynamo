@@ -50,7 +50,7 @@ maturin develop --uv
 
 ### Prerequisite
 
-See [README.md](../../../docs/runtime/README.md#prerequisites).
+See [README.md](../../../docs/development/runtime-guide.md#prerequisites).
 
 ### Hello World Example
 

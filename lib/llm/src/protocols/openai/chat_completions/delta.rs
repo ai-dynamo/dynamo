@@ -10,6 +10,29 @@ use crate::{
 
 /// Provides a method for generating a [`DeltaGenerator`] from a chat completion request.
 impl NvCreateChatCompletionRequest {
+    /// Enables usage tracking for non-streaming requests to comply with OpenAI API specification.
+    ///
+    /// According to OpenAI API spec, non-streaming chat completion responses (stream=false)
+    /// must always include usage statistics. This method ensures `stream_options.include_usage`
+    /// is set to `true` for non-streaming requests.
+    ///
+    /// # Arguments
+    /// * `original_stream_flag` - The original value of the `stream` field before any internal processing
+    pub fn enable_usage_for_nonstreaming(&mut self, original_stream_flag: bool) {
+        if !original_stream_flag {
+            // For non-streaming requests (stream=false), enable usage by default
+            if self.inner.stream_options.is_none() {
+                self.inner.stream_options =
+                    Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                        include_usage: true,
+                    });
+            } else if let Some(ref mut opts) = self.inner.stream_options {
+                // If stream_options exists, ensure include_usage is true for non-streaming
+                opts.include_usage = true;
+            }
+        }
+    }
+
     /// Creates a [`DeltaGenerator`] instance based on the chat completion request.
     ///
     /// # Arguments
@@ -235,6 +258,7 @@ impl DeltaGenerator {
             choices,
             usage: None, // Always None for chunks with content/choices
             service_tier: self.service_tier.clone(),
+            nvext: None, // Will be populated by router layer if needed
         }
     }
 
@@ -256,6 +280,7 @@ impl DeltaGenerator {
             choices: vec![], // Empty choices for usage-only chunk
             usage: Some(usage),
             service_tier: self.service_tier.clone(),
+            nvext: None,
         }
     }
 
@@ -293,6 +318,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 .expect("token_ids length exceeds u32::MAX");
 
             self.usage.completion_tokens += token_length;
+
+            // If backend provides completion_usage with prompt token details,
+            // propagate the entire details struct to usage tracking
+            if let Some(prompt_details) = delta
+                .completion_usage
+                .as_ref()
+                .and_then(|usage| usage.prompt_tokens_details.as_ref())
+            {
+                self.usage.prompt_tokens_details = Some(prompt_details.clone());
+            }
         }
 
         let logprobs = self.create_logprobs(
@@ -325,7 +360,41 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Create the streaming response.
         let index = 0;
-        let stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
+        let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
+
+        // Extract worker_id from disaggregated_params and inject into nvext if present
+        if let Some(worker_id_json) = delta
+            .disaggregated_params
+            .as_ref()
+            .and_then(|params| params.get("worker_id"))
+        {
+            use crate::protocols::openai::nvext::{NvExtResponse, WorkerIdInfo};
+
+            let prefill_worker_id = worker_id_json
+                .get("prefill_worker_id")
+                .and_then(|v| v.as_u64());
+            let decode_worker_id = worker_id_json
+                .get("decode_worker_id")
+                .and_then(|v| v.as_u64());
+
+            let worker_id_info = WorkerIdInfo {
+                prefill_worker_id,
+                decode_worker_id,
+            };
+
+            let nvext_response = NvExtResponse {
+                worker_id: Some(worker_id_info),
+            };
+
+            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+                stream_response.nvext = Some(nvext_json);
+                tracing::debug!(
+                    "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
+                    prefill_worker_id,
+                    decode_worker_id
+                );
+            }
+        }
 
         Ok(stream_response)
     }
@@ -340,5 +409,69 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
     fn is_usage_enabled(&self) -> bool {
         DeltaGenerator::is_usage_enabled(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_async_openai::types::{
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
+        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
+    };
+
+    fn create_test_request() -> NvCreateChatCompletionRequest {
+        let messages = vec![ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text("test".to_string()),
+                name: None,
+            },
+        )];
+
+        NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages,
+                stream: Some(false),
+                stream_options: None,
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+            unsupported_fields: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_enable_usage_for_nonstreaming_enables_usage() {
+        // Test that non-streaming requests get usage enabled
+        let mut request = create_test_request();
+        assert!(request.inner.stream_options.is_none());
+
+        request.enable_usage_for_nonstreaming(false); // false = non-streaming
+
+        assert!(
+            request.inner.stream_options.is_some(),
+            "Non-streaming request should have stream_options created"
+        );
+        assert!(
+            request.inner.stream_options.unwrap().include_usage,
+            "Non-streaming request should have include_usage=true for OpenAI compliance"
+        );
+    }
+
+    #[test]
+    fn test_enable_usage_for_nonstreaming_ignores_streaming() {
+        // Test that streaming requests are not modified
+        let mut request = create_test_request();
+        assert!(request.inner.stream_options.is_none());
+
+        request.enable_usage_for_nonstreaming(true); // true = streaming
+
+        assert!(
+            request.inner.stream_options.is_none(),
+            "Streaming request should not have stream_options modified"
+        );
     }
 }

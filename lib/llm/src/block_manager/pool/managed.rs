@@ -72,11 +72,6 @@ pub struct ManagedBlockPoolArgs<S: Storage, L: LocalityProvider, M: BlockMetadat
     #[builder(default = "Handle::current()")]
     async_runtime: Handle,
 
-    #[builder(
-        default = "BlockManagerMetrics::new(&Arc::new(Registry::new())).unwrap().pool(\"pool\")"
-    )]
-    pool_metrics: Arc<PoolMetrics>,
-
     #[builder(default = "BlockRegistrationDuplicationSetting::Disabled")]
     default_duplication_setting: BlockRegistrationDuplicationSetting,
 }
@@ -90,7 +85,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPoolArgsBuil
             blocks,
             global_registry,
             async_runtime,
-            metrics,
             default_duplication_setting,
         ) = args.dissolve();
 
@@ -101,7 +95,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPoolArgsBuil
             blocks,
             global_registry,
             async_runtime,
-            metrics,
             default_duplication_setting,
         );
 
@@ -183,7 +176,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
         blocks: Vec<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
-        metrics: Arc<PoolMetrics>,
         default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> Self {
         let (pool, progress_engine) = Self::with_progress_engine(
@@ -192,7 +184,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
             blocks,
             global_registry,
             async_runtime,
-            metrics,
             default_duplication_setting,
         );
 
@@ -237,7 +228,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
         blocks: Vec<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
-        metrics: Arc<PoolMetrics>,
         default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> (Self, ProgressEngine<S, L, M>) {
         let (priority_tx, priority_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -251,7 +241,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
             blocks,
             global_registry,
             async_runtime,
-            metrics,
         );
 
         let available_blocks_counter = progress_engine.available_blocks_counter.clone();
@@ -504,7 +493,6 @@ struct ProgressEngine<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     cancel_token: CancellationToken,
     state: State<S, L, M>,
     return_rx: tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
-    metrics: Arc<PoolMetrics>,
     available_blocks_counter: Arc<AtomicU64>,
     total_blocks_counter: Arc<AtomicU64>,
 }
@@ -515,7 +503,6 @@ pub struct State<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     registry: BlockRegistry,
     return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, L, M>>,
     event_manager: Arc<dyn EventManager>,
-    metrics: Arc<PoolMetrics>,
 }
 
 impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine<S, L, M> {
@@ -528,16 +515,10 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
         blocks: Vec<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
-        metrics: Arc<PoolMetrics>,
     ) -> Self {
         let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::<S, L, M>::new(
-            event_manager,
-            return_tx,
-            global_registry,
-            async_runtime,
-            metrics.clone(),
-        );
+        let mut state =
+            State::<S, L, M>::new(event_manager, return_tx, global_registry, async_runtime);
 
         let count = blocks.len();
 
@@ -553,7 +534,6 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
             cancel_token,
             state,
             return_rx,
-            metrics,
             available_blocks_counter,
             total_blocks_counter,
         }
@@ -564,17 +544,14 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
             biased;
 
             Some(priority_req) = self.priority_rx.recv(), if !self.priority_rx.is_closed() => {
-                self.metrics.gauge("priority_request_queue_size").set(self.priority_rx.len() as i64);
                 self.state.handle_priority_request(priority_req, &mut self.return_rx).await;
             }
 
             Some(req) = self.ctrl_rx.recv(), if !self.ctrl_rx.is_closed() => {
-                self.metrics.gauge("control_request_queue_size").set(self.ctrl_rx.len() as i64);
                 self.state.handle_control_request(req);
             }
 
             Some(block) = self.return_rx.recv() => {
-                self.metrics.gauge("return_block_queue_size").set(self.return_rx.len() as i64);
                 self.state.handle_return_block(block);
             }
 
@@ -612,7 +589,6 @@ mod tests {
                 blocks,
                 global_registry,
                 async_runtime,
-                metrics,
                 default_duplication_setting,
             ) = args.dissolve();
 
@@ -622,7 +598,6 @@ mod tests {
                 blocks,
                 global_registry,
                 async_runtime,
-                metrics,
                 default_duplication_setting,
             );
 

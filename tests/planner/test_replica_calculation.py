@@ -49,8 +49,8 @@ def planner():
     args.decode_engine_num_gpu = 1
     args.min_endpoint = 1
     args.max_gpu_budget = 10
-    args.ttft = 80  # ms
-    args.itl = 10  # ms
+    args.ttft = 80.0  # ms
+    args.itl = 10.0  # ms
     args.backend = "vllm"
     args.no_operation = True  # Don't actually scale
     args.no_correction = False  # Allow correction factors

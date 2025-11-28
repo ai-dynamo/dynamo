@@ -4,23 +4,73 @@
 import asyncio
 import logging
 import os
-import uuid
+import tempfile
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from copy import deepcopy
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Final
 
-import msgspec
 from vllm.inputs import TokensPrompt
+from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from dynamo.llm import ZmqKvEventPublisher
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
+from .multimodal_utils.image_loader import ImageLoader
+
+# Multimodal data dictionary keys
+IMAGE_URL_KEY: Final = "image_url"
+VIDEO_URL_KEY: Final = "video_url"
+URL_VARIANT_KEY: Final = "Url"
+DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+def build_sampling_params(
+    request: Dict[str, Any],
+    default_sampling_params: Dict[str, Any],
+    model_max_len: int | None = None,
+) -> SamplingParams:
+    """
+    Build SamplingParams from a PreprocessedRequest.
+
+    Args:
+        request: The PreprocessedRequest dict with 'sampling_options' and 'stop_conditions'
+        default_sampling_params: Default sampling parameters to initialize with
+
+    Returns:
+        SamplingParams configured from the request
+    """
+    sampling_params = SamplingParams(**default_sampling_params)
+    sampling_params.detokenize = False
+
+    # Apply sampling_options
+    for key, value in request["sampling_options"].items():
+        if value is not None and hasattr(sampling_params, key):
+            setattr(sampling_params, key, value)
+
+    # Apply stop_conditions
+    for key, value in request["stop_conditions"].items():
+        if value is not None and hasattr(sampling_params, key):
+            # Do not add stop key to sampling params - dynamo handles stop conditions directly
+            if key == "stop":
+                continue
+            setattr(sampling_params, key, value)
+
+    # If max_tokens wasn't provided (None or missing), compute a dynamic default
+    provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
+    token_ids = request.get("token_ids", [])
+    input_length = len(token_ids)
+    if model_max_len is not None and (provided_max_tokens is None):
+        # Ensure at least 1 token generation by default when possible
+        dynamic_default = max(1, model_max_len - input_length)
+        sampling_params.max_tokens = dynamic_default
+
+    return sampling_params
 
 
 class BaseWorkerHandler(ABC):
@@ -28,13 +78,25 @@ class BaseWorkerHandler(ABC):
     Request handler for the generate and clear_kv_blocks endpoints.
     """
 
-    def __init__(self, runtime, component, engine, default_sampling_params):
+    def __init__(
+        self,
+        runtime,
+        component,
+        engine,
+        default_sampling_params,
+        model_max_len: int | None = None,
+        enable_multimodal: bool = False,
+    ):
         self.runtime = runtime
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
-        self.kv_publisher = None
+        self.kv_publishers: list[ZmqKvEventPublisher] | None = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
+        self.image_loader = ImageLoader()
+        self.temp_dirs: list[tempfile.TemporaryDirectory] = []
+        self.model_max_len = model_max_len
+        self.enable_multimodal = enable_multimodal
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -77,13 +139,102 @@ class BaseWorkerHandler(ABC):
         except Exception as e:
             yield {"status": "error", "message": str(e)}
 
-    def cleanup(self):
-        """Override in subclasses if cleanup is needed."""
-        pass
+    def add_temp_dir(self, temp_dir: tempfile.TemporaryDirectory) -> None:
+        """Add a temporary directory to be cleaned up later."""
+        if temp_dir is not None:
+            self.temp_dirs.append(temp_dir)
 
-    async def generate_tokens(self, prompt, sampling_params, request_id):
+    def cleanup(self):
+        """Clean up resources including temporary directories."""
+        for temp_dir in self.temp_dirs:
+            try:
+                temp_dir.cleanup()
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp directory: {e}")
+
+    async def _extract_multimodal_data(
+        self, request: Dict[str, Any]
+    ) -> Dict[str, Any] | None:
+        """
+        Extract and decode multimodal data from PreprocessedRequest.
+        """
+        if "multi_modal_data" not in request or request["multi_modal_data"] is None:
+            return None
+
+        # Security check: reject multimodal data if not explicitly enabled
+        if not self.enable_multimodal:
+            raise ValueError(
+                "Received multimodal data but multimodal processing is not enabled. "
+                "Use --enable-multimodal flag to enable multimodal processing."
+            )
+
+        mm_map = request["multi_modal_data"]
+        vllm_mm_data = {}
+
+        # Process image_url entries
+        images = []
+        for item in mm_map.get(IMAGE_URL_KEY, []):
+            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                url = item[URL_VARIANT_KEY]
+                try:
+                    # ImageLoader supports both data: and http(s): URLs with caching
+                    image = await self.image_loader.load_image(url)
+                    images.append(image)
+                    logger.debug(f"Loaded image from URL: {url[:80]}...")
+                except Exception:
+                    logger.exception(f"Failed to load image from {url[:80]}...")
+                    raise
+            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
+                # Decoded support from PRs #3971/#3988 (frontend decoding + NIXL transfer)
+                # Will contain NIXL metadata for direct memory access
+                # TODO: Implement NIXL read when PRs merge
+                logger.warning(
+                    "Decoded multimodal data not yet supported in standard worker"
+                )
+
+        if images:
+            # vLLM expects single image or list
+            vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+            logger.debug(f"Extracted {len(images)} image(s) for multimodal processing")
+
+        # Handle video_url entries (future expansion)
+        if VIDEO_URL_KEY in mm_map:
+            logger.warning("Video multimodal data not yet supported in standard worker")
+
+        return vllm_mm_data if vllm_mm_data else None
+
+    @staticmethod
+    def _build_completion_usage(request_output: RequestOutput) -> Dict[str, Any]:
+        return {
+            "prompt_tokens": (
+                len(request_output.prompt_token_ids)
+                if request_output.prompt_token_ids
+                else None
+            ),
+            "completion_tokens": len(request_output.outputs[0].token_ids),
+            "total_tokens": (
+                len(request_output.prompt_token_ids)
+                + len(request_output.outputs[0].token_ids)
+                if request_output.prompt_token_ids
+                else None
+            ),
+            "prompt_tokens_details": (
+                {"cached_tokens": request_output.num_cached_tokens}
+                if request_output.num_cached_tokens
+                else None
+            ),
+        }
+
+    async def generate_tokens(
+        self, prompt, sampling_params, request_id, data_parallel_rank=None
+    ):
         try:
-            gen = self.engine_client.generate(prompt, sampling_params, request_id)
+            gen = self.engine_client.generate(
+                prompt,
+                sampling_params,
+                request_id,
+                data_parallel_rank=data_parallel_rank,
+            )
 
             num_output_tokens_so_far = 0
             try:
@@ -99,6 +250,11 @@ class BaseWorkerHandler(ABC):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res
+                        )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
                     yield out
@@ -123,134 +279,65 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         component,
         engine,
         default_sampling_params,
-        prefill_worker_client=None,
-        prefill_router_client=None,
+        model_max_len: int | None = None,
+        enable_multimodal: bool = False,
     ):
-        super().__init__(runtime, component, engine, default_sampling_params)
-        self.prefill_worker_client = prefill_worker_client
-        self.prefill_router_client = prefill_router_client
-        self.can_prefill = 0
-        self._prefill_check_task = None
-
-        if self.prefill_worker_client or self.prefill_router_client:
-            self._prefill_check_task = asyncio.create_task(self._prefill_check_loop())
-
-    async def _prefill_check_loop(self):
-        """Background task that checks prefill router/worker availability every 5 seconds."""
-        while True:
-            try:
-                router_count = (
-                    len(self.prefill_router_client.instance_ids())
-                    if self.prefill_router_client is not None
-                    else 0
-                )
-                worker_count = (
-                    len(self.prefill_worker_client.instance_ids())
-                    if self.prefill_worker_client is not None
-                    else 0
-                )
-                self.can_prefill = max(router_count, worker_count)
-                logger.debug(
-                    f"Prefill availability - Routers: {router_count}, Workers: {worker_count}"
-                )
-            except asyncio.CancelledError:
-                logger.warning("Prefill check loop cancelled.")
-                raise
-            except Exception as e:
-                logger.error(f"Error in prefill check loop: {e}")
-
-            await asyncio.sleep(5)
-
-    def cleanup(self):
-        """Cancel background tasks."""
-        if self._prefill_check_task is not None:
-            self._prefill_check_task.cancel()
-        super().cleanup()
+        super().__init__(
+            runtime,
+            component,
+            engine,
+            default_sampling_params,
+            model_max_len,
+            enable_multimodal,
+        )
 
     async def generate(self, request, context):
-        request_id = str(uuid.uuid4().hex)
-        logger.debug(f"New Request ID: {request_id}")
+        # Use context ID for request tracking and correlation
+        request_id = context.id()
+        logger.debug(f"Decode Request ID: {request_id}")
 
-        prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
+        # Extract and decode multimodal data if present
+        multi_modal_data = await self._extract_multimodal_data(request)
 
-        sampling_params = SamplingParams(**self.default_sampling_params)
+        prompt = TokensPrompt(
+            prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
+        )
 
-        sampling_params.detokenize = False
-        for key, value in request["sampling_options"].items():
-            if value is not None and hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
+        # Build sampling params from request
+        sampling_params = build_sampling_params(
+            request, self.default_sampling_params, self.model_max_len
+        )
 
-        for key, value in request["stop_conditions"].items():
-            if value is not None and hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
+        prefill_result = request.get("prefill_result")
+        if prefill_result and isinstance(prefill_result, dict):
+            kv_params = prefill_result.get("disaggregated_params", {}).get(
+                "kv_transfer_params"
+            )
+        else:
+            kv_params = None
 
-        # Use prefill router or worker if available
-        if self.can_prefill:
-            # Create prefill sampling params with modifications
-            prefill_sampling_params = deepcopy(sampling_params)
-            if prefill_sampling_params.extra_args is None:
-                prefill_sampling_params.extra_args = {}
-            prefill_sampling_params.extra_args["kv_transfer_params"] = {
-                "do_remote_decode": True,
-            }
-            prefill_sampling_params.max_tokens = 1
-            prefill_sampling_params.min_tokens = 1
+        if kv_params is not None:
+            if sampling_params.extra_args is None:
+                sampling_params.extra_args = {}
+            sampling_params.extra_args["kv_transfer_params"] = kv_params
+            logger.debug(
+                f"Using disaggregated params from prefill for request {request_id}"
+            )
+        prefill_prompt_tokens_details = (
+            prefill_result.get("prompt_tokens_details") if prefill_result else None
+        )
 
-            try:
-                # Send request with sampling_params and request_id in extra_args
-                prefill_request = request.copy()
-                # TODO (PeaBrane): this smells a bit bad as not we have two nestings
-                # of extra_args (an inner one again in sampling_params)
-                prefill_request["extra_args"] = {
-                    "sampling_params": msgspec.to_builtins(prefill_sampling_params),
-                    "request_id": request_id,
-                }
-
-                # Try router first if available, fallback to worker
-                if (
-                    self.prefill_router_client is not None
-                    and self.prefill_router_client.instance_ids()
-                ):
-                    # Call router's generate endpoint which returns LLMEngineOutput
-                    prefill_response = await anext(
-                        await self.prefill_router_client.generate(
-                            prefill_request, context=context
-                        )
-                    )
-                elif self.prefill_worker_client is not None:
-                    # Fallback to direct worker with same format
-                    prefill_response = await anext(
-                        await self.prefill_worker_client.round_robin(
-                            prefill_request, context=context
-                        )
-                    )
-                else:
-                    raise ValueError("No prefill router or worker available")
-
-                prefill_output = prefill_response.data()
-
-                # Extract kv_transfer_params from response
-                kv_transfer_params = prefill_output.get("extra_args", {}).get(
-                    "kv_transfer_params"
-                )
-                if kv_transfer_params:
-                    if sampling_params.extra_args is None:
-                        sampling_params.extra_args = {}
-                    sampling_params.extra_args[
-                        "kv_transfer_params"
-                    ] = kv_transfer_params
-
-            except Exception as e:
-                if context.is_stopped() or context.is_killed():
-                    logger.debug(f"Aborted Remote Prefill Request ID: {request_id}")
-                    return
-                logger.warning(f"Prefill error: {e}, falling back to local prefill")
+        dp_rank = request.get("dp_rank", None)
 
         async with self._abort_monitor(context, request_id):
             try:
                 async for tok in self.generate_tokens(
-                    prompt, sampling_params, request_id
+                    prompt, sampling_params, request_id, data_parallel_rank=dp_rank
                 ):
+                    if prefill_result is not None and "completion_usage" in tok:
+                        tok["completion_usage"][
+                            "prompt_tokens_details"
+                        ] = prefill_prompt_tokens_details
                     yield tok
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
@@ -260,25 +347,69 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
-    def __init__(self, runtime, component, engine, default_sampling_params):
-        super().__init__(runtime, component, engine, default_sampling_params)
+    def __init__(
+        self,
+        runtime,
+        component,
+        engine,
+        default_sampling_params,
+        model_max_len: int | None = None,
+        enable_multimodal: bool = False,
+    ):
+        super().__init__(
+            runtime,
+            component,
+            engine,
+            default_sampling_params,
+            model_max_len,
+            enable_multimodal,
+        )
 
     async def generate(self, request, context):
-        # Extract from PreprocessedRequest format - request_id and sampling_params from extra_args
-        extra_args = request.get("extra_args", {})
-        request_id = extra_args.get("request_id", str(uuid.uuid4().hex))
-        logger.debug(f"New Prefill Request ID: {request_id}")
+        # Use context ID for request tracking and correlation with decode phase
+        request_id = context.id()
+        logger.debug(f"Prefill Request ID: {request_id}")
+
+        # Extract and decode multimodal data if present
+        multi_modal_data = await self._extract_multimodal_data(request)
 
         token_ids = request["token_ids"]
-        prompt = TokensPrompt(prompt_token_ids=token_ids)
+        prompt = TokensPrompt(
+            prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
+        )
 
-        # Get sampling_params from extra_args
-        sampling_params_dict = extra_args.get("sampling_params", {})
-        sampling_params = msgspec.convert(sampling_params_dict, SamplingParams)
+        # Build sampling params from request using shared utility
+        sampling_params = build_sampling_params(
+            request, self.default_sampling_params, self.model_max_len
+        )
+
+        # Configure for prefill-only mode with remote decode
+        if sampling_params.extra_args is None:
+            sampling_params.extra_args = {}
+        sampling_params.extra_args["kv_transfer_params"] = {
+            "do_remote_decode": True,
+        }
+        sampling_params_defaults = {
+            "do_remote_prefill": False,
+            "remote_engine_id": None,
+            "remote_block_ids": None,
+            "remote_host": None,
+            "remote_port": None,
+        }
+        # Add only missing keys
+        for k, v in sampling_params_defaults.items():
+            sampling_params.extra_args["kv_transfer_params"].setdefault(k, v)
+        # Override for prefill: only generate 1 token
+        sampling_params.max_tokens = 1
+        sampling_params.min_tokens = 1
+
+        dp_rank = request.get("dp_rank", None)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
-                gen = self.engine_client.generate(prompt, sampling_params, request_id)
+                gen = self.engine_client.generate(
+                    prompt, sampling_params, request_id, data_parallel_rank=dp_rank
+                )
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")
@@ -293,10 +424,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                     output: Dict[str, Any] = {
                         "token_ids": list(token_ids),
-                        "extra_args": (
+                        "disaggregated_params": (
                             {"kv_transfer_params": res.kv_transfer_params}
                             if res.kv_transfer_params
-                            else {}
+                            else None
+                        ),
+                        "completion_usage": BaseWorkerHandler._build_completion_usage(
+                            request_output=res
                         ),
                     }
 

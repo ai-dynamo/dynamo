@@ -12,7 +12,6 @@ mod tests {
     use super::*;
     use crate::kv_router::indexer::KvIndexer;
     use crate::kv_router::indexer::KvIndexerMetrics;
-    use crate::kv_router::indexer::WorkerId;
     use crate::kv_router::protocols::*;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -50,6 +49,7 @@ mod tests {
             KvCacheEvent {
                 event_id,
                 data: add_blocks(hashes, parent),
+                dp_rank: 0,
             },
         )
     }
@@ -65,6 +65,7 @@ mod tests {
                         .map(|i| ExternalSequenceBlockHash(*i * 100))
                         .collect(),
                 }),
+                dp_rank: 0,
             },
         )
     }

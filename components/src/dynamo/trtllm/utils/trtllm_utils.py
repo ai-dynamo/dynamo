@@ -8,21 +8,21 @@ from typing import Optional
 from tensorrt_llm.llmapi import BuildConfig
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
-from dynamo.common.config_dump import add_config_dump_args
+from dynamo.common.config_dump import add_config_dump_args, register_encoder
 from dynamo.trtllm import __version__
-from dynamo.trtllm.request_handlers.handler_base import (
-    DisaggregationMode,
-    DisaggregationStrategy,
-)
+from dynamo.trtllm.request_handlers.handler_base import DisaggregationMode
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
 
-# Default endpoint for the next worker.
-DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.tensorrt_llm.generate"
+# Default endpoints for TensorRT-LLM workers
+DEFAULT_ENDPOINT = (
+    f"dyn://{DYN_NAMESPACE}.tensorrt_llm.generate"  # Decode/aggregated workers
+)
+DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"  # Prefill workers
+DEFAULT_ENCODE_ENDPOINT = (
+    f"dyn://{DYN_NAMESPACE}.tensorrt_llm_encode.generate"  # Encode workers
+)
 DEFAULT_MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-DEFAULT_NEXT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.tensorrt_llm_next.generate"
-DEFAULT_ENCODE_ENDPOINT = f"dyn://{DYN_NAMESPACE}.tensorrt_llm_encode.generate"
-DEFAULT_DISAGGREGATION_STRATEGY = DisaggregationStrategy.DECODE_FIRST
 DEFAULT_DISAGGREGATION_MODE = DisaggregationMode.AGGREGATED
 
 
@@ -41,19 +41,15 @@ class Config:
         self.kv_block_size: int = 32
         self.migration_limit: int = 0
         self.gpus_per_node: Optional[int] = None
-        self.max_batch_size: int = BuildConfig.max_batch_size
-        self.max_num_tokens: int = BuildConfig.max_num_tokens
-        self.max_seq_len: int = BuildConfig.max_seq_len
-        self.max_beam_width: int = BuildConfig.max_beam_width
-        self.free_gpu_memory_fraction: Optional[float] = None
+        self.max_batch_size: int = BuildConfig.model_fields["max_batch_size"].default
+        self.max_num_tokens: int = BuildConfig.model_fields["max_num_tokens"].default
+        self.max_seq_len: int = BuildConfig.model_fields["max_seq_len"].default
+        self.max_beam_width: int = BuildConfig.model_fields["max_beam_width"].default
+        self.free_gpu_memory_fraction: float = 0.9
         self.extra_engine_args: str = ""
         self.override_engine_args: str = ""
         self.publish_events_and_metrics: bool = False
         self.disaggregation_mode: DisaggregationMode = DEFAULT_DISAGGREGATION_MODE
-        self.disaggregation_strategy: DisaggregationStrategy = (
-            DEFAULT_DISAGGREGATION_STRATEGY
-        )
-        self.next_endpoint: str = ""
         self.encode_endpoint: str = ""
         self.modality: str = "text"
         self.allowed_local_media_path: str = ""
@@ -62,6 +58,8 @@ class Config:
         self.tool_call_parser: Optional[str] = None
         self.dump_config_to: Optional[str] = None
         self.custom_jinja_template: Optional[str] = None
+        self.store_kv: str = ""
+        self.request_plane: str = ""
 
     def __str__(self) -> str:
         return (
@@ -85,35 +83,24 @@ class Config:
             f"migration_limit={self.migration_limit}, "
             f"publish_events_and_metrics={self.publish_events_and_metrics}, "
             f"disaggregation_mode={self.disaggregation_mode}, "
-            f"disaggregation_strategy={self.disaggregation_strategy}, "
-            f"next_endpoint={self.next_endpoint}, "
             f"encode_endpoint={self.encode_endpoint}, "
             f"modality={self.modality}, "
             f"allowed_local_media_path={self.allowed_local_media_path}, "
             f"max_file_size_mb={self.max_file_size_mb}, "
             f"reasoning_parser={self.reasoning_parser}, "
             f"tool_call_parser={self.tool_call_parser}, "
-            f"dump_config_to={self.dump_config_to},"
-            f"custom_jinja_template={self.custom_jinja_template}"
+            f"dump_config_to={self.dump_config_to}, "
+            f"custom_jinja_template={self.custom_jinja_template}, "
+            f"store_kv={self.store_kv}, "
+            f"request_plane={self.request_plane}"
         )
 
 
-def is_first_worker(config):
-    """
-    Check if the current worker is the first worker in the disaggregation chain.
-    """
-    is_primary_worker = config.disaggregation_mode == DisaggregationMode.AGGREGATED
-    if not is_primary_worker:
-        is_primary_worker = (
-            config.disaggregation_strategy == DisaggregationStrategy.PREFILL_FIRST
-        ) and (config.disaggregation_mode == DisaggregationMode.PREFILL)
-
-    if not is_primary_worker:
-        is_primary_worker = (
-            config.disaggregation_strategy == DisaggregationStrategy.DECODE_FIRST
-        ) and (config.disaggregation_mode == DisaggregationMode.DECODE)
-
-    return is_primary_worker
+@register_encoder(Config)
+def _preprocess_for_encode_config(
+    obj: Config,
+) -> dict:  # pyright: ignore[reportUnusedFunction]
+    return obj.__dict__
 
 
 def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
@@ -139,7 +126,7 @@ def cmd_line_args():
         "--endpoint",
         type=str,
         default="",
-        help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: {DEFAULT_ENDPOINT} if first worker, {DEFAULT_NEXT_ENDPOINT} if next worker",
+        help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: {DEFAULT_ENDPOINT} for decode/aggregated, {DEFAULT_PREFILL_ENDPOINT} for prefill workers, or {DEFAULT_ENCODE_ENDPOINT} for encode workers",
     )
     parser.add_argument(
         "--model-path",
@@ -189,26 +176,26 @@ def cmd_line_args():
     parser.add_argument(
         "--max-batch-size",
         type=int,
-        default=BuildConfig.max_batch_size,
+        default=BuildConfig.model_fields["max_batch_size"].default,
         help="Maximum number of requests that the engine can schedule.",
     )
     parser.add_argument(
         "--max-num-tokens",
         type=int,
-        default=BuildConfig.max_num_tokens,
+        default=BuildConfig.model_fields["max_num_tokens"].default,
         help="Maximum number of batched input tokens after padding is removed in each batch.",
     )
     parser.add_argument(
         "--max-seq-len",
         type=int,
-        default=BuildConfig.max_seq_len,
+        default=BuildConfig.model_fields["max_seq_len"].default,
         help="Maximum total length of one request, including prompt and outputs. "
         "If unspecified, the value is deduced from the model config.",
     )
     parser.add_argument(
         "--max-beam-width",
         type=int,
-        default=BuildConfig.max_beam_width,
+        default=BuildConfig.model_fields["max_beam_width"].default,
         help="Maximum number of beams for beam search decoding.",
     )
     parser.add_argument(
@@ -249,24 +236,11 @@ def cmd_line_args():
         help="Use NIXL Connect for communication between workers.",
     )
     parser.add_argument(
-        "--disaggregation-strategy",
-        type=str,
-        default=DEFAULT_DISAGGREGATION_STRATEGY,
-        choices=[strategy.value for strategy in DisaggregationStrategy],
-        help=f"Strategy to use for disaggregation. Default: {DEFAULT_DISAGGREGATION_STRATEGY}",
-    )
-    parser.add_argument(
         "--modality",
         type=str,
         default="text",
         choices=["text", "multimodal"],
         help="Modality to use for the model. Default: text. Current supported modalities are image.",
-    )
-    parser.add_argument(
-        "--next-endpoint",
-        type=str,
-        default="",
-        help=f"Endpoint(in 'dyn://namespace.component.endpoint' format) to send requests to when running in disaggregation mode. Default: {DEFAULT_NEXT_ENDPOINT} if first worker, empty if next worker",
     )
     parser.add_argument(
         "--encode-endpoint",
@@ -308,6 +282,20 @@ def cmd_line_args():
         default=None,
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
+    parser.add_argument(
+        "--store-kv",
+        type=str,
+        choices=["etcd", "file", "mem"],
+        default=os.environ.get("DYN_STORE_KV", "etcd"),
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
+    parser.add_argument(
+        "--request-plane",
+        type=str,
+        choices=["nats", "http", "tcp"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
 
     args = parser.parse_args()
 
@@ -320,29 +308,18 @@ def cmd_line_args():
         # This becomes an `Option` on the Rust side
         config.served_model_name = None
 
-    # Set the disaggregation mode and strategy.
+    # Set the disaggregation mode.
     config.disaggregation_mode = DisaggregationMode(args.disaggregation_mode)
-    config.disaggregation_strategy = DisaggregationStrategy(
-        args.disaggregation_strategy
-    )
 
-    # Set the appropriate defaults for the endpoint and next endpoint.
-    if is_first_worker(config):
-        if args.endpoint == "":
-            args.endpoint = DEFAULT_ENDPOINT
-        if (
-            args.next_endpoint == ""
-            and config.disaggregation_mode != DisaggregationMode.AGGREGATED
-        ):
-            args.next_endpoint = DEFAULT_NEXT_ENDPOINT
-    elif config.disaggregation_mode == DisaggregationMode.ENCODE:
-        if args.endpoint == "":
+    # Set the appropriate default for the endpoint based on disaggregation mode
+    if args.endpoint == "":
+        if config.disaggregation_mode == DisaggregationMode.ENCODE:
             args.endpoint = DEFAULT_ENCODE_ENDPOINT
-    else:
-        if args.endpoint == "":
-            args.endpoint = DEFAULT_NEXT_ENDPOINT
-        if args.next_endpoint != "":
-            raise ValueError("Next endpoint is not allowed for the next worker")
+        elif config.disaggregation_mode == DisaggregationMode.PREFILL:
+            args.endpoint = DEFAULT_PREFILL_ENDPOINT
+        else:
+            # Decode and aggregated workers use "tensorrt_llm" component
+            args.endpoint = DEFAULT_ENDPOINT
     endpoint = args.endpoint
     parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
         endpoint
@@ -351,7 +328,6 @@ def cmd_line_args():
     config.namespace = parsed_namespace
     config.component = parsed_component_name
     config.endpoint = parsed_endpoint_name
-    config.next_endpoint = args.next_endpoint
     config.encode_endpoint = args.encode_endpoint
     config.allowed_local_media_path = args.allowed_local_media_path
     config.max_file_size_mb = args.max_file_size_mb
@@ -379,12 +355,19 @@ def cmd_line_args():
     config.reasoning_parser = args.dyn_reasoning_parser
     config.tool_call_parser = args.dyn_tool_call_parser
     config.dump_config_to = args.dump_config_to
+    config.store_kv = args.store_kv
+    config.request_plane = args.request_plane
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:
         expanded_template_path = os.path.expandvars(
             os.path.expanduser(args.custom_jinja_template)
         )
+        # Validate custom Jinja template file exists
+        if not os.path.isfile(expanded_template_path):
+            raise FileNotFoundError(
+                f"Custom Jinja template file not found: {expanded_template_path}"
+            )
         config.custom_jinja_template = expanded_template_path
     else:
         config.custom_jinja_template = None

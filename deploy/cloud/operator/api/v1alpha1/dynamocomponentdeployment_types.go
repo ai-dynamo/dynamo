@@ -20,9 +20,6 @@
 package v1alpha1
 
 import (
-	"strings"
-
-	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,22 +35,12 @@ const (
 
 // DynamoComponentDeploymentSpec defines the desired state of DynamoComponentDeployment
 type DynamoComponentDeploymentSpec struct {
-	// DynamoComponent selects the Dynamo component from the archive to deploy.
-	// Typically corresponds to a component defined in the packaged Dynamo artifacts.
-	DynamoComponent string `json:"dynamoComponent,omitempty"`
-	// contains the tag of the DynamoComponent: for example, "my_package:MyService"
-	DynamoTag string `json:"dynamoTag,omitempty"`
-
 	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm")
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
 	BackendFramework string `json:"backendFramework,omitempty"`
 
 	// DynamoComponentDeploymentSharedSpec embeds common deployment and runtime
 	// settings that apply to the component (resources, scaling, ingress, etc.).
-	DynamoComponentDeploymentSharedSpec `json:",inline"`
-}
-
-type DynamoComponentDeploymentOverridesSpec struct {
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
@@ -76,12 +63,17 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
 	SubComponentType string `json:"subComponentType,omitempty"`
 
-	// Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
+	// DynamoNamespace is deprecated and will be removed in a future version.
+	// The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
+	// +kubebuilder:validation:Optional
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
+
+	// GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
 	// Resources requested and limits for this component, including CPU, memory,
 	// GPUs/devices, and any runtime-specific resources.
-	Resources *dynamoCommon.Resources `json:"resources,omitempty"`
+	Resources *Resources `json:"resources,omitempty"`
 	// Autoscaling config for this component (replica range, target utilization, etc.).
 	Autoscaling *Autoscaling `json:"autoscaling,omitempty"`
 	// Envs defines additional environment variables to inject into the component containers.
@@ -95,17 +87,22 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Ingress config to expose the component outside the cluster (or through a service mesh).
 	Ingress *IngressSpec `json:"ingress,omitempty"`
 
+	// ModelRef references a model that this component serves
+	// When specified, a headless service will be created for endpoint discovery
+	// +optional
+	ModelRef *ModelReference `json:"modelRef,omitempty"`
+
 	// SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).
 	SharedMemory *SharedMemorySpec `json:"sharedMemory,omitempty"`
 
 	// +optional
 	// ExtraPodMetadata adds labels/annotations to the created Pods.
-	ExtraPodMetadata *dynamoCommon.ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
+	ExtraPodMetadata *ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
 	// +optional
 	// ExtraPodSpec allows to override the main pod spec configuration.
 	// It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field
 	// that allows overriding the main container configuration.
-	ExtraPodSpec *dynamoCommon.ExtraPodSpec `json:"extraPodSpec,omitempty"`
+	ExtraPodSpec *ExtraPodSpec `json:"extraPodSpec,omitempty"`
 
 	// LivenessProbe to detect and restart unhealthy containers.
 	LivenessProbe *corev1.Probe `json:"livenessProbe,omitempty"`
@@ -229,7 +226,7 @@ func (s *DynamoComponentDeployment) SetSpec(spec any) {
 }
 
 func (s *DynamoComponentDeployment) IsFrontendComponent() bool {
-	return strings.HasSuffix(s.Spec.DynamoTag, s.Spec.ServiceName) || s.Spec.ComponentType == commonconsts.ComponentTypeFrontend
+	return s.Spec.ComponentType == commonconsts.ComponentTypeFrontend
 }
 
 func (s *DynamoComponentDeployment) GetDynamoDeploymentConfig() []byte {
@@ -280,4 +277,15 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
 
 func (s *DynamoComponentDeployment) GetParentGraphDeploymentNamespace() string {
 	return s.GetNamespace()
+}
+
+// ModelReference identifies a model served by this component
+type ModelReference struct {
+	// Name is the base model identifier (e.g., "llama-3-70b-instruct-v1")
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Revision is the model revision/version (optional)
+	// +optional
+	Revision string `json:"revision,omitempty"`
 }

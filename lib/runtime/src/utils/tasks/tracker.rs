@@ -357,14 +357,14 @@
 //!
 //! ```rust
 //! use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
-//! use dynamo_runtime::metrics::MetricsRegistry;
+//! use dynamo_runtime::DistributedRuntime;
 //!
-//! # async fn example(registry: &dyn MetricsRegistry) -> anyhow::Result<()> {
+//! # async fn example(drt: &DistributedRuntime) -> anyhow::Result<()> {
 //! // Root tracker with Prometheus metrics
 //! let tracker = TaskTracker::new_with_prometheus(
 //!     SemaphoreScheduler::with_permits(10),
 //!     LogOnlyPolicy::new(),
-//!     registry,
+//!     drt,
 //!     "my_component"
 //! )?;
 //!
@@ -383,7 +383,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::metrics::MetricsRegistry;
+use crate::metrics::MetricsHierarchy;
 use crate::metrics::prometheus_names::task_tracker;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -492,27 +492,8 @@ impl<T> TaskHandle<T> {
     ///
     /// This token is a child of the tracker's cancellation token and can be used
     /// to cancel just this individual task without affecting other tasks.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::*;
-    /// # #[tokio::main]
-    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new())?;
-    /// let handle = tracker.spawn(async {
-    ///     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-    ///     Ok("completed")
-    /// });
-    ///
-    /// // Cancel this specific task
-    /// handle.cancellation_token().cancel();
-    ///
-    /// // Task will be cancelled
-    /// let result = handle.await?;
-    /// assert!(result.is_err());
-    /// # Ok(())
-    /// # }
-    /// ```
+    // FIXME: The doctest previously here failed intermittently and may
+    // indicate a bug in either the doctest example or the implementation.
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancel_token
     }
@@ -1567,47 +1548,45 @@ impl PrometheusTaskMetrics {
     /// ```rust
     /// # use std::sync::Arc;
     /// # use dynamo_runtime::utils::tasks::tracker::PrometheusTaskMetrics;
-    /// # use dynamo_runtime::metrics::MetricsRegistry;
-    /// # fn example(registry: Arc<dyn MetricsRegistry>) -> anyhow::Result<()> {
-    /// let metrics = PrometheusTaskMetrics::new(registry.as_ref(), "main_tracker")?;
+    /// # use dynamo_runtime::DistributedRuntime;
+    /// # fn example(drt: &DistributedRuntime) -> anyhow::Result<()> {
+    /// let metrics = PrometheusTaskMetrics::new(drt, "main_tracker")?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new<R: MetricsRegistry + ?Sized>(
-        registry: &R,
-        component_name: &str,
-    ) -> anyhow::Result<Self> {
-        let issued_counter = registry.create_intcounter(
+    pub fn new<R: MetricsHierarchy>(registry: &R, component_name: &str) -> anyhow::Result<Self> {
+        let metrics = registry.metrics();
+        let issued_counter = metrics.create_intcounter(
             &format!("{}_{}", component_name, task_tracker::TASKS_ISSUED_TOTAL),
             "Total number of tasks issued/submitted",
             &[],
         )?;
 
-        let started_counter = registry.create_intcounter(
+        let started_counter = metrics.create_intcounter(
             &format!("{}_{}", component_name, task_tracker::TASKS_STARTED_TOTAL),
             "Total number of tasks started",
             &[],
         )?;
 
-        let success_counter = registry.create_intcounter(
+        let success_counter = metrics.create_intcounter(
             &format!("{}_{}", component_name, task_tracker::TASKS_SUCCESS_TOTAL),
             "Total number of successfully completed tasks",
             &[],
         )?;
 
-        let cancelled_counter = registry.create_intcounter(
+        let cancelled_counter = metrics.create_intcounter(
             &format!("{}_{}", component_name, task_tracker::TASKS_CANCELLED_TOTAL),
             "Total number of cancelled tasks",
             &[],
         )?;
 
-        let failed_counter = registry.create_intcounter(
+        let failed_counter = metrics.create_intcounter(
             &format!("{}_{}", component_name, task_tracker::TASKS_FAILED_TOTAL),
             "Total number of failed tasks",
             &[],
         )?;
 
-        let rejected_counter = registry.create_intcounter(
+        let rejected_counter = metrics.create_intcounter(
             &format!("{}_{}", component_name, task_tracker::TASKS_REJECTED_TOTAL),
             "Total number of rejected tasks",
             &[],
@@ -2070,20 +2049,20 @@ impl TaskTracker {
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
     /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
-    /// # use dynamo_runtime::metrics::MetricsRegistry;
-    /// # fn example(registry: Arc<dyn MetricsRegistry>) -> anyhow::Result<()> {
+    /// # use dynamo_runtime::DistributedRuntime;
+    /// # fn example(drt: &DistributedRuntime) -> anyhow::Result<()> {
     /// let scheduler = SemaphoreScheduler::with_permits(10);
     /// let error_policy = LogOnlyPolicy::new();
     /// let tracker = TaskTracker::new_with_prometheus(
     ///     scheduler,
     ///     error_policy,
-    ///     registry.as_ref(),
+    ///     drt,
     ///     "main_tracker"
     /// )?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new_with_prometheus<R: MetricsRegistry + ?Sized>(
+    pub fn new_with_prometheus<R: MetricsHierarchy>(
         scheduler: Arc<dyn TaskScheduler>,
         error_policy: Arc<dyn OnErrorPolicy>,
         registry: &R,

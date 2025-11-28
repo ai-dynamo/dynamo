@@ -59,7 +59,10 @@ impl ControlClient {
     }
 
     async fn execute<T: DeserializeOwned>(&self, message: ControlMessage) -> Result<T> {
-        let mut stream = self.client.direct(message.into(), self.instance_id).await?;
+        let mut stream = self
+            .client
+            .direct(message.into(), self.instance_id as u64)
+            .await?;
         let resp = stream
             .next()
             .await

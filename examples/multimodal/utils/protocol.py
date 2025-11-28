@@ -22,10 +22,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
 from vllm.inputs.data import TokensPrompt
+from vllm.logprobs import PromptLogprobs
 from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import PromptLogprobs, RequestMetrics
+from vllm.sequence import RequestMetrics
 
 import dynamo.nixl_connect as connect
 
@@ -108,6 +109,15 @@ class ImageContent(BaseModel):
     image_url: ImageURLDetail
 
 
+class AudioURLDetail(BaseModel):
+    url: str
+
+
+class AudioContent(BaseModel):
+    type: Literal["audio_url"]
+    audio_url: AudioURLDetail
+
+
 class VideoURLDetail(BaseModel):
     url: str
 
@@ -117,7 +127,7 @@ class VideoContent(BaseModel):
     video_url: VideoURLDetail
 
 
-MessageContent = Union[TextContent, ImageContent, VideoContent]
+MessageContent = Union[TextContent, ImageContent, AudioContent, VideoContent]
 
 
 class ChatMessage(BaseModel):
@@ -137,6 +147,7 @@ class MultiModalRequest(BaseModel):
 class MultiModalInput(BaseModel):
     image_url: Optional[str] = None
     video_url: Optional[str] = None
+    audio_url: Optional[str] = None
 
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):
@@ -144,7 +155,7 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     embeddings_shape: Optional[
-        Union[Tuple[int, int, int], Tuple[int, int, int, int]]
+        Union[Tuple[int, int, int], Tuple[int, int, int, int], Tuple[int, int]]
     ] = None
     serialized_request: Optional[connect.RdmaMetadata] = None
 

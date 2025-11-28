@@ -6,12 +6,12 @@
 //! This module provides centralized Prometheus metric name constants and sanitization functions
 //! for various components to ensure consistency and avoid duplication across the codebase.
 //!
-//! ⚠️  **CRITICAL: SYNC WITH PYTHON BINDINGS** ⚠️
-//! When modifying constants in this file, you MUST also update:
-//! `lib/bindings/python/rust/prometheus_names.rs`
+//! ⚠️  **CRITICAL: REGENERATE PYTHON FILE AFTER CHANGES** ⚠️
+//! When modifying constants in this file, regenerate the Python module:
+//!     cargo run -p dynamo-codegen --bin gen-python-prometheus-names
 //!
-//! The Python bindings expose these constants to Python code and must stay in sync.
-//! Any changes here should be reflected in the Python bindings immediately.
+//! This generates `lib/bindings/python/src/dynamo/prometheus_names.py`
+//! with pure Python constants (no Rust bindings needed).
 //!
 //! ## Naming Conventions
 //!
@@ -84,8 +84,7 @@ pub mod labels {
 
 /// Frontend service metrics (LLM HTTP service)
 ///
-/// ⚠️  SYNC ALERT: These constants are exposed to Python via:
-/// `lib/bindings/python/rust/prometheus_names.rs` - FrontendService class
+/// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
 pub mod frontend_service {
     // TODO: Move DYN_METRICS_PREFIX and other environment variable names to environment_names.rs
     // for centralized environment variable constant management across the codebase
@@ -113,6 +112,9 @@ pub mod frontend_service {
 
     /// Output sequence length in tokens
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "output_sequence_tokens";
+
+    /// Total number of output tokens generated (counter that updates in real-time)
+    pub const OUTPUT_TOKENS_TOTAL: &str = "output_tokens_total";
 
     /// Time to first token in seconds
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "time_to_first_token_seconds";
@@ -318,13 +320,31 @@ pub mod distributed_runtime {
     pub const UPTIME_SECONDS: &str = "uptime_seconds";
 }
 
-/// KVBM connector
-pub mod kvbm_connector {
-    /// KVBM connector leader
-    pub const KVBM_CONNECTOR_LEADER: &str = "kvbm_connector_leader";
+/// KVBM
+pub mod kvbm {
+    /// The number of offload blocks from device to host
+    pub const OFFLOAD_BLOCKS_D2H: &str = "offload_blocks_d2h";
 
-    /// KVBM connector worker
-    pub const KVBM_CONNECTOR_WORKER: &str = "kvbm_connector_worker";
+    /// The number of offload blocks from host to disk
+    pub const OFFLOAD_BLOCKS_H2D: &str = "offload_blocks_h2d";
+
+    /// The number of offload blocks from device to disk (bypassing host memory)
+    pub const OFFLOAD_BLOCKS_D2D: &str = "offload_blocks_d2d";
+
+    /// The number of onboard blocks from host to device
+    pub const ONBOARD_BLOCKS_H2D: &str = "onboard_blocks_h2d";
+
+    /// The number of onboard blocks from disk to device
+    pub const ONBOARD_BLOCKS_D2D: &str = "onboard_blocks_d2d";
+
+    /// The number of matched tokens
+    pub const MATCHED_TOKENS: &str = "matched_tokens";
+
+    /// Host cache hit rate (0.0-1.0) from the sliding window
+    pub const HOST_CACHE_HIT_RATE: &str = "host_cache_hit_rate";
+
+    /// Disk cache hit rate (0.0-1.0) from the sliding window
+    pub const DISK_CACHE_HIT_RATE: &str = "disk_cache_hit_rate";
 }
 
 /// KvStats metrics from LLM workers

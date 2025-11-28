@@ -3,7 +3,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: oss-gpt120b-bench
+  name: gpt-oss-120b-bench
 spec:
   backoffLimit: 1
   completions: 1
@@ -11,7 +11,7 @@ spec:
   template:
     metadata:
       labels:
-        app: oss-gpt120b-bench
+        app: gpt-oss-120b-bench
     spec:
       affinity:
         podAntiAffinity:
@@ -29,7 +29,7 @@ spec:
         - -c
         - |
           apt-get update && apt-get install -y curl jq procps git && apt-get clean
-          pip install git+https://github.com/ai-dynamo/aiperf.git@70af59489df24a601dba57604a7341966150b366;
+          pip install git+https://github.com/ai-dynamo/aiperf.git@4d3fa29403c8f75da22a14f1f7b3aeb27db9288f;
           echo "aiperf installation completed";
           sysctl -w net.ipv4.ip_local_port_range="1024 65000"
           cat /proc/sys/net/ipv4/ip_local_port_range
@@ -57,23 +57,24 @@ spec:
             aiperf profile --artifact-dir $ARTIFACT_DIR \
                 --model $TARGET_MODEL \
                 --tokenizer /model-cache/hub/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a  \
-                --endpoint-type chat  --endpoint /v1/chat/completions \
+                --endpoint-type chat  \
+                --endpoint /v1/chat/completions \
                 --streaming \
                 --url http://$ENDPOINT \
                 --synthetic-input-tokens-mean $isl \
                 --synthetic-input-tokens-stddev 0 \
                 --output-tokens-mean $osl \
                 --output-tokens-stddev 0 \
-                --extra-inputs "{\"max_tokens\":$osl}" \
-                --extra-inputs "{\"min_tokens\":$osl}" \
-                --extra-inputs "{\"ignore_eos\":true}" \
+                --extra-inputs "max_tokens:$osl" \
+                --extra-inputs "min_tokens:$osl" \
+                --extra-inputs "ignore_eos:true" \
                 --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
-                --extra-inputs "{\"repetition_penalty\":1.0}" \
-                --extra-inputs "{\"temperature\": 0.0}" \
+                --extra-inputs "repetition_penalty:1.0" \
+                --extra-inputs "temperature: 0.0" \
                 --concurrency $concurrency \
                 --request-count $((10*concurrency)) \
                 --warmup-request-count $concurrency \
-                --conversation-num 12800 \
+                --num-dataset-entries 12800 \
                 --random-seed 100 \
                 --workers-max 252 \
                 -H 'Authorization: Bearer NOT USED' \

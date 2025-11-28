@@ -6,10 +6,12 @@ This version runs as the final job in a workflow and captures metrics for
 the entire workflow including all previous jobs.
 """
 
+import glob
 import json
 import os
 import re
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
@@ -21,6 +23,7 @@ EXCLUDED_JOB_NAMES = [
     "Upload Workflow Metrics",  # Avoid infinite loops
     # Add other job names to exclude here as needed
 ]
+FRAMEWORK_IMAGE_BUILD_JOBS = ["vllm", "sglang", "trtllm"]
 
 # NEW STANDARDIZED FIELD SCHEMA - Using consistent prefixes for OpenSearch mapping
 # Using prefixes: s_ for strings, l_ for longs, ts_ for timestamps
@@ -56,6 +59,160 @@ FIELD_STEP_ID = "s_step_id"
 FIELD_NAME = "s_step_name"
 FIELD_STEP_NUMBER = "l_step_number"
 FIELD_COMMAND = "s_command"
+
+# Container-specific fields (for CONTAINER_INDEX)
+FIELD_BUILD_DURATION_SEC = "l_build_duration_sec"
+FIELD_BUILD_START_TIME = "ts_build_start_time"
+FIELD_BUILD_END_TIME = "ts_build_end_time"
+FIELD_BUILD_TARGET = "s_build_target"
+FIELD_BUILD_FRAMEWORK = "s_build_framework"
+FIELD_BUILD_SIZE_BYTES = "l_build_size_bytes"
+
+# Test Info
+FIELD_FRAMEWORK = "s_framework"
+FIELD_ERROR_MESSAGE = "s_error_message"
+FIELD_TEST_NAME = "s_test_name"  # Test name (e.g., test_sglang_deployment[aggregated])
+FIELD_TEST_CLASSNAME = (
+    "s_test_classname"  # Test class name (e.g., tests.serve.test_sglang)
+)
+FIELD_TEST_DURATION = "l_test_duration_ms"
+FIELD_TEST_STATUS = "s_test_status"  # Test status (passed, failed, error, skipped)
+
+
+class BuildMetricsReader:
+    """Reader for build metrics from environment variables and artifacts"""
+
+    @staticmethod
+    def _process_artifact_metrics(artifact_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Process and clean up artifact metrics data"""
+        # Convert types (same as in get_build_metrics)
+        if "build_duration_sec" in artifact_metrics:
+            try:
+                artifact_metrics["build_duration_sec"] = int(
+                    artifact_metrics["build_duration_sec"]
+                )
+            except (ValueError, TypeError):
+                artifact_metrics["build_duration_sec"] = 0
+
+        if "image_size_bytes" in artifact_metrics:
+            try:
+                artifact_metrics["image_size_bytes"] = int(
+                    artifact_metrics["image_size_bytes"]
+                )
+            except (ValueError, TypeError):
+                artifact_metrics["image_size_bytes"] = 0
+
+        # Convert Unix timestamps to ISO format if needed
+        for time_field in ["build_start_time", "build_end_time"]:
+            if time_field in artifact_metrics and artifact_metrics[time_field]:
+                time_value = artifact_metrics[time_field]
+                if isinstance(time_value, (int, float)) or (
+                    isinstance(time_value, str) and time_value.isdigit()
+                ):
+                    try:
+                        timestamp = float(time_value)
+                        artifact_metrics[time_field] = datetime.fromtimestamp(
+                            timestamp, tz=timezone.utc
+                        ).isoformat()
+                    except (ValueError, OSError):
+                        pass  # Keep original value if conversion fails
+
+        return artifact_metrics
+
+    @staticmethod
+    def get_build_metrics_for_job(job_name: str) -> Optional[Dict[str, Any]]:
+        """Get build metrics for a specific job by looking for framework-specific artifacts"""
+
+        # Determine framework from job name
+        framework = None
+        job_name_lower = job_name.lower()
+        if "vllm" in job_name_lower:
+            framework = "vllm"
+        elif "sglang" in job_name_lower:
+            framework = "sglang"
+        elif "trtllm" in job_name_lower:
+            framework = "trtllm"
+
+        if not framework:
+            print(f"⚠️  Could not determine framework from job name: {job_name}")
+            return None
+
+        # Determine architecture preference from job name
+        preferred_arch = "amd64"  # default
+        if "arm64" in job_name_lower:
+            preferred_arch = "arm64"
+
+        # Try to read consolidated metrics file first
+        consolidated_path = "build-metrics/consolidated-metrics.json"
+        if os.path.exists(consolidated_path):
+            try:
+                with open(consolidated_path, "r") as f:
+                    all_metrics = json.load(f)
+
+                # Look for job-specific metrics
+                # Try preferred architecture first
+                job_key = f"{framework}-{preferred_arch}"
+                if job_key in all_metrics:
+                    return BuildMetricsReader._process_artifact_metrics(
+                        all_metrics[job_key]
+                    )
+
+                # Try other architecture
+                other_arch = "arm64" if preferred_arch == "amd64" else "amd64"
+                job_key = f"{framework}-{other_arch}"
+                if job_key in all_metrics:
+                    return BuildMetricsReader._process_artifact_metrics(
+                        all_metrics[job_key]
+                    )
+
+                # Try just framework name (backward compatibility)
+                if framework in all_metrics:
+                    return BuildMetricsReader._process_artifact_metrics(
+                        all_metrics[framework]
+                    )
+
+                print(
+                    f"⚠️  No metrics found for {framework} in consolidated file. Available keys: {list(all_metrics.keys())}"
+                )
+
+            except Exception as e:
+                print(f"❌ Error reading consolidated build metrics: {e}")
+
+        # Fallback to individual file approach for backward compatibility
+        # Try framework-specific artifact (direct path)
+        artifact_path = f"build-metrics/metrics-{framework}-{preferred_arch}-*.json"
+        if not os.path.exists(artifact_path):
+            # Try the other architecture (direct path)
+            other_arch = "arm64" if preferred_arch == "amd64" else "amd64"
+            artifact_path = f"build-metrics/metrics-{framework}-{other_arch}-*.json"
+        if not os.path.exists(artifact_path):
+            # Try artifact subdirectory structure (new format)
+            artifact_path = f"build-metrics/build-metrics-{framework}-{preferred_arch}/metrics-{framework}-{preferred_arch}-*.json"
+        if not os.path.exists(artifact_path):
+            # Try other architecture in subdirectory
+            other_arch = "arm64" if preferred_arch == "amd64" else "amd64"
+            artifact_path = f"build-metrics/build-metrics-{framework}-{other_arch}/metrics-{framework}-{other_arch}-*.json"
+        if not os.path.exists(artifact_path):
+            # Try old naming convention (backward compatibility)
+            artifact_path = f"build-metrics/metrics-{framework}-*.json"
+        if not os.path.exists(artifact_path):
+            # Try alternative path (old format)
+            artifact_path = f"build-metrics/build-metrics-{framework}/metrics.json"
+
+        if os.path.exists(artifact_path):
+            try:
+                with open(artifact_path, "r") as f:
+                    artifact_metrics = json.load(f)
+                    return BuildMetricsReader._process_artifact_metrics(
+                        artifact_metrics
+                    )
+            except Exception as e:
+                print(
+                    f"⚠️  Could not read {framework} build metrics from {artifact_path}: {e}"
+                )
+
+        print(f"⚠️  No build metrics artifact found for {framework} at {artifact_path}")
+        return None
 
 
 class TimingProcessor:
@@ -477,6 +634,17 @@ class WorkflowMetricsUploader:
         self.post_to_db(self.jobs_index, db_data)
         print(f"Uploaded metrics for job: {job_name}")
 
+        # Upload container metrics if this is a build job and metrics are available
+        # Check if this is one of our framework build jobs
+        is_framework_job = any(
+            framework in job_name.lower() for framework in FRAMEWORK_IMAGE_BUILD_JOBS
+        )
+
+        if is_framework_job:
+            self._upload_container_metrics(job_data)
+            # Also upload test metrics if available for this framework job
+            self._upload_test_metrics(job_data)
+
     def _upload_job_step_metrics(self, job_data: Dict[str, Any]) -> int:
         """Extract and post metrics for all steps in a job"""
         job_name = job_data["name"]
@@ -557,6 +725,314 @@ class WorkflowMetricsUploader:
         # Post to database
         self.post_to_db(self.steps_index, db_data)
         print(f"Uploaded metrics for step: {step_name} (step {step_number})")
+
+    def _upload_container_metrics(
+        self, job_data: Dict[str, Any], build_metrics: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Upload container-specific metrics to CONTAINER_INDEX"""
+        container_index = os.getenv("CONTAINER_INDEX")
+        if not container_index:
+            print(
+                "⚠️  CONTAINER_INDEX not configured, skipping container metrics upload"
+            )
+            return
+
+        # Get build metrics if not provided
+        if build_metrics is None:
+            # Try to get framework-specific build metrics based on job name
+            job_name = job_data.get("name", "")
+            build_metrics = BuildMetricsReader.get_build_metrics_for_job(job_name)
+
+        if not build_metrics:
+            print(
+                f"⚠️  No build metrics available for container upload for job: {job_data.get('name', 'unknown')}"
+            )
+            return
+
+        print(f"📦 Uploading container metrics to {container_index}")
+
+        # Create container metrics payload
+        container_data = {}
+
+        # Identity & Context - container-specific fields only
+        job_id = str(job_data["id"])
+        job_name = job_data["name"]
+        container_data[
+            FIELD_ID
+        ] = f"github-container-{job_id}-{build_metrics.get('framework', 'unknown')}"
+        container_data[FIELD_JOB_NAME] = str(job_name)
+        container_data[FIELD_JOB_ID] = job_id
+
+        # Find the "Build Container" step ID
+        build_step_id = None
+        steps = job_data.get("steps", [])
+        for step in steps:
+            if (
+                "build" in step.get("name", "").lower()
+                and "container" in step.get("name", "").lower()
+            ):
+                build_step_id = f"{job_id}_{step.get('number', 1)}"
+                break
+
+        container_data[FIELD_STEP_ID] = build_step_id or f"{job_id}_build"
+
+        # Status - container-specific
+        container_data[FIELD_STATUS] = str(
+            job_data.get("conclusion") or job_data.get("status", "unknown")
+        )
+
+        # Container Info (only truly container-specific fields)
+        container_data[FIELD_BUILD_FRAMEWORK] = build_metrics.get(
+            "framework", "unknown"
+        )
+        container_data[FIELD_BUILD_SIZE_BYTES] = build_metrics.get(
+            "image_size_bytes", 0
+        )
+
+        # Timing (reusing existing build timing fields)
+        if "build_start_time" in build_metrics:
+            container_data[FIELD_BUILD_START_TIME] = build_metrics["build_start_time"]
+        if "build_end_time" in build_metrics:
+            container_data[FIELD_BUILD_END_TIME] = build_metrics["build_end_time"]
+        container_data[FIELD_BUILD_DURATION_SEC] = build_metrics.get(
+            "build_duration_sec", 0
+        )
+
+        # Add @timestamp for time-series data
+        container_data["@timestamp"] = build_metrics.get(
+            "build_end_time", datetime.now(timezone.utc).isoformat()
+        )
+
+        # Add common context fields
+        self.add_common_context_fields(container_data)
+
+        # Upload to container index
+        try:
+            self.post_to_db(container_index, container_data)
+            print(
+                f"✅ Container metrics uploaded for {build_metrics.get('framework', 'unknown')} framework"
+            )
+        except Exception as e:
+            print(f"❌ Failed to upload container metrics: {e}")
+
+    def _upload_test_metrics(self, job_data: Dict[str, Any]) -> None:
+        """Upload individual test metrics by parsing JUnit XML directly from test-results"""
+        test_index = os.getenv("TEST_INDEX")
+        if not test_index:
+            print("⚠️  TEST_INDEX not configured, skipping test metrics upload")
+            return
+
+        job_name = job_data.get("name", "")
+        job_id = str(job_data["id"])
+
+        # Skip deployment test jobs (No pytest metadata files are created)
+        if job_name.lower().startswith("deploy"):
+            print(f"⏭️  Skipping test metrics for deployment job '{job_name}'")
+            return
+
+        print(f"🧪 Looking for test results for job '{job_name}'")
+
+        # Determine framework from job name to filter metadata files
+        framework = None
+        job_name_lower = job_name.lower()
+        if "vllm" in job_name_lower:
+            framework = "vllm"
+        elif "sglang" in job_name_lower:
+            framework = "sglang"
+        elif "trtllm" in job_name_lower:
+            framework = "trtllm"
+
+        if not framework:
+            print(f"⚠️  Could not determine framework from job name: {job_name}")
+            return
+
+        # Determine platform architecture from job name
+        # Job names typically look like: "vllm (amd64)" or "sglang (arm64)"
+        platform_arch = None
+        if "(amd64)" in job_name_lower or "amd64" in job_name_lower:
+            platform_arch = "amd64"
+        elif "(arm64)" in job_name_lower or "arm64" in job_name_lower:
+            platform_arch = "arm64"
+
+        if not platform_arch:
+            print(
+                f"⚠️  Could not determine platform architecture from job name: {job_name}"
+            )
+            # Default to amd64 if not specified
+            platform_arch = "amd64"
+            print(f"   Defaulting to platform_arch: {platform_arch}")
+
+        print(f"📦 Job framework: {framework}, platform_arch: {platform_arch}")
+
+        # Look for test results directory
+        test_results_dir = "test-results"
+        if not os.path.exists(test_results_dir):
+            print(f"⚠️  Test results directory not found: {test_results_dir}")
+            return
+
+        # Look for metadata files to get accurate step and framework info
+        # Updated pattern to match new unique naming: test_metadata_<framework>_<test_type>_<arch>.json
+        # Filter by both framework AND architecture to only process this job's tests
+        metadata_files = glob.glob(
+            f"{test_results_dir}/test_metadata_{framework}_*_{platform_arch}.json"
+        )
+
+        if not metadata_files:
+            print(
+                f"⚠️  No test metadata files found for framework '{framework}' with arch '{platform_arch}' in {test_results_dir}"
+            )
+            return
+
+        print(
+            f"📄 Found {len(metadata_files)} test metadata files for {framework} ({platform_arch})"
+        )
+
+        total_tests_processed = 0
+
+        # Process each metadata file
+        for metadata_file in metadata_files:
+            try:
+                # Read metadata to get accurate step and framework info
+                with open(metadata_file, "r") as f:
+                    metadata = json.load(f)
+
+                framework = metadata.get("framework", "unknown")
+                test_type = metadata.get("test_type", "unknown")
+                step_name = metadata.get("step_name", "Run tests")
+                junit_xml_file = metadata.get(
+                    "junit_xml_file", "pytest_test_report.xml"
+                )
+
+                # Construct step ID from metadata
+                test_step_id = f"{job_id}_{step_name.lower().replace(' ', '_')}"
+
+                print("📋 Processing test results:")
+                print(f"   Framework: {framework}")
+                print(f"   Test Type: {test_type}")
+                print(f"   Step Name: {step_name}")
+                print(f"   Step ID: {test_step_id}")
+
+                # Find the corresponding XML file
+                xml_file = f"{test_results_dir}/{junit_xml_file}"
+                if not os.path.exists(xml_file):
+                    print(f"⚠️  JUnit XML file not found: {xml_file}")
+                    continue
+
+                print(f"📄 Processing JUnit XML: {xml_file}")
+
+                # Parse JUnit XML using xml.etree.ElementTree
+                tree = ET.parse(xml_file)
+                root = tree.getroot()
+
+                # Process each test case
+                for testsuite in root.findall(".//testsuite"):
+                    for testcase in testsuite.findall("testcase"):
+                        # Extract test case information
+                        test_classname = testcase.get("classname", "")
+                        test_name = testcase.get("name", "")
+                        test_time = float(testcase.get("time", 0))
+                        test_status = "passed"  # Default status
+
+                        # Create individual test data payload
+                        test_data = {}
+
+                        # Identity & Context
+                        test_full_name = (
+                            f"{test_classname}::{test_name}"
+                            if test_classname
+                            else test_name
+                        )
+                        test_data[
+                            FIELD_ID
+                        ] = f"github-test-{job_id}-{hash(test_full_name) & 0x7FFFFFFF}"  # Use hash for unique ID
+                        test_data[FIELD_STEP_ID] = test_step_id
+                        test_data[FIELD_JOB_ID] = job_id
+
+                        # Test Info
+                        test_data[FIELD_FRAMEWORK] = framework
+                        test_data[FIELD_TEST_NAME] = test_name
+                        test_data[FIELD_TEST_CLASSNAME] = test_classname
+                        test_data[FIELD_TEST_DURATION] = int(
+                            test_time * 1000
+                        )  # Convert to milliseconds
+
+                        # Check for failure, error, or skipped elements
+                        error_msg = ""
+                        if testcase.find("failure") is not None:
+                            test_status = "failed"
+                            failure_elem = testcase.find("failure")
+                            error_msg = (
+                                failure_elem.get("message", "")
+                                if failure_elem is not None
+                                else ""
+                            )
+                            if (
+                                not error_msg
+                                and failure_elem is not None
+                                and failure_elem.text
+                            ):
+                                error_msg = failure_elem.text
+                        elif testcase.find("error") is not None:
+                            test_status = "error"
+                            error_elem = testcase.find("error")
+                            error_msg = (
+                                error_elem.get("message", "")
+                                if error_elem is not None
+                                else ""
+                            )
+                            if (
+                                not error_msg
+                                and error_elem is not None
+                                and error_elem.text
+                            ):
+                                error_msg = error_elem.text
+                        elif testcase.find("skipped") is not None:
+                            test_status = "skipped"
+                            skipped_elem = testcase.find("skipped")
+                            error_msg = (
+                                skipped_elem.get("message", "")
+                                if skipped_elem is not None
+                                else ""
+                            )
+
+                        test_data[FIELD_TEST_STATUS] = test_status
+                        test_data[
+                            FIELD_STATUS
+                        ] = test_status  # Also set general status field
+
+                        if error_msg:
+                            test_data[FIELD_ERROR_MESSAGE] = error_msg[
+                                :1000
+                            ]  # Limit error message length
+
+                        # Add timing (use job completion time as more accurate timestamp)
+                        job_completed_at = job_data.get("completed_at")
+                        if job_completed_at:
+                            test_data["@timestamp"] = job_completed_at
+                        else:
+                            # Fallback to current time if job completion time not available
+                            test_data["@timestamp"] = datetime.now(
+                                timezone.utc
+                            ).isoformat()
+
+                        # Add common context fields (repo, branch, pr_id, etc.)
+                        self.add_common_context_fields(test_data)
+
+                        # Upload individual test
+                        try:
+                            self.post_to_db(test_index, test_data)
+                            print(
+                                f"✅ Uploaded test: {test_full_name} ({test_status}, {test_time:.3f}s)"
+                            )
+                            total_tests_processed += 1
+                        except Exception as e:
+                            print(f"❌ Failed to upload test {test_full_name}: {e}")
+
+            except Exception as e:
+                print(f"❌ Failed to process metadata file {metadata_file}: {e}")
+
+        print(f"📊 Processed {total_tests_processed} individual tests total")
+        print("   " + "=" * 50)
 
 
 def main():

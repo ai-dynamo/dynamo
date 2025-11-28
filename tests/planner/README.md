@@ -10,7 +10,7 @@ This directory contains comprehensive testing tools for validating the SLA plann
 The SLA planner monitors metrics every 60 seconds (default adjustment interval) and scales
 prefill/decode workers based on TTFT, ITL, and request patterns.
 
-To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./components/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `uv pip install -r container/deps/requirements.txt`
+To setup the environment, simply use the released docker images for any backends, or build your own docker image following the READMEs in `./examples/backends/<vllm/sglang/trtllm>/README.md`, or follow the `Developing Locally` section in [README.md](../../README.md) to setup the environment locally. If using the local environment, make sure to install dependencies by running `UV_GIT_LFS=1 uv pip install --no-cache -r container/deps/requirements.txt`
 
 ## Pre-Requisite: Pre-Deployment Profiling Data
 
@@ -23,7 +23,7 @@ Use the pre-configured test deployment with sample profiling data, we provide th
 
 ### Option B: Use Your Own Profiling Results
 
-1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../docs/benchmarks/pre_deployment_profiling.md) for detailed instructions.
+1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../docs/benchmarks/sla_driven_profiling.md) for detailed instructions.
 
 ## Interpolator Testing
 
@@ -34,34 +34,34 @@ python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
   --profile_results_dir <path_to_profile_results> \
   --isl <ISL> \
   --osl <OSL> \
-  --ttft <TTFT(s)> \
-  --itl <ITL(s)>
+  --ttft <TTFT(ms)> \
+  --itl <ITL(ms)>
 ```
 
 The script will perform the interpolation based on ISL, OSL, and TTFT and ITL SLAs and advise the load that can saturate the engine.
 
-For example, to test the interpolator for `nvidia/Llama-3.1-8B-Instruct-FP8` on H200,
+For example, to test the interpolator for `nvidia/Llama-3.1-8B-Instruct-FP8` on H200 (target TTFT=200ms, ITL=10ms):
 
 ```bash
 python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
   --profile_results_dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
   --isl 3000 \
   --osl 300 \
-  --ttft 0.2 \
-  --itl 0.01
+  --ttft 200 \
+  --itl 10
 
 # output:
 ISL=3000, OSL=300
-TTFT=0.1s, ITL=0.01s
+TTFT=200ms, ITL=10ms
 Using profile results from tests/planner/profiling_results/H200_TP1P_TP1D/
 
 Interpolating prefill performance ...
-        Estimated TTFT=0.060s <= target TTFT=0.200s. Requests can queue 0.140s maximally while meeting TTFT SLA.
+        Estimated TTFT=60.00ms <= target TTFT=200.00ms. Requests can queue 140.00ms maximally while meeting TTFT SLA.
         Estimated throughput: 49481.09 tokens/s/gpu. Request rate at 16.49 requests/s will saturate one GPU.
 
 Interpolating decode performance ...
         Average context length: isl + osl/2 = 3150.
-        Estimated ITL=0.0097s <= target ITL=0.0100s at 16.16% active kv usage.
+        Estimated ITL=9.70ms <= target ITL=10.00ms at 16.16% active kv usage.
         Estimated throughput: 4555.68 token/s/gpu. Request rate at 15.19 requests/s will saturate one GPU.
 ```
 
@@ -111,8 +111,8 @@ For example, to dry run SLA planner for the previous FP8 8B on H200 using the ge
 
 ```bash
 python components/planner/test/planner_sla_dryrun.py \
-    --ttft 0.2 \
-    --itl 0.01 \
+    --ttft 200 \
+    --itl 10 \
     --adjustment-interval 60 \
     --profile-results-dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
     --dataset rr-5-45_i3000o300.jsonl \
@@ -160,20 +160,80 @@ PYTHONPATH=../../components/src python -m pytest test_replica_calculation.py -v
 **Note**: The unit tests automatically mock external dependencies (prometheus_client, runtime modules) to ensure they can run in isolation without requiring the full Dynamo environment.
 
 #### Run Full End-to-End Test
-Test complete scaling behavior including Kubernetes deployment and load generation:
+
+Test complete scaling behavior including Kubernetes deployment and load generation.
+
+**Prerequisites:**
+
+- **[kube-prometheus-stack](../../docs/kubernetes/observability/metrics.md) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
+- Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../docs/planner/sla_planner_quickstart.md#prerequisites) for details).
+
+**Prepare the test deployment manifest:**
+
+The test requires modifying `examples/backends/vllm/deploy/disagg_planner.yaml` with test-specific planner arguments:
+
+1. Copy the base deployment:
 
 ```bash
-./scaling/run_scaling_test.sh
+cp examples/backends/vllm/deploy/disagg_planner.yaml tests/planner/scaling/disagg_planner.yaml
 ```
 
-With custom namespace:
+2. Edit `tests/planner/scaling/disagg_planner.yaml`. Ensure all services use the correct image. Modify the Planner service args:
+
+```yaml
+spec:
+  services:
+    Planner:
+      extraPodSpec:
+        mainContainer:
+          args:
+            - --environment=kubernetes
+            - --backend=vllm
+            - --adjustment-interval=60
+            - --profile-results-dir=/workspace/tests/planner/profiling_results/H200_TP1P_TP1D
+            - --ttft=100
+            - --itl=10
+            - --load-predictor=constant
+            - --no-correction
+```
+
+Remove `volumes` and `volumeMounts`:
+
+```
+# Remove these lines or any similar lines
+          volumeMounts:
+            - name: planner-profile-data
+              mountPath: /workspace/profiling_results
+              readOnly: true
+        volumes:
+          - name: planner-profile-data
+            configMap:
+              # Must be pre-created before deployment by the profiler
+              # See docs/planner/sla_planner_quickstart.md for more details
+              name: planner-profile-data
+```
+
+3. Update the model in VllmPrefillWorker and VllmDecodeWorker services:
+
+```yaml
+args:
+  - -m
+  - dynamo.vllm
+  - --model
+  - nvidia/Llama-3.1-8B-Instruct-FP8
+  - --migration-limit=3
+  - --max-model-len=8192
+```
+
+**Run the test:**
+
 ```bash
 ./scaling/run_scaling_test.sh --namespace <namespace>
 ```
 
 To save results to `tests/planner/e2e_scaling_results` instead of `/tmp`:
 ```bash
-./scaling/run_scaling_test.sh --save-results
+./scaling/run_scaling_test.sh --namespace <namespace> --save-results
 ```
 
 **E2E Test Deployment Management:**
@@ -215,23 +275,23 @@ When running deployment with sla-planner, to reduce the image pulling time, depl
 kubectl apply -f ./perf_test_configs/image_cache_daemonset.yaml -n <namespace>
 ```
 
-Then, port-forward or shell into the frontend pod and run GenAI-Perf to get the goodput:
+Then, port-forward or shell into the frontend pod and run AIPerf to get the goodput:
 
 ```bash
-genai-perf profile \
+aiperf profile \
   --model nvidia/Llama-3.1-8B-Instruct-FP8 \
   --tokenizer nvidia/Llama-3.1-8B-Instruct-FP8 \
   --endpoint-type chat \
   --url localhost:8000 \ # or the port-forwarded port
   --streaming \
-  --input-file payload:/workspace/rr-5-45_i3000o300.jsonl \ # path to the generated load dataset \
-  --fixed-schedule True \
-  --goodput time_to_first_token:200 inter_token_latency:10 \
-  -- -v -max-threads 64 \
+  --input-file /workspace/rr-5-45_i3000o300.jsonl \ # path to the generated load dataset \
+  --custom-dataset-type mooncake_trace \
+  --goodput "time_to_first_token:200 inter_token_latency:10" \
+  -v
 ```
 
 > [!NOTE]
-> Sometimes, when sla planner scales down the number of workers, a few requests will error out and cause GenAI-Perf to stuck. We are aware of this issue and are working on fixing it.
+> Sometimes, when sla planner scales down the number of workers, a few requests will error out and cause AIPerf to stuck. We are aware of this issue and are working on fixing it.
 
 #### E2E Perf Test Results
 

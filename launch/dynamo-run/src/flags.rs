@@ -6,9 +6,7 @@ use std::path::PathBuf;
 
 use clap::ValueEnum;
 use dynamo_llm::entrypoint::RouterConfig;
-use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::kv_router::KvRouterConfig;
-use dynamo_llm::local_model::LocalModel;
 use dynamo_llm::mocker::protocols::MockEngineArgs;
 use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
 
@@ -21,7 +19,6 @@ pub struct Flags {
     /// The model. The options depend on the engine.
     ///
     /// The full list - only mistralrs supports all three currently:
-    /// - Full path to a GGUF file
     /// - Full path of a checked out Hugging Face repository containing safetensor files
     /// - Name of a Hugging Face repository, e.g 'google/flan-t5-small'. The model will be
     ///   downloaded and cached.
@@ -34,7 +31,7 @@ pub struct Flags {
 
     /// HTTP port. `in=http` only
     /// If tls_cert_path and tls_key_path are provided, this will be TLS/HTTPS.
-    #[arg(long, default_value = "8080")]
+    #[arg(long, default_value = "8000")]
     pub http_port: u16,
 
     /// TLS certificate file
@@ -52,15 +49,6 @@ pub struct Flags {
     /// Verbose output (-v for debug, -vv for trace)
     #[arg(short = 'v', action = clap::ArgAction::Count, default_value_t = 0)]
     pub verbosity: u8,
-
-    /// llamacpp only
-    ///
-    /// The path to the tokenizer and model config because:
-    /// - llama_cpp only runs GGUF files
-    /// - our engine is a 'core' engine in that we do the tokenization, so we need the vocab
-    /// - TODO: we don't yet extract that from the GGUF. Once we do we can remove this flag.
-    #[arg(long)]
-    pub model_config: Option<PathBuf>,
 
     /// If using `out=dyn` with multiple instances, this says how to route the requests.
     ///
@@ -81,8 +69,8 @@ pub struct Flags {
     pub router_temperature: Option<f64>,
 
     /// KV Router: Whether to use KV events to maintain the view of cached blocks
-    /// If false, would use ApproxKvRouter for predicting block creation / deletion
-    /// based only on incoming requests at a timer.
+    /// If false, the router predicts cache state based on routing decisions
+    /// with TTL-based expiration and pruning, rather than receiving events from workers.
     /// Default: true
     #[arg(long)]
     pub use_kv_events: Option<bool>,
@@ -132,14 +120,17 @@ pub struct Flags {
     #[arg(long, value_parser = clap::value_parser!(u32).range(0..1024))]
     pub migration_limit: Option<u32>,
 
-    /// Make this a static worker.
-    /// Do not connect to or advertise self on etcd.
-    /// in=dyn://x.y.z only
-    #[arg(long, default_value = "false")]
-    pub static_worker: bool,
+    /// Which key-value backend to use: etcd, mem, file.
+    /// Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details.
+    /// File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.
+    #[arg(long, default_value = "etcd", value_parser = ["etcd", "file", "mem"])]
+    pub store_kv: String,
 
-    /// Everything after a `--`.
-    /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
+    /// Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp].
+    #[arg(long, default_value = "nats", value_parser = ["nats", "http", "tcp"])]
+    pub request_plane: String,
+
+    /// Everything after a `--`. Not currently used.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]
     pub last: Vec<String>,
 }
@@ -147,21 +138,7 @@ pub struct Flags {
 impl Flags {
     /// For each Output variant, check if it would be able to run.
     /// This takes validation out of the main engine creation path.
-    pub fn validate(
-        &self,
-        local_model: &LocalModel,
-        in_opt: &Input,
-        out_opt: &Output,
-    ) -> anyhow::Result<()> {
-        match in_opt {
-            Input::Endpoint(_) => {}
-            _ => {
-                if self.static_worker {
-                    anyhow::bail!("'--static-worker true' only applies to in=dyn://x.y.z");
-                }
-            }
-        }
-
+    pub fn validate(&self, out_opt: &Output) -> anyhow::Result<()> {
         match out_opt {
             Output::Auto => {
                 if self.context_length.is_some() {
@@ -180,30 +157,9 @@ impl Flags {
                     );
                 }
             }
-            Output::Static(_) => {
-                if self.model_name.is_none()
-                    || self
-                        .model_path_pos
-                        .as_ref()
-                        .or(self.model_path_flag.as_ref())
-                        .is_none()
-                {
-                    anyhow::bail!(
-                        "out=dyn://<path> requires --model-name and --model-path, which are the name and path on disk of the model we expect to serve."
-                    );
-                }
-            }
             Output::Echo => {}
             #[cfg(feature = "mistralrs")]
             Output::MistralRs => {}
-            #[cfg(feature = "llamacpp")]
-            Output::LlamaCpp => {
-                if !local_model.path().is_file() {
-                    anyhow::bail!(
-                        "--model-path should refer to a GGUF file. llama_cpp does not support safetensors."
-                    );
-                }
-            }
             Output::Mocker => {
                 // nothing to check here
             }
@@ -231,6 +187,9 @@ impl Flags {
                 self.router_replica_sync,
                 self.router_track_active_blocks,
                 // defaulting below args (no longer maintaining new flags for dynamo-run)
+                None,
+                None,
+                None,
                 None,
                 None,
             ),

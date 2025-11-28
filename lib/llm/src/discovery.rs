@@ -7,5 +7,5 @@ pub use model_manager::{ModelManager, ModelManagerError};
 mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};
 
-/// The root etcd path for KV Router registrations
-pub const KV_ROUTERS_ROOT_PATH: &str = "v1/kv_routers";
+mod worker_monitor;
+pub use worker_monitor::{KvWorkerMonitor, WorkerLoadState};

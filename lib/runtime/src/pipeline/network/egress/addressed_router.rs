@@ -1,14 +1,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use async_nats::client::Client;
-use async_nats::{HeaderMap, HeaderValue};
-use tracing as log;
+use std::sync::Arc;
 
+use super::unified_client::RequestPlaneClient;
 use super::*;
-use crate::logging::DistributedTraceContext;
-use crate::logging::get_distributed_tracing_context;
-use crate::{Result, protocols::maybe_error::MaybeError};
+use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
+use crate::logging::inject_trace_headers_into_map;
+use crate::pipeline::network::ConnectionInfo;
+use crate::pipeline::network::NetworkStreamWrapper;
+use crate::pipeline::network::PendingConnections;
+use crate::pipeline::network::STREAM_ERR_MSG;
+use crate::pipeline::network::StreamOptions;
+use crate::pipeline::network::TwoPartCodec;
+use crate::pipeline::network::codec::TwoPartMessage;
+use crate::pipeline::network::tcp;
+use crate::pipeline::{ManyOut, PipelineError, ResponseStream, SingleIn};
+use crate::protocols::maybe_error::MaybeError;
+
+use anyhow::{Error, Result};
+use serde::Deserialize;
+use serde::Serialize;
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
@@ -44,32 +56,36 @@ impl<T> AddressedRequest<T> {
         Self { request, address }
     }
 
-    fn into_parts(self) -> (T, String) {
+    pub(crate) fn into_parts(self) -> (T, String) {
         (self.request, self.address)
     }
 }
 
 pub struct AddressedPushRouter {
-    // todo: generalize with a generic
-    req_transport: Client,
+    // Request transport (unified trait object - works with all transports)
+    req_client: Arc<dyn RequestPlaneClient>,
 
-    // todo: generalize with a generic
+    // Response transport (TCP streaming - unchanged)
     resp_transport: Arc<tcp::server::TcpStreamServer>,
 }
 
 impl AddressedPushRouter {
+    /// Create a new router with a request plane client
+    ///
+    /// This is the unified constructor that works with any transport type.
+    /// The client is provided as a trait object, hiding the specific implementation.
     pub fn new(
-        req_transport: Client,
+        req_client: Arc<dyn RequestPlaneClient>,
         resp_transport: Arc<tcp::server::TcpStreamServer>,
     ) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
-            req_transport,
+            req_client,
             resp_transport,
         }))
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl<T, U> AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>, Error> for AddressedPushRouter
 where
     T: Data + Serialize,
@@ -122,7 +138,7 @@ where
         let ctrl = serde_json::to_vec(&control_message)?;
         let data = serde_json::to_vec(&request)?;
 
-        log::trace!(
+        tracing::trace!(
             request_id,
             "packaging two-part message; ctrl: {} bytes, data: {} bytes",
             ctrl.len(),
@@ -139,34 +155,25 @@ where
 
         // TRANSPORT ABSTRACT REQUIRED - END HERE
 
-        log::trace!(request_id, "enqueueing two-part message to nats");
+        // Send request using unified client interface
+        tracing::trace!(
+            request_id,
+            transport = self.req_client.transport_name(),
+            address = %address,
+            "Sending request via request plane client"
+        );
 
-        // Insert Trace Context into Headers
-        // Enables span to be created in push_endpoint before
-        // payload is parsed
+        // Prepare trace headers using shared helper
+        let mut headers = std::collections::HashMap::new();
+        inject_trace_headers_into_map(&mut headers);
 
-        let mut headers = HeaderMap::new();
-        if let Some(trace_context) = get_distributed_tracing_context() {
-            headers.insert("traceparent", trace_context.create_traceparent());
-            if let Some(tracestate) = trace_context.tracestate {
-                headers.insert("tracestate", tracestate);
-            }
-            if let Some(x_request_id) = trace_context.x_request_id {
-                headers.insert("x-request-id", x_request_id);
-            }
-            if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
-                headers.insert("x-dynamo-request-id", x_dynamo_request_id);
-            }
-        }
-
-        // we might need to add a timeout on this if there is no subscriber to the subject; however, I think nats
-        // will handle this for us
+        // Send request (works for all transport types)
         let _response = self
-            .req_transport
-            .request_with_headers(address.to_string(), headers, buffer)
+            .req_client
+            .send_request(address, buffer, headers)
             .await?;
 
-        log::trace!(request_id, "awaiting transport handshake");
+        tracing::trace!(request_id, "awaiting transport handshake");
         let response_stream = response_stream_provider
             .await
             .map_err(|_| PipelineError::DetachedStreamReceiver)?
@@ -204,7 +211,7 @@ where
                     Err(err) => {
                         // legacy log print
                         let json_str = String::from_utf8_lossy(&res_bytes);
-                        log::warn!(%err, %json_str, "Failed deserializing JSON to response");
+                        tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
 
                         Some(U::from_err(Error::new(err).into()))
                     }
@@ -216,11 +223,11 @@ where
                 // Gracefully end the stream if 'stop_generating()' was called. Do NOT check for
                 // 'is_killed()' here because it implies the stream ended abnormally which should be
                 // handled by the error branch below.
-                log::debug!("Request cancelled and then trying to read a response");
+                tracing::debug!("Request cancelled and then trying to read a response");
                 None
             } else {
                 // stream ended unexpectedly
-                log::debug!("{STREAM_ERR_MSG}");
+                tracing::debug!("{STREAM_ERR_MSG}");
                 Some(U::from_err(Error::msg(STREAM_ERR_MSG).into()))
             }
         });

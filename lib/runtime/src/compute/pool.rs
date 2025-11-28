@@ -367,7 +367,7 @@ impl ComputePoolExt for ComputePool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
 
     #[tokio::test]
     async fn test_compute_pool_execute() {

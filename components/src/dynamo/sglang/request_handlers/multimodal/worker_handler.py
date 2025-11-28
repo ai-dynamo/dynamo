@@ -10,7 +10,7 @@ import sglang as sgl
 import torch
 
 import dynamo.nixl_connect as connect
-from dynamo._core import Client, Component
+from dynamo._core import Client, Component, Context
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
@@ -275,10 +275,16 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
                 request = SglangMultimodalRequest.model_validate(request)
         return request
 
-    async def generate(self, request: SglangMultimodalRequest) -> AsyncIterator[str]:
+    async def generate(
+        self, request: SglangMultimodalRequest, context: Context
+    ) -> AsyncIterator[str]:
         """
         Generate response using SGLang with multimodal data
         Handles both aggregated and disaggregated modes (following regular SGLang DecodeWorkerHandler pattern)
+
+        Args:
+            request: Multimodal request with input and parameters.
+            context: Context object for cancellation handling.
         """
         try:
             request = self._validate_and_parse_request(request)
@@ -429,10 +435,14 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
         await self.embeddings_processor.initialize()
 
     async def generate(
-        self, disagg_request: DisaggSglangMultimodalRequest
+        self, disagg_request: DisaggSglangMultimodalRequest, context: Context
     ) -> AsyncIterator[str]:
         """
         Handle prefill phase: process multimodal input and provide bootstrap info
+
+        Args:
+            disagg_request: Disaggregated multimodal request.
+            context: Context object for cancellation handling.
         """
         bootstrap_room = None
         try:

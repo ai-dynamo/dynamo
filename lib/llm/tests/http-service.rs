@@ -277,6 +277,9 @@ async fn test_http_service() {
     let cancel_token = token.clone();
     let task = tokio::spawn(async move { service.run(token.clone()).await });
 
+    // Wait for the service to be ready before proceeding
+    wait_for_service_ready(port).await;
+
     let registry = Registry::new();
 
     // TODO: Shouldn't this test know the card before it registers a model?
@@ -384,26 +387,22 @@ async fn test_http_service() {
     let buckets = histogram.get_bucket();
 
     let mut found = false;
-
-    for bucket in buckets {
-        let upper_bound = bucket.get_upper_bound();
-        let cumulative_count = bucket.get_cumulative_count();
-
-        println!(
-            "Bucket upper bound: {}, count: {}",
-            upper_bound, cumulative_count
-        );
-
-        // Since our observation is 2.5, it should fall into the bucket with upper bound 4.0
-        if upper_bound >= 4.0 {
-            assert_eq!(
-                cumulative_count, 1,
-                "Observation should be counted in the 4.0 bucket"
-            );
+    let mut expected_count = 0;
+    for bucket_idx in 1..buckets.len() {
+        if buckets[bucket_idx].get_upper_bound() >= 2.5
+            && buckets[bucket_idx - 1].get_upper_bound() < 2.5
+        {
             found = true;
+            assert_eq!(
+                buckets[bucket_idx].get_cumulative_count(),
+                1,
+                "Observation should be counted in the bucket containing 2.5"
+            );
+            expected_count = 1;
         } else {
             assert_eq!(
-                cumulative_count, 0,
+                buckets[bucket_idx].get_cumulative_count(),
+                expected_count,
                 "No observations should be in this bucket"
             );
         }
@@ -774,6 +773,7 @@ async fn test_nv_custom_client() {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        unsupported_fields: Default::default(),
     };
 
     let result = nv_custom_client.chat_stream(request).await;
@@ -814,6 +814,7 @@ async fn test_nv_custom_client() {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        unsupported_fields: Default::default(),
     };
 
     let result = nv_custom_client.chat_stream(request).await;
@@ -855,6 +856,7 @@ async fn test_nv_custom_client() {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        unsupported_fields: Default::default(),
     };
 
     let result = nv_custom_client

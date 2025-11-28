@@ -76,6 +76,8 @@ use std::{
 
 use cudarc::driver::{CudaContext, sys};
 
+use crate::block_manager::numa_allocator;
+
 /// Trait for [Storage] types that can be accessed by CUDA
 pub trait CudaAccessible: Storage {}
 
@@ -176,10 +178,27 @@ impl PinnedStorage {
         unsafe {
             ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
-            let ptr = cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
-                .map_err(StorageError::Cuda)?;
+            // Try NUMA-aware allocation if enabled, otherwise use direct allocation
+            let ptr = if numa_allocator::is_numa_enabled() {
+                let device_id = ctx.cu_device() as u32;
+                match numa_allocator::worker_pool::NumaWorkerPool::global()
+                    .allocate_pinned_for_gpu(size, device_id)
+                {
+                    Ok(ptr) => ptr,
+                    Err(e) => {
+                        tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
+                        cudarc::driver::result::malloc_host(
+                            size,
+                            sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+                        )
+                        .map_err(StorageError::Cuda)? as *mut u8
+                    }
+                }
+            } else {
+                cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
+                    .map_err(StorageError::Cuda)? as *mut u8
+            };
 
-            let ptr = ptr as *mut u8;
             assert!(!ptr.is_null(), "Failed to allocate pinned memory");
             assert!(ptr.is_aligned(), "Pinned memory is not aligned");
             assert!(size < isize::MAX as usize);
@@ -296,8 +315,8 @@ impl StorageAllocator<PinnedStorage> for PinnedAllocator {
 /// When building a [`DeviceStorage`] from a torch tensor, we need to ensure that
 /// the torch tensor is not GCed until the [`DeviceStorage`] is dropped.
 /// Because of this, we need to store a reference to the torch tensor in the [`DeviceStorage`]
-#[derive(Debug)]
-enum DeviceStorageType {
+#[derive(Clone, Debug)]
+pub enum DeviceStorageType {
     Owned,                                   // Memory that we allocated ourselves.
     Torch { _tensor: Arc<dyn TorchTensor> }, // Memory that came from a torch tensor.
 }
@@ -309,7 +328,7 @@ pub struct DeviceStorage {
     size: usize,
     ctx: Arc<CudaContext>,
     handles: RegistrationHandles,
-    _storage_type: DeviceStorageType,
+    storage_type: DeviceStorageType,
 }
 
 impl Local for DeviceStorage {}
@@ -326,7 +345,7 @@ impl DeviceStorage {
             size,
             ctx: ctx.clone(),
             handles: RegistrationHandles::new(),
-            _storage_type: DeviceStorageType::Owned,
+            storage_type: DeviceStorageType::Owned,
         })
     }
 
@@ -354,13 +373,17 @@ impl DeviceStorage {
             size,
             ctx: ctx.clone(),
             handles: RegistrationHandles::new(),
-            _storage_type: DeviceStorageType::Torch { _tensor: tensor },
+            storage_type: DeviceStorageType::Torch { _tensor: tensor },
         })
     }
 
     /// Get the CUDA context
     pub fn context(&self) -> &Arc<CudaContext> {
         &self.ctx
+    }
+
+    pub fn device_storage_type(&self) -> &DeviceStorageType {
+        &self.storage_type
     }
 }
 
@@ -395,7 +418,7 @@ impl CudaContextProivder for DeviceStorage {
 impl Drop for DeviceStorage {
     fn drop(&mut self) {
         self.handles.release();
-        match &self._storage_type {
+        match &self.storage_type {
             DeviceStorageType::Owned => {
                 unsafe { cudarc::driver::result::free_sync(self.ptr as _) }.unwrap()
             }

@@ -17,8 +17,10 @@ import argparse
 import json
 import logging
 import math
+import random
 
 import numpy as np
+from prefix_data_generator.hasher import RollingHasher
 from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO)
@@ -38,7 +40,8 @@ def main(args):
         else:
             return (args.isl2, args.osl2)
 
-    total_hash_ids = np.arange(args.total_blocks)
+    rolling_hasher = RollingHasher()
+
     for t in tqdm(range(0, args.time_duration, args.process_interval)):
         t_e = min(t + args.process_interval, args.time_duration)
         request_rate = (args.request_rate_min + args.request_rate_max) / 2 + (
@@ -49,14 +52,17 @@ def main(args):
         for req_idx in range(num_requests):
             t_req = t + (t_e - t) * req_idx / num_requests
             isl, osl = get_isl_osl(t_req)
+            hash_ids = [
+                (random.randrange(args.total_blocks),)
+                for _ in range(math.ceil(isl / args.block_size))
+            ]
+            rolling_hash_ids = rolling_hasher(hash_ids)
             output_data.append(
                 {
                     "timestamp": int(t_req * 1000),  # in ms, integer
                     "input_length": isl,
                     "output_length": osl,
-                    "hash_ids": np.random.choice(
-                        total_hash_ids, size=math.ceil(isl / args.block_size)
-                    ).tolist(),
+                    "hash_ids": rolling_hash_ids,
                 }
             )
 

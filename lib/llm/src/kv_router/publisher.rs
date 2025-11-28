@@ -1,38 +1,34 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::kv_router::{
-    KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT, KV_METRICS_SUBJECT,
-    indexer::{RouterEvent, compute_block_hash_for_seq},
-    protocols::*,
-    scoring::LoadEvent,
-};
-use async_trait::async_trait;
-use dynamo_runtime::metrics::{MetricsRegistry, prometheus_names::kvstats};
-use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
-use dynamo_runtime::{
-    Error, Result,
-    component::{Component, Namespace},
-    pipeline::{
-        AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
-        network::Ingress,
-    },
-    protocols::annotated::Annotated,
-    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
-};
-use futures::stream;
+use std::fmt;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use std::time::Duration;
 
+use anyhow::Result;
 use rmp_serde as rmps;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use std::fmt;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
+
+use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
+use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
+use dynamo_runtime::{
+    component::{Component, Namespace},
+    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
+};
+
+use crate::kv_router::{
+    KV_EVENT_SUBJECT, KV_METRICS_SUBJECT,
+    indexer::{RouterEvent, compute_block_hash_for_seq},
+    protocols::*,
+    scoring::LoadEvent,
+};
+use dynamo_runtime::config::environment_names::nats as env_nats;
 
 // -------------------------------------------------------------------------
 // KV Event Publishers -----------------------------------------------------
@@ -104,13 +100,15 @@ pub struct KvEventPublisher {
 impl KvEventPublisher {
     pub fn new(
         component: Component,
-        worker_id: i64,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
 
         let (tx, rx) = mpsc::unbounded_channel::<KvCacheEvent>();
+
+        // Infer worker_id from component's connection
+        let worker_id = component.drt().connection_id();
 
         // Create our event source (if any)
         let mut source = None;
@@ -127,8 +125,8 @@ impl KvEventPublisher {
         let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
             .to_string()
             .replace("_", "-");
-        let nats_server =
-            std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+        let nats_server = std::env::var(env_nats::NATS_SERVER)
+            .unwrap_or_else(|_| "nats://localhost:4222".to_string());
         // Create NatsQueue without consumer since we're only publishing
         let mut nats_queue = NatsQueue::new_without_consumer(
             stream_name,
@@ -181,7 +179,7 @@ impl Drop for KvEventPublisher {
 
 async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
     publisher: P,
-    worker_id: i64,
+    worker_id: u64,
     cancellation_token: CancellationToken,
     mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
 ) {
@@ -326,13 +324,16 @@ pub async fn start_zmq_listener(
                 };
 
                 tracing::trace!(
-                    "ZMQ listener on {} received batch with {} events (seq={})",
+                    "ZMQ listener on {} received batch with {} events (seq={}, dp_rank={})",
                     zmq_endpoint,
                     batch.events.len(),
-                    seq
+                    seq,
+                    batch.data_parallel_rank
                 );
+
+                let dp_rank = batch.data_parallel_rank;
                 for raw_event in batch.events.into_iter() {
-                    let event = convert_event(raw_event, seq, kv_block_size, &warning_count);
+                    let event = convert_event(raw_event, seq, kv_block_size, dp_rank, &warning_count);
                     if tx.send(event).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         exit_reason = "channel receiver dropped";
@@ -356,6 +357,7 @@ fn convert_event(
     raw: RawKvEvent,
     event_id: u64,
     kv_block_size: u32,
+    dp_rank: u32,
     warning_count: &Arc<AtomicU32>,
 ) -> KvCacheEvent {
     match raw {
@@ -387,6 +389,7 @@ fn convert_event(
                         warning_count,
                     ),
                 }),
+                dp_rank,
             }
         }
         RawKvEvent::BlockRemoved { block_hashes, .. } => {
@@ -400,11 +403,13 @@ fn convert_event(
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
                     block_hashes: hashes,
                 }),
+                dp_rank,
             }
         }
         RawKvEvent::AllBlocksCleared => KvCacheEvent {
             event_id,
             data: KvCacheEventData::Cleared,
+            dp_rank,
         },
     }
 }
@@ -700,25 +705,25 @@ struct KvStatsPrometheusGauges {
 impl KvStatsPrometheusGauges {
     /// Create a new KvStatsPrometheusGauges instance with all metrics registered
     fn new(component: &Component) -> Result<Self> {
-        let kv_active_blocks_gauge = component.create_gauge(
+        let kv_active_blocks_gauge = component.metrics().create_gauge(
             kvstats::ACTIVE_BLOCKS,
             "Number of active KV cache blocks currently in use",
             &[],
         )?;
 
-        let kv_total_blocks_gauge = component.create_gauge(
+        let kv_total_blocks_gauge = component.metrics().create_gauge(
             kvstats::TOTAL_BLOCKS,
             "Total number of KV cache blocks available",
             &[],
         )?;
 
-        let gpu_cache_usage_gauge = component.create_gauge(
+        let gpu_cache_usage_gauge = component.metrics().create_gauge(
             kvstats::GPU_CACHE_USAGE_PERCENT,
             "GPU cache usage as a percentage (0.0-1.0)",
             &[],
         )?;
 
-        let gpu_prefix_cache_hit_rate_gauge = component.create_gauge(
+        let gpu_prefix_cache_hit_rate_gauge = component.metrics().create_gauge(
             kvstats::GPU_PREFIX_CACHE_HIT_RATE,
             "GPU prefix cache hit rate as a percentage (0.0-1.0)",
             &[],
@@ -783,51 +788,17 @@ impl WorkerMetricsPublisher {
         Ok(())
     }
 
-    pub async fn create_endpoint(
-        &self,
-        component: Component,
-        metrics_labels: Option<&[(&str, &str)]>,
-    ) -> Result<()> {
-        let mut metrics_rx = self.rx.clone();
-        let handler = Arc::new(KvLoadEndpointHandler::new(metrics_rx.clone()));
-        let handler = Ingress::for_engine(handler)?;
-
-        let worker_id = component
-            .drt()
-            .primary_lease()
-            .map(|lease| lease.id())
-            .unwrap_or_else(|| {
-                tracing::warn!("Component is static, assuming worker_id of 0");
-                0
-            });
-
+    pub async fn create_endpoint(&self, component: Component) -> Result<()> {
+        let worker_id = component.drt().connection_id();
         self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
-
-        let metrics_labels = metrics_labels.map(|v| {
-            v.iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<Vec<_>>()
-        });
-
-        component
-            .endpoint(KV_METRICS_ENDPOINT)
-            .endpoint_builder()
-            .stats_handler(move |_| {
-                let metrics = metrics_rx.borrow_and_update().clone();
-                serde_json::to_value(&*metrics).unwrap()
-            })
-            .metrics_labels(metrics_labels)
-            .handler(handler)
-            .start()
-            .await
+        Ok(())
     }
 
     /// Starts a background task to publish metrics over NATS
     ///
     /// This task monitors metric changes (specifically kv_active_blocks and num_requests_waiting)
     /// and publishes stable metrics to NATS after they've been unchanged for 1ms.
-    #[allow(dead_code)]
-    fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: i64) {
+    fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: u64) {
         let nats_rx = self.rx.clone();
 
         tokio::spawn(async move {
@@ -893,36 +864,16 @@ impl WorkerMetricsPublisher {
                                 tracing::warn!("Failed to publish metrics over NATS: {}", e);
                             }
                         }
+
+                        // Reset timer to pending state to avoid tight loop
+                        // It will be reset to 1ms when metrics actually change
+                        publish_timer.as_mut().reset(
+                            tokio::time::Instant::now() + tokio::time::Duration::from_secs(3600)
+                        );
                     }
                 }
             }
         });
-    }
-}
-
-struct KvLoadEndpointHandler {
-    metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
-}
-
-impl KvLoadEndpointHandler {
-    pub fn new(metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>) -> Self {
-        Self { metrics_rx }
-    }
-}
-
-#[async_trait]
-impl AsyncEngine<SingleIn<()>, ManyOut<Annotated<ForwardPassMetrics>>, Error>
-    for KvLoadEndpointHandler
-{
-    async fn generate(
-        &self,
-        request: SingleIn<()>,
-    ) -> Result<ManyOut<Annotated<ForwardPassMetrics>>> {
-        let context = request.context();
-        let metrics = self.metrics_rx.borrow().clone();
-        let metrics = (*metrics).clone();
-        let stream = stream::iter(vec![Annotated::from_data(metrics)]);
-        Ok(ResponseStream::new(Box::pin(stream), context))
     }
 }
 
@@ -1014,7 +965,7 @@ mod test_event_processing {
             medium: None,
         };
 
-        let out = convert_event(raw_evt, 42, kv_block_size, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(raw_evt, 42, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
         assert!(matches!(out.data, KvCacheEventData::Stored(_)));
     }
 
@@ -1025,7 +976,7 @@ mod test_event_processing {
             block_hashes: vec![BlockHashValue::Unsigned(123), BlockHashValue::Signed(456)],
             medium: None,
         };
-        let out = convert_event(raw_evt, 7, kv_block_size, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(raw_evt, 7, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
 
         assert!(matches!(out.data, KvCacheEventData::Removed(_)));
     }
@@ -1034,7 +985,7 @@ mod test_event_processing {
     fn test_convert_event_all_blocks_cleared() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::AllBlocksCleared;
-        let out = convert_event(raw_evt, 1, kv_block_size, &Arc::new(AtomicU32::new(0)));
+        let out = convert_event(raw_evt, 1, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
         assert!(matches!(out.data, KvCacheEventData::Cleared));
     }
 }
@@ -1077,7 +1028,7 @@ mod tests_startup_helpers {
             &self,
             event_name: impl AsRef<str> + Send + Sync,
             event: &(impl serde::Serialize + Send + Sync),
-        ) -> dynamo_runtime::Result<()> {
+        ) -> anyhow::Result<()> {
             let bytes = rmp_serde::to_vec(event).unwrap();
             self.published
                 .lock()
@@ -1090,7 +1041,7 @@ mod tests_startup_helpers {
             &self,
             event_name: impl AsRef<str> + Send + Sync,
             bytes: Vec<u8>,
-        ) -> dynamo_runtime::Result<()> {
+        ) -> anyhow::Result<()> {
             self.published
                 .lock()
                 .unwrap()
@@ -1115,6 +1066,7 @@ mod tests_startup_helpers {
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: vec![ExternalSequenceBlockHash(1), ExternalSequenceBlockHash(2)],
             }),
+            dp_rank: 0,
         };
 
         let token = CancellationToken::new();
@@ -1384,7 +1336,6 @@ mod test_integration_publisher {
     #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
     async fn test_kvstats_prometheus_gauge_updates() {
         use crate::kv_router::publisher::kvstats;
-        use dynamo_runtime::metrics::MetricsRegistry;
 
         // Test that publish() updates Prometheus gauges correctly using real Component
         let publisher = WorkerMetricsPublisher::new().unwrap();
@@ -1438,8 +1389,8 @@ mod test_integration_publisher {
         assert_eq!(hit_rate_gauge.get(), 0.75);
 
         // Test 4: Verify metrics are properly registered in the component's registry
-        // Component implements MetricsRegistry trait which provides prometheus_metrics_fmt()
-        let prometheus_output = component.prometheus_metrics_fmt().unwrap();
+        // Component implements MetricsRegistry trait which provides prometheus_expfmt()
+        let prometheus_output = component.metrics().prometheus_expfmt().unwrap();
 
         // Verify metric names are present
         assert!(prometheus_output.contains(kvstats::ACTIVE_BLOCKS));

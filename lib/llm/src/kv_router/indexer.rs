@@ -35,13 +35,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use dynamo_runtime::{
     component::Component,
-    metrics::{MetricsRegistry, prometheus_names::kvrouter},
+    metrics::{MetricsHierarchy, prometheus_names::kvrouter},
 };
 use prometheus::{IntCounterVec, Opts};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     iter,
     rc::Rc,
     sync::{Arc, OnceLock},
@@ -54,8 +54,9 @@ use xxhash_rust::xxh3;
 
 pub const XXH3_SEED: u64 = 1337;
 
+use crate::kv_router::approx::{BlockEntry, PruneConfig, PruneManager};
 use crate::kv_router::protocols::*;
-use crate::tokens::SequenceHash;
+use crate::tokens::{SequenceHash, TokenBlockSequence};
 
 /// Errors that can occur in the KV Router.
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +69,9 @@ pub enum KvRouterError {
 
     #[error("Indexer is dropped request")]
     IndexerDroppedRequest,
+
+    #[error("Prune operation failed: {0}")]
+    PruneFailed(String),
 }
 
 /// Errors that can occur during KV Cache Event processing.
@@ -78,10 +82,10 @@ pub enum KvCacheEventError {
 
     #[error("Failed to find block")]
     BlockNotFound,
-}
 
-/// Identifier of a LLM worker which emits events to the router.
-pub type WorkerId = i64;
+    #[error("Invalid block sequence")]
+    InvalidBlockSequence,
+}
 
 /// A shared reference to a [`RadixBlock`].
 type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
@@ -171,7 +175,7 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
 }
 
 /// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RouterEvent {
     /// The ID of the worker emitting the event.
     worker_id: WorkerId,
@@ -200,8 +204,9 @@ impl RouterEvent {
 struct RadixBlock {
     /// A map of child blocks, keyed by their local block hash.
     children: HashMap<LocalBlockHash, SharedRadixBlock>,
-    /// A set of worker IDs associated with this block.
-    workers: HashSet<WorkerId>,
+    /// A map of workers (with dp_rank) to their external sequence block hash for this block.
+    /// The external hash is preserved to speed up snapshotting.
+    workers: HashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
     /// A buffer of times that this block was last traversed
     recent_uses: VecDeque<Instant>,
 }
@@ -215,7 +220,7 @@ impl RadixBlock {
     pub fn new() -> Self {
         Self {
             children: HashMap::new(),
-            workers: HashSet::new(),
+            workers: HashMap::new(),
             recent_uses: VecDeque::new(),
         }
     }
@@ -234,7 +239,7 @@ pub struct RadixTree {
     /// Transitioning to a radix tree only would require a change in the messaging structure
     /// as the entire prefix would need to be sent. Alternatively, we could use block_depth
     /// integers to indicate how many blocks to skip and use a radix/prefix tree at each level.
-    lookup: HashMap<WorkerId, HashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
+    lookup: HashMap<WorkerWithDpRank, HashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
     /// The time buffer the radix tree should check when considering frequence of block accesses
     expiration_duration: Option<Duration>,
 }
@@ -289,7 +294,7 @@ impl RadixTree {
                 current_borrow.children.get(block_hash).cloned()
             };
             if let Some(block) = next_block {
-                scores.update_scores(&block.borrow().workers);
+                scores.update_scores(block.borrow().workers.keys());
 
                 if let Some(expiration_duration) = self.expiration_duration {
                     let mut block_mut = block.borrow_mut();
@@ -322,6 +327,16 @@ impl RadixTree {
 
         tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
 
+        // Populate tree sizes for all workers that have scores
+        for worker in scores.scores.keys() {
+            let tree_size = self
+                .lookup
+                .get(worker)
+                .expect("worker in scores must exist in lookup table")
+                .len();
+            scores.tree_sizes.insert(*worker, tree_size);
+        }
+
         scores
     }
 
@@ -331,11 +346,15 @@ impl RadixTree {
     ///
     /// * `event` - The `RouterEvent` to apply.
     pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
-        let (worker_id, event) = (event.worker_id, event.event);
-        let (id, op) = (event.event_id, event.data);
+        let (worker_id, kv_event) = (event.worker_id, event.event);
+        let (id, op) = (kv_event.event_id, kv_event.data);
+
+        // Construct WorkerWithDpRank from worker_id and dp_rank from the event
+        let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
+
         tracing::trace!(id, "RadixTree::apply_event: Store operation: {:?}", op);
 
-        let worker_lookup = self.lookup.entry(worker_id).or_default();
+        let worker_lookup = self.lookup.entry(worker).or_default();
 
         match op {
             KvCacheEventData::Stored(op) => {
@@ -343,55 +362,85 @@ impl RadixTree {
                 // we check the radix tree's root to find it.
                 // this is the single most expensive lookup
                 let current = match op.parent_hash {
-                    Some(parent) => worker_lookup.get(&parent),
-                    None => Some(&self.root),
+                    Some(parent) => match worker_lookup.get(&parent) {
+                        Some(current) => current.clone(),
+                        None => {
+                            tracing::warn!(
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
+                                id,
+                                parent_hash = ?op.parent_hash,
+                                num_blocks = op.blocks.len(),
+                                "Failed to find parent block; skipping store operation"
+                            );
+                            return Err(KvCacheEventError::ParentBlockNotFound);
+                        }
+                    },
+                    None => self.root.clone(),
                 };
 
-                let mut current = match current {
-                    Some(current) => current.clone(),
-                    None => {
-                        tracing::warn!(
-                            worker_id = worker_id.to_string(),
-                            id,
-                            parent_hash = ?op.parent_hash,
-                            "Failed to find parent block; skipping store operation"
-                        );
-                        return Err(KvCacheEventError::ParentBlockNotFound);
+                fn process_blocks(
+                    parent: SharedRadixBlock,
+                    blocks: &[KvCacheStoredBlockData],
+                    worker: WorkerWithDpRank,
+                    worker_lookup: &mut HashMap<ExternalSequenceBlockHash, SharedRadixBlock>,
+                    id: u64,
+                ) -> Result<(), KvCacheEventError> {
+                    if blocks.is_empty() {
+                        return Ok(());
                     }
-                };
 
-                for block_id in op.blocks {
-                    let mut inner = current.borrow_mut();
-                    let block = match inner.children.get(&block_id.tokens_hash) {
+                    let mut parent_mut = parent.borrow_mut();
+                    let block_data = &blocks[0];
+
+                    let child = match parent_mut.children.get(&block_data.tokens_hash) {
                         Some(block) => block.clone(),
                         None => {
                             // create new block - automatically added to the lookup table
                             let new_block = worker_lookup
-                                .get(&block_id.block_hash)
+                                .get(&block_data.block_hash)
                                 .cloned()
                                 .unwrap_or_else(|| Rc::new(RefCell::new(RadixBlock::new())));
 
                             // insert into radix tree
-                            inner
+                            parent_mut
                                 .children
-                                .insert(block_id.tokens_hash, new_block.clone());
+                                .insert(block_data.tokens_hash, new_block.clone());
 
                             new_block
                         }
                     };
 
-                    // add our worker_id to the block
-                    block.borrow_mut().workers.insert(worker_id);
+                    // Update child and check for cycles
+                    {
+                        // Try to borrow the child mutably - if it fails, it's already borrowed
+                        // in the ancestor chain (parent_mut is alive + all ancestors in recursive stack)
+                        let mut child_mut = match child.try_borrow_mut() {
+                            Ok(b) => b,
+                            Err(_) => {
+                                tracing::warn!(
+                                    worker_id = worker.worker_id.to_string(),
+                                    dp_rank = worker.dp_rank,
+                                    id,
+                                    block_hash = ?block_data.block_hash,
+                                    "Detected cycle in store event (block already in parent chain); rejecting sequence"
+                                );
+                                return Err(KvCacheEventError::InvalidBlockSequence);
+                            }
+                        };
+
+                        // add our worker to the block with its external hash
+                        child_mut.workers.insert(worker, block_data.block_hash);
+                    }
 
                     // add the block to the worker_id lookup table
-                    worker_lookup.insert(block_id.block_hash, block.clone());
+                    worker_lookup.insert(block_data.block_hash, child.clone());
 
-                    // drop inner so we can shift current to this block
-                    drop(inner);
-
-                    current = block;
+                    // Recurse with the child and remaining blocks
+                    process_blocks(child, &blocks[1..], worker, worker_lookup, id)
                 }
-                Ok(())
+
+                process_blocks(current, &op.blocks, worker, worker_lookup, id)
             }
             KvCacheEventData::Removed(remove) => {
                 // tracing::trace!(id, "KV Remove Operation: {:?}", op);
@@ -406,8 +455,10 @@ impl RadixTree {
                         Some(entry) => entry.clone(),
                         None => {
                             tracing::warn!(
-                                worker_id = worker_id.to_string(),
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
                                 id,
+                                block_hash = ?block,
                                 "Failed to find block to remove; skipping remove operation"
                             );
                             return Err(KvCacheEventError::BlockNotFound);
@@ -415,9 +466,9 @@ impl RadixTree {
                     };
 
                     let mut guard = entry.borrow_mut();
-                    guard.workers.remove(&worker_id);
+                    guard.workers.remove(&worker);
                     if guard.workers.is_empty() {
-                        // if no worker are using this block, that is true for all children
+                        // if no workers are using this block, that is true for all children
                         guard.children.clear();
                     }
                     // remove the block from the lookup table
@@ -426,110 +477,134 @@ impl RadixTree {
                 Ok(())
             }
             KvCacheEventData::Cleared => {
-                self.clear_all_blocks(worker_id);
+                self.clear_all_blocks(worker.worker_id);
                 Ok(())
             }
         }
     }
 
-    pub fn remove_worker(&mut self, worker: WorkerId) {
-        if let Some((_, blocks)) = self.lookup.remove_entry(&worker) {
-            blocks.iter().for_each(|(_, block)| {
-                block.borrow_mut().workers.remove(&worker);
-            });
+    /// Helper function to remove or clear blocks for a worker.
+    /// If `keep_worker` is true, the worker remains in lookup with empty blocks.
+    /// If `keep_worker` is false, the worker is completely removed from lookup.
+    fn remove_or_clear_worker_blocks(&mut self, worker_id: WorkerId, keep_worker: bool) {
+        // Collect all WorkerWithDpRank keys that match this worker_id
+        let workers: Vec<WorkerWithDpRank> = self
+            .lookup
+            .keys()
+            .filter(|w| w.worker_id == worker_id)
+            .copied()
+            .collect();
+
+        for worker in workers {
+            if let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) {
+                blocks.iter().for_each(|(_, block)| {
+                    block.borrow_mut().workers.remove(&worker);
+                    // If no workers are using this block, that is true for all children
+                    if block.borrow().workers.is_empty() {
+                        block.borrow_mut().children.clear();
+                    }
+                });
+
+                if keep_worker {
+                    // Re-insert worker with empty blocks map to keep it tracked
+                    self.lookup.insert(worker_key, HashMap::new());
+                }
+            }
         }
     }
 
-    pub fn clear_all_blocks(&mut self, worker: WorkerId) {
-        // Check if the worker has any blocks to clear
-        if let Some(blocks) = self.lookup.get(&worker) {
-            let blocks_to_clear: Vec<_> = blocks.values().collect();
+    pub fn remove_worker(&mut self, worker_id: WorkerId) {
+        self.remove_or_clear_worker_blocks(worker_id, false);
+    }
 
-            // Remove the worker from each block's workers set
-            blocks_to_clear.iter().for_each(|block| {
-                block.borrow_mut().workers.remove(&worker);
-            });
+    pub fn clear_all_blocks(&mut self, worker_id: WorkerId) {
+        self.remove_or_clear_worker_blocks(worker_id, true);
+    }
 
-            // Clear the worker's blocks
-            if let Some(worker_blocks) = self.lookup.get_mut(&worker) {
-                worker_blocks.clear();
-            }
-        }
+    /// Get all worker IDs currently tracked in the radix tree.
+    /// Returns unique worker_ids (ignoring dp_rank differences).
+    pub fn get_workers(&self) -> Vec<WorkerId> {
+        let mut worker_ids: Vec<WorkerId> = self.lookup.keys().map(|w| w.worker_id).collect();
+        worker_ids.sort_unstable();
+        worker_ids.dedup();
+        worker_ids
     }
 
     /// Dump the radix tree as a series of RouterEvents that can reconstruct the tree.
     /// Uses BFS traversal to ensure that the tree reconstruction is unique,
     /// though the exact event ordering will be lost.
     pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
+        tracing::debug!(
+            "Dumping radix tree as events (contains information about {:?} workers)",
+            self.lookup.len()
+        );
+
         let mut events = Vec::new();
         let mut event_id = 0u64;
 
-        // BFS queue: (current_block, parent_external_hash, tokens_hash)
-        let mut queue = VecDeque::new();
+        // BFS queue: (current_block, parent_hashes_per_worker, tokens_hash)
+        // parent_hashes_per_worker maps WorkerWithDpRank -> ExternalSequenceBlockHash
+        let mut queue: VecDeque<(
+            SharedRadixBlock,
+            HashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
+            LocalBlockHash,
+        )> = VecDeque::new();
 
         // Process root's children first
         let root_borrow = self.root.borrow();
         for (tokens_hash, child_block) in &root_borrow.children {
-            queue.push_back((child_block.clone(), None, *tokens_hash));
+            queue.push_back((child_block.clone(), HashMap::new(), *tokens_hash));
         }
         drop(root_borrow);
 
-        while let Some((current_block, parent_external_hash, tokens_hash)) = queue.pop_front() {
+        while let Some((current_block, parent_hashes, tokens_hash)) = queue.pop_front() {
             let current_borrow = current_block.borrow();
 
-            // Closure to find external hash for a block in a worker's lookup
-            let find_external_hash = |worker_id: &WorkerId| {
-                self.lookup.get(worker_id).and_then(|worker_blocks| {
-                    worker_blocks
-                        .iter()
-                        .find(|(_, block)| Rc::ptr_eq(block, &current_block))
-                        .map(|(hash, _)| *hash)
-                })
-            };
+            // Map of this block's external hashes per worker (for children to use as parent)
+            let mut current_external_hashes = HashMap::new();
 
             // For each worker that has this block
-            for worker_id in &current_borrow.workers {
-                // Find the external hash for this block from the worker's lookup
-                let external_hash = find_external_hash(worker_id);
+            for (worker_id, external_hash) in &current_borrow.workers {
+                // Get the correct parent hash for this worker
+                let parent_hash = parent_hashes.get(worker_id).copied();
 
-                if let Some(block_hash) = external_hash {
-                    // Create a store event for this worker
-                    let event = RouterEvent {
-                        worker_id: *worker_id,
-                        event: KvCacheEvent {
-                            event_id,
-                            data: KvCacheEventData::Stored(KvCacheStoreData {
-                                parent_hash: parent_external_hash,
-                                blocks: vec![KvCacheStoredBlockData {
-                                    block_hash,
-                                    tokens_hash,
-                                }],
-                            }),
-                        },
-                    };
-                    events.push(event);
-                    event_id += 1;
-                }
+                // Create a store event for this worker
+                let event = RouterEvent {
+                    worker_id: worker_id.worker_id,
+                    event: KvCacheEvent {
+                        event_id,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash,
+                            blocks: vec![KvCacheStoredBlockData {
+                                block_hash: *external_hash,
+                                tokens_hash,
+                            }],
+                        }),
+                        dp_rank: worker_id.dp_rank,
+                    },
+                };
+                events.push(event);
+                event_id += 1;
+
+                // Track this block's external hash for this worker
+                current_external_hashes.insert(*worker_id, *external_hash);
             }
 
-            // Add children to queue for BFS traversal
-            // We need to find any external hash for this block to use as parent
-            let any_external_hash = if !current_borrow.workers.is_empty() {
-                current_borrow
-                    .workers
-                    .iter()
-                    .next()
-                    .and_then(find_external_hash)
-            } else {
-                None
-            };
-
+            // Enqueue children with per-worker parent hashes
             for (child_tokens_hash, child_block) in &current_borrow.children {
-                queue.push_back((child_block.clone(), any_external_hash, *child_tokens_hash));
+                queue.push_back((
+                    child_block.clone(),
+                    current_external_hashes.clone(),
+                    *child_tokens_hash,
+                ));
             }
         }
 
         events
+    }
+
+    pub fn current_size(&self) -> usize {
+        self.lookup.values().map(|m| m.len()).sum()
     }
 }
 
@@ -544,6 +619,7 @@ pub struct KvIndexerMetrics {
 pub const METRIC_STATUS_OK: &str = "ok";
 pub const METRIC_STATUS_PARENT_NOT_FOUND: &str = "parent_block_not_found";
 pub const METRIC_STATUS_BLOCK_NOT_FOUND: &str = "block_not_found";
+pub const METRIC_STATUS_INVALID_BLOCK: &str = "invalid_block";
 
 /// Metric event labels.
 pub const METRIC_EVENT_STORED: &str = "stored";
@@ -563,7 +639,7 @@ impl KvIndexerMetrics {
     /// KV_INDEXER_METRICS to avoid duplicate registration issues.
     pub fn from_component(component: &Component) -> Arc<Self> {
         KV_INDEXER_METRICS.get_or_init(|| {
-            match component.create_intcountervec(
+            match component.metrics().create_intcountervec(
                 kvrouter::KV_CACHE_EVENTS_APPLIED,
                 "Total number of KV cache events applied to index",
                 &["event_type", "status"],
@@ -616,6 +692,7 @@ impl KvIndexerMetrics {
                 let error_label = match e {
                     KvCacheEventError::ParentBlockNotFound => METRIC_STATUS_PARENT_NOT_FOUND,
                     KvCacheEventError::BlockNotFound => METRIC_STATUS_BLOCK_NOT_FOUND,
+                    KvCacheEventError::InvalidBlockSequence => METRIC_STATUS_INVALID_BLOCK,
                 };
                 self.kv_cache_events_applied
                     .with_label_values(&[event_type, error_label])
@@ -625,13 +702,15 @@ impl KvIndexerMetrics {
     }
 }
 
-/// Scores representing the overlap of workers.
+/// Scores representing the overlap of workers (with their dp_rank).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlapScores {
-    // map of worker_id to score
-    pub scores: HashMap<WorkerId, u32>,
+    // map of worker (with dp_rank) to score
+    pub scores: HashMap<WorkerWithDpRank, u32>,
     // List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
     pub frequencies: Vec<usize>,
+    // Map of worker to their tree size (number of blocks in the tree for that worker)
+    pub tree_sizes: HashMap<WorkerWithDpRank, usize>,
 }
 
 impl Default for OverlapScores {
@@ -650,6 +729,7 @@ impl OverlapScores {
         Self {
             scores: HashMap::new(),
             frequencies: Vec::with_capacity(32),
+            tree_sizes: HashMap::new(),
         }
     }
 
@@ -657,8 +737,11 @@ impl OverlapScores {
     ///
     /// ### Arguments
     ///
-    /// * `workers` - A reference to a `HashSet` of `WorkerId`s.
-    pub fn update_scores(&mut self, workers: &HashSet<WorkerId>) {
+    /// * `workers` - An iterator over `WorkerWithDpRank` references.
+    pub fn update_scores<'a, I>(&mut self, workers: I)
+    where
+        I: IntoIterator<Item = &'a WorkerWithDpRank>,
+    {
         for worker in workers {
             let score = self.scores.entry(*worker).or_insert(0);
             *score += 1;
@@ -690,6 +773,12 @@ pub struct MatchRequest {
 pub struct DumpRequest {
     /// Channel to send the dumped events
     pub resp: oneshot::Sender<Vec<RouterEvent>>,
+}
+
+/// A request to get all workers currently tracked
+pub struct GetWorkersRequest {
+    /// Channel to send the worker IDs
+    pub resp: oneshot::Sender<Vec<WorkerId>>,
 }
 
 #[async_trait]
@@ -745,6 +834,39 @@ pub trait KvIndexerInterface {
     ///
     /// A vector of RouterEvents representing the current state of the tree.
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError>;
+
+    /// Process a routing decision with pre-computed hashes.
+    ///
+    /// ### Arguments
+    ///
+    /// * `worker` - The worker (with dp_rank) that was selected.
+    /// * `local_hashes` - The local hashes of the tokens sent to the worker.
+    /// * `sequence_hashes` - The sequence hashes of the tokens sent to the worker.
+    async fn process_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError>;
+
+    /// Process a routing decision for a request with tokens.
+    ///
+    /// ### Arguments
+    ///
+    /// * `tokens` - A vector of `u32` tokens.
+    /// * `worker` - The worker (with dp_rank) that was selected.
+    async fn process_routing_decision_for_request(
+        &self,
+        tokens: &[u32],
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError>;
+}
+
+/// A request to process a routing decision.
+struct RoutingDecisionRequest {
+    worker: WorkerWithDpRank,
+    local_hashes: Vec<LocalBlockHash>,
+    sequence_hashes: Vec<SequenceHash>,
 }
 
 /// The KV Indexer, managing the KV store and handling events and match requests.
@@ -757,8 +879,12 @@ pub struct KvIndexer {
     match_tx: mpsc::Sender<MatchRequest>,
     /// A sender for remove worker requests.
     remove_worker_tx: mpsc::Sender<WorkerId>,
+    /// A sender for get workers requests.
+    get_workers_tx: mpsc::Sender<GetWorkersRequest>,
     /// A sender for dump requests.
     dump_tx: mpsc::Sender<DumpRequest>,
+    /// A sender for routing decision requests.
+    routing_tx: mpsc::Sender<RoutingDecisionRequest>,
     /// A handle to the background task managing the KV store.
     task: OnceLock<std::thread::JoinHandle<()>>,
     /// The size of the KV block this indexer can handle.
@@ -772,6 +898,8 @@ impl KvIndexer {
     ///
     /// * `token` - A `CancellationToken` for managing shutdown.
     /// * `expiration_duration` - The amount of time that block usage should be buffered.
+    /// * `ttl` - The time-to-live for blocks before they expire.
+    /// * `prune_config` - Configuration for tree-size based pruning.
     ///
     /// ### Returns
     ///
@@ -781,65 +909,203 @@ impl KvIndexer {
         expiration_duration: Option<Duration>,
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
+        prune_config: Option<PruneConfig>,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(2048);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
+        let (get_workers_tx, get_workers_rx) = mpsc::channel::<GetWorkersRequest>(16);
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
+        let (routing_tx, mut routing_rx) = mpsc::channel::<RoutingDecisionRequest>(2048);
+        let (prune_tx, mut prune_rx) = mpsc::channel::<()>(1);
         let cancel_clone = token.clone();
 
         let task = std::thread::spawn(move || {
-            // create a new tokio runtime which will only perform work on a single thread
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1) // Single-threaded environment
+            // Create a single-threaded tokio runtime
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
 
-            let local_set = tokio::task::LocalSet::new();
+            runtime.block_on(async move {
+                let cancel = cancel_clone;
+                let mut match_rx = match_rx;
+                let mut event_rx = event_rx;
+                let mut remove_worker_rx = remove_worker_rx;
+                let mut get_workers_rx = get_workers_rx;
+                let mut dump_rx = dump_rx;
+                let mut trie = RadixTree::new_with_frequency(expiration_duration);
 
-            runtime.block_on(local_set.run_until(async move {
-                tokio::task::spawn_local(async move {
-                    let cancel = cancel_clone;
-                    let mut match_rx = match_rx;
-                    let mut event_rx = event_rx;
-                    let mut remove_worker_rx = remove_worker_rx;
-                    let mut dump_rx = dump_rx;
-                    let mut trie = RadixTree::new_with_frequency(expiration_duration);
-                    loop {
-                        tokio::select! {
-                            biased;
+                // Create PruneManager if prune_config is specified
+                let mut prune_manager = prune_config.map(|config| {
+                    PruneManager::<BlockEntry>::new(50, config)
+                });
+                let mut event_id_counter = 0u64;
 
-                            _ = cancel.cancelled() => {
-                                tracing::debug!("KvCacheIndexer progress loop shutting down");
-                                return;
+                loop {
+                    // Create a future that sleeps until the next expiration time
+                    let expiry_fut = if let Some(ref pm) = prune_manager
+                        && let Some(next_expiry) = pm.peek_next_expiry() {
+                        tokio::time::sleep_until(next_expiry)
+                    } else {
+                        tokio::time::sleep(Duration::MAX)
+                    };
+
+                    tokio::select! {
+                        biased;
+
+                        _ = cancel.cancelled() => {
+                            tracing::debug!("KvCacheIndexer progress loop shutting down");
+                            return;
+                        }
+
+                        Some(worker) = remove_worker_rx.recv() => {
+                            trie.remove_worker(worker);
+                        }
+
+                        Some(get_workers_req) = get_workers_rx.recv() => {
+                            let workers = trie.get_workers();
+                            let _ = get_workers_req.resp.send(workers);
+                        }
+
+                        Some(_) = prune_rx.recv() => {
+                            // Tree size-based pruning triggered
+                            let Some(ref mut pm) = prune_manager else { continue };
+                            let Ok(pruned) = pm.prune(trie.current_size()) else { continue };
+
+                            for p in pruned {
+                                event_id_counter += 1;
+                                let event = RouterEvent::new(
+                                    p.worker.worker_id,
+                                    KvCacheEvent {
+                                        event_id: event_id_counter,
+                                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                            block_hashes: vec![p.key],
+                                        }),
+                                        dp_rank: p.worker.dp_rank,
+                                    }
+                                );
+                                let _ = trie.apply_event(event);
+                            }
+                        }
+
+                        Some(event) = event_rx.recv() => {
+                            let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                            let result = trie.apply_event(event.clone());
+                            let result_is_ok = result.is_ok();
+                            metrics.increment_event_applied(event_type, result);
+
+                            // Track blocks in PruneManager if TTL is enabled and event was stored successfully
+                            let Some(ref mut pm) = prune_manager else { continue };
+                            if !result_is_ok { continue };
+                            let KvCacheEventData::Stored(ref store_data) = event.event.data else { continue };
+
+                            let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+                            let block_entries: Vec<BlockEntry> = store_data.blocks.iter().enumerate().map(|(idx, block)| {
+                                BlockEntry {
+                                    key: block.block_hash,
+                                    worker,
+                                    seq_position: idx,
+                                }
+                            }).collect();
+                            pm.insert(block_entries);
+
+                            // Check if we need to prune due to tree size
+                            let Some(ref pc) = pm.prune_config else { continue };
+                            let current_size = trie.current_size();
+                            if current_size > pc.max_tree_size {
+                                tracing::info!(
+                                    "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
+                                    current_size,
+                                    pc.max_tree_size
+                                );
+                                let _ = prune_tx.try_send(());
+                            }
+                        }
+
+                        Some(dump_req) = dump_rx.recv() => {
+                            let events = trie.dump_tree_as_events();
+                            let _ = dump_req.resp.send(events);
+                        }
+
+                        Some(routing_req) = routing_rx.recv() => {
+                            // Process routing decisions when TTL/pruning is enabled
+                            let Some(ref mut pm) = prune_manager else { continue };
+
+                            event_id_counter += 1;
+
+                            let hashes = routing_req.local_hashes.iter().zip(routing_req.sequence_hashes.iter());
+                            let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
+                                parent_hash: None,
+                                blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
+                                    tokens_hash: *local_hash,
+                                    block_hash: ExternalSequenceBlockHash(*sequence_hash),
+                                }).collect(),
+                            });
+
+                            let event = RouterEvent::new(
+                                routing_req.worker.worker_id,
+                                KvCacheEvent {
+                                    event_id: event_id_counter,
+                                    data: stored_event,
+                                    dp_rank: routing_req.worker.dp_rank,
+                                }
+                            );
+
+                            if trie.apply_event(event).is_err() {
+                                continue;
                             }
 
-                            Some(worker) = remove_worker_rx.recv() => {
-                                trie.remove_worker(worker);
-                            }
+                            let block_entries: Vec<BlockEntry> = routing_req.sequence_hashes.iter().enumerate().map(|(idx, h)| {
+                                BlockEntry {
+                                    key: ExternalSequenceBlockHash(*h),
+                                    worker: routing_req.worker,
+                                    seq_position: idx,
+                                }
+                            }).collect();
+                            pm.insert(block_entries);
 
-                            Some(event) = event_rx.recv() => {
-                                let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                                let result = trie.apply_event(event);
-                                metrics.increment_event_applied(event_type, result);
+                            // Check if we need to prune due to tree size
+                            let Some(ref pc) = pm.prune_config else { continue };
+                            let current_size = trie.current_size();
+                            if current_size > pc.max_tree_size {
+                                tracing::info!(
+                                    "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
+                                    current_size,
+                                    pc.max_tree_size
+                                );
+                                let _ = prune_tx.try_send(());
                             }
+                        }
 
-                            Some(dump_req) = dump_rx.recv() => {
-                                let events = trie.dump_tree_as_events();
-                                let _ = dump_req.resp.send(events);
-                            }
+                        Some(req) = match_rx.recv() => {
+                            let matches = trie.find_matches(req.sequence, req.early_exit);
+                            let _ = req.resp.send(matches);
+                        }
 
-                            Some(req) = match_rx.recv() => {
-                                let matches = trie.find_matches(req.sequence, req.early_exit);
-                                let _ = req.resp.send(matches);
+                        _ = expiry_fut => {
+                            // TTL-based expiry triggered
+                            let Some(ref mut pm) = prune_manager else { continue };
+
+                            let expired = pm.pop_expired();
+                            for e in expired {
+                                event_id_counter += 1;
+                                let event = RouterEvent::new(
+                                    e.worker.worker_id,
+                                    KvCacheEvent {
+                                        event_id: event_id_counter,
+                                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                            block_hashes: vec![e.key],
+                                        }),
+                                        dp_rank: e.worker.dp_rank,
+                                    }
+                                );
+                                let _ = trie.apply_event(event);
                             }
                         }
                     }
-                })
-                .await
-                .unwrap()
-            }));
+                }
+            });
 
             tracing::debug!("KvCacheIndexer task completed");
         });
@@ -852,7 +1118,9 @@ impl KvIndexer {
             event_tx,
             match_tx,
             remove_worker_tx,
+            get_workers_tx,
             dump_tx,
+            routing_tx,
             task: once,
             kv_block_size,
         }
@@ -867,7 +1135,7 @@ impl KvIndexer {
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
     ) -> Self {
-        Self::new_with_frequency(token, None, kv_block_size, metrics)
+        Self::new_with_frequency(token, None, kv_block_size, metrics, None)
     }
 
     /// Get a sender for `RouterEvent`s.
@@ -895,6 +1163,15 @@ impl KvIndexer {
     /// A `mpsc::Sender` for `WorkerId`s.
     pub fn remove_worker_sender(&self) -> mpsc::Sender<WorkerId> {
         self.remove_worker_tx.clone()
+    }
+
+    /// Get a sender for get workers requests.
+    ///
+    /// ### Returns
+    ///
+    /// A `mpsc::Sender` for `GetWorkersRequest`s.
+    pub fn get_workers_sender(&self) -> mpsc::Sender<GetWorkersRequest> {
+        self.get_workers_tx.clone()
     }
 }
 
@@ -966,6 +1243,46 @@ impl KvIndexerInterface for KvIndexer {
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
+
+    async fn process_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        self.routing_tx
+            .send(RoutingDecisionRequest {
+                worker,
+                local_hashes,
+                sequence_hashes,
+            })
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        Ok(())
+    }
+
+    async fn process_routing_decision_for_request(
+        &self,
+        tokens: &[u32],
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        let local_hashes = compute_block_hash_for_seq(tokens, self.kv_block_size);
+        let sequence = TokenBlockSequence::new(tokens.into(), self.kv_block_size, None);
+        let sequence_hashes = sequence
+            .blocks()
+            .iter()
+            .map(|b| b.sequence_hash())
+            .collect::<Vec<_>>();
+
+        self.process_routing_decision(worker, local_hashes, sequence_hashes)
+            .await
+    }
+}
+
+impl Drop for KvIndexer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1001,6 +1318,7 @@ pub struct KvIndexerSharded {
     request_broadcast_tx: broadcast::Sender<ShardedMatchRequest>,
     remove_worker_tx: Vec<mpsc::Sender<WorkerId>>,
     dump_tx: Vec<mpsc::Sender<DumpRequest>>,
+    routing_tx: Vec<mpsc::Sender<RoutingDecisionRequest>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -1012,6 +1330,8 @@ impl KvIndexerSharded {
     /// * `token` - A `CancellationToken` for managing shutdown.
     /// * `shards` - A list of kvindexer shards.
     /// * `expiration_duration` - The amount of time that block usage should be buffered.
+    /// * `ttl` - The time-to-live for blocks before they expire.
+    /// * `prune_config` - Configuration for tree-size based pruning.
     ///
     /// ### Returns
     ///
@@ -1022,13 +1342,16 @@ impl KvIndexerSharded {
         expiration_duration: Option<Duration>,
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
+        prune_config: Option<PruneConfig>,
     ) -> Self {
         let worker_assignments: HashMap<WorkerId, usize> = HashMap::new();
         let worker_counts: Vec<usize> = vec![0; num_shards];
 
         let mut event_tx = Vec::new();
         let mut remove_worker_tx = Vec::new();
-        let mut dump_tx = Vec::new(); // Add dump channels
+        let mut get_workers_tx = Vec::new();
+        let mut dump_tx = Vec::new();
+        let mut routing_tx = Vec::new();
         let mut tasks = Vec::new();
 
         let (request_broadcast_tx, _) = broadcast::channel::<ShardedMatchRequest>(1048576);
@@ -1037,63 +1360,204 @@ impl KvIndexerSharded {
             let (shard_event_tx, mut shard_event_rx) = mpsc::channel::<RouterEvent>(2048);
             let (shard_remove_worker_tx, mut shard_remove_worker_rx) =
                 mpsc::channel::<WorkerId>(16);
-            let (shard_dump_tx, mut shard_dump_rx) = mpsc::channel::<DumpRequest>(16); // Add dump channel
+            let (shard_get_workers_tx, mut shard_get_workers_rx) =
+                mpsc::channel::<GetWorkersRequest>(16);
+            let (shard_dump_tx, mut shard_dump_rx) = mpsc::channel::<DumpRequest>(16);
+            let (shard_routing_tx, mut shard_routing_rx) =
+                mpsc::channel::<RoutingDecisionRequest>(2048);
+            let (shard_prune_tx, mut shard_prune_rx) = mpsc::channel::<()>(1);
             let mut shard_broadcast_rx = request_broadcast_tx.subscribe();
             let cancel = token.clone();
             let metrics = metrics.clone();
+            let prune_config_clone = prune_config.clone();
 
             event_tx.push(shard_event_tx);
             remove_worker_tx.push(shard_remove_worker_tx);
-            dump_tx.push(shard_dump_tx); // Store dump sender
+            get_workers_tx.push(shard_get_workers_tx);
+            dump_tx.push(shard_dump_tx);
+            routing_tx.push(shard_routing_tx);
 
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
 
             tasks.push(std::thread::spawn(move || {
-                let local_set = tokio::task::LocalSet::new();
+                runtime.block_on(async move {
+                    let mut trie = RadixTree::new_with_frequency(expiration_duration);
 
-                runtime.block_on(local_set.run_until(async move {
-                    tokio::task::spawn_local(async move {
-                        let mut trie = RadixTree::new_with_frequency(expiration_duration);
-                        loop {
-                            tokio::select! {
-                                biased;
+                    // Create PruneManager if prune_config is specified
+                    let mut prune_manager = prune_config_clone.map(|config| {
+                        PruneManager::<BlockEntry>::new(50, config)
+                    });
+                    let mut event_id_counter = 0u64;
 
-                                _ = cancel.cancelled() => {
-                                    tracing::trace!("KvCacheIndexer progress loop shutting down");
-                                    return;
+                    loop {
+                        // Create a future that sleeps until the next expiration time
+                        let expiry_fut = if let Some(ref pm) = prune_manager
+                            && let Some(next_expiry) = pm.peek_next_expiry() {
+                            tokio::time::sleep_until(next_expiry)
+                        } else {
+                            tokio::time::sleep(Duration::MAX)
+                        };
+
+                        tokio::select! {
+                            biased;
+
+                            _ = cancel.cancelled() => {
+                                tracing::trace!("KvCacheIndexer progress loop shutting down");
+                                return;
+                            }
+
+                            Some(worker) = shard_remove_worker_rx.recv() => {
+                                trie.remove_worker(worker);
+                            }
+
+                            Some(get_workers_req) = shard_get_workers_rx.recv() => {
+                                let workers = trie.get_workers();
+                                let _ = get_workers_req.resp.send(workers);
+                            }
+
+                            Some(_) = shard_prune_rx.recv() => {
+                                // Tree size-based pruning triggered
+                                let Some(ref mut pm) = prune_manager else { continue };
+                                let Ok(pruned) = pm.prune(trie.current_size()) else { continue };
+
+                                for p in pruned {
+                                    event_id_counter += 1;
+                                    let event = RouterEvent::new(
+                                        p.worker.worker_id,
+                                        KvCacheEvent {
+                                            event_id: event_id_counter,
+                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                                block_hashes: vec![p.key],
+                                            }),
+                                            dp_rank: p.worker.dp_rank,
+                                        }
+                                    );
+                                    let _ = trie.apply_event(event);
                                 }
+                            }
 
-                                Some(worker) = shard_remove_worker_rx.recv() => {
-                                    trie.remove_worker(worker);
-                                }
+                            Some(event) = shard_event_rx.recv() => {
+                                let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                                let result = trie.apply_event(event.clone());
+                                let result_is_ok = result.is_ok();
+                                metrics.increment_event_applied(event_type, result);
 
-                                Some(event) = shard_event_rx.recv() => {
-                                    let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                                    let result = trie.apply_event(event);
-                                    metrics.increment_event_applied(event_type, result);
-                                }
+                                // Track blocks in PruneManager if TTL is enabled and event was stored successfully
+                                let Some(ref mut pm) = prune_manager else { continue };
+                                if !result_is_ok { continue };
+                                let KvCacheEventData::Stored(ref store_data) = event.event.data else { continue };
 
-                                Some(dump_req) = shard_dump_rx.recv() => {
-                                    let events = trie.dump_tree_as_events();
-                                    let _ = dump_req.resp.send(events);
-                                }
-
-                                Ok(req) = shard_broadcast_rx.recv() => {
-                                    let matches = trie.find_matches(req.sequence, req.early_exit);
-                                    if let Err(e) = req.resp.send(matches).await {
-                                        tracing::trace!("Failed to send match response: {:?}", e);
+                                let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+                                let block_entries: Vec<BlockEntry> = store_data.blocks.iter().enumerate().map(|(idx, block)| {
+                                    BlockEntry {
+                                        key: block.block_hash,
+                                        worker,
+                                        seq_position: idx,
                                     }
+                                }).collect();
+                                pm.insert(block_entries);
+
+                                // Check if we need to prune due to tree size
+                                let Some(ref pc) = pm.prune_config else { continue };
+                                let current_size = trie.current_size();
+                                if current_size > pc.max_tree_size {
+                                    tracing::info!(
+                                        "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
+                                        current_size,
+                                        pc.max_tree_size
+                                    );
+                                    let _ = shard_prune_tx.try_send(());
+                                }
+                            }
+
+                            Some(routing_req) = shard_routing_rx.recv() => {
+                                // Process routing decisions when TTL/pruning is enabled
+                                let Some(ref mut pm) = prune_manager else { continue };
+
+                                event_id_counter += 1;
+
+                                let hashes = routing_req.local_hashes.iter().zip(routing_req.sequence_hashes.iter());
+                                let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
+                                    parent_hash: None,
+                                    blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
+                                        tokens_hash: *local_hash,
+                                        block_hash: ExternalSequenceBlockHash(*sequence_hash),
+                                    }).collect(),
+                                });
+
+                                let event = RouterEvent::new(
+                                    routing_req.worker.worker_id,
+                                    KvCacheEvent {
+                                        event_id: event_id_counter,
+                                        data: stored_event,
+                                        dp_rank: routing_req.worker.dp_rank,
+                                    }
+                                );
+
+                                if trie.apply_event(event).is_err() {
+                                    continue;
+                                }
+
+                                let block_entries: Vec<BlockEntry> = routing_req.sequence_hashes.iter().enumerate().map(|(idx, h)| {
+                                    BlockEntry {
+                                        key: ExternalSequenceBlockHash(*h),
+                                        worker: routing_req.worker,
+                                        seq_position: idx,
+                                    }
+                                }).collect();
+                                pm.insert(block_entries);
+
+                                // Check if we need to prune due to tree size
+                                let Some(ref pc) = pm.prune_config else { continue };
+                                let current_size = trie.current_size();
+                                if current_size > pc.max_tree_size {
+                                    tracing::info!(
+                                        "Pruning: tree size ({}) exceeded max tree size ({}), scheduling pruning",
+                                        current_size,
+                                        pc.max_tree_size
+                                    );
+                                    let _ = shard_prune_tx.try_send(());
+                                }
+                            }
+
+                            Some(dump_req) = shard_dump_rx.recv() => {
+                                let events = trie.dump_tree_as_events();
+                                let _ = dump_req.resp.send(events);
+                            }
+
+                            Ok(req) = shard_broadcast_rx.recv() => {
+                                let matches = trie.find_matches(req.sequence, req.early_exit);
+                                if let Err(e) = req.resp.send(matches).await {
+                                    tracing::trace!("Failed to send match response: {:?}", e);
+                                }
+                            }
+
+                            _ = expiry_fut => {
+                                // TTL-based expiry triggered
+                                let Some(ref mut pm) = prune_manager else { continue };
+
+                                let expired = pm.pop_expired();
+                                for e in expired {
+                                    event_id_counter += 1;
+                                    let event = RouterEvent::new(
+                                        e.worker.worker_id,
+                                        KvCacheEvent {
+                                            event_id: event_id_counter,
+                                            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                                block_hashes: vec![e.key],
+                                            }),
+                                            dp_rank: e.worker.dp_rank,
+                                        }
+                                    );
+                                    let _ = trie.apply_event(event);
                                 }
                             }
                         }
-                    })
-                    .await
-                    .unwrap()
-                }));
+                    }
+                });
 
                 tracing::debug!("KvCacheIndexer task completed");
             }));
@@ -1107,7 +1571,8 @@ impl KvIndexerSharded {
             event_tx,
             request_broadcast_tx,
             remove_worker_tx,
-            dump_tx, // Add dump_tx field
+            dump_tx,
+            routing_tx,
             tasks,
         }
     }
@@ -1122,7 +1587,7 @@ impl KvIndexerSharded {
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
     ) -> Self {
-        Self::new_with_frequency(token, num_shards, None, kv_block_size, metrics)
+        Self::new_with_frequency(token, num_shards, None, kv_block_size, metrics, None)
     }
 }
 
@@ -1148,6 +1613,7 @@ impl KvIndexerInterface for KvIndexerSharded {
                 match match_rx.recv().await {
                     Some(response) => {
                         scores.scores.extend(response.scores);
+                        scores.tree_sizes.extend(response.tree_sizes);
 
                         if response_num == 0 {
                             scores.frequencies = response.frequencies;
@@ -1249,6 +1715,53 @@ impl KvIndexerInterface for KvIndexerSharded {
 
         Ok(all_events)
     }
+
+    async fn process_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        // Route to the appropriate shard based on worker assignment
+        let shard_idx = self
+            .worker_assignments
+            .get(&worker.worker_id)
+            .copied()
+            .unwrap_or(0);
+
+        self.routing_tx[shard_idx]
+            .send(RoutingDecisionRequest {
+                worker,
+                local_hashes,
+                sequence_hashes,
+            })
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        Ok(())
+    }
+
+    async fn process_routing_decision_for_request(
+        &self,
+        tokens: &[u32],
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        let local_hashes = compute_block_hash_for_seq(tokens, self.kv_block_size);
+        let sequence = TokenBlockSequence::new(tokens.into(), self.kv_block_size, None);
+        let sequence_hashes = sequence
+            .blocks()
+            .iter()
+            .map(|b| b.sequence_hash())
+            .collect::<Vec<_>>();
+
+        self.process_routing_decision(worker, local_hashes, sequence_hashes)
+            .await
+    }
+}
+
+impl Drop for KvIndexerSharded {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
 
 #[cfg(test)]
@@ -1295,6 +1808,7 @@ mod tests {
             event: KvCacheEvent {
                 event_id,
                 data: add_blocks(hashes, parent),
+                dp_rank: 0,
             },
         }
     }
@@ -1310,6 +1824,7 @@ mod tests {
                         .map(|i| ExternalSequenceBlockHash(*i * 100))
                         .collect(),
                 }),
+                dp_rank: 0,
             },
         }
     }
@@ -1330,10 +1845,22 @@ mod tests {
             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
             false,
         );
-        assert_eq!(scores.scores.get(&worker_1).unwrap(), &3);
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap(),
+            &3
+        );
 
         assert_eq!(trie.lookup.len(), 1);
-        assert_eq!(trie.lookup.get(&worker_1).unwrap().len(), 3);
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
+                .len(),
+            3
+        );
         assert_eq!(trie.root.borrow().workers.len(), 0);
         assert_eq!(trie.root.borrow().children.len(), 1);
         assert_eq!(
@@ -1366,12 +1893,36 @@ mod tests {
             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
             false,
         );
-        assert_eq!(scores.scores.get(&worker_1).unwrap(), &3);
-        assert_eq!(scores.scores.get(&worker_2).unwrap(), &1);
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap(),
+            &3
+        );
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                .unwrap(),
+            &1
+        );
 
         assert_eq!(trie.lookup.len(), 2);
-        assert_eq!(trie.lookup.get(&worker_1).unwrap().len(), 3);
-        assert_eq!(trie.lookup.get(&worker_2).unwrap().len(), 3);
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                .unwrap()
+                .len(),
+            3
+        );
         assert_eq!(trie.root.borrow().workers.len(), 0);
         assert_eq!(trie.root.borrow().children.len(), 1);
         assert_eq!(
@@ -1400,8 +1951,20 @@ mod tests {
         trie.apply_event(create_remove_event(worker_2, 2, vec![5]))
             .unwrap();
         assert_eq!(trie.lookup.len(), 2);
-        assert_eq!(trie.lookup.get(&worker_1).unwrap().len(), 3);
-        assert_eq!(trie.lookup.get(&worker_2).unwrap().len(), 2);
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(trie.root.borrow().workers.len(), 0);
         assert_eq!(trie.root.borrow().children.len(), 1);
         assert_eq!(
@@ -1431,8 +1994,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(trie.lookup.len(), 2);
-        assert_eq!(trie.lookup.get(&worker_1).unwrap().len(), 3);
-        assert_eq!(trie.lookup.get(&worker_2).unwrap().len(), 1);
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(trie.root.borrow().workers.len(), 0);
         assert_eq!(trie.root.borrow().children.len(), 1);
         assert_eq!(
@@ -1470,12 +2045,36 @@ mod tests {
             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
             false,
         );
-        assert_eq!(scores.scores.get(&worker_1).unwrap(), &3);
-        assert_eq!(scores.scores.get(&worker_2).unwrap(), &2);
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap(),
+            &3
+        );
+        assert_eq!(
+            scores
+                .scores
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                .unwrap(),
+            &2
+        );
 
         assert_eq!(trie.lookup.len(), 2);
-        assert_eq!(trie.lookup.get(&worker_1).unwrap().len(), 3);
-        assert_eq!(trie.lookup.get(&worker_2).unwrap().len(), 4);
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
+                .unwrap()
+                .len(),
+            4
+        );
         assert_eq!(trie.root.borrow().workers.len(), 0);
         assert_eq!(trie.root.borrow().children.len(), 1);
         assert_eq!(
@@ -1502,7 +2101,7 @@ mod tests {
         );
         assert_eq!(
             trie.lookup
-                .get(&worker_1)
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
                 .unwrap()
                 .get(&ExternalSequenceBlockHash(200))
                 .unwrap()
@@ -1513,7 +2112,7 @@ mod tests {
         );
         assert_eq!(
             trie.lookup
-                .get(&worker_2)
+                .get(&WorkerWithDpRank::from_worker_id(worker_2))
                 .unwrap()
                 .get(&ExternalSequenceBlockHash(200))
                 .unwrap()
@@ -1549,6 +2148,34 @@ mod tests {
             result.unwrap_err(),
             KvCacheEventError::BlockNotFound
         ));
+
+        // Parent appears in blocks: parent=1, blocks=[1, 2, 3]
+        // This should be rejected as block 1 (hash 100) is the parent
+        trie.apply_event(create_store_event(worker_0, 4, vec![1], None))
+            .unwrap();
+        let result = trie.apply_event(create_store_event(
+            worker_0,
+            5,
+            vec![1, 2, 3],
+            Some(ExternalSequenceBlockHash(100)),
+        ));
+        assert!(matches!(
+            result.unwrap_err(),
+            KvCacheEventError::InvalidBlockSequence
+        ));
+
+        // Block appears twice in sequence: parent=1, blocks=[2, 3, 2]
+        // Block 2 appears at positions 0 and 2, creating a cycle
+        let result = trie.apply_event(create_store_event(
+            worker_0,
+            6,
+            vec![2, 3, 2],
+            Some(ExternalSequenceBlockHash(100)),
+        ));
+        assert!(matches!(
+            result.unwrap_err(),
+            KvCacheEventError::InvalidBlockSequence
+        ));
     }
 
     #[test]
@@ -1571,12 +2198,16 @@ mod tests {
             .unwrap();
 
         let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
-        assert!(result.len() == 2 && result[&worker_0] == 1 && result[&worker_1] == 1);
+        assert!(
+            result.len() == 2
+                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 1
+                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
+        );
 
         trie.remove_worker(worker_0);
 
         let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
-        assert!(result.len() == 1 && result[&worker_1] == 1);
+        assert!(result.len() == 1 && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1);
     }
 
     #[test]
@@ -1594,7 +2225,11 @@ mod tests {
 
         // Test clearing an empty worker
         trie.clear_all_blocks(worker_0);
-        assert!(!trie.lookup.contains_key(&worker_0));
+        assert!(
+            !trie
+                .lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
 
         // Test clearing a worker with shared blocks
         trie.apply_event(create_store_event(worker_0, 0, vec![0, 1, 3], None))
@@ -1603,17 +2238,29 @@ mod tests {
             .unwrap();
 
         let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
-        assert!(result.len() == 2 && result[&worker_0] == 1 && result[&worker_1] == 1);
+        assert!(
+            result.len() == 2
+                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 1
+                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
+        );
 
         trie.clear_all_blocks(worker_0);
 
-        assert!(trie.lookup.contains_key(&worker_0));
-        assert!(trie.lookup.get(&worker_0).unwrap().is_empty());
+        assert!(
+            trie.lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
+        assert!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_0))
+                .unwrap()
+                .is_empty()
+        );
         let result = trie
             .find_matches(vec![LocalBlockHash(0), LocalBlockHash(2)], false)
             .scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&worker_1], 2);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 2);
         let result = trie
             .find_matches(
                 vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(3)],
@@ -1621,7 +2268,7 @@ mod tests {
             )
             .scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&worker_1], 1);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 1);
 
         // Test re-adding blocks after clearing worker
         trie.apply_event(create_store_event(worker_0, 0, vec![4, 5], None))
@@ -1630,19 +2277,32 @@ mod tests {
             .find_matches(vec![LocalBlockHash(4), LocalBlockHash(5)], false)
             .scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&worker_0], 2);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_0)], 2);
 
         // Test multiple clears
         trie.clear_all_blocks(worker_0);
         trie.clear_all_blocks(worker_0);
-        assert!(trie.lookup.contains_key(&worker_0));
+        assert!(
+            trie.lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
 
         // Test clearing all workers
         trie.clear_all_blocks(worker_0);
         trie.clear_all_blocks(worker_1);
         assert!(!trie.lookup.is_empty());
-        assert!(trie.lookup.get(&worker_0).unwrap().is_empty());
-        assert!(trie.lookup.get(&worker_1).unwrap().is_empty());
+        assert!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_0))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
+                .is_empty()
+        );
 
         // Test clearing a worker that has been removed
         trie.apply_event(create_store_event(worker_0, 0, vec![6], None))
@@ -1651,20 +2311,35 @@ mod tests {
             .unwrap();
         trie.remove_worker(worker_0);
         trie.clear_all_blocks(worker_0);
-        assert!(!trie.lookup.contains_key(&worker_0));
+        assert!(
+            !trie
+                .lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
         let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&worker_1], 1);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 1);
 
         // Test clearing a worker that doesn't exist
         let worker_fake = 2;
-        assert!(!trie.lookup.contains_key(&worker_fake));
+        assert!(
+            !trie
+                .lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_fake))
+        );
         trie.clear_all_blocks(worker_fake);
-        assert!(!trie.lookup.contains_key(&worker_fake));
-        assert!(trie.lookup.contains_key(&worker_1));
+        assert!(
+            !trie
+                .lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_fake))
+        );
+        assert!(
+            trie.lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
+        );
         let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[&worker_1], 1);
+        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 1);
     }
 
     #[test]
@@ -1687,12 +2362,20 @@ mod tests {
             )
             .scores;
 
-        assert!(result.len() == 2 && result[&worker_0] == 2 && result[&worker_1] == 1);
+        assert!(
+            result.len() == 2
+                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 2
+                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
+        );
 
         let result = trie
             .find_matches(vec![LocalBlockHash(0), LocalBlockHash(1)], true)
             .scores;
-        assert!(result.len() == 2 && result[&worker_0] == 2 && result[&worker_1] == 1);
+        assert!(
+            result.len() == 2
+                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 2
+                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
+        );
     }
 
     #[rstest]
@@ -1819,6 +2502,7 @@ mod tests {
                 Some(expiration),
                 kv_block_size,
                 metrics,
+                None,
             ));
         } else {
             kv_indexer = Box::new(KvIndexerSharded::new_with_frequency(
@@ -1827,6 +2511,7 @@ mod tests {
                 Some(expiration),
                 kv_block_size,
                 metrics,
+                None,
             ));
         }
 
@@ -1919,6 +2604,7 @@ mod tests {
                     tokens_hash: LocalBlockHash(13226331709069118873),
                 }],
             }),
+            dp_rank: 0,
         };
         let router_event = RouterEvent::new(worker_id, kv_cache_event);
 
@@ -2170,5 +2856,125 @@ mod tests {
                 .get(),
             1
         );
+    }
+
+    #[test]
+    fn test_remove_worker_verifies_hash_removal() {
+        setup();
+        let mut trie = RadixTree::new();
+
+        let worker_0 = 0;
+        let worker_1 = 1;
+        let worker_2 = 2;
+
+        // Add blocks for multiple workers
+        trie.apply_event(create_store_event(worker_0, 0, vec![1, 2, 3], None))
+            .unwrap();
+        trie.apply_event(create_store_event(worker_1, 0, vec![1, 2, 3], None))
+            .unwrap();
+        trie.apply_event(create_store_event(worker_2, 0, vec![1, 4, 5], None))
+            .unwrap();
+
+        // Verify worker_0 has 3 blocks in lookup
+        assert_eq!(
+            trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_0))
+                .unwrap()
+                .len(),
+            3
+        );
+
+        // Verify that blocks have the correct workers
+        let block_1 = trie
+            .lookup
+            .get(&WorkerWithDpRank::from_worker_id(worker_0))
+            .unwrap()
+            .get(&ExternalSequenceBlockHash(100))
+            .unwrap();
+        assert_eq!(block_1.borrow().workers.len(), 3); // worker_0, worker_1, and worker_2 (all have hash 1)
+        assert!(
+            block_1
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
+        assert!(
+            block_1
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
+        );
+        assert!(
+            block_1
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_2))
+        );
+
+        // Remove worker_0
+        trie.remove_worker(worker_0);
+
+        // Verify worker_0 is completely removed from lookup table
+        assert!(
+            !trie
+                .lookup
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
+        assert_eq!(trie.lookup.len(), 2);
+
+        // Verify that worker_0's hash is removed from the workers set
+        let block_1 = trie
+            .lookup
+            .get(&WorkerWithDpRank::from_worker_id(worker_1))
+            .unwrap()
+            .get(&ExternalSequenceBlockHash(100))
+            .unwrap();
+        assert_eq!(block_1.borrow().workers.len(), 2); // worker_1 and worker_2 remain
+        assert!(
+            !block_1
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
+        );
+        assert!(
+            block_1
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
+        );
+        assert!(
+            block_1
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_2))
+        );
+
+        // Verify that blocks with no remaining workers have their children cleared
+        // This tests the optimization where empty blocks clear their children
+        let block_2 = trie
+            .lookup
+            .get(&WorkerWithDpRank::from_worker_id(worker_1))
+            .unwrap()
+            .get(&ExternalSequenceBlockHash(200))
+            .unwrap();
+        assert_eq!(block_2.borrow().workers.len(), 1); // only worker_1
+        assert!(
+            block_2
+                .borrow()
+                .workers
+                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
+        );
+
+        // Verify match results no longer include worker_0
+        let result = trie
+            .find_matches(
+                vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+                false,
+            )
+            .scores;
+        assert_eq!(result.len(), 2);
+        assert!(!result.contains_key(&WorkerWithDpRank::from_worker_id(worker_0)));
+        assert!(result.contains_key(&WorkerWithDpRank::from_worker_id(worker_1)));
+        assert!(result.contains_key(&WorkerWithDpRank::from_worker_id(worker_2)));
     }
 }

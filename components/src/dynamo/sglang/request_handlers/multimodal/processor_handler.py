@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 from transformers import AutoTokenizer
 
-from dynamo._core import Client, Component
+from dynamo._core import Client, Component, Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.multimodal_utils import (
     multimodal_request_to_sglang,
@@ -54,7 +54,14 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
     def cleanup(self):
         pass
 
-    async def generate(self, raw_request: MultiModalRequest):
+    async def generate(self, raw_request: MultiModalRequest, context: Context):
+        """
+        Process multimodal request and forward to encode worker.
+
+        Args:
+            raw_request: Raw multimodal request to process.
+            context: Context object for cancellation handling.
+        """
         if not isinstance(raw_request, MultiModalRequest):
             # If the request is not MultiModalRequest, convert it to MultiModalRequest
             raw_request = MultiModalRequest.model_validate(raw_request)

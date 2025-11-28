@@ -46,9 +46,8 @@ func TestDynamoComponentDeployment_IsFrontendComponent(t *testing.T) {
 			name: "main component",
 			fields: fields{
 				Spec: DynamoComponentDeploymentSpec{
-					DynamoTag: "dynamo-component:main",
 					DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
-						ServiceName: "main",
+						ComponentType: commonconsts.ComponentTypeFrontend,
 					},
 				},
 			},
@@ -58,9 +57,8 @@ func TestDynamoComponentDeployment_IsFrontendComponent(t *testing.T) {
 			name: "not main component",
 			fields: fields{
 				Spec: DynamoComponentDeploymentSpec{
-					DynamoTag: "dynamo-component:main",
 					DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
-						ServiceName: "not-main",
+						ComponentType: commonconsts.ComponentTypeWorker,
 					},
 				},
 			},

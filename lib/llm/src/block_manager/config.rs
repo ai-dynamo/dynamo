@@ -3,6 +3,8 @@
 
 use super::events::EventManager;
 use super::*;
+use dynamo_runtime::config::environment_names::kvbm::cpu_cache as env_cpu_cache;
+use dynamo_runtime::config::environment_names::kvbm::disk_cache as env_disk_cache;
 use prometheus::Registry;
 
 #[derive(Debug, Clone)]
@@ -116,6 +118,11 @@ pub struct KvManagerLayoutConfig<S: Storage + NixlRegisterableStorage> {
     /// The type of block parallelism strategy to use
     #[builder(default)]
     pub logical: Option<BlockParallelismStrategy>,
+
+    /// The offload filter to use (if any).
+    /// This dictates which blocks will be offloaded to the next-lowest cache level.
+    #[builder(default = "None")]
+    pub offload_filter: Option<Arc<dyn OffloadFilter>>,
 }
 
 impl<S: Storage + NixlRegisterableStorage> KvManagerLayoutConfig<S> {
@@ -194,6 +201,19 @@ pub struct KvBlockManagerConfig {
     /// Channel to reset the block manager to a specific cache level
     #[builder(default)]
     pub block_reset_channel: Option<BlockResetChannel>,
+
+    /// Optional KVBM-level metrics for tracking offload/onboard operations
+    #[builder(default)]
+    pub kvbm_metrics: Option<crate::block_manager::metrics_kvbm::KvbmMetrics>,
+
+    /// Optional KV Event Consolidator Configuration
+    ///
+    /// If provided, KVBM will create a KV Event Consolidator that deduplicates
+    /// KV cache events from vLLM (G1) and KVBM (G2/G3) before sending to the router.
+    /// This is used when `--connector kvbm` is enabled with prefix caching.
+    #[builder(default, setter(strip_option))]
+    pub consolidator_config:
+        Option<crate::block_manager::kv_consolidator::KvEventConsolidatorConfig>,
 }
 
 impl KvBlockManagerConfig {
@@ -201,4 +221,41 @@ impl KvBlockManagerConfig {
     pub fn builder() -> KvBlockManagerConfigBuilder {
         KvBlockManagerConfigBuilder::default()
     }
+}
+
+/// Determines if CPU memory (G2) should be bypassed for direct G1->G3 (Device->Disk) offloading.
+///
+/// Returns `true` if:
+/// - Disk cache env vars are set (`DYN_KVBM_DISK_CACHE_GB` or `DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS`)
+///   AND their values are non-zero
+/// - AND CPU cache env vars are NOT set (`DYN_KVBM_CPU_CACHE_GB` or `DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS`)
+///   OR their values are zero (treated as not set)
+pub fn should_bypass_cpu_cache() -> bool {
+    let cpu_cache_gb_set = std::env::var(env_cpu_cache::DYN_KVBM_CPU_CACHE_GB)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v > 0)
+        .unwrap_or(false);
+    let cpu_cache_override_set =
+        std::env::var(env_cpu_cache::DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS)
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|v| v > 0)
+            .unwrap_or(false);
+    let disk_cache_gb_set = std::env::var(env_disk_cache::DYN_KVBM_DISK_CACHE_GB)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v > 0)
+        .unwrap_or(false);
+    let disk_cache_override_set =
+        std::env::var(env_disk_cache::DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS)
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|v| v > 0)
+            .unwrap_or(false);
+
+    let cpu_cache_set = cpu_cache_gb_set || cpu_cache_override_set;
+    let disk_cache_set = disk_cache_gb_set || disk_cache_override_set;
+
+    disk_cache_set && !cpu_cache_set
 }

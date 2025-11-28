@@ -249,13 +249,20 @@ class Planner:
             self.num_p_workers_gauge.set(len(self.p_endpoints))
             self.num_d_workers_gauge.set(len(self.d_endpoints))
 
-        self.last_metrics.ttft = self.prometheus_api_client.get_avg_time_to_first_token(
-            f"{self.args.adjustment_interval}s",
-            self.model_name,
+        # Prometheus returns seconds, convert to milliseconds
+        self.last_metrics.ttft = (
+            self.prometheus_api_client.get_avg_time_to_first_token(
+                f"{self.args.adjustment_interval}s",
+                self.model_name,
+            )
+            * 1000
         )
-        self.last_metrics.itl = self.prometheus_api_client.get_avg_inter_token_latency(
-            f"{self.args.adjustment_interval}s",
-            self.model_name,
+        self.last_metrics.itl = (
+            self.prometheus_api_client.get_avg_inter_token_latency(
+                f"{self.args.adjustment_interval}s",
+                self.model_name,
+            )
+            * 1000
         )
         self.last_metrics.num_req = self.prometheus_api_client.get_avg_request_count(
             f"{self.args.adjustment_interval}s",
@@ -284,7 +291,7 @@ class Planner:
             f"Observed num_req: {self.last_metrics.num_req:.2f} isl: {self.last_metrics.isl:.2f} osl: {self.last_metrics.osl:.2f}"
         )
         logger.info(
-            f"Observed ttft: {self.last_metrics.ttft:.3f}s itl: {self.last_metrics.itl:.3f}s"
+            f"Observed ttft: {self.last_metrics.ttft:.2f}ms itl: {self.last_metrics.itl:.2f}ms"
         )
 
         self.num_req_predictor.add_data_point(self.last_metrics.num_req)

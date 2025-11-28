@@ -28,18 +28,18 @@
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::kv_router::protocols::{ForwardPassMetrics, KvCacheEventData, KvStats, WorkerStats};
+use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
-use crate::mocker::protocols::{DirectRequest, MockEngineArgs, MoveBlockResponse};
-use crate::mocker::protocols::{MoveBlock, OutputSignal, PrefillCost, block_response_to_kv_event};
+use crate::mocker::perf_model::PerfModel;
+use crate::mocker::protocols::{
+    DirectRequest, MockEngineArgs, MoveBlock, OutputSignal, PrefillCost, WorkerType,
+};
+use crate::mocker::running_mean::RunningMean;
 use crate::mocker::sequence::ActiveSequence;
-use crate::tokens::BlockHash;
 use crate::tokens::blocks::UniqueBlock;
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use std::collections::{HashMap, VecDeque};
+use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -112,9 +112,8 @@ impl SchedulerState {
     /// Returns `Some((prefill_compute, creation_signal, is_full_prefill))` where:
     /// - `prefill_compute`: The compute time in milliseconds for this prefill operation
     /// - `creation_signal`: Optional MoveBlock signal for KV cache block creation
-    /// - `block_hashes`: Block hashes of the sequence beign prefilled
     /// - `is_full_prefill`: true if the entire sequence was prefilled, false if chunked
-    fn try_prefill(&mut self) -> Option<(f64, Option<MoveBlock>, Vec<BlockHash>, bool)> {
+    fn try_prefill(&mut self, perf_model: &PerfModel) -> Option<(f64, Option<MoveBlock>, bool)> {
         let uuid = self.prefill.pop_front()?;
 
         // Remove and extract prefill_compute from prefill_costs
@@ -136,11 +135,12 @@ impl SchedulerState {
 
         let (prefill_compute, is_full_prefill) = if let Some(prefill_tokens) = maybe_prefill_tokens
         {
-            let prefill_compute = prefill_cost.predict_prefill_compute(Some(prefill_tokens));
+            let prefill_compute =
+                prefill_cost.predict_prefill_compute(Some(prefill_tokens), perf_model);
             prefill_cost.new_tokens -= prefill_tokens;
             assert!(
-                (prefill_cost.new_tokens > 0) && (prefill_compute > 0.0),
-                "Encountered negative prefill tokens or prefill compute cost."
+                prefill_cost.new_tokens > 0,
+                "Encountered negative prefill tokens."
             );
 
             self.prefill.push_front(uuid);
@@ -157,7 +157,7 @@ impl SchedulerState {
             self.active_tokens += new_tokens;
             self.waiting_tokens -= new_tokens;
 
-            (prefill_cost.predict_prefill_compute(None), true)
+            (prefill_cost.predict_prefill_compute(None, perf_model), true)
         };
 
         // NOTE: the current behavior allocates the KV blocks for the entire sequence,
@@ -169,7 +169,6 @@ impl SchedulerState {
         Some((
             prefill_compute,
             sequence.take_creation_signal(),
-            sequence.block_hashes(),
             is_full_prefill,
         ))
     }
@@ -238,8 +237,6 @@ impl SchedulerState {
 /// Manages scheduling of requests using KvManager resources
 #[derive(Clone)]
 pub struct Scheduler {
-    state: Arc<Mutex<SchedulerState>>,
-    kv_manager: Arc<Mutex<KvManager>>,
     request_tx: mpsc::UnboundedSender<DirectRequest>,
     metrics_rx: tokio::sync::watch::Receiver<ForwardPassMetrics>,
 }
@@ -248,28 +245,11 @@ impl Scheduler {
     /// Create a new Scheduler with the given parameters
     pub fn new(
         args: MockEngineArgs,
-        dp_rank: Option<u32>,
+        dp_rank: u32,
         output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
-        kv_events_tx: Option<mpsc::UnboundedSender<KvCacheEventData>>,
+        component: Option<dynamo_runtime::component::Component>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
-        let state = Arc::new(Mutex::new(SchedulerState::new(args.max_num_batched_tokens)));
-
-        // Create internal channel for KV events only if needed
-        let (block_resp_tx, mut block_resp_rx) = if kv_events_tx.is_some() {
-            let (tx, rx) = mpsc::unbounded_channel::<MoveBlockResponse>();
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
-
-        let kv_manager = Arc::new(Mutex::new(KvManager::new_with_sender(
-            args.num_gpu_blocks,
-            args.block_size,
-            block_resp_tx,
-        )));
-        let hit_rates = Arc::new(Mutex::new(VecDeque::with_capacity(1000)));
-
         // Assert speedup_ratio is greater than 0
         assert!(
             args.speedup_ratio > 0.0,
@@ -280,147 +260,74 @@ impl Scheduler {
         // Create channel for request handling
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
         let mut initial_metrics = ForwardPassMetrics::default();
-        initial_metrics.worker_stats.data_parallel_rank = dp_rank;
+        initial_metrics.worker_stats.data_parallel_rank = Some(dp_rank);
         let (metrics_tx, metrics_rx) =
             tokio::sync::watch::channel::<ForwardPassMetrics>(initial_metrics);
 
-        // Create a clone for the background task
-        let state_clone = state.clone();
-        let kv_manager_clone = kv_manager.clone();
-        let output_tx_clone = output_tx.clone();
         let cancel_token_clone = cancellation_token.unwrap_or_default().clone();
 
         // Spawn main background task with cancellation token
         tokio::spawn(async move {
-            let mut should_schedule = true;
+            // Create state and kv_manager as local variables owned by this task
+            let mut state = SchedulerState::new(args.max_num_batched_tokens);
+            let mut kv_manager = KvManager::new_with_publisher(
+                args.num_gpu_blocks,
+                args.block_size,
+                component,
+                dp_rank,
+            );
+            let mut hit_rates = RunningMean::new(1000);
 
             loop {
-                {
-                    let state_guard = state_clone.lock().await;
-
-                    // Enqueue new request, blocks until at least one is received, so no redundant work is done
-                    // TODO: clean this up? double lock acquisition is ugly, but needed to not hold the lock forever
-                    if state_guard.is_empty() {
-                        drop(state_guard);
-                        let Some(request) = request_rx.recv().await else {
-                            tracing::warn!("request sender is dropped");
+                // 1. Receive requests
+                if state.is_empty() {
+                    // Fully idle - block until new request arrives
+                    tokio::select! {
+                        biased;
+                        Some(request) = request_rx.recv() => {
+                            state.receive(request);
+                        }
+                        _ = cancel_token_clone.cancelled() => {
                             break;
-                        };
-                        let mut state_guard = state_clone.lock().await;
-                        state_guard.receive(request);
+                        }
                     }
-                }
-
-                tokio::select! {
-                    biased;
-
-                    // Enqueue new request
-                    Some(request) = request_rx.recv() => {
-                        let mut state = state_clone.lock().await;
+                } else {
+                    // Has active/waiting work - collect any pending requests without blocking
+                    while let Ok(request) = request_rx.try_recv() {
                         state.receive(request);
                     }
 
-                    // Try Scheduling Requests - runs on normal interval or after simulation
-                    _ = tokio::task::yield_now() => {
-                        // Skip if we just ran scheduling after simulation to prevent consecutive runs
-                        if !should_schedule {
-                            continue;
-                        }
-
-                        let mut state_guard = state_clone.lock().await;
-                        let kv_manager_guard = kv_manager_clone.lock().await;
-
-                        // Process DirectRequests, converting them to ActiveSequence and scheduling them until we can't
-                        // schedule anymore.
-                        let mut current_blocks = kv_manager_guard.num_active_blocks();
-                        let mut current_tokens = state_guard.active_tokens + state_guard.waiting_tokens;
-                        let mut current_seqs = state_guard.num_active_requests();
-
-                        while let Some((uuid, request)) = state_guard.next() {
-                            let active_sequence = get_active_sequence(request, args.block_size, args.enable_prefix_caching);
-
-                            // Update predictive budgets
-                            let prefill_cost = kv_manager_guard.get_prefill_cost(&active_sequence);
-                            let total_tokens = active_sequence.len();
-                            // this is conservative, assumes no cache hit so never over-schedules
-                            let new_blocks = (total_tokens as u32).div_ceil(args.block_size as u32) as usize;
-                            let new_tokens = prefill_cost.new_tokens;
-
-                            current_blocks += new_blocks;
-                            current_tokens += new_tokens;
-                            current_seqs += 1;
-
-                            // Check various budgets to see if possible to schedule
-                            let under_block_budget = current_blocks as f64 <= (1. - args.watermark) * kv_manager_guard.max_capacity() as f64;
-                            // If chunked prefill is enabled, we can be under token budget when scheduling
-                            let comparison_tokens = if args.enable_chunked_prefill {current_tokens - new_tokens} else {current_tokens};
-                            let under_token_budget = args.max_num_batched_tokens.is_none_or(|limit| comparison_tokens <= limit);
-                            let under_seq_budget = args.max_num_seqs.is_none_or(|limit| current_seqs <= limit);
-
-                            // Cannot schedule, put first in line instead
-                            if !(under_block_budget && under_token_budget && under_seq_budget) {
-                                state_guard.first_in_line(uuid, Request::Active(active_sequence));
-                                break;
-                            }
-
-                            // Compute and store hit rate
-                            let hit_rate = if !active_sequence.is_empty() { 1.0 - (new_tokens as f32 / active_sequence.len() as f32) } else { 0.0 };
-                            {
-                                let mut hit_rates_guard = hit_rates.lock().await;
-                                hit_rates_guard.push_back(hit_rate);
-                                if hit_rates_guard.len() > 1000 {
-                                    hit_rates_guard.pop_front();
-                                }
-                            }
-
-                            state_guard.move_to_prefill(uuid, active_sequence, prefill_cost);
-                            should_schedule = false;
-                        }
-                    }
-
                     // Check for cancellation
-                    _ = cancel_token_clone.cancelled() => {
+                    if cancel_token_clone.is_cancelled() {
                         break;
                     }
                 }
 
-                // Simulates prefill + decode
-                let mut state_guard = state_clone.lock().await;
-                let mut kv_manager_guard = kv_manager_clone.lock().await;
+                // Start timing for this forward pass (schedule + simulate)
+                let iteration_start = std::time::Instant::now();
 
-                // Base time needed for decoding using active percentage and quadratic formula
-                let active_perc = kv_manager_guard.get_active_perc();
-                let decoding_time = -5.47 * active_perc.powi(2) + 43.88 * active_perc + 19.44;
-                let mut total_time = Duration::from_secs_f64(decoding_time / 1000.0);
+                // 2. Schedule waiting requests (once per iteration)
+                try_schedule(&mut state, &kv_manager, &mut hit_rates, &args);
+
+                // 3. Simulate prefill + decode
+                let mut total_time = Duration::ZERO;
 
                 // Process prefilling
-                while let Some((
-                    prefill_compute,
-                    maybe_creation_signal,
-                    block_hashes,
-                    is_full_prefill,
-                )) = state_guard.try_prefill()
+                while let Some((prefill_compute, maybe_creation_signal, is_full_prefill)) =
+                    state.try_prefill(&args.perf_model)
                 {
                     // NOTE: Prefill cost/time is always incremented for new blocks, even if they
                     // could be cached by other requests in the same batch. This matches vLLM behavior.
-                    total_time += Duration::from_secs_f64(prefill_compute / 1000.0);
+                    // For decode workers, skip adding prefill compute time
+                    if args.worker_type != WorkerType::Decode {
+                        total_time += Duration::from_secs_f64(prefill_compute / 1000.0);
+                    }
 
-                    if let Some(creation_signal) = maybe_creation_signal {
-                        if !process_signals(
-                            &mut kv_manager_guard,
-                            std::slice::from_ref(&creation_signal),
-                        ) {
-                            panic!("Block allocation for prefilling cannot fail.");
-                        }
-
-                        // Drain KV events and forward to relay after prefill signal processing
-                        if let (Some(relay_tx), Some(rx)) = (&kv_events_tx, &mut block_resp_rx) {
-                            while let Ok(event) = rx.try_recv() {
-                                let _ =
-                                    relay_tx.send(block_response_to_kv_event(event, &block_hashes));
-                            }
-                        }
-                    };
+                    if let Some(creation_signal) = maybe_creation_signal
+                        && !process_signals(&mut kv_manager, std::slice::from_ref(&creation_signal))
+                    {
+                        panic!("Block allocation for prefilling cannot fail.");
+                    }
 
                     // Impossible to schedule more prefills if we encounter one incomplete (chunked) prefill
                     if !is_full_prefill {
@@ -428,46 +335,44 @@ impl Scheduler {
                     }
                 }
 
-                state_guard.reset_active_tokens();
+                // Compute decode timing
+                let active_kv_tokens = kv_manager.num_active_blocks() * args.block_size;
+                // Compute average context length across all active decode requests
+                let (total_length, count) = state
+                    .decode
+                    .keys()
+                    .filter_map(|uuid| state.requests.get(uuid))
+                    .fold((0usize, 0usize), |(sum, cnt), req| {
+                        if let Request::Active(seq) = req {
+                            (sum + seq.len(), cnt + 1)
+                        } else {
+                            (sum, cnt)
+                        }
+                    });
+                let context_length = if count > 0 { total_length / count } else { 0 };
+                let decoding_time = args
+                    .perf_model
+                    .predict_decode_time(active_kv_tokens, context_length);
+                total_time += Duration::from_secs_f64(decoding_time / 1000.0);
 
-                {
-                    let hit_rates_guard = hit_rates.lock().await;
-                    let metrics = get_fwd_pass_metrics(
-                        &state_guard,
-                        &kv_manager_guard,
-                        &hit_rates_guard,
-                        dp_rank,
-                    );
-                    let _ = metrics_tx.send(metrics);
-                }
+                state.reset_active_tokens();
 
                 // Process decoding
-                let uuids: Vec<Uuid> = state_guard.decode.keys().cloned().collect();
-                if !uuids.is_empty() {
-                    should_schedule = true
-                };
+                let uuids: Vec<Uuid> = state.decode.keys().cloned().collect();
                 for uuid in uuids {
-                    let Some(sequence) = state_guard.run(uuid) else {
+                    let Some(sequence) = state.run(uuid) else {
                         continue;
                     };
                     let signals = sequence.generate();
 
                     // Process all signals with the KvManager
                     // Handling of preemption on failure
-                    if !process_signals(&mut kv_manager_guard, &signals) {
+                    if !process_signals(&mut kv_manager, &signals) {
                         sequence.pop(); // revert the failed generation op
-                        for signal in state_guard.preempt() {
-                            kv_manager_guard.process(&signal);
+                        for signal in state.preempt() {
+                            kv_manager.process(&signal);
                         }
                         continue;
-                    }
-
-                    // Drain KV events and forward to relay after decode signal processing
-                    if let (Some(relay_tx), Some(rx)) = (&kv_events_tx, &mut block_resp_rx) {
-                        while let Ok(event) = rx.try_recv() {
-                            let _ = relay_tx
-                                .send(block_response_to_kv_event(event, &sequence.block_hashes()));
-                        }
                     }
 
                     // Check completion and send notification
@@ -477,7 +382,7 @@ impl Scheduler {
 
                     let mut send_failed = false;
                     if should_output {
-                        send_failed = output_tx_clone.as_ref().is_some_and(|tx| {
+                        send_failed = output_tx.as_ref().is_some_and(|tx| {
                             tx.send(OutputSignal {
                                 uuid,
                                 completed: is_complete,
@@ -488,41 +393,34 @@ impl Scheduler {
 
                     if send_failed {
                         for signal in &sequence.free_signal() {
-                            kv_manager_guard.process(signal);
+                            kv_manager.process(signal);
                         }
                     }
 
-                    {
-                        let hit_rates_guard = hit_rates.lock().await;
-                        let metrics = get_fwd_pass_metrics(
-                            &state_guard,
-                            &kv_manager_guard,
-                            &hit_rates_guard,
-                            dp_rank,
-                        );
-                        let _ = metrics_tx.send(metrics);
-                    }
-
                     if send_failed || is_complete {
-                        state_guard.complete(&uuid);
+                        state.complete(&uuid);
                         continue;
                     }
                 }
 
-                // Sleep once for the adjusted duration
-                drop(kv_manager_guard);
-                drop(state_guard);
-                let adjusted_time =
+                // Send metrics once per forward pass (after all prefill and decode processing)
+                {
+                    let metrics = get_fwd_pass_metrics(&state, &kv_manager, &hit_rates, dp_rank);
+                    let _ = metrics_tx.send(metrics);
+                }
+
+                // 4. Sleep to maintain target iteration timing
+                let target_duration =
                     Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio);
-                if adjusted_time.as_millis() > 0 {
-                    tokio::time::sleep(adjusted_time).await;
+                let elapsed = iteration_start.elapsed();
+
+                if elapsed < target_duration {
+                    tokio::time::sleep(target_duration - elapsed).await;
                 }
             }
         });
 
         Self {
-            state,
-            kv_manager,
             request_tx,
             metrics_rx,
         }
@@ -537,31 +435,6 @@ impl Scheduler {
         self.request_tx.clone()
     }
 
-    pub async fn waiting_count(&self) -> usize {
-        let state = self.state.lock().await;
-        state.waiting.len()
-    }
-
-    pub async fn running_count(&self) -> usize {
-        let state = self.state.lock().await;
-        state.decode.len()
-    }
-
-    pub async fn waiting_tokens(&self) -> usize {
-        let state = self.state.lock().await;
-        state.waiting_tokens
-    }
-
-    pub async fn active_tokens(&self) -> usize {
-        let state = self.state.lock().await;
-        state.active_tokens
-    }
-
-    pub async fn kv_usage_perc(&self) -> f64 {
-        let kv_manager = self.kv_manager.lock().await;
-        kv_manager.current_capacity_perc()
-    }
-
     /// Get a watch receiver for forward pass metrics
     pub fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<ForwardPassMetrics> {
         self.metrics_rx.clone()
@@ -572,15 +445,15 @@ impl Scheduler {
 fn get_fwd_pass_metrics(
     state: &SchedulerState,
     kv_manager: &KvManager,
-    hit_rates: &VecDeque<f32>,
-    dp_rank: Option<u32>,
+    hit_rates: &RunningMean<f32>,
+    dp_rank: u32,
 ) -> ForwardPassMetrics {
     // Get state metrics
     let request_active_slots = state.decode.len() as u64;
     let num_requests_waiting = state.waiting.len() as u64;
 
     // Get KV manager metrics
-    let active_blocks_count = kv_manager.active_blocks().len() as u64;
+    let active_blocks_count = kv_manager.num_active_blocks() as u64;
     let total_capacity = kv_manager.max_capacity() as u64;
     let gpu_cache_usage_perc = if total_capacity > 0 {
         active_blocks_count as f32 / total_capacity as f32
@@ -588,16 +461,11 @@ fn get_fwd_pass_metrics(
         0.0
     };
 
-    // Get hit rate metrics
-    let gpu_prefix_cache_hit_rate = if hit_rates.is_empty() {
-        0.0
-    } else {
-        let sum: f32 = hit_rates.iter().sum();
-        sum / hit_rates.len() as f32
-    };
+    // Get hit rate metrics - O(1) access
+    let gpu_prefix_cache_hit_rate = hit_rates.mean();
 
     let worker_stats = WorkerStats {
-        data_parallel_rank: dp_rank,
+        data_parallel_rank: Some(dp_rank),
         request_active_slots,
         request_total_slots: 1024, // vllm max_num_seqs for gpu >= 70 vram, otherwise 256, fallback is 128
         num_requests_waiting,
@@ -619,26 +487,75 @@ fn get_fwd_pass_metrics(
     }
 }
 
-/// Convert a Request to an ActiveSequence
-fn get_active_sequence(
-    request: Request,
-    block_size: usize,
-    enable_prefix_caching: bool,
-) -> ActiveSequence {
-    if let Request::Active(active_seq) = request {
-        return active_seq;
+/// Attempts to schedule waiting requests from the state queue.
+/// Returns the number of requests successfully scheduled.
+fn try_schedule(
+    state: &mut SchedulerState,
+    kv_manager: &KvManager,
+    hit_rates: &mut RunningMean<f32>,
+    args: &MockEngineArgs,
+) -> usize {
+    let mut scheduled_count = 0;
+    let mut current_blocks = kv_manager.num_active_blocks();
+    let mut current_tokens = state.active_tokens + state.waiting_tokens;
+    let mut current_seqs = state.num_active_requests();
+
+    while let Some((uuid, request)) = state.next() {
+        // Convert Request to ActiveSequence
+        let active_sequence = match request {
+            Request::Active(active_seq) => active_seq,
+            Request::Direct(direct_request) => ActiveSequence::new(
+                direct_request.tokens,
+                direct_request.max_output_tokens,
+                Some(args.block_size),
+                args.enable_prefix_caching,
+            ),
+        };
+
+        // Update predictive budgets
+        let prefill_cost = kv_manager.get_prefill_cost(&active_sequence);
+        let total_tokens = active_sequence.len();
+        // this is conservative, assumes no cache hit so never over-schedules
+        let new_blocks = (total_tokens as u32).div_ceil(args.block_size as u32) as usize;
+        let new_tokens = prefill_cost.new_tokens;
+
+        current_blocks += new_blocks;
+        current_tokens += new_tokens;
+        current_seqs += 1;
+
+        // Check various budgets to see if possible to schedule
+        let under_block_budget =
+            current_blocks as f64 <= (1. - args.watermark) * kv_manager.max_capacity() as f64;
+        // If chunked prefill is enabled, we can be under token budget when scheduling
+        let comparison_tokens = if args.enable_chunked_prefill {
+            current_tokens - new_tokens
+        } else {
+            current_tokens
+        };
+        let under_token_budget = args
+            .max_num_batched_tokens
+            .is_none_or(|limit| comparison_tokens <= limit);
+        let under_seq_budget = args.max_num_seqs.is_none_or(|limit| current_seqs <= limit);
+
+        // Cannot schedule, put first in line instead
+        if !(under_block_budget && under_token_budget && under_seq_budget) {
+            state.first_in_line(uuid, Request::Active(active_sequence));
+            break;
+        }
+
+        // Compute and store hit rate
+        let hit_rate = if !active_sequence.is_empty() {
+            1.0 - (new_tokens as f32 / active_sequence.len() as f32)
+        } else {
+            0.0
+        };
+        hit_rates.push(hit_rate);
+
+        state.move_to_prefill(uuid, active_sequence, prefill_cost);
+        scheduled_count += 1;
     }
 
-    let Request::Direct(direct_request) = request else {
-        unreachable!("Request must be either Direct or Active");
-    };
-
-    ActiveSequence::new(
-        direct_request.tokens,
-        direct_request.max_output_tokens,
-        Some(block_size),
-        enable_prefix_caching,
-    )
+    scheduled_count
 }
 
 /// Processes MoveBlock signals with the KvManager.
@@ -648,17 +565,14 @@ fn get_active_sequence(
 /// This validation is important because in normal operation, the only legitimate failure
 /// case should be when trying to acquire a new generation block - any other failures would
 /// indicate an unexpected state in the system.
-fn process_signals(
-    kv_manager_guard: &mut tokio::sync::MutexGuard<'_, KvManager>,
-    signals: &[MoveBlock],
-) -> bool {
+fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
     for signal in signals {
-        if kv_manager_guard.process(signal) {
+        if kv_manager.process(signal) {
             continue;
         }
 
         // Check we have a Use signal with blocks
-        let MoveBlock::Use(blocks) = signal else {
+        let MoveBlock::Use(blocks, _hashes) = signal else {
             panic!(
                 "Failed signal is Invalid. Has to fail on generation signal, but failed on {signal:?}"
             );
@@ -666,7 +580,7 @@ fn process_signals(
 
         // Verify the signal contains exactly one block
         let num_blocks = blocks.len();
-        let num_active_blocks = kv_manager_guard.num_active_blocks();
+        let num_active_blocks = kv_manager.num_active_blocks();
         if num_blocks != 1 {
             panic!(
                 "Failed signal is Invalid. Tried to create (prefill) {num_blocks} blocks on top of {num_active_blocks} active blocks."
@@ -690,6 +604,30 @@ mod tests {
     use rstest::rstest;
     use std::time::Duration;
     use tokio::time::interval;
+
+    /// Helper function to verify that the scheduler is idle (no active or waiting requests/resources)
+    fn assert_scheduler_idle(metrics: &ForwardPassMetrics) {
+        assert_eq!(
+            metrics.worker_stats.request_active_slots, 0,
+            "Expected 0 active slots, got {}",
+            metrics.worker_stats.request_active_slots
+        );
+        assert_eq!(
+            metrics.worker_stats.num_requests_waiting, 0,
+            "Expected 0 waiting requests, got {}",
+            metrics.worker_stats.num_requests_waiting
+        );
+        assert_eq!(
+            metrics.kv_stats.kv_active_blocks, 0,
+            "Expected 0 active blocks, got {}",
+            metrics.kv_stats.kv_active_blocks
+        );
+        assert_eq!(
+            metrics.kv_stats.gpu_cache_usage_perc, 0.0,
+            "Expected 0% GPU cache usage, got {}",
+            metrics.kv_stats.gpu_cache_usage_perc
+        );
+    }
 
     #[rstest]
     #[case::case_1(false, false, false)]
@@ -728,7 +666,7 @@ mod tests {
             .unwrap();
 
         // Create scheduler with new args struct
-        let scheduler = Scheduler::new(args, None, Some(output_tx), None, None);
+        let scheduler = Scheduler::new(args, 0, Some(output_tx), None, None);
 
         // Create shared tokens for caching case
         let shared_tokens = if use_shared_tokens {
@@ -759,7 +697,7 @@ mod tests {
                 tokens: input_tokens,
                 max_output_tokens,
                 uuid: None,
-                dp_rank: None,
+                dp_rank: 0,
             };
             scheduler.receive(request).await;
         }
@@ -820,17 +758,11 @@ mod tests {
             "Received {received_tokens} tokens but expected exactly {expected_tokens}"
         );
 
-        let active_tokens = scheduler.active_tokens().await;
-        assert!(
-            active_tokens == 0,
-            "Scheduler still have {active_tokens} active tokens but expected 0"
-        );
+        // Wait a bit for final metrics update to propagate
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let waiting_tokens = scheduler.waiting_tokens().await;
-        assert!(
-            waiting_tokens == 0,
-            "Scheduler still have {waiting_tokens} waiting tokens but expected 0"
-        );
+        let metrics = scheduler.metrics_receiver().borrow().clone();
+        assert_scheduler_idle(&metrics);
     }
 
     #[tokio::test]
@@ -853,7 +785,7 @@ mod tests {
             .unwrap();
 
         // Create scheduler
-        let scheduler = Scheduler::new(args, None, Some(output_tx), None, None);
+        let scheduler = Scheduler::new(args, 0, Some(output_tx), None, None);
 
         // Create identical tokens for all requests
         let identical_tokens: Vec<u32> = (0..token_length).map(|i| i as u32).collect();
@@ -864,7 +796,7 @@ mod tests {
                 tokens: identical_tokens.clone(),
                 max_output_tokens,
                 uuid: None,
-                dp_rank: None,
+                dp_rank: 0,
             };
             scheduler.receive(request).await;
             // Sleep for 0.1 second after each request
@@ -913,12 +845,7 @@ mod tests {
         // Verify forward pass metrics
         let metrics = metrics_rx.borrow().clone();
 
-        assert_eq!(
-            metrics.worker_stats.num_requests_waiting, 0,
-            "Expected no waiting requests, got {}",
-            metrics.worker_stats.num_requests_waiting
-        );
-
+        assert_scheduler_idle(&metrics);
         assert!(
             metrics.kv_stats.gpu_prefix_cache_hit_rate > 0.8,
             "Expected cache hit rate > 0.8, got {}",
@@ -950,7 +877,7 @@ mod tests {
             .unwrap();
 
         // Create scheduler
-        let scheduler = Scheduler::new(args, None, Some(output_tx), None, None);
+        let scheduler = Scheduler::new(args, 0, Some(output_tx), None, None);
 
         // Create request with 256 tokens
         let tokens: Vec<u32> = (0..input_tokens).map(|i| i as u32).collect();
@@ -958,7 +885,7 @@ mod tests {
             tokens,
             max_output_tokens,
             uuid: None,
-            dp_rank: None,
+            dp_rank: 0,
         };
 
         scheduler.receive(request).await;
@@ -983,17 +910,6 @@ mod tests {
         let metrics_rx = scheduler.metrics_receiver();
         let metrics = metrics_rx.borrow().clone();
 
-        assert_eq!(
-            metrics.kv_stats.gpu_cache_usage_perc,
-            0.0,
-            "Expected GPU cache usage to be 0%, got {}%",
-            metrics.kv_stats.gpu_cache_usage_perc * 100.0
-        );
-
-        assert_eq!(
-            metrics.kv_stats.kv_active_blocks, 0,
-            "Expected 0 active blocks, got {}",
-            metrics.kv_stats.kv_active_blocks
-        );
+        assert_scheduler_idle(&metrics);
     }
 }

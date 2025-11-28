@@ -4,6 +4,7 @@
 pub mod managed;
 pub use managed::ManagedBlockPool;
 
+use anyhow::Result;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,6 @@ use super::block::{
     private, registry::BlockRegistry,
 };
 use super::events::{EventManager, NullEventManager};
-use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::storage::Storage;
 
 use crate::block_manager::CacheLevel;
@@ -23,7 +23,6 @@ use crate::block_manager::block::locality::LocalityProvider;
 use crate::tokens::{SequenceHash, TokenBlock};
 
 use async_trait::async_trait;
-use prometheus::Registry;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
@@ -32,8 +31,6 @@ use std::{
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-
-use dynamo_runtime::Result;
 
 // Type aliases to reduce complexity across the module
 type BlockPoolResult<T> = Result<T, BlockPoolError>;

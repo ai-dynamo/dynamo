@@ -41,14 +41,13 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> Controller<Locality, M
         block_manager: KvBlockManager<Locality, Metadata>,
         component: dynamo_runtime::component::Component,
     ) -> anyhow::Result<Self> {
-        let service = component.service_builder().create().await?;
-
         let handler = ControllerHandler::new(block_manager.clone());
         let engine = Ingress::for_engine(handler.clone())?;
 
+        let component_clone = component.clone();
         let reset_task = CriticalTaskExecutionHandle::new(
             |_cancel_token| async move {
-                service
+                component_clone
                     .endpoint("controller")
                     .endpoint_builder()
                     .handler(engine)
@@ -95,7 +94,7 @@ pub enum ResetResponse {
     ResetBlocks(ResetBlocksResponse),
 }
 
-#[cfg(all(test, feature = "testing-full"))]
+#[cfg(all(test, feature = "testing-etcd", feature = "testing-full"))]
 mod tests {
     use crate::tokens::Tokens;
 
@@ -111,7 +110,7 @@ mod tests {
             .await
             .unwrap();
 
-        let worker_id = drt.primary_lease().unwrap().id();
+        let worker_id = drt.connection_id();
 
         let block_manager = create_reference_block_manager_with_counts(8, 16, 0).await;
 

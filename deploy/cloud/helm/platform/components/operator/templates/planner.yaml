@@ -12,12 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+{{- if .Values.namespaceRestriction.enabled }}
+# Namespace-restricted mode: Role + ServiceAccount + RoleBinding
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: planner-serviceaccount
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
 {{- if .Values.dynamo.dockerRegistry.useKubernetesSecret }}
 imagePullSecrets:
 - name: {{ include "dynamo-operator.componentsDockerRegistrySecretName" . }}
@@ -27,7 +32,9 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: planner-role
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
 rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamocomponentdeployments", "dynamographdeployments"]
@@ -37,12 +44,28 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: planner-binding
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
 subjects:
 - kind: ServiceAccount
   name: planner-serviceaccount
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
 roleRef:
   kind: Role
   name: planner-role
   apiGroup: rbac.authorization.k8s.io
+{{- else }}
+# Cluster-wide mode: ClusterRole for planner
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-planner
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamocomponentdeployments", "dynamographdeployments"]
+  verbs: ["get", "list", "create", "update", "patch"]
+{{- end }}

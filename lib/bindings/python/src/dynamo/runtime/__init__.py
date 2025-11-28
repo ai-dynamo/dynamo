@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
 from functools import wraps
 from typing import Any, AsyncGenerator, Callable, Type, Union
 
@@ -16,15 +17,17 @@ from dynamo._core import Context as Context
 from dynamo._core import DistributedRuntime as DistributedRuntime
 from dynamo._core import Endpoint as Endpoint
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
+from dynamo._core import Namespace as Namespace
 from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
-def dynamo_worker(static=False):
+def dynamo_worker():
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
-            runtime = DistributedRuntime(loop, static)
+            request_plane = os.environ.get("DYN_REQUEST_PLANE", "nats")
+            runtime = DistributedRuntime(loop, "etcd", request_plane)
 
             await func(runtime, *args, **kwargs)
 

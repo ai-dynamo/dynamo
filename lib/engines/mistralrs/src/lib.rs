@@ -136,7 +136,6 @@ impl MistralRsEngine {
         let paged_attention_config = if cfg!(feature = "cuda") && EXP_ENABLE_PAGED_ATTENTION {
             Some(PagedAttentionConfig::new(
                 None, // Block size, default 32
-                4096, // CPU memory in MiB
                 MemoryGpuConfig::ContextSize(max_seq_len),
                 PagedCacheType::Auto,
             )?)
@@ -237,6 +236,7 @@ impl MistralRsEngine {
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: None,
+            truncate_sequence: false,
         }));
 
         // Send warmup request and consume response
@@ -312,6 +312,7 @@ impl
                 .unwrap_or(det.top_n_logprobs),
             frequency_penalty: request.inner.frequency_penalty.or(det.frequency_penalty),
             presence_penalty: request.inner.presence_penalty.or(det.presence_penalty),
+            repetition_penalty: det.repetition_penalty,
             stop_toks: request.inner.stop.map(to_stop_tokens).or(det.stop_toks),
             max_len: {
                 let requested_max_tokens = request
@@ -358,6 +359,7 @@ impl
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: None,
+            truncate_sequence: false,
         }));
 
         self.mistralrs
@@ -418,6 +420,7 @@ impl
                             usage: None,
                             system_fingerprint: Some(c.system_fingerprint),
                             service_tier: None,
+                            nvext: None,
                         };
                         let ann = Annotated{
                             id: None,
@@ -510,6 +513,7 @@ impl
                 .unwrap_or(det.top_n_logprobs),
             frequency_penalty: request.inner.frequency_penalty.or(det.frequency_penalty),
             presence_penalty: request.inner.presence_penalty.or(det.presence_penalty),
+            repetition_penalty: det.repetition_penalty,
             stop_toks: request
                 .inner
                 .stop
@@ -556,6 +560,7 @@ impl
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: None,
+            truncate_sequence: false,
         }));
 
         self.mistralrs

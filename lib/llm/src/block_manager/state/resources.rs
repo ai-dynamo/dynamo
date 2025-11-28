@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::block_manager::events::DynamoEventManager;
 
 impl Resources {
     /// Create a new [`Resources`] instance
-    pub fn new(config: KvBlockManagerConfig) -> Result<Self> {
+    pub async fn new(config: KvBlockManagerConfig) -> Result<Self> {
         config
             .runtime
             .validate()
@@ -18,15 +19,34 @@ impl Resources {
 
         let global_registry = GlobalRegistry::default();
 
-        let metrics = BlockManagerMetrics::new(&config.runtime.metrics_registry)?;
-
-        let event_manager = config
-            .event_manager
-            .clone()
-            .unwrap_or_else(|| NullEventManager::new());
-
-        // Create a NIXL agent if NIXL is enabled and instantiate requested backends
-        // TODO: Build a map of NIXL backends to block pools/sets
+        // Create event manager based on configuration:
+        // 1. If explicit event_manager provided, use it
+        // 2. Else if consolidator_config provided, create DynamoEventManager with consolidator
+        // 3. Else use NullEventManager (no event reporting)
+        let event_manager = if let Some(ref event_mgr) = config.event_manager {
+            tracing::info!("Using explicit event_manager from config");
+            event_mgr.clone()
+        } else if let Some(consolidator_config) = config.consolidator_config.clone() {
+            tracing::info!(
+                "Creating DynamoEventManager with kv event consolidator config: engine={}, source={:?}",
+                consolidator_config.engine_event_endpoint,
+                consolidator_config.engine_source
+            );
+            // Create DynamoEventManager with consolidator config (async)
+            match DynamoEventManager::new_with_config(consolidator_config).await {
+                Ok(manager) => manager as Arc<dyn EventManager>,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to create DynamoEventManager with consolidator: {}, fallback to NullEventManager",
+                        e
+                    );
+                    NullEventManager::new()
+                }
+            }
+        } else {
+            tracing::info!("Using NullEventManager");
+            NullEventManager::new()
+        };
 
         let mut nixl_backends: HashMap<String, Arc<nixl_sys::Backend>> = HashMap::new();
 
@@ -36,13 +56,6 @@ impl Resources {
                 let agent = NixlAgent::new(&worker_id.to_string())?;
 
                 tracing::debug!("Creating NIXL backends");
-
-                if let Ok((_, ucx_params)) = agent.get_plugin_params("UCX") {
-                    let backend = agent.create_backend("UCX", &ucx_params)?;
-                    nixl_backends.insert("UCX".to_string(), Arc::new(backend));
-                } else {
-                    tracing::warn!("No UCX plugin found; will not create UCX backend");
-                }
 
                 if config.disk_layout.is_some() {
                     if let Ok((_, gds_mt_params)) = agent.get_plugin_params("GDS_MT") {
@@ -75,7 +88,6 @@ impl Resources {
             nixl_backends,
             global_registry,
             event_manager,
-            metrics,
             config,
         })
     }

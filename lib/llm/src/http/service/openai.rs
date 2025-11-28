@@ -20,6 +20,7 @@ use axum::{
     },
     routing::{get, post},
 };
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
@@ -59,7 +60,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
 /// Can be configured at compile time using the DYN_FRONTEND_BODY_LIMIT_MB environment variable
 fn get_body_limit() -> usize {
-    std::env::var("DYN_HTTP_BODY_LIMIT_MB")
+    std::env::var(env_llm::DYN_HTTP_BODY_LIMIT_MB)
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .map(|mb| mb * 1024 * 1024)
@@ -318,11 +319,33 @@ async fn completions(
     request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
+    use crate::protocols::openai::completions::get_prompt_batch_size;
+
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
     validate_completion_fields_generic(&request)?;
 
+    // Detect batch prompts
+    let batch_size = get_prompt_batch_size(&request.inner.prompt);
+    let n = request.inner.n.unwrap_or(1);
+
+    // If single prompt or single-element batch, use original flow
+    if batch_size == 1 {
+        return completions_single(state, request, stream_handle).await;
+    }
+
+    // Batch processing: handle multiple prompts
+    completions_batch(state, request, stream_handle, batch_size, n).await
+}
+
+/// Handle single prompt completions (original logic)
+#[tracing::instrument(skip_all)]
+async fn completions_single(
+    state: Arc<service_v2::State>,
+    request: Context<NvCreateCompletionRequest>,
+    stream_handle: ConnectionHandle,
+) -> Result<Response, ErrorResponse> {
     let request_id = request.id().to_string();
 
     // todo - decide on default
@@ -422,7 +445,166 @@ async fn completions(
                     request_id,
                     e
                 );
-                ErrorMessage::internal_server_error("Failed to fold completions stream")
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to fold completions stream for {}: {:?}",
+                    request_id, e
+                ))
+            })?;
+
+        inflight_guard.mark_ok();
+        Ok(Json(response).into_response())
+    }
+}
+
+/// Handle batch prompt completions (multiple prompts with n choices each)
+#[tracing::instrument(skip_all)]
+async fn completions_batch(
+    state: Arc<service_v2::State>,
+    request: Context<NvCreateCompletionRequest>,
+    stream_handle: ConnectionHandle,
+    batch_size: usize,
+    n: u8,
+) -> Result<Response, ErrorResponse> {
+    use crate::protocols::openai::completions::extract_single_prompt;
+    use futures::stream::{self, StreamExt};
+
+    let request_id = request.id().to_string();
+    let streaming = request.inner.stream.unwrap_or(false);
+    let model = request.inner.model.clone();
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
+    let engine = state
+        .manager()
+        .get_completions_engine(&model)
+        .map_err(|_| ErrorMessage::model_not_found())?;
+
+    let parsing_options = state.manager().get_parsing_options(&model);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    // prepare to process any annotations
+    let annotations = request.annotations();
+
+    // Create inflight_guard before calling engine to ensure errors are counted
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Completions, streaming);
+
+    // Generate streams for each prompt in the batch
+    let mut all_streams = Vec::new();
+    let mut first_ctx = None;
+
+    for prompt_idx in 0..batch_size {
+        // Extract single prompt at this index
+        let single_prompt = extract_single_prompt(&request.inner.prompt, prompt_idx);
+
+        // Create a new request with this single prompt
+        let mut single_request = request.content().clone();
+        single_request.inner.prompt = single_prompt;
+
+        // Generate unique request_id for each prompt: original_id-{prompt_idx}
+        let unique_request_id = format!("{}-{}", request.id(), prompt_idx);
+        let single_request_context = Context::with_id(single_request, unique_request_id);
+
+        // Generate stream for this prompt
+        let stream = engine
+            .generate(single_request_context)
+            .await
+            .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+
+        // Capture context from first stream
+        if first_ctx.is_none() {
+            first_ctx = Some(stream.context());
+        }
+
+        // Remap choice indices: choice.index += prompt_idx * n
+        let prompt_idx_u32 = prompt_idx as u32;
+        let n_u32 = n as u32;
+        let remapped_stream = stream.map(move |mut response| {
+            if let Some(ref mut data) = response.data {
+                for choice in &mut data.inner.choices {
+                    choice.index += prompt_idx_u32 * n_u32;
+                }
+            }
+            response
+        });
+
+        all_streams.push(remapped_stream);
+    }
+
+    // Merge all streams
+    let merged_stream = stream::select_all(all_streams);
+
+    // capture the context to cancel the stream if the client disconnects
+    let ctx = first_ctx.expect("At least one stream should be generated");
+
+    let annotations_vec = annotations.map_or(Vec::new(), |annotations| {
+        annotations
+            .iter()
+            .filter_map(|annotation| {
+                if annotation == ANNOTATION_REQUEST_ID {
+                    Annotated::<NvCreateCompletionResponse>::from_annotation(
+                        ANNOTATION_REQUEST_ID,
+                        &request_id,
+                    )
+                    .ok()
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+
+    // apply any annotations to the front of the stream
+    let merged_stream = stream::iter(annotations_vec).chain(merged_stream);
+
+    if streaming {
+        // For streaming, we'll drop the http_queue_guard on the first token
+        let mut http_queue_guard = Some(http_queue_guard);
+        let stream = merged_stream.map(move |response| {
+            // Calls observe_response() on each token
+            process_response_using_event_converter_and_observe_metrics(
+                EventConverter::from(response),
+                &mut response_collector,
+                &mut http_queue_guard,
+            )
+        });
+        let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
+
+        let mut sse_stream = Sse::new(stream);
+
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+
+        Ok(sse_stream.into_response())
+    } else {
+        // Tap the stream to collect metrics for non-streaming requests without altering items
+        let mut http_queue_guard = Some(http_queue_guard);
+        let stream = merged_stream.inspect(move |response| {
+            // Calls observe_response() on each token - drops http_queue_guard on first token
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+        });
+
+        let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to fold completions stream for {}: {:?}",
+                    request_id,
+                    e
+                );
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to fold completions stream for {}: {:?}",
+                    request_id, e
+                ))
             })?;
 
         inflight_guard.mark_ok();
@@ -1061,8 +1243,8 @@ async fn list_models_openai(
         data.push(ModelListing {
             id: model_name.clone(),
             object: "object",
-            created,                        // Where would this come from? The GGUF?
-            owned_by: "nvidia".to_string(), // Get organization from GGUF
+            created,                        // Where would this come from?
+            owned_by: "nvidia".to_string(), // Get organization from config
         });
     }
 
@@ -1400,6 +1582,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_err());
@@ -1428,6 +1611,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_ok());
@@ -1448,7 +1632,7 @@ mod tests {
     // 11. Repetition Penalty: Should be a float between 0.0 and 2.0 : Done
     // 12. Logprobs: Should be a positive integer between 0 and 5 : Done
     // invalid or non existing user : Only empty string is not allowed validation is there. How can we check non-extisting user ?
-    // add_special_tokens null or invalid : Not Done
+    // Unknown fields : Done (rejected via extra_fields catch-all)
     // guided_whitespace_pattern null or invalid : Not Done
     // "response_format": { "type": "invalid_format" } : Not Done
     // "logit_bias": { "invalid_token": "not_a_number" }, : Partial Validation is already there
@@ -1464,6 +1648,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
 
         let result = validate_completion_fields_generic(&request);
@@ -1487,6 +1672,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1509,6 +1695,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1531,6 +1718,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1555,6 +1743,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1577,6 +1766,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1607,6 +1797,7 @@ mod tests {
                 "session": {"id": "session-1", "timestamp": 1640995200}
             })
             .into(),
+            unsupported_fields: Default::default(),
         };
 
         let result = validate_completion_fields_generic(&request);
@@ -1635,6 +1826,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
 
         let result = validate_chat_completion_fields_generic(&request);
@@ -1663,6 +1855,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1690,6 +1883,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1717,6 +1911,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1746,6 +1941,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1773,6 +1969,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             chat_template_args: None,
+            unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -1782,6 +1979,80 @@ mod tests {
                 error_response.1.message,
                 "Top_logprobs must be between 0 and 20, got 25"
             );
+        }
+    }
+
+    #[test]
+    fn test_chat_completions_unknown_fields_rejected() {
+        // Test that known unsupported fields are rejected and all shown in error message
+        let json = r#"{
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "test-model",
+            "add_special_tokens": true,
+            "documents": ["doc1"],
+            "chat_template": "custom",
+            "chat_template_kwargs": {"key": "val"}
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json).unwrap();
+
+        // Verify all unsupported fields were captured
+        assert!(
+            request
+                .unsupported_fields
+                .contains_key("add_special_tokens")
+        );
+        assert!(request.unsupported_fields.contains_key("documents"));
+        assert!(request.unsupported_fields.contains_key("chat_template"));
+        assert!(
+            request
+                .unsupported_fields
+                .contains_key("chat_template_kwargs")
+        );
+
+        let result = validate_chat_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            let msg = &error_response.1.message;
+            assert!(msg.contains("Unsupported parameter"));
+            // Verify all fields appear in the error message
+            assert!(msg.contains("add_special_tokens"));
+            assert!(msg.contains("documents"));
+            assert!(msg.contains("chat_template"));
+            assert!(msg.contains("chat_template_kwargs"));
+        }
+    }
+
+    #[test]
+    fn test_completions_unsupported_fields_rejected() {
+        // Test that known unsupported fields are rejected and all shown in error message
+        let json = r#"{
+            "model": "test-model",
+            "prompt": "Hello",
+            "add_special_tokens": true,
+            "response_format": {"type": "json_object"}
+        }"#;
+
+        let request: NvCreateCompletionRequest = serde_json::from_str(json).unwrap();
+
+        // Verify both unsupported fields were captured
+        assert!(
+            request
+                .unsupported_fields
+                .contains_key("add_special_tokens")
+        );
+        assert!(request.unsupported_fields.contains_key("response_format"));
+
+        let result = validate_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            let msg = &error_response.1.message;
+            assert!(msg.contains("Unsupported parameter"));
+            // Verify both fields appear in error message
+            assert!(msg.contains("add_special_tokens"));
+            assert!(msg.contains("response_format"));
         }
     }
 }

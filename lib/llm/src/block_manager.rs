@@ -14,12 +14,14 @@ pub mod block;
 pub mod connector;
 pub mod distributed;
 pub mod events;
+pub mod kv_consolidator;
 pub mod layout;
-pub mod metrics;
 pub mod metrics_kvbm;
+pub mod numa_allocator;
 pub mod offload;
 pub mod pool;
 pub mod storage;
+pub mod v2;
 
 // dynamo rt integration
 pub mod controller;
@@ -33,7 +35,7 @@ pub use block::{
 pub use config::*;
 
 pub use layout::{LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType, nixl::NixlLayout};
-pub use offload::request::BlockResult;
+pub use offload::{filter::OffloadFilter, request::BlockResult};
 pub use pool::{BlockPool, ManagedBlockPool};
 pub use storage::{
     DeviceStorage, DiskStorage, PinnedStorage, Storage, StorageAllocator,
@@ -324,18 +326,6 @@ mod tests {
         ReferenceBlockManager::new(create_reference_block_manager_config())
             .await
             .unwrap()
-    }
-
-    pub async fn create_reference_block_manager_with_counts(
-        device: usize,
-        host: usize,
-        disk: usize,
-    ) -> ReferenceBlockManager {
-        ReferenceBlockManager::new(create_reference_block_manager_config_with_counts(
-            device, host, disk,
-        ))
-        .await
-        .unwrap()
     }
 
     #[tokio::test]

@@ -9,9 +9,19 @@ Dynamo backends and components.
 
 Main submodules:
     - config_dump: Configuration dumping and system diagnostics utilities
+    - utils: Common utilities including environment and prometheus helpers
 """
 
-from dynamo.common import config_dump
-from dynamo.common._version import __version__
+from dynamo.common import config_dump, utils
 
-__all__ = ["__version__", "config_dump"]
+try:
+    from ._version import __version__
+except Exception:
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        __version__ = _pkg_version("ai-dynamo")
+    except Exception:
+        __version__ = "0.0.0+unknown"
+
+__all__ = ["__version__", "config_dump", "utils"]

@@ -1,7 +1,9 @@
 package dynamo
 
 import (
-	"strings"
+	"fmt"
+	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
@@ -13,46 +15,46 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 	backend := &VLLMBackend{}
 
 	tests := []struct {
-		name                  string
-		numberOfNodes         int32
-		role                  Role
-		component             *v1alpha1.DynamoComponentDeploymentOverridesSpec
-		multinodeDeployer     MultinodeDeployer
-		initialArgs           []string
-		initialLivenessProbe  *corev1.Probe
-		initialReadinessProbe *corev1.Probe
-		initialStartupProbe   *corev1.Probe
-		expectedArgs          []string
-		expectContains        []string
-		expectNotModified     bool // If true, container args should not change
-		expectProbesRemoved   bool // If true, probes should be nil
+		name                string
+		numberOfNodes       int32
+		role                Role
+		component           *v1alpha1.DynamoComponentDeploymentSharedSpec
+		multinodeDeployer   MultinodeDeployer
+		initialContainer    *corev1.Container
+		gpuCount            int64 // GPU count for the test case
+		expectedArgs        []string
+		expectNotModified   bool // If true, container args should not change
+		expectProbesRemoved bool // If true, probes should be nil
 	}{
 		{
 			name:              "single node does not modify args",
 			numberOfNodes:     1,
 			role:              RoleMain,
-			component:         &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialArgs:       []string{"python3", "-m", "dynamo.vllm"},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
+			gpuCount:          0,
 			expectNotModified: true,
 		},
 		{
 			name:                "multinode leader prepends ray start --head",
 			numberOfNodes:       3,
 			role:                RoleLeader,
-			component:           &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			component:           &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer:   &GroveMultinodeDeployer{},
-			initialArgs:         []string{"python3", "-m", "dynamo.vllm", "--model", "test"},
-			expectContains:      []string{"ray start --head --port=6379 &&", "python3", "-m", "dynamo.vllm", "--model", "test"},
+			initialContainer:    &corev1.Container{Command: []string{"python3", "-m", "dynamo.vllm"}, Args: []string{"--model", "test", tensorParallelSizeFlag, "8"}},
+			gpuCount:            4,
+			expectedArgs:        []string{fmt.Sprintf("ray start --head --port=%s && python3 -m dynamo.vllm --model test %s 8", VLLMPort, tensorParallelSizeFlag)},
 			expectProbesRemoved: true,
 		},
 		{
 			name:                "multinode worker replaces args with ray start --block",
 			numberOfNodes:       3,
 			role:                RoleWorker,
-			component:           &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			component:           &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer:   &GroveMultinodeDeployer{},
-			initialArgs:         []string{"python3", "-m", "dynamo.vllm", "--model", "test"},
+			initialContainer:    &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", "--model", "test", tensorParallelSizeFlag, "8"}},
+			gpuCount:            4,
 			expectedArgs:        []string{"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block"},
 			expectProbesRemoved: true,
 		},
@@ -60,28 +62,31 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			name:                "multinode worker with LWS deployment type",
 			numberOfNodes:       2,
 			role:                RoleWorker,
-			component:           &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			component:           &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer:   &LWSMultinodeDeployer{},
-			initialArgs:         []string{"python3", "-m", "dynamo.vllm"},
-			expectedArgs:        []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
+			initialContainer:    &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "8"}},
+			gpuCount:            4,
+			expectedArgs:        []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
 			expectProbesRemoved: true,
 		},
 		{
 			name:              "multinode leader with no initial args",
 			numberOfNodes:     2,
 			role:              RoleLeader,
-			component:         &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialArgs:       []string{},
+			initialContainer:  &corev1.Container{Args: []string{}},
+			gpuCount:          0,
 			expectNotModified: true, // Should not modify empty args
 		},
 		{
 			name:              "multinode main role (non-leader/worker) does not modify args",
 			numberOfNodes:     3,
 			role:              RoleMain,
-			component:         &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialArgs:       []string{"python3", "-m", "dynamo.frontend"},
+			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.frontend"}},
+			gpuCount:          0,
 			expectNotModified: true,
 		},
 	}
@@ -90,37 +95,124 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
-			// Create a container with initial state
-			container := &corev1.Container{
-				Args:           append([]string{}, tt.initialArgs...), // Copy slice to avoid modifying original
-				LivenessProbe:  tt.initialLivenessProbe,
-				ReadinessProbe: tt.initialReadinessProbe,
-				StartupProbe:   tt.initialStartupProbe,
-			}
+			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
 
-			// Call UpdateContainer
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
-
-			if tt.expectNotModified {
-				// Args should not have changed
-				g.Expect(container.Args).To(gomega.Equal(tt.initialArgs))
-			} else if tt.expectedArgs != nil {
-				// Check exact match
-				g.Expect(container.Args).To(gomega.Equal(tt.expectedArgs))
-			} else if tt.expectContains != nil {
-				// Check that expected strings are contained in the result
-				argsStr := strings.Join(container.Args, " ")
-				for _, expected := range tt.expectContains {
-					if !strings.Contains(argsStr, expected) {
-						t.Errorf("UpdateContainer() args = %v, should contain %s", container.Args, expected)
-					}
+			// Create resources from GPU count and set in component
+			if tt.gpuCount > 0 {
+				tt.component.Resources = &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
+						GPU: strconv.FormatInt(tt.gpuCount, 10),
+					},
 				}
 			}
 
+			// Call UpdateContainer
+			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
+
+			if tt.expectNotModified {
+				// Args should not have changed
+				g.Expect(tt.initialContainer.Args).To(gomega.Equal(initialContainerArgs))
+			} else if tt.expectedArgs != nil {
+				// Check exact match
+				g.Expect(tt.initialContainer.Args).To(gomega.Equal(tt.expectedArgs))
+			}
+
 			if tt.expectProbesRemoved {
-				g.Expect(container.LivenessProbe).To(gomega.BeNil())
-				g.Expect(container.ReadinessProbe).To(gomega.BeNil())
-				g.Expect(container.StartupProbe).To(gomega.BeNil())
+				g.Expect(tt.initialContainer.LivenessProbe).To(gomega.BeNil())
+				g.Expect(tt.initialContainer.ReadinessProbe).To(gomega.BeNil())
+				g.Expect(tt.initialContainer.StartupProbe).To(gomega.BeNil())
+			}
+		})
+	}
+}
+
+func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
+	backend := &VLLMBackend{}
+
+	tests := []struct {
+		name              string
+		numberOfNodes     int32
+		role              Role
+		multinodeDeployer MultinodeDeployer
+		initialContainer  *corev1.Container
+		gpuCount          int64 // GPU count for the test case
+		expectedArgs      []string
+		description       string
+	}{
+		{
+			name:              "single node shell command not modified",
+			numberOfNodes:     1,
+			role:              RoleMain,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{"python3 -m dynamo.vllm"}},
+			gpuCount:          0,
+			expectedArgs:      []string{"python3 -m dynamo.vllm"},
+			description:       "Single node should not modify shell commands",
+		},
+		{
+			name:              "multinode shell command with regex injection",
+			numberOfNodes:     2,
+			role:              RoleLeader,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8", dataParallelSizeFlag)}},
+			gpuCount:          4,
+			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-size-local 4 --data-parallel-rpc-port 13445 --data-parallel-start-rank 0 --data-parallel-size 8"},
+			description:       "Shell commands should use regex injection for python commands",
+		},
+		{
+			name:              "multinode shell command with complex pipeline",
+			numberOfNodes:     2,
+			role:              RoleLeader,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("echo blah | wc -l && python3 -m dynamo.vllm %s 8 && ls -al", dataParallelSizeFlag)}},
+			gpuCount:          4,
+			expectedArgs:      []string{"echo blah | wc -l && python3 -m dynamo.vllm --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-size-local 4 --data-parallel-rpc-port 13445 --data-parallel-start-rank 0 --data-parallel-size 8 && ls -al"},
+			description:       "Complex shell commands should inject flags only into python part",
+		},
+		{
+			name:              "shell command with LWS deployer",
+			numberOfNodes:     2,
+			role:              RoleLeader,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8", dataParallelSizeFlag)}},
+			gpuCount:          4,
+			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-address $LWS_LEADER_ADDRESS --data-parallel-size-local 4 --data-parallel-rpc-port 13445 --data-parallel-start-rank 0 --data-parallel-size 8"},
+			description:       "LWS shell commands should use LWS variables",
+		},
+		{
+			name:              "shell command with pipes",
+			numberOfNodes:     2,
+			role:              RoleLeader,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8 | tee /tmp/log", dataParallelSizeFlag)}},
+			gpuCount:          4,
+			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-size-local 4 --data-parallel-rpc-port 13445 --data-parallel-start-rank 0 --data-parallel-size 8 | tee /tmp/log"},
+			description:       "Shell commands with pipes should inject flags before pipe",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expectedCommand := append([]string{}, tt.initialContainer.Command...)
+
+			// Create component with resources from GPU count
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
+			if tt.gpuCount > 0 {
+				component.Resources = &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
+						GPU: strconv.FormatInt(tt.gpuCount, 10),
+					},
+				}
+			}
+
+			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, component, "test-service", tt.multinodeDeployer)
+
+			if !reflect.DeepEqual(tt.initialContainer.Args, tt.expectedArgs) {
+				t.Errorf("UpdateContainer() args = %v, want %v", tt.initialContainer.Args, tt.expectedArgs)
+			}
+
+			if !reflect.DeepEqual(tt.initialContainer.Command, expectedCommand) {
+				t.Errorf("UpdateContainer() should preserve shell command, got: %v, want: %v", tt.initialContainer.Command, expectedCommand)
 			}
 		})
 	}
@@ -131,7 +223,7 @@ func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 
 	tests := []struct {
 		name                  string
-		component             *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		component             *v1alpha1.DynamoComponentDeploymentSharedSpec
 		volumeMounts          []corev1.VolumeMount
 		expectCacheEnvVar     bool
 		expectCacheEnvVarName string
@@ -139,14 +231,12 @@ func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 	}{
 		{
 			name: "VLLM backend with useAsCompilationCache volume mount",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					VolumeMounts: []v1alpha1.VolumeMount{
-						{
-							Name:                  "vllm-cache",
-							MountPoint:            "/root/.cache/vllm",
-							UseAsCompilationCache: true,
-						},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{
+						Name:                  "vllm-cache",
+						MountPoint:            "/root/.cache/vllm",
+						UseAsCompilationCache: true,
 					},
 				},
 			},
@@ -157,14 +247,12 @@ func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 		},
 		{
 			name: "VLLM backend with useAsCompilationCache at custom mount point",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					VolumeMounts: []v1alpha1.VolumeMount{
-						{
-							Name:                  "custom-cache",
-							MountPoint:            "/custom/cache/path",
-							UseAsCompilationCache: true,
-						},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{
+						Name:                  "custom-cache",
+						MountPoint:            "/custom/cache/path",
+						UseAsCompilationCache: true,
 					},
 				},
 			},
@@ -175,13 +263,11 @@ func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 		},
 		{
 			name: "VLLM backend without useAsCompilationCache",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					VolumeMounts: []v1alpha1.VolumeMount{
-						{
-							Name:       "regular-volume",
-							MountPoint: "/data",
-						},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{
+						Name:       "regular-volume",
+						MountPoint: "/data",
 					},
 				},
 			},
@@ -190,10 +276,8 @@ func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 		},
 		{
 			name: "VLLM backend with no volume mounts",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					VolumeMounts: nil,
-				},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				VolumeMounts: nil,
 			},
 			volumeMounts:      []corev1.VolumeMount{},
 			expectCacheEnvVar: false,
@@ -243,44 +327,73 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 		name              string
 		role              Role
 		multinodeDeployer MultinodeDeployer
-		initialArgs       []string
+		initialContainer  *corev1.Container
+		gpuCount          int64 // GPU count for the test case
 		expectedArgs      []string
-		expectContains    []string
 		expectNotModified bool
 	}{
 		{
 			name:              "leader prepends ray start --head",
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialArgs:       []string{"python3", "-m", "dynamo.vllm"},
-			expectContains:    []string{"ray start --head --port=6379 &&", "python3", "-m", "dynamo.vllm"},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
+			gpuCount:          8,
+			expectedArgs:      []string{fmt.Sprintf("ray start --head --port=%s && python3 -m dynamo.vllm %s 16", VLLMPort, tensorParallelSizeFlag)},
+		},
+		{
+			name:              "leader prepends distributed data parallel flags",
+			role:              RoleLeader,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "16"}},
+			gpuCount:          8,
+			expectedArgs:      []string{fmt.Sprintf("exec python3 -m dynamo.vllm %s 16 --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-size-local 8 --data-parallel-rpc-port 13445 --data-parallel-start-rank 0", dataParallelSizeFlag)},
 		},
 		{
 			name:              "leader with empty args does not modify",
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialArgs:       []string{},
+			initialContainer:  &corev1.Container{Args: []string{}},
+			gpuCount:          0,
 			expectNotModified: true,
 		},
 		{
-			name:              "worker with Grove deployment",
+			name:              "worker with ray distributed launch Grove",
 			role:              RoleWorker,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialArgs:       []string{"python3", "-m", "dynamo.vllm"},
+			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
+			gpuCount:          8,
 			expectedArgs:      []string{"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block"},
 		},
 		{
-			name:              "worker with LWS deployment",
+			name:              "worker with data parallel launch Grove",
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "16"}},
+			gpuCount:          8,
+			expectedArgs:      []string{fmt.Sprintf("exec python3 -m dynamo.vllm %s 16 --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-size-local 8 --data-parallel-rpc-port 13445 --data-parallel-start-rank $(( 8 * $((GROVE_PCLQ_POD_INDEX + 1)) ))", dataParallelSizeFlag)},
+		},
+		{
+			name:              "worker with data parallel launch Grove, tp > 1",
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "8", tensorParallelSizeFlag, "2"}},
+			gpuCount:          8,
+			expectedArgs:      []string{fmt.Sprintf("exec python3 -m dynamo.vllm %s 8 %s 2 --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-size-local 4 --data-parallel-rpc-port 13445 --data-parallel-start-rank $(( 4 * $((GROVE_PCLQ_POD_INDEX + 1)) ))", dataParallelSizeFlag, tensorParallelSizeFlag)},
+		},
+		{
+			name:              "worker with ray distributed launch LWS",
 			role:              RoleWorker,
 			multinodeDeployer: &LWSMultinodeDeployer{},
-			initialArgs:       []string{"python3", "-m", "dynamo.vllm"},
-			expectedArgs:      []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
+			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
+			gpuCount:          8,
+			expectedArgs:      []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
 		},
 		{
 			name:              "main role does not modify args",
 			role:              RoleMain,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialArgs:       []string{"python3", "-m", "dynamo.frontend"},
+			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.frontend"}},
+			gpuCount:          0,
 			expectNotModified: true,
 		},
 	}
@@ -289,28 +402,27 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
-			// Create a container with initial args
-			container := &corev1.Container{
-				Args: append([]string{}, tt.initialArgs...), // Copy slice to avoid modifying original
+			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
+
+			// Create resources from GPU count
+			var resources *v1alpha1.Resources
+			if tt.gpuCount > 0 {
+				resources = &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
+						GPU: strconv.FormatInt(tt.gpuCount, 10),
+					},
+				}
 			}
 
 			// Call updateVLLMMultinodeArgs
-			updateVLLMMultinodeArgs(container, tt.role, "test-service", tt.multinodeDeployer)
+			updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, resources)
 
 			if tt.expectNotModified {
 				// Args should not have changed
-				g.Expect(container.Args).To(gomega.Equal(tt.initialArgs))
+				g.Expect(tt.initialContainer.Args).To(gomega.Equal(initialContainerArgs))
 			} else if tt.expectedArgs != nil {
 				// Check exact match
-				g.Expect(container.Args).To(gomega.Equal(tt.expectedArgs))
-			} else if tt.expectContains != nil {
-				// Check that expected strings are contained in the result
-				argsStr := strings.Join(container.Args, " ")
-				for _, expected := range tt.expectContains {
-					if !strings.Contains(argsStr, expected) {
-						t.Errorf("updateVLLMMultinodeArgs() args = %v, should contain %s", container.Args, expected)
-					}
-				}
+				g.Expect(tt.initialContainer.Args).To(gomega.Equal(tt.expectedArgs))
 			}
 		})
 	}

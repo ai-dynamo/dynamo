@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 
@@ -11,14 +12,14 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.llm import ModelInput, ModelType
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
 from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang.publisher import setup_sgl_metrics
+from dynamo.sglang.publisher import setup_prometheus_registry, setup_sgl_metrics
 from dynamo.sglang.register import register_llm_with_readiness_gate
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
@@ -33,9 +34,44 @@ from dynamo.sglang.request_handlers import (
 configure_dynamo_logging()
 
 
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
+async def _handle_non_leader_node(
+    engine: sgl.Engine,
+    generate_endpoint,
+) -> None:
+    """
+    Handle non-leader node (node_rank >= 1) in multi-node deployments.
+
+    Non-leader nodes only run scheduler processes and don't handle requests,
+    but they should still expose metrics via Dynamo's metrics endpoint.
+
+    Args:
+        engine: The SGLang engine instance.
+        config: SGLang configuration including server args.
+        component: The Dynamo runtime component.
+        generate_endpoint: The Dynamo endpoint for generation requests.
+    """
+    logging.info(
+        f"Non-leader node detected (node_rank={engine.server_args.node_rank})."
+    )
+
+    # Only setup Prometheus registry to expose SGLang metrics from shared memory
+    # Non-leader nodes don't need Dynamo metrics publishing or KV events
+    if engine.server_args.enable_metrics:
+        setup_prometheus_registry(engine, generate_endpoint)
+        logging.info("Prometheus metrics registry configured for non-leader node")
+
+    # Wait indefinitely - the process will be terminated via signal handlers
+    await asyncio.Event().wait()
+
+
+async def worker():
+    config = await parse_args(sys.argv[1:])
+    dump_config(config.dynamo_args.dump_config_to, config)
+
     loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(
+        loop, config.dynamo_args.store_kv, config.dynamo_args.request_plane
+    )
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -45,8 +81,6 @@ async def worker(runtime: DistributedRuntime):
 
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
-    config = parse_args(sys.argv[1:])
-    dump_config(config.dynamo_args.dump_config_to, config)
     if config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config)
     elif config.dynamo_args.multimodal_processor:
@@ -67,18 +101,36 @@ async def worker(runtime: DistributedRuntime):
 async def init(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
+    # Prevent SGLang from blocking on non-leader nodes
+    # We can switch this to 0 and leverage our own metrics
+    # after https://github.com/sgl-project/sglang/pull/13686
+    # is merged in
+    if server_args.node_rank >= 1:
+        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
+
     engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
+    # Handle non-leader nodes (multi-node parallelism)
+    # Non-leader nodes only run scheduler processes and expose metrics
+    if server_args.node_rank >= 1:
+        await _handle_non_leader_node(engine, generate_endpoint)
+        return
+
     prefill_client = None
+    prefill_router_client = None
     if config.serving_mode == DisaggregationMode.DECODE:
-        logging.info("Initializing prefill client")
+        prefill_router_client = (
+            await runtime.namespace(dynamo_args.namespace)
+            .component("router")
+            .endpoint("best_worker_id")
+            .client()
+        )
         prefill_client = (
             await runtime.namespace(dynamo_args.namespace)
             .component("prefill")
@@ -91,16 +143,22 @@ async def init(runtime: DistributedRuntime, config: Config):
         engine, config, component, generate_endpoint
     )
 
+    # Register Prometheus metrics callback if enabled
+    if engine.server_args.enable_metrics:
+        setup_prometheus_registry(engine, generate_endpoint)
+
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    handler = DecodeWorkerHandler(component, engine, config, publisher, prefill_client)
+    handler = DecodeWorkerHandler(
+        component, engine, config, publisher, prefill_client, prefill_router_client
+    )
 
     health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
     try:
         # Start endpoint immediately and register model concurrently
-        # Requests queue until ready_event is set
+        # Requests queue until ready_event is set (TODO: Part of new PR)
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -132,16 +190,41 @@ async def init(runtime: DistributedRuntime, config: Config):
 async def init_prefill(runtime: DistributedRuntime, config: Config):
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
+    # Prevent SGLang from blocking on non-leader nodes
+    # We can switch this to 0 and leverage our own metrics
+    # after https://github.com/sgl-project/sglang/pull/13686
+    # is merged in
+    if server_args.node_rank >= 1:
+        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "1"
+
     engine = sgl.Engine(server_args=server_args)
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    handler = PrefillWorkerHandler(component, engine, config)
+    # Handle non-leader nodes (multi-node tensor parallelism)
+    # Non-leader nodes only run scheduler processes and expose metrics
+    if server_args.node_rank >= 1:
+        await _handle_non_leader_node(engine, generate_endpoint)
+        return
+
+    # Perform dummy warmup for prefill worker to avoid initial TTFT hit
+    # Only needed on leader node that handles requests
+    await _warmup_prefill_engine(engine, server_args)
+
+    # publisher instantiates the metrics and kv event publishers
+    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
+        engine, config, component, generate_endpoint
+    )
+
+    # Register Prometheus metrics callback if enabled
+    if engine.server_args.enable_metrics:
+        setup_prometheus_registry(engine, generate_endpoint)
+
+    handler = PrefillWorkerHandler(component, engine, config, publisher)
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
@@ -149,7 +232,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
-            metrics_labels=[("model", server_args.served_model_name)],
+            metrics_labels=metrics_labels,
             health_check_payload=health_check_payload,
         )
     ]
@@ -160,6 +243,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            logging.info("Metrics task successfully cancelled")
+            pass
         handler.cleanup()
 
 
@@ -172,7 +261,6 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -180,6 +268,10 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
+
+    # Register Prometheus metrics callback if enabled
+    if engine.server_args.enable_metrics:
+        setup_prometheus_registry(engine, generate_endpoint)
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
@@ -226,7 +318,6 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -275,7 +366,6 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -316,7 +406,6 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -358,7 +447,6 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
-    await component.create_service()
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
@@ -381,6 +469,41 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
         raise
     finally:
         handler.cleanup()
+
+
+async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
+    """Perform warmup request for prefill engine to reduce initial TTFT."""
+    logging.info("Start of prefill disaggregation warmup ...")
+    try:
+        from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+        from sglang.srt.sampling.sampling_params import SamplingParams
+
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            max_new_tokens=8,
+            ignore_eos=True,
+        )
+
+        # Timeout: 1800s (30 min) for deep gemm precache
+        async def _do_warmup():
+            results = await engine.async_generate(
+                input_ids=[0, 1, 2, 3],
+                sampling_params=sampling_params,
+                stream=True,
+                bootstrap_host=FAKE_BOOTSTRAP_HOST,
+                bootstrap_port=server_args.disaggregation_bootstrap_port,
+                bootstrap_room=999999,
+            )
+            # Consume the stream
+            async for _ in results:
+                pass
+
+        await asyncio.wait_for(_do_warmup(), timeout=1800)
+        logging.info("Prefill warmup completed")
+    except asyncio.TimeoutError:
+        logging.warning("Prefill warmup timed out after 1800s")
+    except Exception as e:
+        logging.warning(f"Prefill warmup failed: {e}")
 
 
 async def graceful_shutdown(runtime):

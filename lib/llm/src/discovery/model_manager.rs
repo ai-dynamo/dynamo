@@ -7,23 +7,36 @@ use std::{
 };
 
 use parking_lot::{Mutex, RwLock};
+use tokio::sync::oneshot;
 
-use dynamo_runtime::component::Component;
-use dynamo_runtime::prelude::DistributedRuntimeProvider;
+use dynamo_runtime::{
+    component::{Endpoint, build_transport_type},
+    discovery::DiscoverySpec,
+    prelude::DistributedRuntimeProvider,
+    protocols::EndpointId,
+};
 
-use crate::{discovery::KV_ROUTERS_ROOT_PATH, model_card::ModelDeploymentCard};
 use crate::{
-    kv_router::KvRouter,
-    types::generic::tensor::TensorStreamingEngine,
-    types::openai::{
-        chat_completions::OpenAIChatCompletionsStreamingEngine,
-        completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
+    kv_router::{KvRouter, KvRouterConfig, router_endpoint_id, scheduler::DefaultWorkerSelector},
+    model_card::ModelDeploymentCard,
+    model_type::ModelType,
+    types::{
+        generic::tensor::TensorStreamingEngine,
+        openai::{
+            chat_completions::OpenAIChatCompletionsStreamingEngine,
+            completions::OpenAICompletionsStreamingEngine,
+            embeddings::OpenAIEmbeddingsStreamingEngine,
+        },
     },
 };
-use crate::{
-    kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector},
-    model_type::ModelType,
-};
+
+/// State for prefill router activation rendezvous
+enum PrefillActivationState {
+    /// Decode model registered, waiting for prefill endpoint
+    DecodeWaiting(oneshot::Sender<Endpoint>),
+    /// Prefill endpoint arrived, waiting for decode model to register
+    PrefillReady(oneshot::Receiver<Endpoint>),
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelManagerError {
@@ -41,10 +54,13 @@ pub struct ModelManager {
     chat_completion_engines: RwLock<ModelEngines<OpenAIChatCompletionsStreamingEngine>>,
     embeddings_engines: RwLock<ModelEngines<OpenAIEmbeddingsStreamingEngine>>,
     tensor_engines: RwLock<ModelEngines<TensorStreamingEngine>>,
+    // Prefill models don't have engines - they're only tracked for discovery/lifecycle
+    prefill_engines: RwLock<ModelEngines<()>>,
 
     // These are Mutex because we read and write rarely and equally
     cards: Mutex<HashMap<String, ModelDeploymentCard>>,
-    kv_choosers: Mutex<HashMap<String, Arc<KvRouter>>>,
+    kv_choosers: Mutex<HashMap<EndpointId, Arc<KvRouter>>>,
+    prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
 }
 
 impl Default for ModelManager {
@@ -60,8 +76,10 @@ impl ModelManager {
             chat_completion_engines: RwLock::new(ModelEngines::default()),
             embeddings_engines: RwLock::new(ModelEngines::default()),
             tensor_engines: RwLock::new(ModelEngines::default()),
+            prefill_engines: RwLock::new(ModelEngines::default()),
             cards: Mutex::new(HashMap::new()),
             kv_choosers: Mutex::new(HashMap::new()),
+            prefill_router_activators: Mutex::new(HashMap::new()),
         }
     }
 
@@ -78,6 +96,7 @@ impl ModelManager {
                 ModelType::Completions => self.completion_engines.read().checksum(model_name),
                 ModelType::Embedding => self.embeddings_engines.read().checksum(model_name),
                 ModelType::TensorBased => self.tensor_engines.read().checksum(model_name),
+                ModelType::Prefill => self.prefill_engines.read().checksum(model_name),
                 _ => {
                     continue;
                 }
@@ -117,6 +136,7 @@ impl ModelManager {
             .chain(self.list_completions_models())
             .chain(self.list_embeddings_models())
             .chain(self.list_tensor_models())
+            .chain(self.list_prefill_models())
             .collect()
     }
 
@@ -134,6 +154,10 @@ impl ModelManager {
 
     pub fn list_tensor_models(&self) -> Vec<String> {
         self.tensor_engines.read().list()
+    }
+
+    pub fn list_prefill_models(&self) -> Vec<String> {
+        self.prefill_engines.read().list()
     }
 
     pub fn add_completions_model(
@@ -176,6 +200,15 @@ impl ModelManager {
         clients.add(model, card_checksum, engine)
     }
 
+    pub fn add_prefill_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+    ) -> Result<(), ModelManagerError> {
+        let mut clients = self.prefill_engines.write();
+        clients.add(model, card_checksum, ())
+    }
+
     pub fn remove_completions_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.completion_engines.write();
         clients.remove(model)
@@ -193,6 +226,11 @@ impl ModelManager {
 
     pub fn remove_tensor_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.tensor_engines.write();
+        clients.remove(model)
+    }
+
+    pub fn remove_prefill_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let mut clients = self.prefill_engines.write();
         clients.remove(model)
     }
 
@@ -254,63 +292,166 @@ impl ModelManager {
 
     pub async fn kv_chooser_for(
         &self,
-        model_name: &str,
-        component: &Component,
+        endpoint: &Endpoint,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        if let Some(kv_chooser) = self.get_kv_chooser(model_name) {
+        let endpoint_id = endpoint.id();
+
+        if let Some(kv_chooser) = self.get_kv_chooser(&endpoint_id) {
             // Check if the existing router has a different block size
             if kv_chooser.block_size() != kv_cache_block_size {
                 tracing::warn!(
-                    model_name = %model_name,
+                    endpoint = %endpoint_id,
                     existing_block_size = %kv_chooser.block_size(),
                     requested_block_size = %kv_cache_block_size,
-                    "KV Router block size mismatch! Model is requesting a different kv_cache_block_size than the existing router. \
+                    "KV Router block size mismatch! Endpoint is requesting a different kv_cache_block_size than the existing router. \
                      This will cause routing to fail silently. Consider using the same block size or restarting the router."
                 );
             }
             return Ok(kv_chooser);
         }
 
-        // Create new KV router with etcd registration
-        let etcd_client = component
-            .drt()
-            .etcd_client()
-            .ok_or_else(|| anyhow::anyhow!("KV routing requires etcd (dynamic mode)"))?;
-        let router_uuid = uuid::Uuid::new_v4();
-        let router_key = format!(
-            "{}/{}/{}",
-            KV_ROUTERS_ROOT_PATH,
-            component.path(),
-            router_uuid
-        );
-        etcd_client
-            .kv_create(
-                &router_key,
-                serde_json::to_vec_pretty(&kv_router_config.unwrap_or_default())?,
-                None, // use primary lease
-            )
-            .await?;
+        let client = endpoint.client().await?;
+
+        // Register router via discovery mechanism
+        let discovery = endpoint.component().drt().discovery();
+        let instance_id = discovery.instance_id();
+        let request_plane_mode = endpoint.drt().request_plane();
+
+        // Build transport for router endpoint based on request plane mode
+        // Use KV_ROUTER_COMPONENT as the component name to distinguish from the generate endpoint's component
+        let router_endpoint_id = router_endpoint_id(endpoint.id().namespace);
+        let transport = build_transport_type(request_plane_mode, &router_endpoint_id, instance_id);
+
+        let discovery_spec = DiscoverySpec::Endpoint {
+            namespace: router_endpoint_id.namespace.clone(),
+            component: router_endpoint_id.component.clone(),
+            endpoint: router_endpoint_id.name.clone(),
+            transport,
+        };
+
+        discovery.register(discovery_spec).await?;
+
+        // Use instance_id (hex) as the consumer ID for NATS consumer coordination
+        let consumer_id = instance_id.to_string();
 
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
         let chooser = KvRouter::new(
-            component.clone(),
+            endpoint.clone(),
+            client,
             kv_cache_block_size,
             Some(selector),
             kv_router_config,
-            router_uuid.to_string(),
+            consumer_id,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
         self.kv_choosers
             .lock()
-            .insert(model_name.to_string(), new_kv_chooser.clone());
+            .insert(endpoint_id, new_kv_chooser.clone());
         Ok(new_kv_chooser)
     }
 
-    fn get_kv_chooser(&self, model_name: &str) -> Option<Arc<KvRouter>> {
-        self.kv_choosers.lock().get(model_name).cloned()
+    fn get_kv_chooser(&self, id: &EndpointId) -> Option<Arc<KvRouter>> {
+        self.kv_choosers.lock().get(id).cloned()
+    }
+
+    /// Register a prefill router for a decode model. Returns a receiver that will be
+    /// activated when the corresponding prefill model is discovered.
+    /// Returns None if the decode model was already registered.
+    pub fn register_prefill_router(
+        &self,
+        model_name: String,
+    ) -> Option<oneshot::Receiver<Endpoint>> {
+        let mut activators = self.prefill_router_activators.lock();
+
+        match activators.remove(&model_name) {
+            Some(PrefillActivationState::PrefillReady(rx)) => {
+                // Prefill endpoint already arrived - rx will immediately resolve
+                tracing::debug!(
+                    model_name = %model_name,
+                    "Prefill endpoint already available, returning receiver with endpoint"
+                );
+                Some(rx)
+            }
+            Some(PrefillActivationState::DecodeWaiting(tx)) => {
+                // Decode already registered - this shouldn't happen, restore state and return None
+                tracing::error!(
+                    model_name = %model_name,
+                    "Decode model already registered for this prefill router"
+                );
+                activators.insert(model_name, PrefillActivationState::DecodeWaiting(tx));
+                None
+            }
+            None => {
+                // New registration: create tx/rx pair, store sender and return receiver
+                let (tx, rx) = oneshot::channel();
+                activators.insert(
+                    model_name.clone(),
+                    PrefillActivationState::DecodeWaiting(tx),
+                );
+                tracing::debug!(
+                    model_name = %model_name,
+                    "No prefill endpoint available yet, storing sender for future activation"
+                );
+                Some(rx)
+            }
+        }
+    }
+
+    /// Activate a prefill router by sending the endpoint through the oneshot channel.
+    /// If no decode model has registered yet, stores the endpoint for future retrieval.
+    pub fn activate_prefill_router(
+        &self,
+        model_name: &str,
+        endpoint: Endpoint,
+    ) -> anyhow::Result<()> {
+        let mut activators = self.prefill_router_activators.lock();
+
+        match activators.remove(model_name) {
+            Some(PrefillActivationState::DecodeWaiting(sender)) => {
+                // Decode model already registered
+                sender.send(endpoint).map_err(|_| {
+                    anyhow::anyhow!(
+                        "Failed to send endpoint to prefill router activator for model: {}",
+                        model_name
+                    )
+                })?;
+
+                tracing::info!(
+                    model_name = %model_name,
+                    "Activated prefill router for already-registered decode model"
+                );
+
+                Ok(())
+            }
+            Some(PrefillActivationState::PrefillReady(_)) => {
+                // Prefill already activated - this shouldn't happen
+                anyhow::bail!("Prefill router for model {} already activated", model_name);
+            }
+            None => {
+                // Decode model not registered yet - create pair and immediately send endpoint
+                let (tx, rx) = oneshot::channel();
+
+                tx.send(endpoint).map_err(|_| {
+                    anyhow::anyhow!("Failed to send endpoint for prefill model: {}", model_name)
+                })?;
+
+                // Store the receiver for when decode model registers
+                activators.insert(
+                    model_name.to_string(),
+                    PrefillActivationState::PrefillReady(rx),
+                );
+
+                tracing::info!(
+                    model_name = %model_name,
+                    "Stored prefill endpoint for future decode model registration"
+                );
+
+                Ok(())
+            }
+        }
     }
 
     pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {

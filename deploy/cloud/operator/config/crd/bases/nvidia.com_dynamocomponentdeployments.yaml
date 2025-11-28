@@ -677,16 +677,10 @@ spec:
                 componentType:
                   description: ComponentType indicates the role of this component (for example, "main").
                   type: string
-                dynamoComponent:
-                  description: |-
-                    DynamoComponent selects the Dynamo component from the archive to deploy.
-                    Typically corresponds to a component defined in the packaged Dynamo artifacts.
-                  type: string
                 dynamoNamespace:
-                  description: Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
-                  type: string
-                dynamoTag:
-                  description: 'contains the tag of the DynamoComponent: for example, "my_package:MyService"'
+                  description: |-
+                    DynamoNamespace is deprecated and will be removed in a future version.
+                    The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component
                   type: string
                 envFromSecret:
                   description: |-
@@ -9816,6 +9810,9 @@ spec:
                       x-kubernetes-list-type: map
                   required: []
                   type: object
+                globalDynamoNamespace:
+                  description: GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+                  type: boolean
                 ingress:
                   description: Ingress config to expose the component outside the cluster (or through a service mesh).
                   properties:
@@ -10010,6 +10007,20 @@ spec:
                       format: int32
                       type: integer
                   type: object
+                modelRef:
+                  description: |-
+                    ModelRef references a model that this component serves
+                    When specified, a headless service will be created for endpoint discovery
+                  properties:
+                    name:
+                      description: Name is the base model identifier (e.g., "llama-3-70b-instruct-v1")
+                      type: string
+                    revision:
+                      description: Revision is the model revision/version (optional)
+                      type: string
+                  required:
+                    - name
+                  type: object
                 multinode:
                   description: Multinode is the configuration for multinode components.
                   properties:
@@ -10181,36 +10192,75 @@ spec:
                     Resources requested and limits for this component, including CPU, memory,
                     GPUs/devices, and any runtime-specific resources.
                   properties:
+                    claims:
+                      description: Claims specifies resource claims for dynamic resource allocation
+                      items:
+                        description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                        properties:
+                          name:
+                            description: |-
+                              Name must match the name of one entry in pod.spec.resourceClaims of
+                              the Pod where this field is used. It makes that resource available
+                              inside a container.
+                            type: string
+                          request:
+                            description: |-
+                              Request is the name chosen for a request in the referenced claim.
+                              If empty, everything from the claim is made available, otherwise
+                              only the result of this request.
+                            type: string
+                        required:
+                          - name
+                        type: object
+                      type: array
                     limits:
+                      description: Limits specifies the maximum resources allowed for the component
                       properties:
                         cpu:
+                          description: CPU specifies the CPU resource request/limit (e.g., "1000m", "2")
                           type: string
                         custom:
                           additionalProperties:
                             type: string
+                          description: Custom specifies additional custom resource requests/limits
                           type: object
                         gpu:
                           description: |-
-                            Indicates the number of GPUs to request.
-                            total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                            GPU indicates the number of GPUs to request.
+                            Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                          type: string
+                        gpuType:
+                          description: |-
+                            GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"
+                            By default if not specified, the GPU type is "nvidia.com/gpu"
                           type: string
                         memory:
+                          description: Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
                           type: string
                       type: object
                     requests:
+                      description: Requests specifies the minimum resources required by the component
                       properties:
                         cpu:
+                          description: CPU specifies the CPU resource request/limit (e.g., "1000m", "2")
                           type: string
                         custom:
                           additionalProperties:
                             type: string
+                          description: Custom specifies additional custom resource requests/limits
                           type: object
                         gpu:
                           description: |-
-                            Indicates the number of GPUs to request.
-                            total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                            GPU indicates the number of GPUs to request.
+                            Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+                          type: string
+                        gpuType:
+                          description: |-
+                            GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"
+                            By default if not specified, the GPU type is "nvidia.com/gpu"
                           type: string
                         memory:
+                          description: Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
                           type: string
                       type: object
                   type: object

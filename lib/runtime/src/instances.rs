@@ -7,28 +7,25 @@
 //! the entire distributed system, complementing the component-specific
 //! instance listing in `component.rs`.
 
-use crate::component::{INSTANCE_ROOT_PATH, Instance};
-use crate::transports::etcd::Client as EtcdClient;
+use std::sync::Arc;
 
-pub async fn list_all_instances(etcd_client: &EtcdClient) -> anyhow::Result<Vec<Instance>> {
-    let mut instances = Vec::new();
+use crate::component::Instance;
+use crate::discovery::{Discovery, DiscoveryQuery};
 
-    for kv in etcd_client
-        .kv_get_prefix(format!("{}/", INSTANCE_ROOT_PATH))
-        .await?
-    {
-        match serde_json::from_slice::<Instance>(kv.value()) {
-            Ok(instance) => instances.push(instance),
-            Err(err) => {
-                tracing::warn!(
-                    "Failed to parse instance from etcd: {}. Key: {}, Value: {}",
-                    err,
-                    kv.key_str().unwrap_or("invalid_key"),
-                    kv.value_str().unwrap_or("invalid_value")
-                );
-            }
-        }
-    }
+pub async fn list_all_instances(
+    discovery_client: Arc<dyn Discovery>,
+) -> anyhow::Result<Vec<Instance>> {
+    let discovery_instances = discovery_client.list(DiscoveryQuery::AllEndpoints).await?;
+
+    let mut instances: Vec<Instance> = discovery_instances
+        .into_iter()
+        .filter_map(|di| match di {
+            crate::discovery::DiscoveryInstance::Endpoint(instance) => Some(instance),
+            _ => None, // Ignore all other variants (ModelCard, etc.)
+        })
+        .collect();
+
+    instances.sort();
 
     Ok(instances)
 }

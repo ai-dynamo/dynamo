@@ -20,16 +20,18 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import AsyncGenerator, Optional, Union
+from typing import Any, AsyncGenerator, Optional, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
+from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
 
 from dynamo._core import Context
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
+from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
@@ -50,11 +52,6 @@ class DisaggregationMode(Enum):
     ENCODE = "encode"
 
 
-class DisaggregationStrategy(Enum):
-    PREFILL_FIRST = "prefill_first"
-    DECODE_FIRST = "decode_first"
-
-
 @dataclass
 class RequestHandlerConfig:
     """
@@ -66,13 +63,16 @@ class RequestHandlerConfig:
     default_sampling_params: SamplingParams
     publisher: Publisher
     disaggregation_mode: DisaggregationMode
-    disaggregation_strategy: DisaggregationStrategy
-    next_client: object
     encode_client: Optional[object] = None
     multimodal_processor: Optional[
         MultimodalRequestProcessor
     ] = None  # for multimodal support
     connector: Optional[Connector] = None
+    runtime: Optional[
+        DistributedRuntime
+    ] = None  # DistributedRuntime reference for graceful shutdown
+    metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
+    kv_block_size: int = 32
 
 
 class HandlerBase:
@@ -85,13 +85,15 @@ class HandlerBase:
         self.component = config.component
         self.default_sampling_params = config.default_sampling_params
         self.publisher = config.publisher
+        self.metrics_collector = config.metrics_collector
         self.disaggregation_mode = config.disaggregation_mode
-        self.disaggregation_strategy = config.disaggregation_strategy
-        self.next_client = config.next_client
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
         self.connector = config.connector
+        # Store runtime reference for graceful shutdown
+        self.runtime = config.runtime
+        self.kv_block_size: int = config.kv_block_size
 
     def check_error(self, result: dict):
         """
@@ -146,6 +148,24 @@ class HandlerBase:
                 except asyncio.CancelledError:
                     pass
 
+    async def _initiate_shutdown(self, error: Exception):
+        """Initiate graceful shutdown after fatal error"""
+        logging.warning(f"Initiating graceful shutdown due to: {error}")
+
+        try:
+            if self.runtime:
+                logging.info("Shutting down Dynamo runtime...")
+                self.runtime.shutdown()
+
+            if self.engine:
+                logging.info("Shutting down TensorRT-LLM engine...")
+                await self.engine.cleanup()
+        except Exception as cleanup_error:
+            logging.error(f"Error during graceful shutdown: {cleanup_error}")
+        finally:
+            logging.critical("Forcing process exit for restart")
+            os._exit(1)
+
     async def generate_locally(
         self,
         request: dict,
@@ -190,11 +210,13 @@ class HandlerBase:
             request["stop_conditions"]["max_tokens"] = 1
             disaggregated_params = LlmDisaggregatedParams(request_type="context_only")
 
-        if "disaggregated_params" in request:
+        if "prefill_result" in request:
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 raise ValueError("Cannot provide disaggregated_params in prefill mode")
             disaggregated_params = DisaggregatedParamsCodec.decode(
-                DisaggregatedParams(**request["disaggregated_params"])
+                DisaggregatedParams(
+                    **request["prefill_result"].get("disaggregated_params")
+                )
             )
             disaggregated_params.request_type = "generation_only"
 
@@ -233,7 +255,6 @@ class HandlerBase:
         )
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
-        model_name = request.get("model", "unknown_model")
 
         # Optional test-only logits processing (enable with DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1)
         if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
@@ -241,66 +262,128 @@ class HandlerBase:
             adapters = create_trtllm_adapters(processors)
             sampling_params.logits_processor = adapters
 
-        # NEW: Updated engine call to include multimodal data
-        generation_result = self.engine.llm.generate_async(
-            inputs=processed_input,  # Use the correctly extracted inputs
-            sampling_params=sampling_params,
-            disaggregated_params=disaggregated_params,
-            streaming=streaming,
+        prefill_result = request.get("prefill_result")
+        prefill_prompt_tokens_details = (
+            prefill_result.get("prompt_tokens_details") if prefill_result else None
         )
 
-        # Use the context manager to handle cancellation monitoring
-        async with self._cancellation_monitor(generation_result, context):
-            async for res in generation_result:
-                # TRTLLM engine needs to start generating tokens first before stats
-                # can be retrieved.
-                if self.first_generation and self.publisher:
-                    self.publisher.start()
-                    self.first_generation = False
+        try:
+            # NEW: Updated engine call to include multimodal data
+            generation_result = self.engine.llm.generate_async(
+                inputs=processed_input,  # Use the correctly extracted inputs
+                sampling_params=sampling_params,
+                disaggregated_params=disaggregated_params,
+                streaming=streaming,
+            )
 
-                # Upon completion, send a final chunk with "stop" as the finish reason.
-                # This signals to the client that the stream has ended.
-                if (
-                    res.finished
-                    and self.disaggregation_mode != DisaggregationMode.PREFILL
-                ):
-                    if self.multimodal_processor:
-                        final_out = self.multimodal_processor.get_stop_response(
-                            request_id, model_name
-                        )
-                        yield final_out
+            # Use the context manager to handle cancellation monitoring
+            async with self._cancellation_monitor(generation_result, context):
+                async for res in generation_result:
+                    # TRTLLM engine needs to start generating tokens first before stats
+                    # can be retrieved.
+                    if self.first_generation and self.publisher:
+                        self.publisher.start()
+                        self.first_generation = False
 
-                # If we are not done generating, but there are no outputs, return an error
-                if not res.outputs and not res.finished:
-                    yield {"finish_reason": "error", "token_ids": []}
-                    break
+                    # If we are not done generating, but there are no outputs, return an error
+                    if not res.outputs and not res.finished:
+                        yield {"finish_reason": "error", "token_ids": []}
+                        break
 
-                output = res.outputs[0]
-                # The engine returns all tokens generated so far. We must calculate the new
-                # tokens generated in this iteration to create the "delta".
-                next_total_toks = len(output.token_ids)
-                if self.multimodal_processor:
-                    out = self.multimodal_processor.create_response_chunk(
-                        output, num_output_tokens_so_far, request_id, model_name
-                    )
-                else:
+                    output = res.outputs[0]
+                    # The engine returns all tokens generated so far. We must calculate the new
+                    # tokens generated in this iteration to create the "delta".
+                    next_total_toks = len(output.token_ids)
+
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-                if output.finish_reason:
-                    out["finish_reason"] = output.finish_reason
-                if output.stop_reason:
-                    out["stop_reason"] = output.stop_reason
-                if self.disaggregation_mode == DisaggregationMode.PREFILL:
-                    # Return the disaggregated params only when operating in prefill mode.
-                    out["disaggregated_params"] = asdict(
-                        DisaggregatedParamsCodec.encode(output.disaggregated_params)
-                    )
 
-                if res.finished and not out.get("finish_reason"):
-                    out["finish_reason"] = "unknown"
-                    logging.warning(
-                        "Request finished with no finish reason set - this indicates a possible bug"
-                    )
+                    if output.finish_reason:
+                        out["finish_reason"] = output.finish_reason
+                    if output.stop_reason:
+                        out["stop_reason"] = output.stop_reason
+                    if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                        # Return the disaggregated params only when operating in prefill mode.
+                        out["disaggregated_params"] = asdict(
+                            DisaggregatedParamsCodec.encode(output.disaggregated_params)
+                        )
 
-                # Yield the chunk to the client and update the token count for the next iteration.
-                yield out
-                num_output_tokens_so_far = next_total_toks
+                    if out.get("finish_reason"):
+                        num_input_tokens = len(request.get("token_ids", []))
+
+                        prompt_tokens_details = None
+                        if prefill_prompt_tokens_details:
+                            prompt_tokens_details = prefill_prompt_tokens_details
+                        else:
+                            if output.request_perf_metrics is not None:
+                                kv_cache_metrics = (
+                                    output.request_perf_metrics.kv_cache_metrics
+                                )
+                                cached_tokens = min(
+                                    num_input_tokens,
+                                    kv_cache_metrics.num_reused_blocks
+                                    * self.kv_block_size,
+                                )
+                                if cached_tokens > 0:
+                                    prompt_tokens_details = {
+                                        "cached_tokens": int(cached_tokens),
+                                    }
+
+                        out["completion_usage"] = {
+                            "prompt_tokens": int(num_input_tokens),
+                            "completion_tokens": int(next_total_toks),
+                            "total_tokens": int(num_input_tokens + next_total_toks),
+                            "prompt_tokens_details": prompt_tokens_details,
+                        }
+
+                    if res.finished and not out.get("finish_reason"):
+                        out["finish_reason"] = "unknown"
+                        logging.warning(
+                            "Request finished with no finish reason set - this indicates a possible bug"
+                        )
+
+                    # Log metrics to TensorRT-LLM MetricsCollector when request finishes
+                    if (
+                        res.finished
+                        and self.metrics_collector
+                        and hasattr(res, "metrics_dict")
+                    ):
+                        try:
+                            self.metrics_collector.log_metrics_dict(res.metrics_dict)
+                        except Exception as e:
+                            logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
+
+                    # Yield the chunk to the client and update the token count for the next iteration.
+                    yield out
+                    num_output_tokens_so_far = next_total_toks
+
+        # 1. Client cancellation - don't shutdown
+        except asyncio.CancelledError:
+            logging.debug(f"Request {request_id}: Client cancelled")
+            # _cancellation_monitor already called abort_request
+            return  # Just stop, no error response
+
+        # 2. Per-request errors - send to client, don't shutdown
+        except RequestError as e:
+            logging.warning(f"Request {request_id} error: {e}")
+            yield {"finish_reason": "error", "token_ids": []}
+
+        # 3. ALL OTHER ERRORS - graceful shutdown
+        except Exception as e:
+            error_type = type(e).__name__
+            error_msg = str(e)
+            logging.error(
+                f"Fatal {error_type} in request {request_id}: {error_msg}",
+                exc_info=True,
+            )
+
+            # Try to send error to client before shutdown
+            try:
+                yield {
+                    "finish_reason": "error",
+                    "token_ids": [],
+                }
+            except Exception:
+                pass  # Best effort
+
+            # Initiate graceful shutdown
+            await self._initiate_shutdown(e)

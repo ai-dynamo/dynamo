@@ -6,16 +6,29 @@ import subprocess
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
-COMPONENTS = [
-    "common",
-    "frontend",
-    "vllm",
-    "sglang",
-    "trtllm",
-    "mocker",
-    "llama_cpp",
-    "planner",
-]
+
+def get_components():
+    """
+    Scan the components/src/dynamo directory to get the list of available components.
+    Returns full paths to component directories and RuntimeError if no components are found.
+    """
+    components_dir = os.path.join(
+        os.path.dirname(__file__), "components", "src", "dynamo"
+    )
+
+    if not os.path.exists(components_dir):
+        raise RuntimeError(f"Components directory not found: {components_dir}")
+
+    components = []
+    for item in os.listdir(components_dir):
+        item_path = os.path.join(components_dir, item)
+        if os.path.isdir(item_path) and not item.startswith("."):
+            components.append(item_path)
+
+    if not components:
+        raise RuntimeError(f"No components found in directory: {components_dir}")
+
+    return components
 
 
 class VersionWriterHook(BuildHookInterface):
@@ -45,9 +58,7 @@ class VersionWriterHook(BuildHookInterface):
 
         version_content = f'#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n#  SPDX-License-Identifier: Apache-2.0\n\n# This file is auto-generated at build time\n__version__ = "{full_version}"\n'
 
-        for component in COMPONENTS:
-            version_file_path = os.path.join(
-                self.root, f"components/src/dynamo/{component}/_version.py"
-            )
+        for component in get_components():
+            version_file_path = os.path.join(component, "_version.py")
             with open(version_file_path, "w") as f:
                 f.write(version_content)

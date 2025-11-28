@@ -12,9 +12,7 @@ use super::{
     ContentProvider, OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider,
     OpenAIStopConditionsProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
-    common_ext::{
-        CommonExt, CommonExtProvider, choose_with_deprecation, emit_nvext_deprecation_warning,
-    },
+    common_ext::{CommonExt, CommonExtProvider},
     nvext::{NvExt, NvExtProvider},
     validate,
 };
@@ -39,6 +37,10 @@ pub struct NvCreateCompletionRequest {
     // metadata - passthrough parameter without restrictions
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+
+    /// Catch-all for unsupported fields - checked during validation
+    #[serde(flatten, default, skip_serializing)]
+    pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
@@ -73,6 +75,39 @@ pub fn prompt_to_string(prompt: &dynamo_async_openai::types::Prompt) -> String {
             })
             .collect::<Vec<_>>()
             .join(" | "), // Separate arrays with a delimiter
+    }
+}
+
+/// Get the batch size from a prompt (1 for single prompts, array length for batch prompts)
+pub fn get_prompt_batch_size(prompt: &dynamo_async_openai::types::Prompt) -> usize {
+    match prompt {
+        dynamo_async_openai::types::Prompt::String(_) => 1,
+        dynamo_async_openai::types::Prompt::IntegerArray(_) => 1,
+        dynamo_async_openai::types::Prompt::StringArray(arr) => arr.len(),
+        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => arr.len(),
+    }
+}
+
+/// Extract a single prompt from a batch at the given index.
+/// For single prompts, returns a clone regardless of index.
+/// For batch prompts, returns the prompt at the specified index.
+pub fn extract_single_prompt(
+    prompt: &dynamo_async_openai::types::Prompt,
+    index: usize,
+) -> dynamo_async_openai::types::Prompt {
+    match prompt {
+        dynamo_async_openai::types::Prompt::String(s) => {
+            dynamo_async_openai::types::Prompt::String(s.clone())
+        }
+        dynamo_async_openai::types::Prompt::IntegerArray(arr) => {
+            dynamo_async_openai::types::Prompt::IntegerArray(arr.clone())
+        }
+        dynamo_async_openai::types::Prompt::StringArray(arr) => {
+            dynamo_async_openai::types::Prompt::String(arr[index].clone())
+        }
+        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
+            dynamo_async_openai::types::Prompt::IntegerArray(arr[index].clone())
+        }
     }
 }
 
@@ -149,92 +184,47 @@ impl CommonExtProvider for NvCreateCompletionRequest {
 
     /// Guided Decoding Options
     fn get_guided_json(&self) -> Option<&serde_json::Value> {
-        // Note: This one needs special handling since it returns a reference
-        if let Some(nvext) = &self.nvext
-            && nvext.guided_json.is_some()
-        {
-            emit_nvext_deprecation_warning("guided_json", true, self.common.guided_json.is_some());
-        }
-        self.common
-            .guided_json
-            .as_ref()
-            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_json.as_ref()))
+        self.common.guided_json.as_ref()
     }
 
     fn get_guided_regex(&self) -> Option<String> {
-        choose_with_deprecation(
-            "guided_regex",
-            self.common.guided_regex.as_ref(),
-            self.nvext.as_ref().and_then(|nv| nv.guided_regex.as_ref()),
-        )
+        self.common.guided_regex.clone()
     }
 
     fn get_guided_grammar(&self) -> Option<String> {
-        choose_with_deprecation(
-            "guided_grammar",
-            self.common.guided_grammar.as_ref(),
-            self.nvext
-                .as_ref()
-                .and_then(|nv| nv.guided_grammar.as_ref()),
-        )
+        self.common.guided_grammar.clone()
     }
 
     fn get_guided_choice(&self) -> Option<Vec<String>> {
-        choose_with_deprecation(
-            "guided_choice",
-            self.common.guided_choice.as_ref(),
-            self.nvext.as_ref().and_then(|nv| nv.guided_choice.as_ref()),
-        )
+        self.common.guided_choice.clone()
     }
 
     fn get_guided_decoding_backend(&self) -> Option<String> {
-        choose_with_deprecation(
-            "guided_decoding_backend",
-            self.common.guided_decoding_backend.as_ref(),
-            self.nvext
-                .as_ref()
-                .and_then(|nv| nv.guided_decoding_backend.as_ref()),
-        )
+        self.common.guided_decoding_backend.clone()
     }
 
     fn get_guided_whitespace_pattern(&self) -> Option<String> {
-        choose_with_deprecation(
-            "guided_whitespace_pattern",
-            self.common.guided_whitespace_pattern.as_ref(),
-            self.nvext
-                .as_ref()
-                .and_then(|nv| nv.guided_whitespace_pattern.as_ref()),
-        )
+        self.common.guided_whitespace_pattern.clone()
     }
 
     fn get_top_k(&self) -> Option<i32> {
-        choose_with_deprecation(
-            "top_k",
-            self.common.top_k.as_ref(),
-            self.nvext.as_ref().and_then(|nv| nv.top_k.as_ref()),
-        )
+        self.common.top_k
     }
 
     fn get_min_p(&self) -> Option<f32> {
-        choose_with_deprecation(
-            "min_p",
-            self.common.min_p.as_ref(),
-            self.nvext.as_ref().and_then(|nv| nv.min_p.as_ref()),
-        )
+        self.common.min_p
     }
 
     fn get_repetition_penalty(&self) -> Option<f32> {
-        choose_with_deprecation(
-            "repetition_penalty",
-            self.common.repetition_penalty.as_ref(),
-            self.nvext
-                .as_ref()
-                .and_then(|nv| nv.repetition_penalty.as_ref()),
-        )
+        self.common.repetition_penalty
     }
 
     fn get_include_stop_str_in_output(&self) -> Option<bool> {
         self.common.include_stop_str_in_output
+    }
+
+    fn get_skip_special_tokens(&self) -> Option<bool> {
+        self.common.skip_special_tokens
     }
 }
 
@@ -259,14 +249,9 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
         self.common.ignore_eos
     }
 
-    /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
-    /// CommonExt (root-level) takes precedence over NvExt.
+    /// Get the effective ignore_eos value from CommonExt.
     fn get_ignore_eos(&self) -> Option<bool> {
-        choose_with_deprecation(
-            "ignore_eos",
-            self.get_common_ignore_eos().as_ref(),
-            NvExtProvider::nvext(self).and_then(|nv| nv.ignore_eos.as_ref()),
-        )
+        self.common.ignore_eos
     }
 }
 
@@ -306,6 +291,7 @@ impl ResponseFactory {
             choices: vec![choice],
             system_fingerprint: self.system_fingerprint.clone(),
             usage,
+            nvext: None, // Will be populated by router layer if needed
         };
         NvCreateCompletionResponse { inner }
     }
@@ -416,7 +402,7 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
-        None
+        CommonExtProvider::get_skip_special_tokens(self)
     }
 
     fn get_formatted_prompt(&self) -> Option<bool> {
@@ -428,6 +414,7 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_model(&self.inner.model)?;
         validate::validate_prompt(&self.inner.prompt)?;
         validate::validate_suffix(self.inner.suffix.as_deref())?;
@@ -452,7 +439,59 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_repetition_penalty(self.get_repetition_penalty())?;
         validate::validate_min_p(self.get_min_p())?;
         validate::validate_top_k(self.get_top_k())?;
-
+        // Cross-field validation
+        validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
+        // total choices validation for completions batch requests
+        validate::validate_total_choices(
+            get_prompt_batch_size(&self.inner.prompt),
+            self.inner.n.unwrap_or(1),
+        )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::common::OutputOptionsProvider;
+    use serde_json::json;
+
+    #[test]
+    fn test_skip_special_tokens_none() {
+        let json_str = json!({
+            "model": "test-model",
+            "prompt": "Hello, world!"
+        });
+
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert_eq!(request.common.skip_special_tokens, None);
+
+        let output_options = request
+            .extract_output_options()
+            .expect("Failed to extract output options");
+
+        assert_eq!(output_options.skip_special_tokens, None);
+    }
+
+    #[test]
+    fn test_skip_special_tokens_propagates() {
+        for skip_value in [true, false] {
+            let json_str = json!({
+                "model": "test-model",
+                "prompt": "Hello, world!",
+                "skip_special_tokens": skip_value
+            });
+
+            let request: NvCreateCompletionRequest =
+                serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+            let output_options = request
+                .extract_output_options()
+                .expect("Failed to extract output options");
+
+            assert_eq!(output_options.skip_special_tokens, Some(skip_value));
+        }
     }
 }

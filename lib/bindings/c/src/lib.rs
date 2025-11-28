@@ -4,17 +4,37 @@
 use async_once_cell::OnceCell as AsyncOnceCell;
 use libc::c_char;
 use once_cell::sync::OnceCell;
+use std::borrow::Cow;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use dynamo_llm::kv_router::{
     indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher,
 };
-use dynamo_runtime::{DistributedRuntime, Worker, storage::key_value_store::Key};
+use dynamo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
 // [FIXME] shouldn't the publisher be instance passing between API calls?
 static KV_PUB: OnceCell<KvEventPublisher> = OnceCell::new();
+
+/// Convert a C string pointer to a Rust string, falling back to a default when:
+/// - the pointer is NULL,
+/// - the bytes are not valid UTF-8,
+/// - or the resulting string is empty/whitespace.
+#[inline]
+unsafe fn cstr_or_default<'a>(ptr: *const c_char, default_val: &'a str) -> Cow<'a, str> {
+    if ptr.is_null() {
+        return Cow::from(default_val);
+    }
+    match unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .ok()
+        .map(|s| s.trim())
+    {
+        Some(s) if !s.is_empty() => Cow::from(s.to_owned()),
+        _ => Cow::from(default_val),
+    }
+}
 
 fn initialize_tracing() {
     // Sets up RUST_LOG environment variable for logging while KV Publishing
@@ -40,7 +60,6 @@ pub enum DynamoLlmResult {
 pub unsafe extern "C" fn dynamo_llm_init(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
-    worker_id: i64,
     kv_block_size: u32,
 ) -> DynamoLlmResult {
     initialize_tracing();
@@ -74,17 +93,15 @@ pub unsafe extern "C" fn dynamo_llm_init(
         }
     };
 
-    let component = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
-        Ok(s) => s.to_string(),
-        Err(e) => {
-            tracing::error!(error = ?e, "Failed to convert C string to Rust string (component)");
-            return DynamoLlmResult::ERR;
-        }
-    };
+    let component_cow = unsafe { cstr_or_default(component_c_str, "backend") };
+    if let Cow::Borrowed("backend") = &component_cow {
+        tracing::info!("defaulting to \"backend\" for component");
+    }
+    let component: String = component_cow.into_owned();
 
     match result {
         Ok(_) => match KV_PUB.get_or_try_init(move || {
-            dynamo_create_kv_publisher(namespace, component, worker_id, kv_block_size)
+            dynamo_create_kv_publisher(namespace, component, kv_block_size)
         }) {
             Ok(_) => DynamoLlmResult::OK,
             Err(e) => {
@@ -126,7 +143,6 @@ pub extern "C" fn dynamo_llm_load_publisher_create() -> DynamoLlmResult {
 fn dynamo_create_kv_publisher(
     namespace: String,
     component: String,
-    worker_id: i64,
     kv_block_size: u32,
 ) -> Result<KvEventPublisher, anyhow::Error> {
     tracing::info!("Creating KV Publisher for model: {}", component);
@@ -136,7 +152,7 @@ fn dynamo_create_kv_publisher(
     {
         Ok(drt) => {
             let backend = drt.namespace(namespace)?.component(component)?;
-            KvEventPublisher::new(backend, worker_id, kv_block_size, None)
+            KvEventPublisher::new(backend, kv_block_size, None)
         }
         Err(e) => Err(e),
     }
@@ -207,6 +223,7 @@ fn kv_event_create_stored_from_parts(
             parent_hash: kv_params.parent_hash.map(ExternalSequenceBlockHash),
         }),
         event_id: kv_params.event_id,
+        dp_rank: 0,
     }
 }
 
@@ -224,6 +241,7 @@ fn kv_event_create_removed_from_parts(
     KvCacheEvent {
         event_id,
         data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+        dp_rank: 0,
     }
 }
 
@@ -327,18 +345,15 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
 /* ------------------------------------------------------------------------
  * Worker selection pipeline
  * ------------------------------------------------------------------------ */
-use std::{pin::Pin, sync::Arc};
+use std::pin::Pin;
 
 const GENERATE_ENDPOINT: &str = "generate";
 
 use anyhow::Context;
-use dynamo_runtime::{
-    Runtime, distributed::DistributedConfig, slug::Slug, traits::DistributedRuntimeProvider,
-};
+use dynamo_runtime::{Runtime, distributed::DistributedConfig, traits::DistributedRuntimeProvider};
 
 use dynamo_llm::discovery::ModelManager;
 use dynamo_llm::entrypoint::build_routed_pipeline;
-use dynamo_llm::kv_router::KvRouter;
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::openai::nvext::NvExt;
@@ -349,7 +364,6 @@ use dynamo_llm::types::{
     },
 };
 use dynamo_runtime::{
-    component::Client,
     engine::AsyncEngineStream,
     pipeline::{ManyOut, RouterMode, ServiceEngine, SingleIn},
 };
@@ -410,13 +424,13 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
             return DynamoLlmResult::ERR;
         }
     };
-    let component = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
-        Ok(s) => s.to_owned(),
-        Err(e) => {
-            tracing::error!(error = ?e, "bad component");
-            return DynamoLlmResult::ERR;
-        }
-    };
+
+    let component_cow = unsafe { cstr_or_default(component_c_str, "backend") };
+    if let Cow::Borrowed("backend") = &component_cow {
+        tracing::info!("defaulting to \"backend\" for component");
+    }
+    let component: String = component_cow.into_owned();
+
     let model = match unsafe { CStr::from_ptr(model_name_c_str) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(e) => {
@@ -438,9 +452,12 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                 (router_temperature >= 0.0).then_some(router_temperature),
                 Some(use_kv_events),
                 Some(router_replica_sync),
-                None,
-                None,
-                None,
+                None, // track_active_blocks
+                None, // router_snapshot_threshold
+                None, // router_reset_states
+                None, // router_ttl_secs
+                None, // router_max_tree_size
+                None, // router_prune_target_ratio
             ))
         } else {
             None
@@ -900,40 +917,7 @@ pub async fn query_worker_selection_and_annotate(
     Ok((worker_id, tokens, original_request))
 }
 
-/// Build a worker selection pipeline
-/// The router handles query_instance_id annotations and returns worker_instance_id and token_data annotations.
-pub async fn build_worker_selection_pipeline_chat(
-    card: &ModelDeploymentCard,
-    client: &Client,
-    router_mode: RouterMode,
-    busy_threshold: Option<f64>,
-    chooser: Option<Arc<KvRouter>>,
-) -> anyhow::Result<
-    ServiceEngine<
-        SingleIn<NvCreateChatCompletionRequest>,
-        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-    >,
-> {
-    let hf_tokenizer = card
-        .tokenizer_hf()
-        .with_context(|| "Failed to load HF tokenizer")?;
-    let engine = build_routed_pipeline::<
-        NvCreateChatCompletionRequest,
-        NvCreateChatCompletionStreamResponse,
-    >(
-        card,
-        client,
-        router_mode,
-        busy_threshold,
-        chooser,
-        hf_tokenizer,
-    )
-    .await?;
-
-    Ok(engine)
-}
-
-/// Helper function to create worker selection pipeline for OpenAI Chat Completion requests
+/// Create a worker selection pipeline for OpenAI Chat Completion requests
 ///
 /// This is a concrete implementation that works specifically with NvCreateChatCompletionRequest
 /// and is designed for use with C bindings. Uses the "generate" endpoint by default.
@@ -962,44 +946,102 @@ pub async fn create_worker_selection_pipeline_chat(
     >,
 > {
     let runtime = Runtime::from_settings()?;
-    let dst_config = DistributedConfig::from_settings(false);
+    let dst_config = DistributedConfig::from_settings();
     let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
     let distributed_runtime: &'static DistributedRuntime = Box::leak(Box::new(drt_owned));
 
     let component = distributed_runtime
         .namespace(namespace)?
         .component(component_name)?;
-    let client = component.endpoint(GENERATE_ENDPOINT).client().await?;
+    let endpoint = component.endpoint(GENERATE_ENDPOINT);
+    let client = endpoint.client().await?;
 
-    let model_slug = Slug::from_string(model_name);
-    let card = match ModelDeploymentCard::load_from_store(
-        &Key::from_raw(model_slug.to_string()),
-        component.drt(),
-    )
-    .await
-    {
-        Ok(Some(card)) => card,
-        Ok(None) => anyhow::bail!("ModelDeploymentCard not found for model: {}", model_name),
-        Err(err) => anyhow::bail!(
-            "Error fetching ModelDeploymentCard from storage under key {model_slug}. {err}"
-        ),
+    // Discover the model card by searching all instances with this model name
+    tracing::debug!("Looking for model: {}", model_name);
+    tracing::debug!("Namespace: {}", namespace);
+
+    use dynamo_llm::discovery::ModelWatcher;
+    let model_manager = std::sync::Arc::new(ModelManager::new());
+    let router_config = dynamo_llm::entrypoint::RouterConfig {
+        router_mode,
+        kv_router_config: kv_router_config.unwrap_or_default(),
+        busy_threshold,
+        enforce_disagg: false,
     };
+    let watcher = ModelWatcher::new(
+        component.drt().clone(),
+        model_manager.clone(),
+        router_config,
+    );
+    let cards = watcher
+        .cards_for_model(model_name, Some(namespace), false)
+        .await
+        .with_context(|| format!("Failed to discover model: {}", model_name))?;
+
+    tracing::debug!("Found {} cards for model {}", cards.len(), model_name);
+
+    let card = cards.into_iter().next().ok_or_else(|| {
+        tracing::error!("No ModelDeploymentCard found for model: {}", model_name);
+        anyhow::anyhow!("ModelDeploymentCard not found for model: {}", model_name)
+    })?;
 
     let chooser = if router_mode == RouterMode::KV {
-        let model_manager = std::sync::Arc::new(ModelManager::new());
         Some(
             model_manager
-                .kv_chooser_for(
-                    &card.display_name,
-                    &component,
-                    card.kv_cache_block_size,
-                    kv_router_config,
-                )
+                .kv_chooser_for(&endpoint, card.kv_cache_block_size, kv_router_config)
                 .await?,
         )
     } else {
         None
     };
 
-    build_worker_selection_pipeline_chat(&card, &client, router_mode, busy_threshold, chooser).await
+    // Download model config files from HuggingFace for EPP
+    // The backend's card has NATS URLs which aren't accessible from EPP
+    tracing::debug!(
+        "Downloading model config files for EPP: {}",
+        card.display_name
+    );
+
+    let local_path = dynamo_llm::hub::from_hf(&card.display_name, true)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to download model config files for: {}",
+                card.display_name
+            )
+        })?;
+
+    // Load a fresh card from local files, then copy runtime config from original card
+    tracing::debug!("Loading ModelDeploymentCard from local path...");
+    let mut card_with_local_files = ModelDeploymentCard::load_from_disk(&local_path, None)
+        .with_context(|| format!("Failed to load card from disk: {:?}", local_path))?;
+
+    // Copy runtime settings from the backend's card
+    tracing::debug!("Copying runtime config from backend card...");
+    card_with_local_files.runtime_config = card.runtime_config.clone();
+    card_with_local_files.kv_cache_block_size = card.kv_cache_block_size;
+    card_with_local_files.context_length = card.context_length;
+
+    // Load the tokenizer from the downloaded files
+    tracing::debug!("Loading tokenizer from local files...");
+    let hf_tokenizer = card_with_local_files
+        .tokenizer_hf()
+        .with_context(|| format!("Failed to load tokenizer for: {}", card.display_name))?;
+
+    let engine = build_routed_pipeline::<
+        NvCreateChatCompletionRequest,
+        NvCreateChatCompletionStreamResponse,
+    >(
+        &card_with_local_files,
+        &client,
+        router_mode,
+        busy_threshold,
+        chooser,
+        hf_tokenizer,
+        None,  // prefill_chooser
+        false, // enforce_disagg
+    )
+    .await?;
+
+    Ok(engine)
 }

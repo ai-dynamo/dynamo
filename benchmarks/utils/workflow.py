@@ -4,7 +4,7 @@
 from pathlib import Path
 from typing import Dict, List
 
-from benchmarks.utils.genai import run_concurrency_sweep
+from benchmarks.utils.aiperf import run_concurrency_sweep
 from deploy.utils.kubernetes import is_running_in_cluster
 
 

@@ -1,9 +1,11 @@
 {
   "request_id": "5627a4c6-39a4-4d9c-8f6a-0f2d853dc50e",
-  "normal_content": "\n\nI'm here to help! If you have any questions about NYC, weather, or anything else, feel free to ask! \ud83d\ude0a",
-  "reasoning_content": "\nOkay, the user is asking, \"How's your day going in NYC?\" Let me think about how to respond.\n\nFirst, I need to check if there's a function available to get the weather in NYC. The provided tool is get_weather, which requires location and unit. The user didn't mention any weather details, so maybe they just want a general response about NYC.\n\nSince there's no function to retrieve personal information or current weather, I can't use the tool here. I should acknowledge their question and offer to help with something else. I need to make sure my response is helpful and guides them appropriately without making up data.\n",
-  "tool_calls": [],
-  "data": [
+  "expected_output": {
+      "normal_content": "\n\nI'm here to help! If you have any questions about NYC, weather, or anything else, feel free to ask! 😊",
+      "reasoning_content": "\nOkay, the user is asking, \"How's your day going in NYC?\" Let me think about how to respond.\n\nFirst, I need to check if there's a function available to get the weather in NYC. The provided tool is get_weather, which requires location and unit. The user didn't mention any weather details, so maybe they just want a general response about NYC.\n\nSince there's no function to retrieve personal information or current weather, I can't use the tool here. I should acknowledge their question and offer to help with something else. I need to make sure my response is helpful and guides them appropriately without making up data.\n",
+      "tool_calls": []
+    },
+  "input_stream": [
     {"data":{"id":"chatcmpl-5627a4c6-39a4-4d9c-8f6a-0f2d853dc50e","choices":[{"index":0,"delta":{"content":"<think>","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
     {"data":{"id":"chatcmpl-5627a4c6-39a4-4d9c-8f6a-0f2d853dc50e","choices":[{"index":0,"delta":{"content":"\n","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
     {"data":{"id":"chatcmpl-5627a4c6-39a4-4d9c-8f6a-0f2d853dc50e","choices":[{"index":0,"delta":{"content":"Okay","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
@@ -162,7 +164,7 @@
     {"data":{"id":"chatcmpl-5627a4c6-39a4-4d9c-8f6a-0f2d853dc50e","choices":[{"index":0,"delta":{"content":" ask","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
     {"data":{"id":"chatcmpl-5627a4c6-39a4-4d9c-8f6a-0f2d853dc50e","choices":[{"index":0,"delta":{"content":"!","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
     {"data":{"id":"chatcmpl-5627a4c6-39a4-4d9c-8f6a-0f2d853dc50e","choices":[{"index":0,"delta":{"content":null,"function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
-    {"data":{"id":"chatcmpl-5627a4c6-39a4-4d9c-8f6a-0f2d853dc50e","choices":[{"index":0,"delta":{"content":" \ud83d\ude0a","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
+    {"data":{"id":"chatcmpl-5627a4c6-39a4-4d9c-8f6a-0f2d853dc50e","choices":[{"index":0,"delta":{"content":" 😊","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}]}},
     {"data":{"id":"chatcmpl-5627a4c6-39a4-4d9c-8f6a-0f2d853dc50e","choices":[{"index":0,"delta":{"content":null,"function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null},"finish_reason":"stop"}]}}
   ]
 }

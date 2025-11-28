@@ -35,38 +35,26 @@ pub async fn run(
     let component = distributed_runtime
         .namespace(&endpoint_id.namespace)?
         .component(&endpoint_id.component)?;
-    let endpoint = component
-        .service_builder()
-        .create()
-        .await?
-        .endpoint(&endpoint_id.name);
+    let endpoint = component.endpoint(&endpoint_id.name);
 
-    let (rt_fut, card): (Pin<Box<dyn Future<Output = _> + Send + 'static>>, _) = match engine_config
-    {
-        EngineConfig::StaticFull {
-            engine,
-            mut model,
-            is_static,
-        } => {
+    let rt_fut: Pin<Box<dyn Future<Output = _> + Send + 'static>> = match engine_config {
+        EngineConfig::InProcessText { engine, mut model } => {
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let ingress_chat = Ingress::<
                 Context<NvCreateChatCompletionRequest>,
                 Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
             >::for_engine(engine)?;
-
-            if !is_static {
-                model
-                    .attach(&endpoint, ModelType::Chat, ModelInput::Text)
-                    .await?;
-            }
+            model
+                .attach(&endpoint, ModelType::Chat, ModelInput::Text)
+                .await?;
             let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
-            (Box::pin(fut_chat), Some(model.card().clone()))
+            Box::pin(fut_chat)
         }
-        EngineConfig::StaticCore {
+        EngineConfig::InProcessTokens {
             engine: inner_engine,
             mut model,
-            is_static,
+            is_prefill,
         } => {
             // Pre-processing is done ingress-side, so it should be already done.
             let frontend = SegmentSource::<
@@ -82,20 +70,17 @@ pub async fn run(
                 .link(frontend)?;
             let ingress = Ingress::for_pipeline(pipeline)?;
 
-            if !is_static {
-                // Default to supporting both Chat and Completions endpoints
-                let model_type = ModelType::Chat | ModelType::Completions;
-                model
-                    .attach(&endpoint, model_type, ModelInput::Tokens)
-                    .await?;
-            }
+            let model_type = if is_prefill {
+                ModelType::Prefill
+            } else {
+                ModelType::Chat | ModelType::Completions
+            };
+            model
+                .attach(&endpoint, model_type, ModelInput::Tokens)
+                .await?;
 
             let fut = endpoint.endpoint_builder().handler(ingress).start();
-
-            (Box::pin(fut), Some(model.card().clone()))
-        }
-        EngineConfig::StaticRemote(_) => {
-            panic!("StaticRemote definitions are only for the frontend end node.");
+            Box::pin(fut)
         }
         EngineConfig::Dynamic(_) => {
             unreachable!("An endpoint input will never have a Dynamic engine");
@@ -106,7 +91,7 @@ pub async fn run(
     // Note: We must return rt_result to propagate the actual error back to the user.
     // If we don't return the specific error, the programmer/user won't know what actually
     // caused the endpoint service to fail, making debugging much more difficult.
-    let result = tokio::select! {
+    tokio::select! {
         rt_result = rt_fut => {
             tracing::debug!("Endpoint service completed");
             match rt_result {
@@ -124,21 +109,7 @@ pub async fn run(
             tracing::debug!("Endpoint service cancelled");
             Ok(())
         }
-    };
-
-    // If we got an error, return it
-    result?;
-
-    // Cleanup on shutdown
-    if let Some(mut card) = card
-        && let Err(err) = card
-            .delete_from_nats(distributed_runtime.nats_client())
-            .await
-    {
-        tracing::error!(%err, "delete_from_nats error on shutdown");
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -156,7 +127,7 @@ mod integration_tests {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create distributed runtime: {}", e))?;
 
-        let engine_config = EngineConfig::StaticFull {
+        let engine_config = EngineConfig::InProcessText {
             engine: crate::engines::make_echo_engine(),
             model: Box::new(
                 crate::local_model::LocalModelBuilder::default()
@@ -165,7 +136,6 @@ mod integration_tests {
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to build LocalModel: {}", e))?,
             ),
-            is_static: false,
         };
 
         Ok((distributed_runtime, engine_config))

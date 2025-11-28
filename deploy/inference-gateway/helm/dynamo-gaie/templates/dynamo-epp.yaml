@@ -12,6 +12,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+{{- /* ------------ file-scope vars (no output) ------------ */ -}}
+{{- $platformNs   := default .Release.Namespace .Values.platformNamespace -}}
+{{- $platformName := default "dynamo-platform" .Values.platformReleaseName -}}
+{{- $useDynamo    := default false .Values.epp.useDynamo -}}
+{{- $resolvedDynNs := (include "dynamo-gaie.dynamoNamespace" .) | trim -}}
+{{- $ns           := ternary (required "set dynamoGraphDeploymentName when epp.useDynamo=true" $resolvedDynNs) "" $useDynamo -}}
+{{- $kv           := default "16" .Values.epp.dynamo.kvBlockSize -}}
+{{- $std          := .Values.extension.standardImage -}}
+{{- $dyn          := .Values.extension.dynamoImage -}}
+{{- $fallback     := ternary $dyn $std .Values.epp.useDynamo -}}
+{{- $eppImage     := default $fallback .Values.extension.image -}}
+
+
+---  # <-- start of actual YAML document
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,7 +43,6 @@ spec:
       labels:
         app: {{ .Values.model.shortName }}-epp
     spec:
-      # Conservatively, this timeout should mirror the longest grace period of the pods within the pool
       terminationGracePeriodSeconds: 130
 
       {{- if .Values.imagePullSecrets }}
@@ -41,7 +54,7 @@ spec:
 
       containers:
       - name: epp
-        image: "{{ if .Values.eppAware.enabled }}{{ default .Values.extension.image .Values.eppAware.eppImage }}{{ else }}{{ .Values.extension.image }}{{ end }}"
+        image: "{{ $eppImage }}"
         imagePullPolicy: {{ default "IfNotPresent" .Values.epp.imagePullPolicy }}
         args:
         {{- if .Values.epp.argsOverride }}
@@ -59,19 +72,13 @@ spec:
           - "9002"
           - -grpcHealthPort
           - "9003"
-        {{- if .Values.eppAware.enabled }}
+          {{- if $useDynamo }}
           - -configFile
-          - "/etc/epp/epp-config-dynamo.yaml"
-        {{- end }}
+          - "{{ .Values.epp.configFile }}"
+          {{- end }}
         {{- end }}
 
-        {{- $platformNs := default .Release.Namespace .Values.platformNamespace -}}
-        {{- $platformName := default "dynamo-platform" .Values.platformReleaseName -}}
-        {{- $ns := required "set eppAware.dynamoNamespace via values" .Values.eppAware.dynamoNamespace -}}
-        {{- $comp := default "backend" .Values.eppAware.dynamoComponent -}}
-        {{- $kv := default "16" .Values.eppAware.dynamoKvBlockSize -}}
-
-        {{- if .Values.eppAware.enabled }}
+        {{- if $useDynamo }}
         volumeMounts:
           - name: epp-config
             mountPath: /etc/epp
@@ -79,17 +86,19 @@ spec:
         {{- end }}
 
         env:
-        {{- if .Values.eppAware.enabled }}
+        {{- if $useDynamo }}
           - name: ETCD_ENDPOINTS
             value: "{{ $platformName }}-etcd.{{ $platformNs }}:2379"
           - name: NATS_SERVER
             value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
           - name: DYNAMO_NAMESPACE
             value: "{{ $ns }}"
-          - name: DYNAMO_COMPONENT
-            value: "{{ $comp }}"
           - name: DYNAMO_KV_BLOCK_SIZE
             value: "{{ $kv }}"
+          - name: DYNAMO_ROUTER_REPLICA_SYNC
+            value: "true"
+          - name: USE_STREAMING
+            value: "true"
         {{- end }}
         {{- range .Values.epp.extraEnv }}
           - name: {{ .name }}
@@ -114,7 +123,7 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
 
-      {{- if .Values.eppAware.enabled }}
+      {{- if $useDynamo }}
       volumes:
         - name: epp-config
           configMap:

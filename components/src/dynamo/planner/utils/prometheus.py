@@ -19,7 +19,7 @@ import typing
 from prometheus_api_client import PrometheusConnect
 from pydantic import BaseModel, ValidationError
 
-from dynamo._core import prometheus_names
+from dynamo import prometheus_names
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -63,6 +63,11 @@ class PrometheusAPIClient:
             Average metric value or 0 if no data/error
         """
         try:
+            # Prepend the frontend metric prefix if not already present
+            if not full_metric_name.startswith(prometheus_names.name_prefix.FRONTEND):
+                full_metric_name = (
+                    f"{prometheus_names.name_prefix.FRONTEND}_{full_metric_name}"
+                )
             query = f"increase({full_metric_name}_sum[{interval}])/increase({full_metric_name}_count[{interval}])"
             result = self.prom.custom_query(query=query)
             if not result:
@@ -75,8 +80,10 @@ class PrometheusAPIClient:
 
             values = []
             for container in metrics_containers:
+                # Frontend lowercases model names for Prometheus labels so we need to do case-insensitive comparison
                 if (
-                    container.metric.model == model_name
+                    container.metric.model
+                    and container.metric.model.lower() == model_name.lower()
                     and container.metric.dynamo_namespace == self.dynamo_namespace
                 ):
                     values.append(container.value[1])
@@ -94,7 +101,7 @@ class PrometheusAPIClient:
 
     def get_avg_inter_token_latency(self, interval: str, model_name: str):
         return self._get_average_metric(
-            prometheus_names.frontend.inter_token_latency_seconds,
+            prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS,
             interval,
             "avg inter token latency",
             model_name,
@@ -102,7 +109,7 @@ class PrometheusAPIClient:
 
     def get_avg_time_to_first_token(self, interval: str, model_name: str):
         return self._get_average_metric(
-            prometheus_names.frontend.time_to_first_token_seconds,
+            prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS,
             interval,
             "avg time to first token",
             model_name,
@@ -110,7 +117,7 @@ class PrometheusAPIClient:
 
     def get_avg_request_duration(self, interval: str, model_name: str):
         return self._get_average_metric(
-            prometheus_names.frontend.request_duration_seconds,
+            prometheus_names.frontend_service.REQUEST_DURATION_SECONDS,
             interval,
             "avg request duration",
             model_name,
@@ -119,15 +126,24 @@ class PrometheusAPIClient:
     def get_avg_request_count(self, interval: str, model_name: str):
         # This function follows a different query pattern than the other metrics
         try:
-            requests_total_metric = prometheus_names.frontend.requests_total
+            requests_total_metric = prometheus_names.frontend_service.REQUESTS_TOTAL
+            # Prepend the frontend metric prefix if not already present
+            if not requests_total_metric.startswith(
+                prometheus_names.name_prefix.FRONTEND
+            ):
+                requests_total_metric = (
+                    f"{prometheus_names.name_prefix.FRONTEND}_{requests_total_metric}"
+                )
             raw_res = self.prom.custom_query(
                 query=f"increase({requests_total_metric}[{interval}])"
             )
             metrics_containers = parse_frontend_metric_containers(raw_res)
             total_count = 0.0
             for container in metrics_containers:
+                # Frontend lowercases model names for Prometheus labels so we need to do case-insensitive comparison
                 if (
-                    container.metric.model == model_name
+                    container.metric.model
+                    and container.metric.model.lower() == model_name.lower()
                     and container.metric.dynamo_namespace == self.dynamo_namespace
                 ):
                     total_count += container.value[1]
@@ -138,7 +154,7 @@ class PrometheusAPIClient:
 
     def get_avg_input_sequence_tokens(self, interval: str, model_name: str):
         return self._get_average_metric(
-            prometheus_names.frontend.input_sequence_tokens,
+            prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS,
             interval,
             "avg input sequence tokens",
             model_name,
@@ -146,7 +162,7 @@ class PrometheusAPIClient:
 
     def get_avg_output_sequence_tokens(self, interval: str, model_name: str):
         return self._get_average_metric(
-            prometheus_names.frontend.output_sequence_tokens,
+            prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS,
             interval,
             "avg output sequence tokens",
             model_name,

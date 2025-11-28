@@ -125,6 +125,20 @@ impl<R: LogicalResources> LocalityProvider for Logical<R> {
         RB: BlockDataProvider<Locality = Self>,
         WB: WritableBlock + BlockDataProviderMut<Locality = Self>,
     {
+        // Check for empty slices and length mismatch early
+        if sources.is_empty() && targets.is_empty() {
+            tracing::warn!(
+                "Logical::handle_transfer called with both sources and targets empty, skipping transfer"
+            );
+            let (tx, rx) = oneshot::channel();
+            tx.send(()).unwrap();
+            return Ok(rx);
+        }
+
+        if sources.len() != targets.len() {
+            return Err(TransferError::CountMismatch(sources.len(), targets.len()));
+        }
+
         let source_resources = Self::load_resources(sources);
         let target_resources = Self::load_resources_mut(targets);
 
