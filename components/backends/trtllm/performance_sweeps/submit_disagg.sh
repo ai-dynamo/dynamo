@@ -419,6 +419,29 @@ main() {
 
             run_single $ctx_num $ctx_tp_size $ctx_ep_size $ctx_enable_attention_dp $gen_num $gen_tp_size $gen_tp_size $gen_batch_size $gen_max_num_tokens $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
             ;;
+        "tp")
+            if [ $# -ne 14 ]; then
+                echo "Error: TP mode requires 14 additional parameters (including mtp_mode)"
+                usage
+            fi
+
+            local ctx_num=$3
+            local ctx_tp_size=$4
+            local ctx_ep_size=$5
+            local ctx_enable_attention_dp=$6
+            local gen_num=$7
+            local gen_tp_size=$8
+            local gen_batch_size=$9
+            local gen_max_num_tokens=${10}
+            local gen_gpu_memory_fraction=${11}
+            local gen_mtp_size=${12}
+            local gen_eplb_num_slots=${13}
+            local gen_concurrency_list=${14}
+
+            echo "Running TP mode ($mtp_mode) with ctx_num=$ctx_num, gen_num=$gen_num, gen_tp_size=$gen_tp_size, gen_ep_size=1, gen_batch_size=$gen_batch_size, gen_max_num_tokens=$gen_max_num_tokens, gen_gpu_memory_fraction=$gen_gpu_memory_fraction, gen_mtp_size=$gen_mtp_size, gen_eplb_num_slots=$gen_eplb_num_slots, gen_concurrency_list=\"$gen_concurrency_list\""
+
+            run_single $ctx_num $ctx_tp_size $ctx_ep_size $ctx_enable_attention_dp $gen_num $gen_tp_size 1 $gen_batch_size $gen_max_num_tokens false $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
+            ;;
         *)
             echo "Error: Unknown mode '$mode'"
             usage
