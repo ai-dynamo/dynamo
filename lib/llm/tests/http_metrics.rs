@@ -321,7 +321,7 @@ mod integration_tests {
             .unwrap();
 
         // Create EngineConfig with EchoEngine
-        let engine_config = EngineConfig::StaticFull {
+        let engine_config = EngineConfig::InProcessText {
             engine: make_echo_engine(),
             model: Box::new(local_model.clone()),
         };
@@ -355,9 +355,8 @@ mod integration_tests {
             model_watcher.watch(discovery_stream, None).await;
         });
 
-        // Set up the engine following the StaticFull pattern from http.rs
-        let EngineConfig::StaticFull { engine, model, .. } = engine_config else {
-            panic!("Expected StaticFull config");
+        let EngineConfig::InProcessText { engine, model, .. } = engine_config else {
+            panic!("Expected InProcessText config");
         };
 
         let card = local_model.card().clone();
@@ -373,7 +372,7 @@ mod integration_tests {
         let test_component = namespace.component("test-mdc-component").unwrap();
         let test_endpoint = test_component.endpoint("test-mdc-endpoint");
 
-        // This will store the MDC in etcd for discovery
+        // This will store the MDC in key-value store for discovery
         local_model
             .attach(
                 &test_endpoint,
