@@ -25,12 +25,10 @@ use tokio_util::sync::CancellationToken;
 mod connector;
 mod lease;
 mod lock;
-mod path;
 
 use connector::Connector;
 use lease::*;
 pub use lock::*;
-pub use path::*;
 
 use super::utils::build_in_runtime;
 use crate::config::environment_names::etcd as env_etcd;

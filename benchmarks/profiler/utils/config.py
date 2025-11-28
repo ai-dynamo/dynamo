@@ -49,8 +49,8 @@ class PodSpec(BaseModel):
 
 
 class ServiceResources(BaseModel):
-    requests: Optional[dict[str, str]] = None
-    limits: Optional[dict[str, str]] = None
+    requests: Optional[dict[str, str | dict]] = None
+    limits: Optional[dict[str, str | dict]] = None
 
 
 class Service(BaseModel):
@@ -298,21 +298,37 @@ def setup_worker_service_resources(
     if worker_service.resources is None:
         worker_service.resources = ServiceResources()
 
-    # Ensure requests exists
-    if worker_service.resources.requests is None:
-        worker_service.resources.requests = {}
+    # Ensure limits exists
+    if worker_service.resources.limits is None:
+        worker_service.resources.limits = {}
 
-    # Set GPU requests
+    # Calculate GPU value
     gpu_value = (
         min(gpu_count, num_gpus_per_node)
         if num_gpus_per_node is not None
         else gpu_count
     )
-    worker_service.resources.requests["gpu"] = str(gpu_value)
 
-    # Update limits if they exist
-    if worker_service.resources.limits is not None:
-        worker_service.resources.limits["gpu"] = str(gpu_value)
+    def _update_resource_dict(resource_dict: dict[str, str], gpu_value: int):
+        """Helper function to update gpu and custom rdma/ib fields in a resource dictionary.
+
+        Args:
+            resource_dict: The resource dictionary (either limits or requests) to update
+            gpu_value: The GPU value to set
+        """
+        resource_dict["gpu"] = str(gpu_value)
+
+        # also update custom rdma/ib if it exists (some cluster requires this)
+        if "custom" in resource_dict:
+            if isinstance(resource_dict["custom"], dict):
+                if "rdma/ib" in resource_dict["custom"]:
+                    resource_dict["custom"]["rdma/ib"] = str(gpu_value)
+
+    # Update limits
+    _update_resource_dict(worker_service.resources.limits, gpu_value)
+    # Also update requests if they exist
+    if worker_service.resources.requests is not None:
+        _update_resource_dict(worker_service.resources.requests, gpu_value)
 
 
 def validate_and_get_worker_args(worker_service, backend):

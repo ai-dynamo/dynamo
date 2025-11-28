@@ -21,9 +21,7 @@ use futures::StreamExt;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event};
 use parking_lot::Mutex;
 
-use crate::storage::key_value_store::KeyValue;
-
-use super::{Key, KeyValueBucket, KeyValueStore, StoreError, StoreOutcome, WatchEvent};
+use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 
 /// How long until a key expires. We keep the keys alive by touching the files.
 /// 10s is the same as our etcd lease expiry.
@@ -100,7 +98,7 @@ impl FileStore {
 }
 
 #[async_trait]
-impl KeyValueStore for FileStore {
+impl Store for FileStore {
     type Bucket = Directory;
 
     /// A "bucket" is a directory
@@ -278,7 +276,7 @@ impl fmt::Display for Directory {
 }
 
 #[async_trait]
-impl KeyValueBucket for Directory {
+impl Bucket for Directory {
     /// Write a file to the directory
     async fn insert(
         &self,
@@ -286,7 +284,7 @@ impl KeyValueBucket for Directory {
         value: bytes::Bytes,
         _revision: u64, // Not used. Maybe put in file name?
     ) -> Result<StoreOutcome, StoreError> {
-        let safe_key = Key::new(key.as_ref()); // because of from_raw
+        let safe_key = key.url_safe();
         let full_path = self.p.join(safe_key.as_ref());
         self.owned_files.lock().insert(full_path.clone());
         let str_path = full_path.display().to_string();
@@ -298,7 +296,7 @@ impl KeyValueBucket for Directory {
 
     /// Read a file from the directory
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
-        let safe_key = Key::new(key.as_ref()); // because of from_raw
+        let safe_key = key.url_safe();
         let full_path = self.p.join(safe_key.as_ref());
         if !full_path.exists() {
             return Ok(None);
@@ -313,7 +311,7 @@ impl KeyValueBucket for Directory {
 
     /// Delete a file from the directory
     async fn delete(&self, key: &Key) -> Result<(), StoreError> {
-        let safe_key = Key::new(key.as_ref()); // because of from_raw
+        let safe_key = key.url_safe();
         let full_path = self.p.join(safe_key.as_ref());
         let str_path = full_path.display().to_string();
         if !full_path.exists() {
@@ -374,7 +372,7 @@ impl KeyValueBucket for Directory {
                     let canonical_item_path = item_path.canonicalize().unwrap_or_else(|_| item_path.clone());
 
                     let key = match canonical_item_path.strip_prefix(&root) {
-                        Ok(stripped) => stripped.display().to_string().replace("_", "/"),
+                        Ok(stripped) => Key::from_url_safe(&stripped.display().to_string()),
                         Err(err) => {
                             // Possibly this should be a panic.
                             // A key cannot be outside the file store root.
@@ -400,7 +398,7 @@ impl KeyValueBucket for Directory {
                             yield WatchEvent::Put(item);
                         }
                         EventKind::Remove(event::RemoveKind::File) => {
-                            yield WatchEvent::Delete(Key::from_raw(key));
+                            yield WatchEvent::Delete(key);
                         }
                         _ => {
                             // These happen every time the keep-alive updates last modified time
@@ -412,7 +410,7 @@ impl KeyValueBucket for Directory {
         }))
     }
 
-    async fn entries(&self) -> Result<HashMap<String, bytes::Bytes>, StoreError> {
+    async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
         let contents = fs::read_dir(&self.p)
             .with_context(|| self.p.display().to_string())
             .map_err(a_to_fs_err)?;
@@ -437,7 +435,7 @@ impl KeyValueBucket for Directory {
             };
 
             let key = match canonical_entry_path.strip_prefix(&self.root) {
-                Ok(p) => p.to_string_lossy().to_string().replace("_", "/"),
+                Ok(p) => Key::from_url_safe(&p.to_string_lossy()),
                 Err(err) => {
                     tracing::error!(
                         error = %err,
@@ -471,9 +469,7 @@ fn to_fs_err<E: std::error::Error>(err: E) -> StoreError {
 mod tests {
     use std::collections::HashSet;
 
-    use crate::storage::key_value_store::{
-        FileStore, Key, KeyValueBucket as _, KeyValueStore as _,
-    };
+    use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _};
 
     #[tokio::test]
     async fn test_entries_full_path() {
@@ -482,17 +478,17 @@ mod tests {
         let m = FileStore::new(t.path());
         let bucket = m.get_or_create_bucket("v1/tests", None).await.unwrap();
         let _ = bucket
-            .insert(&Key::new("key1/multi/part"), "value1".into(), 0)
+            .insert(&Key::new("key1/multi/part".to_string()), "value1".into(), 0)
             .await
             .unwrap();
         let _ = bucket
-            .insert(&Key::new("key2"), "value2".into(), 0)
+            .insert(&Key::new("key2".to_string()), "value2".into(), 0)
             .await
             .unwrap();
         let entries = bucket.entries().await.unwrap();
-        let keys: HashSet<String> = entries.into_keys().collect();
+        let keys: HashSet<Key> = entries.into_keys().collect();
 
-        assert!(keys.contains("v1/tests/key1/multi/part"));
-        assert!(keys.contains("v1/tests/key2"));
+        assert!(keys.contains(&Key::new("v1/tests/key1/multi/part".to_string())));
+        assert!(keys.contains(&Key::new("v1/tests/key2".to_string())));
     }
 }
