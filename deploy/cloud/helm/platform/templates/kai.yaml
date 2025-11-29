@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 ---
-{{- if .Capabilities.APIVersions.Has "scheduling.run.ai/v2" }}
+{{- if and (index .Values.global "kai-scheduler" "enabled") (.Capabilities.APIVersions.Has "scheduling.run.ai/v2") }}
 
 {{- /* Create parent queue first */ -}}
 {{- $defaultQueue := lookup "scheduling.run.ai/v2" "Queue" "" "dynamo-default" }}

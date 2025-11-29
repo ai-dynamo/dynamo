@@ -186,6 +186,8 @@ spec:
         {{- end }}
       securityContext:
         runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-controller-manager
       terminationGracePeriodSeconds: 30
       {{- if .Values.webhook.enabled }}
