@@ -183,6 +183,9 @@ filterwarnings = [
 
 # NOTE: Can also manually mark tests with @pytest.mark.asyncio
 asyncio_mode = "auto"
+# NOTE: Keep this list in sync with tests/conftest.py pytest_configure() function
+# This file (pyproject.toml) may not be available in runtime containers, therefore
+# markers are also registered programmatically in tests/conftest.py as a fallback
 markers = [
     "pre_merge: marks tests to run before merging",
     "parallel: marks tests that can run in parallel with pytest-xdist",

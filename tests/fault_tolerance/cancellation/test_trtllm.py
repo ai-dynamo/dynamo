@@ -1,6 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""
+TensorRT-LLM Request Cancellation E2E Tests
+
+These tests verify request cancellation handling in various scenarios:
+- Aggregated mode (single worker)
+- Disaggregated mode (prefill + decode workers)
+- Different cancellation phases (prefill, decode, KV transfer)
+
+Running the tests:
+    # Run all 4 tests (takes ~4 minutes)
+    pytest tests/fault_tolerance/cancellation/test_trtllm.py -v
+
+    # Run single test (takes ~45-65 seconds)
+    pytest tests/fault_tolerance/cancellation/test_trtllm.py::test_request_cancellation_trtllm_aggregated -v
+
+    # Run with timeout for safety
+    timeout 600 pytest tests/fault_tolerance/cancellation/test_trtllm.py -v
+
+Expected timing:
+    - All 4 tests: ~230 seconds (3 min 49 sec)
+    - Individual tests: 45-65 seconds each
+    - Requires 1 GPU (marked with @pytest.mark.gpu_1)
+"""
+
 import logging
 import os
 import shutil
@@ -140,6 +164,9 @@ def test_request_cancellation_trtllm_aggregated(
     This test verifies that when a request is cancelled by the client,
     the system properly handles the cancellation and cleans up resources
     on the worker side in aggregated (prefill_and_decode) mode.
+
+    Typical runtime: ~45 seconds (single worker, 3 cancellation scenarios)
+    Fastest test due to single aggregated worker architecture.
     """
 
     # Step 1: Start the frontend
@@ -217,6 +244,8 @@ def test_request_cancellation_trtllm_decode_cancel(
     This test verifies that when a request is cancelled by the client during the decode phase,
     the system properly handles the cancellation and cleans up resources
     on the decode worker side in a disaggregated setup.
+
+    Typical runtime: ~55-60 seconds (2 workers: prefill + decode, streaming cancellation)
     """
 
     # Step 1: Start the frontend
@@ -293,6 +322,8 @@ def test_request_cancellation_trtllm_prefill_cancel(
     This test verifies that when a request is cancelled by the client during the prefill phase,
     the system properly handles the cancellation and cleans up resources on the prefill worker.
     Since the request is cancelled before prefill completes, the decode worker never receives it.
+
+    Typical runtime: ~55-60 seconds (2 workers: prefill + decode, long prompt prefill cancellation)
     """
 
     # Step 1: Start the frontend
@@ -378,6 +409,10 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
 
     This test verifies that when a request is cancelled by the client during the KV transfer phase,
     the system properly handles the cancellation and cleans up resources on the workers.
+
+    Typical runtime: ~60-65 seconds (2 workers: prefill + decode, KV transfer timing critical)
+    Note: This test has tight timing requirements (2ms poll interval) to catch KV transfer window.
+    Includes extra validation to verify workers remain functional after cancellation.
     """
 
     # Step 1: Start the frontend

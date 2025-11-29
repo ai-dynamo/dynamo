@@ -56,7 +56,7 @@ runs:
 
         docker run --runtime=nvidia --gpus all -w /workspace \
           --cpus=${NUM_CPUS} \
-          --network host \
+          --network bridge --shm-size=10G \
           --name ${{ env.CONTAINER_ID }}_pytest \
           ${{ inputs.image_tag }} \
           bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""

@@ -28,9 +28,37 @@ from tests.utils.managed_process import ManagedProcess
 
 
 def pytest_configure(config):
-    # Defining model morker to avoid `'model' not found in `markers` configuration option`
-    # error when pyproject.toml is not available in the container
-    config.addinivalue_line("markers", "model: model id used by a test or parameter")
+    # Register markers to avoid warnings when pyproject.toml is not available in runtime containers
+    # NOTE: Keep this list in sync with pyproject.toml [tool.pytest.ini_options] markers section
+    markers = [
+        "model: model id used by a test or parameter",
+        "pre_merge: marks tests to run before merging",
+        "parallel: marks tests that can run in parallel with pytest-xdist",
+        "nightly: marks tests to run nightly",
+        "weekly: marks tests to run weekly",
+        "gpu_1: marks tests to run on GPU",
+        "gpu_2: marks tests to run on 2GPUs",
+        "gpu_4: marks tests to run on 4GPUs",
+        "gpu_8: marks tests to run on 8GPUs",
+        "e2e: marks tests as end-to-end tests",
+        "integration: marks tests as integration tests",
+        "unit: marks tests as unit tests",
+        "stress: marks tests as stress tests",
+        "vllm: marks tests as requiring vllm",
+        "trtllm: marks tests as requiring trtllm",
+        "trtllm_marker: marks tests as requiring trtllm",
+        "sglang: marks tests as requiring sglang",
+        "multimodal: marks tests as multimodal (image/video) tests",
+        "slow: marks tests as known to be slow",
+        "h100: marks tests to run on H100",
+        "kvbm: marks tests for KV behavior and model determinism",
+        "kvbm_v2: marks tests using KVBM V2",
+        "custom_build: marks tests that require custom builds or special setup",
+        "k8s: marks tests as requiring Kubernetes",
+        "fault_tolerance: marks tests as fault tolerance tests",
+    ]
+    for marker in markers:
+        config.addinivalue_line("markers", marker)
 
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
