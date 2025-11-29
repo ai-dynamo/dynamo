@@ -124,6 +124,7 @@ NIXL_UCX_REF=v1.19.0
 NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
 NO_CACHE=""
+NO_TAG_LATEST=""
 
 # sccache configuration for S3
 USE_SCCACHE=""
@@ -194,7 +195,6 @@ get_options() {
             fi
             ;;
         --base-image)
-            # Note: --base-image cannot be used with --dev-image
             if [ "$2" ]; then
                 BASE_IMAGE=$2
                 shift
@@ -213,14 +213,6 @@ get_options() {
         --target)
             if [ "$2" ]; then
                 TARGET=$2
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
-        --dev-image)
-            if [ "$2" ]; then
-                DEV_IMAGE_INPUT=$2
                 shift
             else
                 missing_requirement "$1"
@@ -269,6 +261,9 @@ get_options() {
             ;;
         --no-cache)
             NO_CACHE=" --no-cache"
+            ;;
+        --no-tag-latest)
+            NO_TAG_LATEST="true"
             ;;
         --cache-from)
             if [ "$2" ]; then
@@ -346,19 +341,10 @@ get_options() {
     done
 
     # Validate argument combinations
-    if [[ -n "${DEV_IMAGE_INPUT:-}" && -n "${BASE_IMAGE:-}" ]]; then
-        error "ERROR: --dev-image cannot be used with --base-image. Use --dev-image to build from existing images or --base-image to build new images."
-    fi
-
-    # Validate that --target and --dev-image cannot be used together
-    if [[ -n "${DEV_IMAGE_INPUT:-}" && -n "${TARGET:-}" ]]; then
-        error "ERROR: --target cannot be used with --dev-image. Use --target to build from scratch or --dev-image to build from existing images."
-    fi
-
-    # Validate that --uid and --gid are only used with local-dev related options
+    # Validate that --uid and --gid are only used with local-dev target
     if [[ -n "${CUSTOM_UID:-}" || -n "${CUSTOM_GID:-}" ]]; then
-        if [[ -z "${DEV_IMAGE_INPUT:-}" && "${TARGET:-}" != "local-dev" ]]; then
-            error "ERROR: --uid and --gid can only be used with --dev-image or --target local-dev"
+        if [[ "${TARGET:-}" != "local-dev" ]]; then
+            error "ERROR: --uid and --gid can only be used with --target local-dev"
         fi
     fi
 
@@ -460,10 +446,10 @@ show_help() {
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
     echo "  [--tag tag for image]"
-    echo "  [--dev-image dev image to build local-dev from]"
-    echo "  [--uid user ID for local-dev images (only with --dev-image or --target local-dev)]"
-    echo "  [--gid group ID for local-dev images (only with --dev-image or --target local-dev)]"
+    echo "  [--uid user ID for local-dev images (only with --target local-dev)]"
+    echo "  [--gid group ID for local-dev images (only with --target local-dev)]"
     echo "  [--no-cache disable docker build cache]"
+    echo "  [--no-tag-latest do not tag the container as latest]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--build-context name=path to add build context]"
     echo "  [--release-build perform a release build]"
@@ -543,44 +529,68 @@ fi
 # Add NIXL_REF as a build argument
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
 
-# Function to build local-dev image with header
-build_local_dev_with_header() {
-    local dev_base_image="$1"
-    local tags="$2"
-    local success_msg="$3"
-    local header_title="$4"
+# Function to build local-dev image
+build_local_dev() {
+    local runtime_image="$1"
+    local tag="$2"
+    local latest_tag="$3"
+    local framework="$4"
 
-    echo "======================================"
-    echo "$header_title"
-    echo "======================================"
-
-    # Get user info right before using it
-    USER_UID=${CUSTOM_UID:-$(id -u)}
-    USER_GID=${CUSTOM_GID:-$(id -g)}
-
-    # Set up dockerfile path
-    DOCKERFILE_LOCAL_DEV="${SOURCE_DIR}/Dockerfile.local_dev"
-
-    if [[ ! -f "$DOCKERFILE_LOCAL_DEV" ]]; then
-        echo "ERROR: Dockerfile.local_dev not found at: $DOCKERFILE_LOCAL_DEV"
+    # Check if framework is supported
+    if [[ "${framework}" == "NONE" ]]; then
+        echo "ERROR: Local-dev build from runtime is not supported for ${framework} framework"
+        echo "Supported frameworks: VLLM, SGLANG, TRTLLM"
         exit 1
     fi
 
-    echo "Building new local-dev image from: $dev_base_image"
-    echo "User 'dynamo' will have UID: $USER_UID, GID: $USER_GID"
+    # Create local-dev tags from existing tags
+    local local_dev_tags=""
+    if [[ -n "$tag" ]]; then
+        # Extract tag name, remove --tag prefix, -runtime suffix, and any existing -local-dev suffix, then add -local-dev
+        local tag_name=$(echo "$tag" | sed 's/--tag //' | sed 's/-runtime$//' | sed 's/-local-dev$//')
+        local_dev_tags+=" --tag ${tag_name}-local-dev"
+    fi
+
+    if [[ -n "$latest_tag" ]]; then
+        # Extract tag name, remove --tag prefix, -runtime suffix, and any existing -local-dev suffix, then add -local-dev
+        local latest_tag_name=$(echo "$latest_tag" | sed 's/--tag //' | sed 's/-runtime$//' | sed 's/-local-dev$//')
+        local_dev_tags+=" --tag ${latest_tag_name}-local-dev"
+    fi
+
+    # Get user info right before using it
+    local user_uid=${CUSTOM_UID:-$(id -u)}
+    local user_gid=${CUSTOM_GID:-$(id -g)}
+
+    # SGLANG uses novenv (system Python), VLLM and TRTLLM use venv
+    local dockerfile_local_dev=""
+    if [[ "${framework}" == "SGLANG" ]]; then
+        dockerfile_local_dev="${SOURCE_DIR}/Dockerfile.runtime2localdev_novenv"
+    else
+        # VLLM and TRTLLM use venv version
+        dockerfile_local_dev="${SOURCE_DIR}/Dockerfile.runtime2localdev_venv"
+    fi
+
+    if [[ ! -f "$dockerfile_local_dev" ]]; then
+        echo "ERROR: Dockerfile not found at: $dockerfile_local_dev"
+        exit 1
+    fi
+
+    echo "Building new local-dev image from runtime: $runtime_image"
+    echo "User 'dynamo' will have UID: $user_uid, GID: $user_gid"
 
     # Show the docker command being executed if not in dry-run mode
-    if [ -z "$RUN_PREFIX" ]; then
+    local run_prefix="${RUN_PREFIX:-}"
+    if [ -z "$run_prefix" ]; then
         set -x
     fi
 
-    $RUN_PREFIX docker build \
-        --build-arg DEV_BASE="$dev_base_image" \
-        --build-arg USER_UID="$USER_UID" \
-        --build-arg USER_GID="$USER_GID" \
+    $run_prefix docker build \
+        --build-arg RUNTIME_IMAGE="$runtime_image" \
+        --build-arg USER_UID="$user_uid" \
+        --build-arg USER_GID="$user_gid" \
         --build-arg ARCH="$ARCH" \
-        --file "$DOCKERFILE_LOCAL_DEV" \
-        $tags \
+        --file "$dockerfile_local_dev" \
+        $local_dev_tags \
         "$SOURCE_DIR" || {
         { set +x; } 2>/dev/null
         echo "ERROR: Failed to build local_dev image"
@@ -588,20 +598,20 @@ build_local_dev_with_header() {
     }
 
     { set +x; } 2>/dev/null
-    echo "$success_msg"
+    echo "Successfully built local-dev images"
 
     # Show usage instructions
     echo ""
-    echo "To run the local-dev image as the local user ($USER_UID/$USER_GID):"
+    echo "To run the local-dev image as the local user ($user_uid/$user_gid):"
     # Extract the last tag from the tags string
-    last_tag=$(echo "$tags" | grep -o -- '--tag [^ ]*' | tail -1 | cut -d' ' -f2)
+    local last_tag=$(echo "$local_dev_tags" | grep -o -- '--tag [^ ]*' | tail -1 | cut -d' ' -f2)
     # Calculate relative path to run.sh from current working directory
     # Get the directory where build.sh is located
-    build_dir="$(dirname "${BASH_SOURCE[0]}")"
+    local build_dir="$(dirname "${BASH_SOURCE[0]}")"
     # Get the absolute path to run.sh (in the same directory as build.sh)
-    run_abs_path="$(realpath "$build_dir/run.sh")"
+    local run_abs_path="$(realpath "$build_dir/run.sh")"
     # Calculate relative path from current PWD to run.sh
-    run_path="$(python3 -c "import os; print(os.path.relpath('$run_abs_path', '$PWD'))")"
+    local run_path="$(python3 -c "import os; print(os.path.relpath('$run_abs_path', '$PWD'))")"
     echo "  $run_path --image $last_tag --mount-workspace ..."
 }
 
@@ -609,7 +619,15 @@ build_local_dev_with_header() {
 # Handle local-dev target
 if [[ $TARGET == "local-dev" ]]; then
     LOCAL_DEV_BUILD=true
-    TARGET_STR="--target dev"
+    # Force target to runtime for Stage 2 (we need runtime image for local-dev)
+    TARGET="runtime"
+    TARGET_STR="--target runtime"
+
+    # Regenerate TAG with runtime suffix since we changed TARGET
+    # Only regenerate if TAG was auto-generated (contains VERSION and FRAMEWORK)
+    if [[ "$TAG" == *"${VERSION}-${FRAMEWORK,,}"* ]]; then
+        TAG="--tag dynamo:${VERSION}-${FRAMEWORK,,}-runtime"
+    fi
 fi
 
 # BUILD DEV IMAGE
@@ -851,6 +869,16 @@ if [ -z "${NO_TAG_LATEST}" ]; then
     fi
 fi
 
+# Clear LATEST_TAG if --no-tag-latest flag is set
+# NO_TAG_LATEST: When set to "true", prevents automatic tagging of the image as "latest"
+# This is useful in CI/CD pipelines or when building multiple versions where you want
+# explicit version tags only (e.g., dynamo:v1.0.0-vllm-runtime) without the implicit
+# "latest" tag (e.g., dynamo:latest-vllm-runtime). This avoids accidentally overwriting
+# the "latest" tag when building older versions or experimental builds.
+if [ "$NO_TAG_LATEST" = "true" ]; then
+    LATEST_TAG=""
+fi
+
 show_image_options
 
 if [ -z "$RUN_PREFIX" ]; then
@@ -858,73 +886,52 @@ if [ -z "$RUN_PREFIX" ]; then
 fi
 
 
-# Skip Build 1 and Build 2 if DEV_IMAGE_INPUT is set (we'll handle it at the bottom)
-if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
-    # Follow 2-step build process for all frameworks
-    if [[ $FRAMEWORK != "NONE" ]]; then
-        # Define base image tag with framework suffix to prevent clobbering
-        # Different frameworks require different base configurations:
-        # - VLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=cuda-dl-base
-        # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
-        # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
-        # Without unique tags, building different frameworks would overwrite each other's names
-        DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}-${FRAMEWORK,,}"
-        # Start base image build
+# Build runtime/dev image (Build 1 and 2)
+# Follow 2-step build process for all frameworks except NONE
+if [[ $FRAMEWORK != "NONE" ]]; then
+    # Define base image tag with framework suffix to prevent clobbering
+    # Different frameworks require different base configurations:
+    # - VLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=cuda-dl-base
+    # - SGLANG: Python 3.10, BASE_IMAGE=cuda-dl-base
+    # - TRTLLM: Python 3.12, ENABLE_KVBM=true, BASE_IMAGE=pytorch
+    # Without unique tags, building different frameworks would overwrite each other's names
+    DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}-${FRAMEWORK,,}"
+
+    # Build 1: Base Image - Check if exists and build if needed
+    if [[ -z "$NO_CACHE" ]] && docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${DYNAMO_BASE_IMAGE}$"; then
         echo "======================================"
-        echo "Starting Build 1: Base Image"
+        echo "Stage 1: Base image ${DYNAMO_BASE_IMAGE} already exists, skipping..."
+        echo "======================================"
+    else
+        echo "======================================"
+        echo "Stage 1: Building Base Image"
         echo "======================================"
         $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-        # Start framework build
+    fi
+
+    # Build 2: Framework Image (dev, runtime, etc.) - Check if exists and build if needed
+    FRAMEWORK_IMAGE_TAG=$(echo "$TAG" | sed 's/--tag //')
+    if [[ -z "$NO_CACHE" && -n "$FRAMEWORK_IMAGE_TAG" ]] && docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${FRAMEWORK_IMAGE_TAG}$"; then
         echo "======================================"
-        echo "Starting Build 2: Framework Image"
+        echo "Stage 2: Framework image ${FRAMEWORK_IMAGE_TAG} already exists, skipping..."
+        echo "======================================"
+    else
+        echo "======================================"
+        echo "Stage 2: Building framework image (${TARGET})"
         echo "======================================"
         BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
         $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-    else
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     fi
+else
+    $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
 fi
 
-# Handle --dev-image option (build local-dev from existing dev image)
-if [[ -n "${DEV_IMAGE_INPUT:-}" ]]; then
-    # Validate that the dev image is not already a local-dev image
-    if [[ "$DEV_IMAGE_INPUT" == *"-local-dev" ]]; then
-        echo "ERROR: Cannot use local-dev image as dev image input: '$DEV_IMAGE_INPUT'"
-        exit 1
-    fi
-
-    # Build tag arguments - always add -local-dev suffix for --dev-image
-    # Generate local-dev tag from input image
-    if [[ "$DEV_IMAGE_INPUT" == *:* ]]; then
-        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}-local-dev"
-    else
-        LOCAL_DEV_TAG="--tag ${DEV_IMAGE_INPUT}:latest-local-dev"
-    fi
-
-    build_local_dev_with_header "$DEV_IMAGE_INPUT" "$LOCAL_DEV_TAG" "Successfully built local-dev image: ${LOCAL_DEV_TAG#--tag }" "Building Local-Dev Image"
-elif [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
-    # Use the first tag name (TAG) if available, otherwise use latest
-    if [[ -n "$TAG" ]]; then
-        DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
-    else
-        DEV_IMAGE="dynamo:latest-${FRAMEWORK,,}"
-    fi
-
-    # Build local-dev tags from existing tags
-    LOCAL_DEV_TAGS=""
-    if [[ -n "$TAG" ]]; then
-        # Extract tag name, remove any existing -local-dev suffix, then add -local-dev
-        TAG_NAME=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
-        LOCAL_DEV_TAGS+=" --tag ${TAG_NAME}-local-dev"
-    fi
-
-    if [[ -n "$LATEST_TAG" ]]; then
-        # Extract tag name, remove any existing -local-dev suffix, then add -local-dev
-        LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
-        LOCAL_DEV_TAGS+=" --tag ${LATEST_TAG_NAME}-local-dev"
-    fi
-
-    build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built local-dev images" "Starting Build 3: Local-Dev Image"
+# Build local-dev image if requested
+if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
+    echo "======================================"
+    echo "Stage 3: Building local-dev image from runtime image"
+    echo "======================================"
+    build_local_dev "$FRAMEWORK_IMAGE_TAG" "$TAG" "$LATEST_TAG" "$FRAMEWORK"
 fi
 
 

@@ -518,8 +518,21 @@ class ManagedProcess:
 
     def _terminate_existing(self):
         if self.terminate_existing:
+            # Get current process and all its ancestors to avoid killing ourselves
+            current_proc = psutil.Process(os.getpid())
+            protected_pids = {current_proc.pid}
+            try:
+                for parent in current_proc.parents():
+                    protected_pids.add(parent.pid)
+            except psutil.NoSuchProcess:
+                pass
+
             for proc in psutil.process_iter(["name", "cmdline"]):
                 try:
+                    # Skip if this is the current process or any ancestor
+                    if proc.pid in protected_pids:
+                        continue
+
                     if (
                         proc.name() == self._command_name
                         or proc.name() in self.stragglers

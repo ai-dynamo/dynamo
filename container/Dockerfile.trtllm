@@ -1,5 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Throughout this file, we make certain paths group-writable because this allows
+# both the dynamo user (UID 1000) and Dev Container users (UID != 1000) to work
+# properly without needing slow chown -R operations (which can add 2-10 extra
+# minutes).
+#
+# HOW WE ACHIEVE GROUP-WRITABLE PERMISSIONS:
+# 1. umask 002 wrapper      - RUN commands create group-writable files (775/664)
+# 2. COPY --chmod=775       - Sets permissions on copied children (not destination)
+# 3. chmod g+w (no -R)      - Fixes destination dirs only (milliseconds vs minutes)
+#
+# PATTERN: COPY --chmod=775 <path>; chmod g+w <path>
+# We use this pattern because COPY --chmod=775 sets permissions on all children
+# (files and subdirectories) but NOT on the destination directory itself. The
+# subsequent non-recursive chmod g+w fixes just the destination directory.
+#
+# PATHS THAT MUST BE GROUP-WRITABLE (for virtualenv containers):
+#   /workspace            - Users create/modify project files
+#   /home/dynamo          - Users create config/cache files
+#   /opt/dynamo/venv      - TensorRT-LLM uses venv, so entire venv must be writable for pip install
 
 # This section contains build arguments that are common and shared with
 # the plain Dockerfile, so they should NOT have a default. The source of truth is from build.sh.
@@ -92,22 +112,24 @@ ARG JINJA2_VER=3.1.6
 ARG SYMPY_VER=1.14.0
 ARG FLASH_ATTN_VER=2.7.4.post1+25.10
 
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch-${TORCH_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch-${TORCH_VER}.dist-info
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchgen ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchgen
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision-${TORCHVISION_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision-${TORCHVISION_VER}.dist-info
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision.libs ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision.libs
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/functorch ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/functorch
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/jinja2 ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/jinja2
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/jinja2-${JINJA2_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/jinja2-${JINJA2_VER}.dist-info
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/sympy ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/sympy
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/sympy-${SYMPY_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/sympy-${SYMPY_VER}.dist-info
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn_2_cuda.cpython-*-*-linux-gnu.so ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch_tensorrt ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt
-COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch_tensorrt-${TORCH_TENSORRT_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt-${TORCH_TENSORRT_VER}.dist-info
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch-${TORCH_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch-${TORCH_VER}.dist-info
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchgen ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchgen
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision-${TORCHVISION_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision-${TORCHVISION_VER}.dist-info
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision.libs ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision.libs
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/functorch ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/functorch
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/jinja2 ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/jinja2
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/jinja2-${JINJA2_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/jinja2-${JINJA2_VER}.dist-info
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/sympy ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/sympy
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/sympy-${SYMPY_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/sympy-${SYMPY_VER}.dist-info
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn_2_cuda.cpython-*-*-linux-gnu.so ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch_tensorrt ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt
+COPY --chmod=775 --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch_tensorrt-${TORCH_TENSORRT_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt-${TORCH_TENSORRT_VER}.dist-info
+RUN chmod g+w ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages
 
 # Install TensorRT-LLM and related dependencies
 ARG HAS_TRTLLM_CONTEXT
@@ -302,8 +324,8 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache /opt/dynamo \
-    && chown -R dynamo: /workspace /home/dynamo /opt/dynamo \
-    && chmod -R g+w /workspace /home/dynamo/.cache /opt/dynamo
+    && chown dynamo:0 /workspace /home/dynamo /opt/dynamo \
+    && chmod -R g+w /workspace /home/dynamo /opt/dynamo
 
 
 # Switch to dynamo user
@@ -311,9 +333,7 @@ USER dynamo
 ENV HOME=/home/dynamo
 ENV DYNAMO_HOME=/workspace
 
-# Copy UCX from framework image as plugin for NIXL
-# Copy NIXL source from framework image
-# Copy dynamo wheels for gitlab artifacts
+# Copy UCX and NIXL to system directories (read-only, no group-write needed)
 COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo: --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
 
@@ -327,16 +347,18 @@ $NIXL_PLUGIN_DIR:\
 $LD_LIBRARY_PATH
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
-# Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage
-COPY --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+# Copy entire virtual environment from framework container with correct ownership
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
 ENV LD_LIBRARY_PATH=/opt/dynamo/venv/lib/python3.12/site-packages/torch/lib:/opt/dynamo/venv/lib/python3.12/site-packages/torch_tensorrt/lib:${TENSORRT_LIB_DIR}:${LD_LIBRARY_PATH}
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
-COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
-COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-RUN uv pip install \
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
+COPY --chmod=775 --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+RUN umask 002 && uv pip install \
       --no-cache \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -352,7 +374,7 @@ RUN uv pip install \
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
+    umask 002 && UV_GIT_LFS=1 uv pip install \
         --no-cache \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
@@ -361,15 +383,16 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         cupy-cuda13x
 
 # Copy tests, benchmarks, deploy and components for CI with correct ownership
-COPY --chown=dynamo: tests /workspace/tests
-COPY --chown=dynamo: examples /workspace/examples
-COPY --chown=dynamo: benchmarks /workspace/benchmarks
-COPY --chown=dynamo: deploy /workspace/deploy
-COPY --chown=dynamo: components/ /workspace/components/
-COPY --chown=dynamo: recipes/ /workspace/recipes/
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo: tests /workspace/tests
+COPY --chmod=775 --chown=dynamo: examples /workspace/examples
+COPY --chmod=775 --chown=dynamo: benchmarks /workspace/benchmarks
+COPY --chmod=775 --chown=dynamo: deploy /workspace/deploy
+COPY --chmod=775 --chown=dynamo: components/ /workspace/components/
+COPY --chmod=775 --chown=dynamo: recipes/ /workspace/recipes/
 
 # Copy attribution files with correct ownership
-COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=664 --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
@@ -377,7 +400,9 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 
 # Setup environment for all users
 USER root
-RUN chmod 755 /opt/dynamo/.launch_screen && \
+RUN chmod g+w ${VIRTUAL_ENV} /workspace /workspace/* /opt/dynamo/* && \
+    chown dynamo:0 ${VIRTUAL_ENV} /workspace /workspace/* /opt/dynamo/* && \
+    chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
@@ -444,14 +469,19 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/usr/local/cargo/bin:$PATH
 
-COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+# Copy rust installation from dynamo_base to avoid duplication efforts
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --from=dynamo_base --chown=dynamo:root --chmod=775 /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base --chown=dynamo:root --chmod=775 /usr/local/cargo /usr/local/cargo
+RUN chmod g+w /usr/local/rustup /usr/local/cargo
 
 # Install maturin, for maturin develop
 RUN uv pip install --no-cache maturin[patchelf]
 
 # Editable install of dynamo
-COPY pyproject.toml README.md hatch_build.py /workspace/
-RUN uv pip install --no-cache --no-deps -e .
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo: pyproject.toml README.md hatch_build.py /workspace/
+RUN chmod g+w /workspace && \
+    uv pip install --no-deps -e .
 
 CMD []
