@@ -6,13 +6,13 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 
 use crate::physical::layout::{BlockDimension, LayoutConfig};
-use dynamo_memory::TorchTensor;
+use dynamo_memory::TensorDescriptor;
 
 pub fn determine_kv_layout(
     num_device_blocks: usize,
     page_size: usize,
     dtype_width_bytes: usize,
-    kv_tensors: &[Arc<dyn TorchTensor>],
+    kv_tensors: &[Arc<dyn TensorDescriptor>],
 ) -> Result<()> {
     let first_tensor = kv_tensors
         .first()
@@ -56,17 +56,17 @@ pub fn determine_kv_layout(
 
 /// Validate tensors
 fn validate_tensor_shapes(
-    first: &Arc<dyn TorchTensor>,
-    tensors: &[Arc<dyn TorchTensor>],
+    first: &Arc<dyn TensorDescriptor>,
+    tensors: &[Arc<dyn TensorDescriptor>],
 ) -> Result<Vec<usize>> {
     let shape = first.shape();
 
-    if !tensors.iter().all(|tensor| *shape == tensor.shape()) {
+    if !tensors.iter().all(|tensor| shape == tensor.shape()) {
         return Err(anyhow::anyhow!(
             "All tensors must have the same shape! Expected {:?}",
             shape
         ));
     }
 
-    Ok(shape)
+    Ok(shape.to_vec())
 }

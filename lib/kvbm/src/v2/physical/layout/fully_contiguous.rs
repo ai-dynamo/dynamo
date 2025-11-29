@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow};
 use validator::Validate;
 
 use super::serialize::{BlockFormat, FullyContiguousDetails, LayoutTypeDetails};
-use super::{Buffer, Layout, LayoutConfig, MemoryDescription, MemoryRegion};
+use super::{Buffer, Layout, LayoutConfig, MemoryDescriptor, MemoryRegion};
 
 /// Fully contiguous layout where all blocks are in a single allocation.
 #[derive(Debug)]

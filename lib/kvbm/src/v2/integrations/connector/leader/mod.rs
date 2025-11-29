@@ -1,7 +1,7 @@
 pub mod data;
 pub mod init;
 pub mod messages;
-pub mod runtime;
+// pub mod runtime;
 
 #[cfg(feature = "console")]
 pub mod console;
@@ -9,8 +9,8 @@ pub mod console;
 #[cfg(feature = "console")]
 pub mod events;
 
-#[cfg(test)]
-pub mod testing;
+// #[cfg(test)]
+// pub mod testing;
 
 pub use data::{
     Blocks, CachedRequestData, FinishedStatus, KVConnectorOutput, MatchResult, NewRequestData,
@@ -20,7 +20,7 @@ pub use data::{
 use super::{G1, G2, G3};
 
 pub use init::InitializedState;
-pub use runtime::ConnectorLeader;
+// pub use runtime::ConnectorLeader;
 
 #[cfg(feature = "console")]
 pub use console::InstrumentedLeader;
@@ -31,26 +31,26 @@ use crate::{
     integrations::connector::leader::data::BlocksView, v2::integrations::IntegrationsConfig,
 };
 
-pub fn build_connector_leader(
-    engine_id: &str,
-    config: IntegrationsConfig,
-) -> Result<Box<dyn LeaderRuntime>> {
-    #[cfg(feature = "console")]
-    {
-        if console::is_enabled() {
-            Ok(Box::new(InstrumentedLeader::new(ConnectorLeader::new(
-                engine_id, config,
-            ))))
-        } else {
-            Ok(Box::new(ConnectorLeader::new(engine_id, config)))
-        }
-    }
+// pub fn build_connector_leader(
+//     engine_id: &str,
+//     config: IntegrationsConfig,
+// ) -> Result<Box<dyn LeaderRuntime>> {
+//     #[cfg(feature = "console")]
+//     {
+//         if console::is_enabled() {
+//             Ok(Box::new(InstrumentedLeader::new(ConnectorLeader::new(
+//                 engine_id, config,
+//             ))))
+//         } else {
+//             Ok(Box::new(ConnectorLeader::new(engine_id, config)))
+//         }
+//     }
 
-    #[cfg(not(feature = "console"))]
-    {
-        Ok(Box::new(ConnectorLeader::new(engine_id, config)))
-    }
-}
+//     #[cfg(not(feature = "console"))]
+//     {
+//         Ok(Box::new(ConnectorLeader::new(engine_id, config)))
+//     }
+// }
 
 /// Trait for a leader runtime implementation.
 pub trait LeaderRuntime {

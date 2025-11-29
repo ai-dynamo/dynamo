@@ -22,12 +22,6 @@ pub mod utils;
 pub mod config;
 pub mod types;
 
-// Transfer system for cross-layout block copying
-// pub mod transfer;
-
-// // Distributed coordination primitives
-// pub mod distributed;
-
 // Hub for distributed block coordination
 // pub mod hub;
 
@@ -51,3 +45,19 @@ pub use dynamo_tokens::{PositionalSequenceHash, SequenceHash as SequenceHashV1};
 
 pub type BlockId = usize;
 pub type SequenceHash = PositionalSequenceHash;
+
+/// G1 marker: GPU/device tier
+#[derive(Clone, Copy, Debug)]
+pub struct G1;
+
+/// G2 marker: CPU/host tier
+#[derive(Clone, Copy, Debug)]
+pub struct G2;
+
+/// G3 marker: Disk tier
+#[derive(Clone, Copy, Debug)]
+pub struct G3;
+
+/// G4 marker: Object store tier
+#[derive(Clone, Copy, Debug)]
+pub struct G4;

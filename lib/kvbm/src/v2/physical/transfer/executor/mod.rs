@@ -18,40 +18,40 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub(crate) struct G4OnboardContext {}
-pub(crate) struct G4OffloadContext {}
+// pub(crate) struct G4OnboardContext {}
+// pub(crate) struct G4OffloadContext {}
 
-pub(crate) fn g4_read(
-    src: &G4OnboardContext,
-    src_seq_hash: &[SequenceHash],
-    dst: &PhysicalLayout,
-    dst_block_ids: &[BlockId],
-    ctx: &TransferContext,
-) -> Result<()> {
-    unimplemented!()
-}
+// pub(crate) fn g4_read(
+//     src: &G4OnboardContext,
+//     src_seq_hash: &[SequenceHash],
+//     dst: &PhysicalLayout,
+//     dst_block_ids: &[BlockId],
+//     ctx: &TransferContext,
+// ) -> Result<()> {
+//     unimplemented!()
+// }
 
-pub(crate) fn g4_write(
-    src: &PhysicalLayout,
-    src_block_ids: &[BlockId],
-    dst: &G4OffloadContext,
-    dst_seq_hash: &[SequenceHash],
-    ctx: &TransferContext,
-) -> Result<()> {
-    if !src.layout().is_fully_contiguous() {
-        anyhow::bail!("G4 write source layout must be fully contiguous");
-    }
+// pub(crate) fn g4_write(
+//     src: &PhysicalLayout,
+//     src_block_ids: &[BlockId],
+//     dst: &G4OffloadContext,
+//     dst_seq_hash: &[SequenceHash],
+//     ctx: &TransferContext,
+// ) -> Result<()> {
+//     if !src.layout().is_fully_contiguous() {
+//         anyhow::bail!("G4 write source layout must be fully contiguous");
+//     }
 
-    // logical instance has created a multi-part upload
-    // this method simply dumps the full block into the offload context
-    // the offload context will consist of:
-    // - bucket name
-    // - object name
-    // - upload id
-    // - part number
+//     // logical instance has created a multi-part upload
+//     // this method simply dumps the full block into the offload context
+//     // the offload context will consist of:
+//     // - bucket name
+//     // - object name
+//     // - upload id
+//     // - part number
 
-    unimplemented!()
-}
+//     unimplemented!()
+// }
 
 // Re-export the NIXL transfer builder for public use
 pub use nixl::NixlTransferBuilder;

@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::{
     logical::blocks::ImmutableBlock,
-    v2::{SequenceHash, integrations::G2},
+    v2::{G2, SequenceHash},
 };
 
 /// Leader trait for distributed block onboarding operations.

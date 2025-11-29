@@ -3,4 +3,4 @@
 
 pub mod state;
 
-pub use state::{SchedulerWorkerConfig, SchedulerWorkerStateMachine};
+pub use state::{SchedulerWorker, SchedulerWorkerConfig};

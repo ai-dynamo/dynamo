@@ -16,12 +16,11 @@ use crate::{
     logical::manager::BlockManager,
     physical::manager::{LayoutHandle, TransferManager},
     v2::{
-        InstanceId,
+        G2, G3, InstanceId,
         distributed::{
             leader::InstanceLeader,
             worker::{DirectWorker, Worker},
         },
-        integrations::{G2, G3},
         logical::pools::SequenceHash,
         physical::{
             layout::LayoutConfig,
@@ -923,8 +922,22 @@ mod tests {
             state.g2_blocks.len()
         );
 
-        // Prefill pulls cached blocks
-        let prefill_dst_block_ids: Vec<BlockId> = (8..(8 + CACHED_BLOCKS) as BlockId).collect();
+        // Prefill allocates destination blocks from its BlockManager
+        // We hold these MutableBlocks for the duration of the transfer - they are NOT
+        // owned by the session, the caller maintains ownership.
+        let prefill_dst_blocks = pair
+            .prefill
+            .g2_manager
+            .allocate_blocks(CACHED_BLOCKS)
+            .expect("Should allocate destination blocks on Prefill");
+        let prefill_dst_block_ids: Vec<BlockId> =
+            prefill_dst_blocks.iter().map(|b| b.block_id()).collect();
+        println!(
+            "Prefill allocated destination blocks: {:?}",
+            prefill_dst_block_ids
+        );
+
+        // Prefill pulls cached blocks (caller holds prefill_dst_blocks for duration)
         let notification = prefill_handle
             .pull_blocks_rdma(&state.g2_blocks, &prefill_dst_block_ids)
             .await
@@ -1007,9 +1020,19 @@ mod tests {
         // =====================================================================
         println!("\n--- Phase 4: Layerwise Transfer ---");
 
-        // Decode destination blocks for the new prefill data
-        // Use block IDs 8-9 (within 0-15 range, not conflicting with cached blocks 0-3)
-        let decode_dst_block_ids: Vec<BlockId> = (8..(8 + NEW_BLOCKS) as BlockId).collect();
+        // Decode allocates destination blocks from its BlockManager
+        // We hold these MutableBlocks for the duration of the transfer - caller owns them.
+        let decode_dst_blocks = pair
+            .decode
+            .g2_manager
+            .allocate_blocks(NEW_BLOCKS)
+            .expect("Should allocate destination blocks on Decode");
+        let decode_dst_block_ids: Vec<BlockId> =
+            decode_dst_blocks.iter().map(|b| b.block_id()).collect();
+        println!(
+            "Decode allocated destination blocks: {:?}",
+            decode_dst_block_ids
+        );
 
         // Fill Prefill's blocks with test pattern (0xBB = distinct from Decode's 0xCA)
         for worker in &pair.prefill.workers {

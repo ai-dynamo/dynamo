@@ -17,11 +17,8 @@ use crate::{
     logical::{blocks::ImmutableBlock, manager::BlockManager},
     physical::transfer::TransferOptions,
     v2::{
-        BlockId, InstanceId, SequenceHash,
-        distributed::worker::Worker,
-        integrations::{G2, G3},
-        logical::LogicalLayoutHandle,
-        physical::manager::LayoutHandle,
+        BlockId, G2, G3, InstanceId, SequenceHash, distributed::worker::Worker,
+        logical::LogicalLayoutHandle, physical::manager::LayoutHandle,
     },
 };
 

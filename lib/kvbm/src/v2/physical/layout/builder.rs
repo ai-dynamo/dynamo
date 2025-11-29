@@ -16,7 +16,7 @@ use crate::physical::layout::physical::PhysicalLayout;
 
 use super::{
     BlockDimension, FullyContiguousLayout, LayerSeparateLayout, Layout, LayoutConfig,
-    MemoryDescription, physical::NixlMetadata,
+    MemoryDescriptor, physical::NixlMetadata,
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -248,7 +248,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
         regions: Vec<S>,
     ) -> Result<PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory>>
     where
-        S: MemoryDescription + NixlCompatible + 'static,
+        S: MemoryDescriptor + NixlCompatible + 'static,
     {
         let (agent, config, layout_kind, _memory) = self.into_parts();
         let entries = register_existing_regions(&agent, regions)?;
@@ -262,7 +262,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
         )
     }
 
-    /// Use pre-registered memory regions (already wrapped in `Arc<dyn MemoryDescription>`).
+    /// Use pre-registered memory regions (already wrapped in `Arc<dyn MemoryDescriptor>`).
     ///
     /// All regions must already expose a NIXL descriptor.
     pub fn with_registered_regions(
@@ -335,7 +335,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
 
 fn register_existing_regions<S>(agent: &NixlAgent, regions: Vec<S>) -> Result<Vec<MemoryEntry>>
 where
-    S: MemoryDescription + NixlCompatible + 'static,
+    S: MemoryDescriptor + NixlCompatible + 'static,
 {
     regions
         .into_iter()
@@ -430,7 +430,7 @@ fn allocate_disk_entry(
 #[cfg(test)]
 fn register_storage<S>(storage: S, agent: &NixlAgent) -> Result<MemoryEntry>
 where
-    S: MemoryDescription + NixlCompatible + 'static,
+    S: MemoryDescriptor + NixlCompatible + 'static,
 {
     let storage_kind = storage.storage_kind();
 
@@ -471,7 +471,7 @@ where
 #[cfg(not(test))]
 fn register_storage<S>(storage: S, agent: &NixlAgent) -> Result<MemoryEntry>
 where
-    S: MemoryDescription + NixlCompatible + 'static,
+    S: MemoryDescriptor + NixlCompatible + 'static,
 {
     // Production builds always register for safety
     match register_with_nixl(storage, agent, None) {
@@ -709,7 +709,7 @@ mod tests {
     use super::super::{BlockDimension, LayoutConfig};
     use super::*;
 
-    use dynamo_memory::{Buffer, MemoryDescription, StorageKind};
+    use dynamo_memory::{Buffer, MemoryDescriptor, StorageKind};
     use std::any::Any;
 
     #[derive(Debug)]
@@ -737,7 +737,7 @@ mod tests {
         }
     }
 
-    impl MemoryDescription for TestRegisteredRegion {
+    impl MemoryDescriptor for TestRegisteredRegion {
         fn addr(&self) -> usize {
             self.data.as_ptr() as usize
         }

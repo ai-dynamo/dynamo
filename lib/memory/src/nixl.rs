@@ -6,9 +6,10 @@
 mod agent;
 mod config;
 
-use super::{MemoryDescription, StorageKind};
+use super::{MemoryDescriptor, StorageKind};
 use std::any::Any;
 use std::fmt;
+use std::sync::Arc;
 
 pub use agent::NixlAgent;
 pub use config::NixlBackendConfig;
@@ -25,6 +26,16 @@ pub trait NixlCompatible {
     /// Returns (ptr, size, mem_type, device_id)
     fn nixl_params(&self) -> (*const u8, usize, MemType, u64);
 }
+
+/// Combined trait for memory that can be registered with NIXL.
+///
+/// This supertrait enables type erasure via `Arc<dyn NixlMemory>`.
+/// Any type implementing both `MemoryDescriptor` and `NixlCompatible`
+/// automatically implements this trait via the blanket implementation.
+pub trait NixlMemory: MemoryDescriptor + NixlCompatible {}
+
+// Blanket impl - any type with both traits automatically implements NixlMemory
+impl<T: MemoryDescriptor + NixlCompatible + ?Sized> NixlMemory for T {}
 
 /// NIXL descriptor containing registration information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,7 +104,7 @@ impl<S: NixlCompatible + fmt::Debug> fmt::Debug for NixlRegistered<S> {
     }
 }
 
-impl<S: MemoryDescription + NixlCompatible + 'static> MemoryDescription for NixlRegistered<S> {
+impl<S: MemoryDescriptor + NixlCompatible + 'static> MemoryDescriptor for NixlRegistered<S> {
     fn addr(&self) -> usize {
         self.storage.addr()
     }
@@ -115,7 +126,7 @@ impl<S: MemoryDescription + NixlCompatible + 'static> MemoryDescription for Nixl
     }
 }
 
-impl<S: MemoryDescription + NixlCompatible> RegisteredView for NixlRegistered<S> {
+impl<S: MemoryDescriptor + NixlCompatible> RegisteredView for NixlRegistered<S> {
     fn agent_name(&self) -> &str {
         &self.agent_name
     }
@@ -131,7 +142,7 @@ impl<S: MemoryDescription + NixlCompatible> RegisteredView for NixlRegistered<S>
     }
 }
 
-impl<S: MemoryDescription + NixlCompatible> NixlRegistered<S> {
+impl<S: MemoryDescriptor + NixlCompatible> NixlRegistered<S> {
     /// Get a reference to the underlying storage.
     pub fn storage(&self) -> &S {
         &self.storage
@@ -181,8 +192,16 @@ pub fn register_with_nixl<S>(
     opt: Option<&OptArgs>,
 ) -> std::result::Result<NixlRegistered<S>, S>
 where
-    S: MemoryDescription + NixlCompatible,
+    S: MemoryDescriptor + NixlCompatible,
 {
+    if storage.nixl_descriptor().is_some() {
+        return Ok(NixlRegistered {
+            storage,
+            handle: None,
+            agent_name: agent.name().to_string(),
+        });
+    }
+
     // Get NIXL parameters
     let (ptr, size, mem_type, device_id) = storage.nixl_params();
 
@@ -203,3 +222,74 @@ where
         Err(_) => Err(storage),
     }
 }
+
+// =============================================================================
+// Arc<dyn NixlMemory> support
+// =============================================================================
+
+impl NixlCompatible for Arc<dyn NixlMemory + Send + Sync> {
+    fn nixl_params(&self) -> (*const u8, usize, MemType, u64) {
+        (**self).nixl_params()
+    }
+}
+
+impl MemoryDescriptor for Arc<dyn NixlMemory + Send + Sync> {
+    fn addr(&self) -> usize {
+        (**self).addr()
+    }
+
+    fn size(&self) -> usize {
+        (**self).size()
+    }
+
+    fn storage_kind(&self) -> StorageKind {
+        (**self).storage_kind()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        (**self).as_any()
+    }
+
+    fn nixl_descriptor(&self) -> Option<NixlDescriptor> {
+        (**self).nixl_descriptor()
+    }
+}
+
+// =============================================================================
+// Extension trait for ergonomic API
+// =============================================================================
+
+/// Extension trait providing ergonomic `.registered()` method for NIXL registration.
+///
+/// This trait is automatically implemented for all types that implement both
+/// `MemoryDescriptor` and `NixlCompatible`. Import this trait to use the
+/// method syntax:
+///
+/// ```ignore
+/// use dynamo_memory::prelude::*;
+///
+/// let storage = DeviceStorage::new(device, size)?;
+/// let registered = storage.registered(&agent, None)?;
+/// ```
+pub trait NixlRegisterExt: MemoryDescriptor + NixlCompatible + Sized {
+    /// Get this memory as NIXL-registered.
+    ///
+    /// This operation is idempotent - it's a no-op if the memory is already registered.
+    ///
+    /// # Arguments
+    /// * `agent` - The NIXL agent to register with
+    /// * `opt` - Optional arguments for registration
+    ///
+    /// # Returns
+    /// A `NixlRegistered` wrapper on success, or the original storage on failure.
+    fn register(
+        self,
+        agent: &NixlAgent,
+        opt: Option<&OptArgs>,
+    ) -> std::result::Result<NixlRegistered<Self>, Self> {
+        register_with_nixl(self, agent, opt)
+    }
+}
+
+// Blanket impl for all compatible types
+impl<T: MemoryDescriptor + NixlCompatible + Sized> NixlRegisterExt for T {}

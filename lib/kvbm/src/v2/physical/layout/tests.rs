@@ -10,7 +10,7 @@
 use crate::physical::layout::physical::PhysicalLayout;
 use crate::v2::physical::layout::{BlockDimension, LayoutConfig, LayoutDescriptor};
 use dynamo_memory::nixl::{MemType, NixlAgent, NixlDescriptor};
-use dynamo_memory::{Buffer, MemoryDescription, MemoryRegion, StorageKind};
+use dynamo_memory::{Buffer, MemoryDescriptor, MemoryRegion, StorageKind};
 use std::any::Any;
 use std::sync::Arc;
 
@@ -27,7 +27,7 @@ impl MockMemory {
     }
 }
 
-impl MemoryDescription for MockMemory {
+impl MemoryDescriptor for MockMemory {
     fn addr(&self) -> usize {
         self.addr
     }
@@ -70,7 +70,7 @@ impl TestMemoryRegion {
     }
 }
 
-impl MemoryDescription for TestMemoryRegion {
+impl MemoryDescriptor for TestMemoryRegion {
     fn addr(&self) -> usize {
         self.addr
     }
@@ -119,7 +119,7 @@ fn test_fully_contiguous_layout_serialization_roundtrip() {
 
     // Create test memory region
     let memory = TestMemoryRegion::new(0x10000, required_size, StorageKind::System);
-    let regions = vec![Buffer::from_arc(memory as Arc<dyn MemoryDescription>)];
+    let regions = vec![Buffer::from_arc(memory as Arc<dyn MemoryDescriptor>)];
 
     // Build physical layout
     let original_layout = PhysicalLayout::builder(agent)
@@ -191,7 +191,7 @@ fn test_layer_separate_layout_serialization_roundtrip() {
                 0x10000 + i * per_layer_size,
                 per_layer_size,
                 StorageKind::System,
-            ) as Arc<dyn MemoryDescription>)
+            ) as Arc<dyn MemoryDescriptor>)
         })
         .collect();
 
@@ -270,7 +270,7 @@ fn test_memory_region_calculation_after_deserialization() {
         * config.dtype_width_bytes;
 
     let memory = TestMemoryRegion::new(0x1000, required_size, StorageKind::System);
-    let regions = vec![Buffer::from_arc(memory as Arc<dyn MemoryDescription>)];
+    let regions = vec![Buffer::from_arc(memory as Arc<dyn MemoryDescriptor>)];
 
     let original_layout = PhysicalLayout::builder(agent)
         .with_config(config.clone())

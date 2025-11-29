@@ -6,7 +6,7 @@
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
 
-use dynamo_memory::TorchTensor;
+use dynamo_memory::TensorDescriptor;
 
 /// Format of tensor layout (for future TP translation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +33,7 @@ pub enum TensorFormat {
 ///
 /// # Returns
 /// The detected tensor format (NHD, HND, or Unknown)
-pub fn validate_tensor_strides(tensors: &[Arc<dyn TorchTensor>]) -> Result<TensorFormat> {
+pub fn validate_tensor_strides(tensors: &[Arc<dyn TensorDescriptor>]) -> Result<TensorFormat> {
     if tensors.is_empty() {
         return Err(anyhow!("Cannot validate empty tensor list"));
     }
@@ -89,7 +89,7 @@ pub fn validate_tensor_strides(tensors: &[Arc<dyn TorchTensor>]) -> Result<Tenso
 ///
 /// # Returns
 /// The common shape shared by all tensors
-pub fn validate_tensor_shapes(tensors: &[Arc<dyn TorchTensor>]) -> Result<Vec<usize>> {
+pub fn validate_tensor_shapes(tensors: &[Arc<dyn TensorDescriptor>]) -> Result<Vec<usize>> {
     if tensors.is_empty() {
         return Err(anyhow!("Cannot validate empty tensor list"));
     }
@@ -106,7 +106,7 @@ pub fn validate_tensor_shapes(tensors: &[Arc<dyn TorchTensor>]) -> Result<Vec<us
         }
     }
 
-    Ok(first_shape)
+    Ok(first_shape.to_vec())
 }
 
 #[allow(dead_code)]

@@ -4260,6 +4260,7 @@ dependencies = [
  "dynamo-kvbm",
  "dynamo-kvbm-kernels",
  "dynamo-llm",
+ "dynamo-memory",
  "dynamo-runtime",
  "either",
  "futures",

@@ -4,7 +4,7 @@
 //! Clean, minimal storage API for v2 block manager.
 //!
 //! This module provides a simplified storage abstraction with:
-//! - Single trait for type erasure (`MemoryDescription`)
+//! - Single trait for type erasure (`MemoryDescriptor`)
 //! - Concrete storage types (no trait implementations required)
 //! - Composition-based NIXL registration via `NixlRegistered<T>` wrapper
 //! - RAII with proper drop ordering (registration handle drops before memory)
@@ -19,7 +19,7 @@ mod device;
 mod disk;
 mod pinned;
 mod system;
-mod torch;
+mod tensor;
 
 #[cfg(test)]
 mod tests;
@@ -30,7 +30,7 @@ pub use disk::DiskStorage;
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use system::SystemStorage;
-pub use torch::{TorchDevice, TorchTensor};
+pub use tensor::{TensorDescriptor, TensorDescriptorExt};
 
 use serde::{Deserialize, Serialize};
 use std::any::Any;
@@ -40,6 +40,27 @@ use thiserror::Error;
 
 /// Result type for storage operations.
 pub type Result<T> = std::result::Result<T, StorageError>;
+
+/// Core trait for memory regions that can be type-erased.
+///
+/// This is the only trait in the storage API. Concrete storage types
+/// implement this trait to enable type erasure via `Arc<dyn MemoryDescriptor>`.
+pub trait MemoryDescriptor: Send + Sync + fmt::Debug {
+    /// Base address of the memory region.
+    fn addr(&self) -> usize;
+
+    /// Size of the memory region in bytes.
+    fn size(&self) -> usize;
+
+    /// Type of storage backing this region.
+    fn storage_kind(&self) -> StorageKind;
+
+    /// Enable downcasting to concrete type.
+    fn as_any(&self) -> &dyn Any;
+
+    /// Get the NIXL descriptor for this memory region.
+    fn nixl_descriptor(&self) -> Option<nixl::NixlDescriptor>;
+}
 
 /// Errors that can occur during storage operations.
 #[derive(Debug, Error)]
@@ -85,32 +106,47 @@ pub enum StorageKind {
     Disk(u64),
 }
 
-/// Core trait for memory regions that can be type-erased.
-///
-/// This is the only trait in the storage API. Concrete storage types
-/// implement this trait to enable type erasure via `Arc<dyn MemoryDescription>`.
-pub trait MemoryDescription: Send + Sync + fmt::Debug {
-    /// Base address of the memory region.
-    fn addr(&self) -> usize;
+impl StorageKind {
+    /// Returns the CUDA device index if this is device memory.
+    pub fn cuda_device_index(&self) -> Option<u32> {
+        match self {
+            StorageKind::Device(idx) => Some(*idx),
+            _ => None,
+        }
+    }
 
-    /// Size of the memory region in bytes.
-    fn size(&self) -> usize;
+    /// Returns true if this is CUDA device memory.
+    pub fn is_cuda(&self) -> bool {
+        matches!(self, StorageKind::Device(_))
+    }
 
-    /// Type of storage backing this region.
-    fn storage_kind(&self) -> StorageKind;
+    /// Returns true if this is system memory (malloc).
+    pub fn is_system(&self) -> bool {
+        matches!(self, StorageKind::System)
+    }
 
-    /// Enable downcasting to concrete type.
-    fn as_any(&self) -> &dyn Any;
+    /// Returns true if this is CUDA pinned host memory.
+    pub fn is_pinned(&self) -> bool {
+        matches!(self, StorageKind::Pinned)
+    }
 
-    /// Get the NIXL descriptor for this memory region.
-    fn nixl_descriptor(&self) -> Option<nixl::NixlDescriptor>;
+    /// Returns true if this is disk-backed memory.
+    pub fn is_disk(&self) -> bool {
+        matches!(self, StorageKind::Disk(_))
+    }
 }
 
 /// Type-erased memory region for use in layouts.
 #[derive(Clone)]
-pub struct Buffer(Arc<dyn MemoryDescription>);
+pub struct Buffer(Arc<dyn MemoryDescriptor>);
 
-impl MemoryDescription for Buffer {
+impl Buffer {
+    pub fn new<S: MemoryDescriptor + 'static>(memory: S) -> Self {
+        Buffer(Arc::new(memory))
+    }
+}
+
+impl MemoryDescriptor for Buffer {
     fn addr(&self) -> usize {
         self.0.addr()
     }
@@ -129,7 +165,7 @@ impl MemoryDescription for Buffer {
 }
 
 impl std::ops::Deref for Buffer {
-    type Target = dyn MemoryDescription;
+    type Target = dyn MemoryDescriptor;
 
     fn deref(&self) -> &Self::Target {
         self.0.as_ref()
@@ -147,14 +183,28 @@ impl std::fmt::Debug for Buffer {
 }
 
 /// Helper function to convert concrete storage to type-erased form.
-pub fn create_buffer<S: MemoryDescription + 'static>(memory: S) -> Buffer {
+pub fn create_buffer<S: MemoryDescriptor + 'static>(memory: S) -> Buffer {
     Buffer(Arc::new(memory))
 }
 
 impl Buffer {
-    /// Create a Buffer from an existing Arc<dyn MemoryDescription>.
-    pub fn from_arc(arc: Arc<dyn MemoryDescription>) -> Self {
+    /// Create a Buffer from an existing Arc<dyn MemoryDescriptor>.
+    pub fn from_arc(arc: Arc<dyn MemoryDescriptor>) -> Self {
         Buffer(arc)
+    }
+}
+
+// From implementations for ergonomic Buffer creation
+impl From<Arc<dyn MemoryDescriptor>> for Buffer {
+    fn from(arc: Arc<dyn MemoryDescriptor>) -> Self {
+        Buffer::from_arc(arc)
+    }
+}
+
+impl From<Arc<dyn nixl::NixlMemory + Send + Sync>> for Buffer {
+    fn from(arc: Arc<dyn nixl::NixlMemory + Send + Sync>) -> Self {
+        // Arc<dyn NixlMemory> implements MemoryDescriptor, so we can wrap it
+        Buffer::new(arc)
     }
 }
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    Any, Buffer, MemoryDescription, Result, StorageError, StorageKind, nixl::NixlDescriptor,
+    Any, Buffer, MemoryDescriptor, Result, StorageError, StorageKind, nixl::NixlDescriptor,
 };
 
 /// An [`OffsetBuffer`] is a new [`Buffer`]-like object that represents a sub-region (still contiguous)
@@ -60,7 +60,7 @@ impl OffsetBuffer {
     }
 }
 
-impl MemoryDescription for OffsetBuffer {
+impl MemoryDescriptor for OffsetBuffer {
     fn addr(&self) -> usize {
         self.base.addr() + self.offset
     }

@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow};
 use validator::Validate;
 
 use super::serialize::{LayerSeparateDetails, LayoutTypeDetails};
-use super::{BlockDimension, Buffer, Layout, LayoutConfig, MemoryDescription, MemoryRegion};
+use super::{BlockDimension, Buffer, Layout, LayoutConfig, MemoryDescriptor, MemoryRegion};
 
 /// Layer-separate layout where each layer has its own allocation.
 #[derive(Debug)]

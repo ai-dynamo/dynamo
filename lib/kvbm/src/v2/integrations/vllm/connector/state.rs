@@ -10,24 +10,29 @@
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
+use dynamo_nova::Nova;
 use tracing::debug;
 
-use crate::block_manager::storage::torch::TorchTensor;
+use dynamo_memory::{
+    Buffer, TensorDescriptor,
+    nixl::{NixlAgent, NixlRegisterExt},
+};
 
-use crate::block_manager::layout::{BlockDimension, LayoutConfigBuilder};
-use crate::v2::{
-    integrations::vllm::VllmConfig,
-    layout::{
-        LayerSeparateLayout, Layout, LayoutConfig, MemoryRegion, validate_tensor_shapes,
-        validate_tensor_strides,
+use crate::{
+    physical::layout::InnerShape,
+    v2::{
+        integrations::{AttentionConfig, ParallelConfig, vllm::KvbmVllmConfig},
+        physical::layout::{
+            BlockDimension, LayerSeparateLayout, Layout, LayoutConfig, validate_tensor_shapes,
+            validate_tensor_strides,
+        },
     },
 };
 
 /// Configuration for scheduler worker initialization.
 #[derive(Clone)]
 pub struct SchedulerWorkerConfig {
-    /// vLLM configuration containing all parallel and attention settings
-    pub vllm_config: VllmConfig,
+    vllm_config: KvbmVllmConfig,
 }
 
 impl std::fmt::Debug for SchedulerWorkerConfig {
@@ -39,165 +44,45 @@ impl std::fmt::Debug for SchedulerWorkerConfig {
 }
 
 impl SchedulerWorkerConfig {
-    /// Create a new configuration from VllmConfig
-    pub fn new(vllm_config: VllmConfig) -> Self {
-        Self { vllm_config }
-    }
-
-    /// Get device ID from vLLM config
-    pub fn device_id(&self) -> usize {
-        self.vllm_config.attention.device_id()
-    }
+    // /// Create a new configuration from KvbmVllmConfig
+    // pub fn new(vllm_config: KvbmVllmConfig) -> Self {
+    //     Self { vllm_config }
+    // }
 
     /// Get page size (block size) from vLLM config
     pub fn page_size(&self) -> usize {
         self.vllm_config.attention.block_size()
     }
 
-    /// Get dtype width in bytes from vLLM config
     pub fn dtype_width_bytes(&self) -> usize {
-        self.vllm_config.attention.cache_dtype().bytes_per_element()
+        2
     }
-
-    /// Get layout contiguity from vLLM config
-    pub fn is_fully_contiguous(&self) -> bool {
-        self.vllm_config.attention.is_fully_contiguous()
-    }
-
-    /// Get worker ID from vLLM parallel config
-    pub fn worker_id(&self) -> usize {
-        self.vllm_config.parallel.worker_id()
-    }
-
-    /// Get tensor parallel size
-    pub fn tensor_parallel_size(&self) -> usize {
-        self.vllm_config.parallel.tensor_parallel_size()
-    }
-
-    /// Get pipeline parallel size
-    pub fn pipeline_parallel_size(&self) -> usize {
-        self.vllm_config.parallel.pipeline_parallel_size()
-    }
-}
-
-/// State of a scheduler worker before KV registration.
-#[derive(Debug)]
-pub struct BeforeRegisteredState {
-    config: SchedulerWorkerConfig,
-}
-
-/// Wrapper for torch tensors to implement OwnedMemoryRegion.
-#[derive(Debug)]
-struct TorchMemoryOwner {
-    tensor: Arc<dyn TorchTensor>,
-}
-
-impl MemoryRegion for TorchMemoryOwner {
-    fn addr(&self) -> usize {
-        self.tensor.data_ptr() as usize
-    }
-
-    fn size(&self) -> usize {
-        self.tensor.size_bytes()
-    }
-
-    fn storage_kind(&self) -> crate::v2::storage::StorageKind {
-        // Torch tensors are device memory when on GPU
-        crate::v2::storage::StorageKind::Device(0) // TODO: Get actual device ID
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-/// State of a scheduler worker after KV registration.
-#[derive(Debug)]
-pub struct AfterRegisteredState {
-    config: SchedulerWorkerConfig,
-    layout: Arc<dyn Layout>,
 }
 
 /// Main state enum representing the scheduler worker lifecycle.
-#[derive(Debug)]
-pub enum SchedulerWorkerState {
-    BeforeRegistered(BeforeRegisteredState),
-    AfterRegistered(AfterRegisteredState),
-    // Future states for active message integration:
-    // Synchronized(SynchronizedState),
-    // Active(ActiveState),
+#[derive(Clone)]
+pub struct SchedulerWorker {
+    config: KvbmVllmConfig,
+    nixl: NixlAgent,
+    nova: Arc<Nova>,
 }
 
-impl SchedulerWorkerState {
-    /// Check if the worker is in the BeforeRegistered state.
-    pub fn is_before_registered(&self) -> bool {
-        matches!(self, SchedulerWorkerState::BeforeRegistered(_))
-    }
-
-    /// Check if the worker is in the AfterRegistered state.
-    pub fn is_after_registered(&self) -> bool {
-        matches!(self, SchedulerWorkerState::AfterRegistered(_))
-    }
-
-    /// Get the worker configuration (available in all states).
-    pub fn config(&self) -> &SchedulerWorkerConfig {
-        match self {
-            SchedulerWorkerState::BeforeRegistered(state) => &state.config,
-            SchedulerWorkerState::AfterRegistered(state) => &state.config,
-        }
-    }
-
-    /// Get the layout configuration (only available after registration).
-    pub fn layout_config(&self) -> Option<&LayoutConfig> {
-        match self {
-            SchedulerWorkerState::BeforeRegistered(_) => None,
-            SchedulerWorkerState::AfterRegistered(state) => Some(state.layout.config()),
-        }
-    }
-}
-
-/// State machine for managing scheduler worker lifecycle.
-pub struct SchedulerWorkerStateMachine {
-    state: SchedulerWorkerState,
-}
-
-impl SchedulerWorkerStateMachine {
-    /// Create a new scheduler worker state machine in the BeforeRegistered state.
-    pub fn new(config: SchedulerWorkerConfig) -> Self {
-        Self {
-            state: SchedulerWorkerState::BeforeRegistered(BeforeRegisteredState { config }),
-        }
-    }
-
-    /// Get the current state of the worker.
-    pub fn state(&self) -> &SchedulerWorkerState {
-        &self.state
-    }
-
+impl SchedulerWorker {
     /// Register KV cache tensors and transition to AfterRegistered state.
     ///
     /// This function validates tensors, infers layout parameters, creates the appropriate
-    /// layout (FullyContiguous or LayerSeparate), and transitions the state machine to
-    /// AfterRegistered.
+    /// layout (FullyContiguous or LayerSeparate).
     ///
     /// # Arguments
     /// * `tensors` - Vector of torch tensors (one per layer)
     /// * `num_device_blocks` - Number of device blocks to allocate
     ///
-    /// # Returns
-    /// Updated state machine in AfterRegistered state, or error if validation fails
     pub fn register_kv(
         self,
-        tensors: Vec<Arc<dyn TorchTensor>>,
+        tensors: Vec<Arc<dyn TensorDescriptor>>,
         num_device_blocks: usize,
-    ) -> Result<Self> {
-        // 1. Extract configuration from BeforeRegistered state
-        let config = match self.state {
-            SchedulerWorkerState::BeforeRegistered(ref state) => state.config.clone(),
-            _ => bail!("register_kv can only be called in BeforeRegistered state"),
-        };
-
-        // 2. Validate tensors
+    ) -> Result<()> {
+        // Validate tensors
         if tensors.is_empty() {
             bail!("Cannot register empty tensor list");
         }
@@ -208,7 +93,7 @@ impl SchedulerWorkerStateMachine {
         // Validate strides and get tensor format (NHD/HND)
         let tensor_format = validate_tensor_strides(&tensors)?;
 
-        // 3. Determine layout dimensions from shape
+        // Determine layout dimensions from shape
         // Shape is expected to be [dim0, dim1, page_tokens, hidden_dim] or similar
         // We need to figure out which dimension contains the blocks
         let (block_dim, outer_dim) = if shape[0] >= num_device_blocks {
@@ -233,9 +118,9 @@ impl SchedulerWorkerStateMachine {
             );
         };
 
-        // 4. Calculate inner dimension from remaining shape
+        // Calculate inner dimension from remaining shape
         // The remaining dimensions should give us page_size * inner_dim
-        let page_size = config.page_size(); // from vllm_config.attention.block_size()
+        let page_size = self.config.attention.block_size(); // from vllm_config.attention.block_size()
         let inner_dim_product: usize = shape[2..].iter().product();
 
         // Validate that page_size divides evenly into the product
@@ -249,31 +134,36 @@ impl SchedulerWorkerStateMachine {
 
         let inner_dim = inner_dim_product / page_size;
 
-        // 5. Use AttentionConfig to infer inner shape (with smart dimension checking)
-        let inner_shape = config.vllm_config.attention.infer_inner_shape(&shape[2..]);
+        // // 5. Use AttentionConfig to infer inner shape (with smart dimension checking)
+        // let inner_shape = config.vllm_config.attention.infer_inner_shape(&shape[2..]);
 
-        debug!(
-            "InnerShape determination: page_size={}, inner_dim={}, tensor_format={:?} => shape={:?}",
-            page_size, inner_dim, tensor_format, inner_shape
-        );
+        // debug!(
+        //     "InnerShape determination: page_size={}, inner_dim={}, tensor_format={:?} => shape={:?}",
+        //     page_size, inner_dim, tensor_format, inner_shape
+        // );
 
         // 6. Build LayoutConfig using the builder pattern with InnerShape
-        let layout_config = LayoutConfigBuilder::default()
+        let layout_config = LayoutConfig::builder()
             .num_blocks(num_device_blocks)
             .num_layers(tensors.len())
             .outer_dim(outer_dim)
             .page_size(page_size)
             .inner_dim(inner_dim)
-            .dtype_width_bytes(config.dtype_width_bytes())
+            .dtype_width_bytes(self.config.attention.cache_dtype_bytes())
             .alignment(1) // Default alignment, could be made configurable
-            .inner_shape(inner_shape)
+            .inner_shape(InnerShape::Unknown)
             .build()?;
 
         // 6. Create memory wrappers for each tensor
-        let memory: Vec<Arc<dyn MemoryRegion>> = tensors
+        let memory: Vec<Buffer> = tensors
             .into_iter()
-            .map(|tensor| Arc::new(TorchMemoryOwner { tensor }) as Arc<dyn MemoryRegion>)
-            .collect();
+            .map(|tensor| {
+                let registered = tensor
+                    .register(&self.nixl, None)
+                    .map_err(|_| anyhow::anyhow!("NIXL registration failed"))?;
+                Ok(Buffer::new(registered))
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         // 7. Create LayerSeparateLayout with the configuration and memory
         let num_layers = layout_config.num_layers;
@@ -282,27 +172,20 @@ impl SchedulerWorkerStateMachine {
         let layout = Arc::new(LayerSeparateLayout::new(layout_config, memory, block_dim)?)
             as Arc<dyn Layout>;
 
-        // 8. Transition to AfterRegistered state
-        debug!(
-            "State transition: BeforeRegistered -> AfterRegistered (blocks={}, layers={}, inner_shape={:?})",
-            num_device_blocks, num_layers, final_inner_shape
-        );
+        // todo: implement the following
+        // create a transfer context specific to the gpu device id
+        // create a transfer manager from the context
+        // create a direct worker from the transfer manager
+        // register the layout with the direct worker as the G1 layout
 
-        Ok(Self {
-            state: SchedulerWorkerState::AfterRegistered(AfterRegisteredState { config, layout }),
-        })
+        // TODO: Store layout and return it
+        let _layout = layout;
+        Ok(())
     }
 
-    /// Get the layout (if after registration).
-    ///
-    /// This returns a reference to the layout object which can be used to
-    /// query memory regions for blocks.
-    pub fn layout(&self) -> Option<Arc<dyn Layout>> {
-        match &self.state {
-            SchedulerWorkerState::BeforeRegistered(_) => None,
-            SchedulerWorkerState::AfterRegistered(state) => Some(state.layout.clone()),
-        }
-    }
+    // TODO: Implement layout() method after state machine is complete
+    // /// Get the layout (if after registration).
+    // pub fn layout(&self) -> Option<Arc<dyn Layout>> { ... }
 
     // Future methods for active message integration:
     // pub fn sync_with_leader(self, leader_info: LeaderInfo) -> Result<Self>
@@ -310,128 +193,6 @@ impl SchedulerWorkerStateMachine {
     // pub fn handle_message(self, message: ActiveMessage) -> Result<Self>
 }
 
-impl std::fmt::Debug for SchedulerWorkerStateMachine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SchedulerWorkerStateMachine")
-            .field("state", &self.state)
-            .finish()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::v2::{
-        AttentionConfig, CacheDtype, CacheLayout, ParallelConfig,
-        integrations::vllm::{VllmAttentionConfig, VllmConfig, VllmParallelConfig},
-    };
-
-    #[derive(Debug, Clone)]
-    struct TestParallelConfig {
-        tensor_parallel_size: usize,
-        pipeline_parallel_size: usize,
-        world_size: usize,
-        worker_id: usize,
-    }
-
-    impl VllmParallelConfig for TestParallelConfig {}
-
-    impl ParallelConfig for TestParallelConfig {
-        fn tensor_parallel_size(&self) -> usize {
-            self.tensor_parallel_size
-        }
-        fn pipeline_parallel_size(&self) -> usize {
-            self.pipeline_parallel_size
-        }
-        fn world_size(&self) -> usize {
-            self.world_size
-        }
-        fn tensor_parallel_rank(&self) -> usize {
-            0
-        }
-        fn pipeline_parallel_rank(&self) -> usize {
-            0
-        }
-        fn worker_id(&self) -> usize {
-            self.worker_id
-        }
-        fn is_single_node(&self) -> bool {
-            true
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    struct TestAttentionConfig {
-        block_size: usize,
-        device_id: usize,
-        cache_dtype: CacheDtype,
-        cache_layout: CacheLayout,
-    }
-
-    impl VllmAttentionConfig for TestAttentionConfig {}
-
-    impl AttentionConfig for TestAttentionConfig {
-        fn block_size(&self) -> usize {
-            self.block_size
-        }
-        fn head_size(&self) -> Option<usize> {
-            Some(64)
-        }
-        fn num_kv_heads(&self) -> Option<usize> {
-            Some(8)
-        }
-        fn cache_layout(&self) -> CacheLayout {
-            self.cache_layout
-        }
-        fn cache_dtype(&self) -> CacheDtype {
-            self.cache_dtype
-        }
-        fn device_id(&self) -> usize {
-            self.device_id
-        }
-    }
-
-    fn create_test_config() -> SchedulerWorkerConfig {
-        let parallel = Arc::new(TestParallelConfig {
-            tensor_parallel_size: 1,
-            pipeline_parallel_size: 1,
-            world_size: 1,
-            worker_id: 0,
-        }) as Arc<dyn VllmParallelConfig>;
-
-        let attention = Arc::new(TestAttentionConfig {
-            block_size: 16,
-            device_id: 0,
-            cache_dtype: CacheDtype::FP16,
-            cache_layout: CacheLayout::NHD,
-        }) as Arc<dyn VllmAttentionConfig>;
-
-        let vllm_config = VllmConfig::new(parallel, attention);
-
-        SchedulerWorkerConfig::new(vllm_config)
-    }
-
-    #[test]
-    fn test_initial_state() {
-        let config = create_test_config();
-        let machine = SchedulerWorkerStateMachine::new(config.clone());
-
-        assert!(machine.state().is_before_registered());
-        assert!(!machine.state().is_after_registered());
-        assert_eq!(machine.state().config().device_id(), config.device_id());
-        assert!(machine.layout().is_none());
-    }
-
-    #[test]
-    fn test_double_registration_fails() {
-        let config = create_test_config();
-        let _machine = SchedulerWorkerStateMachine::new(config);
-
-        // First registration would succeed with real tensors
-        // For now, just test that double registration would fail
-        // by creating a machine in AfterRegistered state manually
-
-        // This test demonstrates the structure - actual implementation
-        // would require mock tensors for full testing
-    }
-}
+// TODO: Re-enable tests when SchedulerWorkerStateMachine is implemented
+// #[cfg(test)]
+// mod tests { ... }

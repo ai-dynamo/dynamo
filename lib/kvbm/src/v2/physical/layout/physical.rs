@@ -13,7 +13,7 @@ use super::{
 
 use anyhow::{Result, anyhow};
 use dynamo_memory::{
-    Buffer, MemoryDescription, StorageKind,
+    Buffer, MemoryDescriptor, StorageKind,
     nixl::{MemType, NixlAgent, NixlDescriptor},
 };
 use serde::{Deserialize, Serialize};
@@ -211,7 +211,7 @@ impl PhysicalLayout {
         }
 
         // Create remote memory regions from descriptors
-        let remote_regions: Vec<Arc<dyn MemoryDescription>> = serialized
+        let remote_regions: Vec<Arc<dyn MemoryDescriptor>> = serialized
             .memory_descriptors
             .iter()
             .map(|desc| {
@@ -220,7 +220,7 @@ impl PhysicalLayout {
                     size: desc.size,
                     storage_kind: serialized.location,
                     nixl_metadata: serialized.nixl_metadata.clone(),
-                }) as Arc<dyn MemoryDescription>
+                }) as Arc<dyn MemoryDescriptor>
             })
             .collect();
 
@@ -278,7 +278,7 @@ struct RemoteMemoryDescriptor {
     nixl_metadata: NixlMetadata,
 }
 
-impl MemoryDescription for RemoteMemoryDescriptor {
+impl MemoryDescriptor for RemoteMemoryDescriptor {
     fn addr(&self) -> usize {
         self.addr
     }

@@ -8,20 +8,8 @@
 //! remain independent of framework-specific types.
 
 pub mod config;
-// pub mod connector;
-// pub mod vllm;
+pub mod connector;
+pub mod vllm;
 
 // Re-export key types for convenience
 pub use config::{AttentionConfig, IntegrationsConfig, ParallelConfig};
-
-/// Generation 1 marker: GPU/device tier
-#[derive(Clone, Copy, Debug)]
-pub struct G1;
-
-/// Generation 2 marker: CPU/host tier
-#[derive(Clone, Copy, Debug)]
-pub struct G2;
-
-/// Generation 3 marker: Disk tier
-#[derive(Clone, Copy, Debug)]
-pub struct G3;

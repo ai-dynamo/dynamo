@@ -4,14 +4,14 @@
 //! # Arena Allocator
 //!
 //! This module provides an arena allocator for generally heap-like allocations.
-//! An [`ArenaAllocator`] can be created by taking ownership of a [`MemoryDescription`] instance.
+//! An [`ArenaAllocator`] can be created by taking ownership of a [`MemoryDescriptor`] instance.
 //!
 //! The [`ArenaAllocator`] allocates memory contiguous regions using the [`offset_allocator`] crate,
 //! which builds on [Sebastian Aaltonen's ArenaAllocator](https://github.com/sebbbi/ArenaAllocator)
 
 use crate::StorageKind;
 
-use super::{MemoryDescription, StorageError};
+use super::{MemoryDescriptor, StorageError};
 use offset_allocator::{Allocation, Allocator};
 use std::{
     any::Any,
@@ -34,20 +34,20 @@ pub enum ArenaError {
     StorageError(#[from] StorageError),
 }
 
-/// Arena allocator backed by an instance of a [`MemoryDescription`] object.
+/// Arena allocator backed by an instance of a [`MemoryDescriptor`] object.
 ///
 /// This struct wraps an [`Allocator`] from the [`offset_allocator`] crate,
 /// and provides methods for allocating memory from the storage.
 ///
 /// The allocator is thread-safe, and the storage is shared between the allocator and the buffers.
 #[derive(Clone)]
-pub struct ArenaAllocator<S: MemoryDescription> {
+pub struct ArenaAllocator<S: MemoryDescriptor> {
     storage: Arc<S>,
     allocator: Arc<Mutex<Allocator>>,
     page_size: u64,
 }
 
-impl<S: MemoryDescription> std::fmt::Debug for ArenaAllocator<S> {
+impl<S: MemoryDescriptor> std::fmt::Debug for ArenaAllocator<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -62,8 +62,8 @@ impl<S: MemoryDescription> std::fmt::Debug for ArenaAllocator<S> {
 /// This struct wraps an [`Allocation`] from the [`offset_allocator`] crate,
 /// and provides methods for interacting with the allocated memory.
 ///
-/// The buffer is backed by a [`MemoryDescription`] object, and the allocation is freed when the buffer is dropped.
-pub struct ArenaBuffer<S: MemoryDescription> {
+/// The buffer is backed by a [`MemoryDescriptor`] object, and the allocation is freed when the buffer is dropped.
+pub struct ArenaBuffer<S: MemoryDescriptor> {
     offset: usize,
     address: usize,
     requested_size: usize,
@@ -72,8 +72,8 @@ pub struct ArenaBuffer<S: MemoryDescription> {
     allocator: Arc<Mutex<Allocator>>,
 }
 
-impl<S: MemoryDescription> ArenaAllocator<S> {
-    /// Create a new [`ArenaAllocator`] from a [`MemoryDescription`] object and a page size.
+impl<S: MemoryDescriptor> ArenaAllocator<S> {
+    /// Create a new [`ArenaAllocator`] from a [`MemoryDescriptor`] object and a page size.
     ///
     /// The page size must be a power of two.
     ///
@@ -135,7 +135,7 @@ impl<S: MemoryDescription> ArenaAllocator<S> {
     }
 }
 
-impl<S: MemoryDescription> std::fmt::Debug for ArenaBuffer<S> {
+impl<S: MemoryDescriptor> std::fmt::Debug for ArenaBuffer<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -148,7 +148,7 @@ impl<S: MemoryDescription> std::fmt::Debug for ArenaBuffer<S> {
     }
 }
 
-impl<S: MemoryDescription + 'static> MemoryDescription for ArenaBuffer<S> {
+impl<S: MemoryDescriptor + 'static> MemoryDescriptor for ArenaBuffer<S> {
     fn addr(&self) -> usize {
         self.address
     }
@@ -177,7 +177,7 @@ use super::nixl::{NixlCompatible, NixlDescriptor, RegisteredView};
 
 impl<S> ArenaBuffer<S>
 where
-    S: MemoryDescription + NixlCompatible,
+    S: MemoryDescriptor + NixlCompatible,
 {
     /// Create a NIXL descriptor for this buffer with the correct offset and size.
     ///
@@ -200,7 +200,7 @@ where
 
 impl<S> ArenaBuffer<S>
 where
-    S: MemoryDescription + RegisteredView,
+    S: MemoryDescriptor + RegisteredView,
 {
     /// Get the agent name from registered storage.
     ///
@@ -223,7 +223,7 @@ where
     }
 }
 
-impl<S: MemoryDescription> Drop for ArenaBuffer<S> {
+impl<S: MemoryDescriptor> Drop for ArenaBuffer<S> {
     fn drop(&mut self) {
         self.allocator.lock().unwrap().free(self.allocation);
     }

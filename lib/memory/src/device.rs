@@ -3,7 +3,7 @@
 
 //! CUDA device memory storage.
 
-use super::{MemoryDescription, Result, StorageError, StorageKind, nixl::NixlDescriptor};
+use super::{MemoryDescriptor, Result, StorageError, StorageKind, nixl::NixlDescriptor};
 use cudarc::driver::CudaContext;
 use std::any::Any;
 use std::collections::HashMap;
@@ -84,7 +84,7 @@ impl Drop for DeviceStorage {
     }
 }
 
-impl MemoryDescription for DeviceStorage {
+impl MemoryDescriptor for DeviceStorage {
     fn addr(&self) -> usize {
         self.device_ptr() as usize
     }

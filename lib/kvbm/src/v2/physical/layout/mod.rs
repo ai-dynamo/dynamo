@@ -40,7 +40,7 @@ pub use validation::{TensorFormat, validate_tensor_shapes, validate_tensor_strid
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-pub use dynamo_memory::{Buffer, MemoryDescription, MemoryRegion, OffsetBuffer};
+pub use dynamo_memory::{Buffer, MemoryDescriptor, MemoryRegion, OffsetBuffer};
 
 /// Core layout trait for mapping block IDs to memory regions.
 ///

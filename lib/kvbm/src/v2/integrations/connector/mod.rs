@@ -7,12 +7,13 @@
 //! Framework-specific leaders (vLLM, etc.) can build on top of these pieces
 //! while supplying their own scheduling semantics.
 
-pub mod leader;
+// pub mod slot;
+// pub use slot::*;
 
-pub mod slot;
-pub use slot::*;
+pub mod leader;
+pub mod worker;
 
 pub mod metadata;
 pub use metadata::ConnectorMetadataBuilder;
 
-pub use super::{G1, G2, G3};
+pub use crate::v2::{G1, G2, G3};

@@ -13,9 +13,7 @@ use crate::{
     logical::{blocks::ImmutableBlock, manager::BlockManager},
     physical::transfer::{TransferCompleteNotification, TransferOptions},
     v2::{
-        BlockId, InstanceId, SequenceHash,
-        distributed::worker::RemoteDescriptor,
-        integrations::{G2, G3},
+        BlockId, G2, G3, InstanceId, SequenceHash, distributed::worker::RemoteDescriptor,
         logical::LogicalLayoutHandle,
     },
 };
@@ -423,6 +421,7 @@ impl InstanceLeader {
     ///
     /// If workers are configured, the handle will have RDMA support enabled,
     /// allowing use of `pull_blocks_rdma()` methods.
+    #[deprecated(note = "Use attach_session instead")]
     pub async fn attach_remote_session(
         &self,
         remote_instance: InstanceId,
@@ -610,11 +609,8 @@ impl InstanceLeader {
         let g2_matches = self.g2_manager.match_blocks(sequence_hashes);
 
         // Collect layout handles from matched blocks
-        let layout_handles: Vec<LayoutHandle> = self
-            .workers
-            .iter()
-            .filter_map(|w| w.g2_handle())
-            .collect();
+        let layout_handles: Vec<LayoutHandle> =
+            self.workers.iter().filter_map(|w| w.g2_handle()).collect();
 
         // Get sequence hashes from matched blocks
         let matched_hashes: Vec<SequenceHash> =
