@@ -1,6 +1,26 @@
 # syntax=docker/dockerfile:1.10.0
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Throughout this file, we make certain paths group-writable because this allows
+# both the dynamo user (UID 1000) and Dev Container users (UID != 1000) to work
+# properly without needing slow chown -R operations (which can add 2-10 extra
+# minutes).
+#
+# HOW WE ACHIEVE GROUP-WRITABLE PERMISSIONS:
+# 1. umask 002 wrapper      - RUN commands create group-writable files (775/664)
+# 2. COPY --chmod=775       - Sets permissions on copied children (not destination)
+# 3. chmod g+w (no -R)      - Fixes destination dirs only (milliseconds vs minutes)
+#
+# PATTERN: COPY --chmod=775 <path>; chmod g+w <path>
+# We use this pattern because COPY --chmod=775 sets permissions on all children
+# (files and subdirectories) but NOT on the destination directory itself. The
+# subsequent non-recursive chmod g+w fixes just the destination directory.
+#
+# PATHS THAT MUST BE GROUP-WRITABLE (for virtualenv containers):
+#   /workspace            - Users create/modify project files
+#   /home/dynamo          - Users create config/cache files
+#   /opt/dynamo/venv      - vLLM uses venv, so entire venv must be writable for pip install
 
 # This section contains build arguments that are common and shared with
 # the plain Dockerfile, so they should NOT have a default. The source of truth is from build.sh.
@@ -238,15 +258,22 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache /opt/dynamo \
-    && chown -R dynamo: /workspace /home/dynamo /opt/dynamo \
-    && chmod -R g+w /workspace /home/dynamo/.cache /opt/dynamo
+    && chown dynamo:0 /workspace /home/dynamo /opt/dynamo \
+    && chmod -R g+w /workspace /home/dynamo /opt/dynamo
+
+# Copy rust installation from dynamo_base to avoid duplication efforts
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --from=dynamo_base --chown=dynamo:root --chmod=775 /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base --chown=dynamo:root --chmod=775 /usr/local/cargo /usr/local/cargo
+RUN chmod g+w /usr/local/rustup /usr/local/cargo
 
 USER dynamo
 ENV HOME=/home/dynamo
 
-# Copy UCX and NIXL to system directories
+# Copy UCX and NIXL to system directories (read-only, no group-write needed)
 COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo: --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+
 ENV PATH=/usr/local/ucx/bin:$PATH
 
 ENV LD_LIBRARY_PATH=\
@@ -260,15 +287,18 @@ $LD_LIBRARY_PATH
 ### VIRTUAL ENVIRONMENT SETUP ###
 
 # Copy entire virtual environment from framework container with correct ownership
-COPY --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo: --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
-# Copy vllm with correct ownership
+# Copy vllm with correct ownership (read-only, no group-write needed)
 COPY --chown=dynamo: --from=framework /opt/vllm /opt/vllm
 
+
 # Install dynamo, NIXL, and dynamo-specific dependencies
-COPY --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
-COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
-RUN uv pip install \
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo: benchmarks/ /opt/dynamo/benchmarks/
+COPY --chmod=775 --chown=dynamo: --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+RUN umask 002 && uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl \
@@ -280,19 +310,21 @@ RUN uv pip install \
     && cd - \
     && rm -rf /opt/dynamo/benchmarks
 
+
 # Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
+    umask 002 && UV_GIT_LFS=1 uv pip install \
         --no-cache \
         --requirement /tmp/requirements.txt \
         --requirement /tmp/requirements.test.txt
 
 # Copy benchmarks, examples, and tests for CI with correct ownership
-COPY --chown=dynamo: . /workspace/
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --chmod=775 --chown=dynamo: . /workspace/
 
 # Copy attribution files
-COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=664 --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
@@ -300,7 +332,9 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 
 # Setup environment for all users
 USER root
-RUN chmod 755 /opt/dynamo/.launch_screen && \
+RUN chmod g+w ${VIRTUAL_ENV} /workspace /workspace/* /opt/dynamo/* && \
+    chown dynamo:0 ${VIRTUAL_ENV} /workspace /workspace/* /opt/dynamo/* && \
+    chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
@@ -368,9 +402,6 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     CARGO_TARGET_DIR=/workspace/target \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/usr/local/cargo/bin:$PATH
-
-COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 
 # Install maturin, for maturin develop
 # Editable install of dynamo

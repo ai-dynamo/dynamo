@@ -1,0 +1,187 @@
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# NOTE: This file is used by vLLM and TRT-LLM frameworks (which use virtualenv)
+#       SGLang uses Dockerfile.runtime2localdev_novenv (no virtualenv)
+#
+# DO NOT USE "chmod -R" OR "chown -R" ON LARGE DIRECTORY TREES!
+# These commands are EXTREMELY SLOW and can take 10+ minutes on large filesystems.
+# Only change permissions on specific files/directories as needed.
+# Use non-recursive operations (chmod/chown without -R) whenever possible.
+
+###########################################################
+########## Local Development from Runtime Image ###########
+###########################################################
+#
+# PURPOSE: Convert runtime image to development environment (with venv/uv)
+# USED BY: vLLM and TRT-LLM frameworks
+#
+# This Dockerfile takes a pre-built runtime image and adds:
+# - Development tools and utilities
+# - Rust toolchain for building Dynamo components
+# - Maturin for editable Python package installation
+# - User configuration with custom UID/GID
+# - Uses virtualenv and uv for Python package management
+#
+# Base: Pre-built vLLM runtime image from the interval GitLab registry
+# Target: Full development environment with Rust support
+
+# Example: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:1e120ed049595195a66e3e004e404dff35239ed1-38551631-vllm-amd64
+ARG RUNTIME_IMAGE
+FROM ${RUNTIME_IMAGE}
+
+# User configuration
+ENV USERNAME=dynamo
+ARG USER_UID
+ARG USER_GID
+
+# Architecture configuration (for Rust installation)
+ARG ARCH=amd64
+ARG ARCH_ALT=x86_64
+
+# Workspace configuration
+ARG WORKSPACE_DIR=/workspace
+
+USER root
+
+##################################
+########## System Packages #######
+##################################
+
+# Install development tools and utilities
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends  \
+    # Install utilities
+    nvtop \
+    wget \
+    tmux \
+    vim \
+    git \
+    openssh-client \
+    iproute2 \
+    rsync \
+    zip \
+    unzip \
+    htop \
+    # Build Dependencies
+    autoconf \
+    automake \
+    cmake \
+    libtool \
+    meson \
+    net-tools \
+    pybind11-dev \
+    # Rust build dependencies
+    clang \
+    libclang-dev \
+    protobuf-compiler \
+    # User management
+    sudo && \
+    rm -rf /var/lib/apt/lists/*
+
+##################################
+########## User Setup ############
+##################################
+
+# Configure user with sudo access and set UID/GID
+RUN echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME && \
+    chmod 0440 /etc/sudoers.d/$USERNAME && \
+    mkdir -p /home/$USERNAME && \
+    # Handle GID conflicts: if target GID exists and it's not our group, remove it
+    (getent group $USER_GID | grep -v "^$USERNAME:" && groupdel $(getent group $USER_GID | cut -d: -f1) || true) && \
+    # Create group if it doesn't exist, otherwise modify existing group
+    (getent group $USERNAME > /dev/null 2>&1 && groupmod -g $USER_GID $USERNAME || groupadd -g $USER_GID $USERNAME) && \
+    usermod -u $USER_UID -g $USER_GID $USERNAME && \
+    # Add user to root group (group 0) so they can write to /opt/dynamo/venv
+    # Also add user to dynamo's group (user 1000) so they can write to files owned by user 1000
+    DYNAMO_GID=$(getent passwd dynamo 2>/dev/null | cut -d: -f4 || echo "0") && \
+    usermod -a -G 0,${DYNAMO_GID} $USERNAME && \
+    chsh -s /bin/bash $USERNAME && \
+    # Change ownership of home directory (only 1 level deep to avoid slow recursion)
+    # .cache subdirectories are group-writable from base image (created with umask 002)
+    chown $USERNAME:$USERNAME /home/$USERNAME /home/$USERNAME/.* /workspace
+
+##################################
+########## Environment Setup #####
+##################################
+
+# User home directory
+ENV HOME=/home/$USERNAME
+
+# Workspace configuration
+ENV WORKSPACE_DIR=${WORKSPACE_DIR}
+ENV DYNAMO_HOME=${WORKSPACE_DIR}
+
+# Python virtual environment
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+
+# PATH: Include venv binaries (cargo binaries added later in Rust Setup)
+ENV PATH=${VIRTUAL_ENV}/bin:$PATH
+
+# Switch to user before installing Rust
+USER $USERNAME
+WORKDIR $HOME
+
+##################################
+########## Rust Setup ############
+##################################
+
+# Rust toolchain configuration
+# Path configuration notes:
+# - CARGO_TARGET_DIR: Build artifacts in workspace/target for persistence across container restarts
+# - CARGO_HOME: Must be in $HOME/.cargo (not workspace) because:
+#               * Workspace gets mounted to different paths where cargo binaries may not exist
+#               * Contains critical cargo binaries and registry that need consistent paths
+# - RUSTUP_HOME: Must be in $HOME/.rustup (not workspace) because:
+#                * Contains rust toolchain binaries that must be at expected system paths
+#                * Workspace mount point would break rustup's toolchain resolution
+ENV CARGO_TARGET_DIR=${WORKSPACE_DIR}/target
+ENV CARGO_HOME=${HOME}/.cargo
+ENV RUSTUP_HOME=${HOME}/.rustup
+ENV RUST_VERSION=1.90.0
+
+# PATH: Add cargo binaries
+ENV PATH=${CARGO_HOME}/bin:$PATH
+
+# Define Rust target based on ARCH_ALT ARG
+ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
+
+# Install Rust as user to user's home directory
+RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    rm rustup-init
+
+##################################
+########## Dev Tools #############
+##################################
+
+# Install maturin for editable Rust-Python package development
+RUN uv pip install maturin[patchelf]
+
+# Setup bash history persistence
+# https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
+RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" && \
+    mkdir -p $HOME/.commandhistory && \
+    touch $HOME/.commandhistory/.bash_history && \
+    echo "$SNIPPET" >> "$HOME/.bashrc"
+
+RUN mkdir -p /home/$USERNAME/.cache/
+
+# Editable install of dynamo (if workspace is mounted)
+# Note: This will fail if /workspace is empty, so we make it optional for build
+RUN if [ -f /workspace/pyproject.toml ]; then \
+        uv pip install --no-deps -e /workspace; \
+    else \
+        echo "Note: /workspace/pyproject.toml not found. Run 'uv pip install --no-deps -e .' after mounting workspace."; \
+    fi
+
+##################################
+########## Entrypoint ############
+##################################
+
+# Use the same entrypoint as the base image
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+

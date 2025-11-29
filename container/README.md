@@ -17,6 +17,8 @@ The NVIDIA Dynamo project uses containerized development and deployment to maint
   - `Dockerfile` - Base/standalone configuration
   - `Dockerfile.frontend` - For Kubernetes Gateway API Inference Extension integration with EPP
   - `Dockerfile.epp` - For building the Endpoint Picker (EPP) image
+  - `Dockerfile.runtime2localdev_venv` - Converts venv runtime images to local-dev with Rust compiler, maturin, development tools, and matched host UID/GID (vLLM, TensorRT-LLM)
+  - `Dockerfile.runtime2localdev_novenv` - Converts non-venv runtime images to local-dev with Rust compiler, maturin, development tools, and matched host UID/GID (SGLang)
 
 ### Why Containerization?
 
@@ -68,7 +70,8 @@ Dockerfile → base → dev (dynamo-base image)
               ↓
 Dockerfile.vllm → framework → runtime → dev (vllm dev image)
                                          ↓
-Dockerfile.local_dev → local-dev (from vllm dev image)
+Dockerfile.runtime2localdev_venv → local-dev (from vllm/trtllm runtime image)
+Dockerfile.runtime2localdev_novenv → local-dev (from sglang runtime image)
 ```
 
 ### Environment Variables by Stage
@@ -105,7 +108,7 @@ Dockerfile.local_dev → local-dev (from vllm dev image)
 - `DYNAMO_HOME`: Always `/workspace` once overridden in vllm→dev (for development)
 
 **5. local-dev Specific Changes:**
-From `Dockerfile.local_dev`, the Rust toolchain is moved to user home because:
+From `Dockerfile.runtime2localdev_venv` and `Dockerfile.runtime2localdev_novenv`, the Rust toolchain is moved to user home because:
 - Workspace mount points may change, breaking toolchain paths
 - User needs ownership of cargo binaries and registry for package installation
 - Toolchain requires consistent system paths that don't depend on workspace location
