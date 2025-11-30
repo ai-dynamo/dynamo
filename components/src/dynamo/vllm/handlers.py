@@ -125,8 +125,8 @@ class BaseWorkerHandler(ABC):
         self.enable_multimodal = enable_multimodal
         # LoRA tracking with thread-safe access
         self._lora_lock = asyncio.Lock()
-        self.lora_id_for_name = {}
-        self.lora_name_to_path = {}
+        self.lora_id_for_name: dict[str, int] = {}
+        self.lora_name_to_path: dict[str, str] = {}
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
