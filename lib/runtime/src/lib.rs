@@ -53,10 +53,6 @@ pub use system_health::{HealthCheckTarget, SystemHealth};
 pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
 
-use crate::{
-    metrics::prometheus_names::distributed_runtime, storage::key_value_store::KeyValueStore,
-};
-
 use component::Endpoint;
 use utils::GracefulShutdownTracker;
 

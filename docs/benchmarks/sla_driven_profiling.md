@@ -21,15 +21,20 @@ This document covers:
 
 ## Support Matrix
 
-| Backend | Dense Models (P:TP, D:TP) | MoE Models (P:TEP, D:DEP) |
+| Backend | Dense Models | MoE Models |
 |---------|-------------|------------|
 | vLLM | ✅ | 🚧 |
 | SGLang | ✅ | ✅ |
 | TensorRT-LLM | ✅ | 🚧 |
 
+Specifically, the profiler sweeps over the following parallelization mapping for prefill and decode:
+| Model Architecture | Prefill Parallelization Mapping | Decode Parallelization Mapping |
+|---------|-------------|------------|
+| MLA+MoE (DeepseekV3ForCausalLM, DeepseekV32ForCausalLM) | TEP, DEP | TEP, DEP |
+| GQA+MoE (Qwen3MoeForCausalLM) | TP, TEP, DEP | TP, TEP, DEP |
+| Other Models | TP | TP |
+
 > [!NOTE]
-> - We only support multi-node engines for MoE models.
-> - For MoE models, we currently only support deepseek-style MLA+MoE models. For other MoE models like GQA+MoE, please use the dense mode (sweep over TP sizes) instead.
 > - Exact model x parallelization mapping support is dependent on the backend. The profiler does not guarantee that the recommended P/D engine configuration is supported and bug-free by the backend.
 
 ## Using DGDR for Profiling (Recommended)
@@ -269,7 +274,7 @@ profilingConfig:
 **When to use:**
 - **min_num_gpus_per_engine**: Skip small TP sizes if your model is large
 - **max_num_gpus_per_engine**: Limit search space or work around constraints (e.g., [AIC attention heads](#ai-configurator-attention-head-constraint-error))
-- **num_gpus_per_node**: Required for MoE models with TEP/DEP sizing
+- **num_gpus_per_node**: Determine the upper bound of number of GPUs per node for dense models and configure Grove for multi-node MoE engines.
 - **gpu_type**: Informational, auto-detected by controller
 
 > [!TIP]

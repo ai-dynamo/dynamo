@@ -993,7 +993,7 @@ impl DRTNatsClientPrometheusMetrics {
 
 /// The NATS subject / inbox to talk to an instance on.
 /// TODO: Do we need to sanitize the names?
-pub(crate) fn instance_subject(endpoint_id: &EndpointId, instance_id: u64) -> String {
+pub fn instance_subject(endpoint_id: &EndpointId, instance_id: u64) -> String {
     format!(
         "{}_{}.{}-{:x}",
         endpoint_id.namespace, endpoint_id.component, endpoint_id.name, instance_id,

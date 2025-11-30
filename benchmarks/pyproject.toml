@@ -46,7 +46,8 @@ dependencies = [
     "pydantic>=2",
     "tabulate",
     "types-tabulate",
-    "transformers<=4.57.1",
+    # Satisfies vLLM 0.11.0 (>=4.55.2), vLLM 0.11.2 (>=4.56.0,<5), TRT-LLM 1.2.0rc2/rc3 (==4.56.0), SGLang 0.5.4.post3 (==4.57.1)
+    "transformers>=4.56.0,<=4.57.1",
     "pytest-mypy",
 ]
 

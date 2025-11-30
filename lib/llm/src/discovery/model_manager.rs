@@ -9,12 +9,15 @@ use std::{
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
 
-use dynamo_runtime::{component::Endpoint, storage::key_value_store::Key};
-use dynamo_runtime::{prelude::DistributedRuntimeProvider, protocols::EndpointId};
+use dynamo_runtime::{
+    component::{Endpoint, build_transport_type},
+    discovery::DiscoverySpec,
+    prelude::DistributedRuntimeProvider,
+    protocols::EndpointId,
+};
 
 use crate::{
-    discovery::KV_ROUTERS_ROOT_PATH,
-    kv_router::{KvRouter, KvRouterConfig, scheduler::DefaultWorkerSelector},
+    kv_router::{KvRouter, KvRouterConfig, router_endpoint_id, scheduler::DefaultWorkerSelector},
     model_card::ModelDeploymentCard,
     model_type::ModelType,
     types::{
@@ -310,23 +313,28 @@ impl ModelManager {
         }
 
         let client = endpoint.client().await?;
-        let store = endpoint.component().drt().store();
-        let router_bucket = store
-            .get_or_create_bucket(KV_ROUTERS_ROOT_PATH, None)
-            .await?;
-        let router_uuid = uuid::Uuid::new_v4();
-        // In lib/llm/src/kv_router/subscriber.rs we filter on component.service_name() so this
-        // must have that prefix.
-        let router_key = Key::new(format!(
-            "{}/{}/{}",
-            endpoint.component().service_name(),
-            endpoint.name(),
-            router_uuid,
-        ));
-        let json_router_config = serde_json::to_vec_pretty(&kv_router_config.unwrap_or_default())?;
-        router_bucket
-            .insert(&router_key, json_router_config.into(), 0)
-            .await?;
+
+        // Register router via discovery mechanism
+        let discovery = endpoint.component().drt().discovery();
+        let instance_id = discovery.instance_id();
+        let request_plane_mode = endpoint.drt().request_plane();
+
+        // Build transport for router endpoint based on request plane mode
+        // Use KV_ROUTER_COMPONENT as the component name to distinguish from the generate endpoint's component
+        let router_endpoint_id = router_endpoint_id(endpoint.id().namespace);
+        let transport = build_transport_type(request_plane_mode, &router_endpoint_id, instance_id);
+
+        let discovery_spec = DiscoverySpec::Endpoint {
+            namespace: router_endpoint_id.namespace.clone(),
+            component: router_endpoint_id.component.clone(),
+            endpoint: router_endpoint_id.name.clone(),
+            transport,
+        };
+
+        discovery.register(discovery_spec).await?;
+
+        // Use instance_id (hex) as the consumer ID for NATS consumer coordination
+        let consumer_id = instance_id.to_string();
 
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
         let chooser = KvRouter::new(
@@ -335,7 +343,7 @@ impl ModelManager {
             kv_cache_block_size,
             Some(selector),
             kv_router_config,
-            router_uuid.to_string(),
+            consumer_id,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);

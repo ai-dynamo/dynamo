@@ -21,7 +21,7 @@ use derive_builder::Builder;
 use dynamo_runtime::discovery::{Discovery, KVStoreDiscovery};
 use dynamo_runtime::logging::make_request_span;
 use dynamo_runtime::metrics::prometheus_names::name_prefix;
-use dynamo_runtime::storage::key_value_store::KeyValueStoreManager;
+use dynamo_runtime::storage::kv;
 use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -31,7 +31,7 @@ use tower_http::trace::TraceLayer;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    store: KeyValueStoreManager,
+    store: kv::Manager,
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
 }
@@ -73,7 +73,7 @@ impl StateFlags {
 }
 
 impl State {
-    pub fn new(manager: Arc<ModelManager>, store: KeyValueStoreManager) -> Self {
+    pub fn new(manager: Arc<ModelManager>, store: kv::Manager) -> Self {
         // Initialize discovery backed by KV store
         // Create a cancellation token for the discovery's watch streams
         let discovery_client = {
@@ -108,7 +108,7 @@ impl State {
         self.manager.clone()
     }
 
-    pub fn store(&self) -> &KeyValueStoreManager {
+    pub fn store(&self) -> &kv::Manager {
         &self.store
     }
 
@@ -178,7 +178,7 @@ pub struct HttpServiceConfig {
     request_template: Option<RequestTemplate>,
 
     #[builder(default)]
-    store: KeyValueStoreManager,
+    store: kv::Manager,
 
     // DEPRECATED: To be removed after custom backends migrate to Dynamo backend.
     #[builder(default = "None")]

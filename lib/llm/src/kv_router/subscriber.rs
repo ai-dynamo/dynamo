@@ -3,15 +3,14 @@
 
 //! Background processes for the KV Router including event consumption and snapshot uploads.
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Result;
 use dynamo_runtime::{
     component::Component,
     config::environment_names::nats as env_nats,
-    discovery::DiscoveryQuery,
+    discovery::{DiscoveryEvent, DiscoveryQuery},
     prelude::*,
-    storage::key_value_store::WatchEvent,
     traits::events::EventPublisher,
     transports::nats::{NatsQueue, Slug},
 };
@@ -20,13 +19,11 @@ use rand::Rng;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    discovery::KV_ROUTERS_ROOT_PATH,
-    kv_router::{
-        KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
-        indexer::{DumpRequest, GetWorkersRequest, RouterEvent},
-        protocols::WorkerId,
-    },
+use crate::kv_router::{
+    KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
+    indexer::{DumpRequest, GetWorkersRequest, RouterEvent},
+    protocols::WorkerId,
+    router_discovery_query,
 };
 
 /// Delay between snapshot reads to verify stability
@@ -217,7 +214,7 @@ impl SnapshotResources {
 #[allow(clippy::too_many_arguments)]
 pub async fn start_kv_router_background(
     component: Component,
-    consumer_uuid: String,
+    consumer_id: String,
     kv_events_tx: mpsc::Sender<RouterEvent>,
     remove_worker_tx: mpsc::Sender<WorkerId>,
     maybe_get_workers_tx: Option<mpsc::Sender<GetWorkersRequest>>,
@@ -238,7 +235,7 @@ pub async fn start_kv_router_background(
         stream_name.clone(),
         nats_server.clone(),
         std::time::Duration::from_secs(60), // 1 minute timeout
-        consumer_uuid.clone(),
+        consumer_id.clone(),
     );
     nats_queue.connect_with_reset(router_reset_states).await?;
 
@@ -266,23 +263,24 @@ pub async fn start_kv_router_background(
     }
 
     // Cleanup orphaned consumers on startup
-    cleanup_orphaned_consumers(&mut nats_queue, &component, &consumer_uuid).await;
-
-    // Watch for router deletions to clean up orphaned consumers
-    let store = component.drt().store();
-    let (_watch_handle, mut router_replicas_rx) =
-        Arc::new(store.clone()).watch(KV_ROUTERS_ROOT_PATH, None, cancellation_token.clone());
+    cleanup_orphaned_consumers(&mut nats_queue, &component, &consumer_id).await;
 
     // Get the generate endpoint and watch for instance deletions
     let generate_endpoint = component.endpoint("generate");
     let discovery_client = component.drt().discovery();
-    let discovery_key = DiscoveryQuery::Endpoint {
+    let generate_discovery_key = DiscoveryQuery::Endpoint {
         namespace: component.namespace().name().to_string(),
         component: component.name().to_string(),
         endpoint: "generate".to_string(),
     };
     let mut instance_event_stream = discovery_client
-        .list_and_watch(discovery_key, Some(cancellation_token.clone()))
+        .list_and_watch(generate_discovery_key, Some(cancellation_token.clone()))
+        .await?;
+
+    // Watch for router deletions to clean up orphaned consumers via discovery
+    let router_discovery_key = router_discovery_query(component.namespace().name());
+    let mut router_event_stream = discovery_client
+        .list_and_watch(router_discovery_key, Some(cancellation_token.clone()))
         .await?;
 
     // Get instances_rx for tracking current workers
@@ -336,7 +334,7 @@ pub async fn start_kv_router_background(
                         continue;
                     };
 
-                    let dynamo_runtime::discovery::DiscoveryEvent::Removed(worker_id) = discovery_event else {
+                    let DiscoveryEvent::Removed(worker_id) = discovery_event else {
                         continue;
                     };
 
@@ -409,36 +407,24 @@ pub async fn start_kv_router_background(
                     }
                 }
 
-                // Handle router deletion events
-                Some(event) = router_replicas_rx.recv() => {
-                    let WatchEvent::Delete(kv) = event else {
-                        // We only care about deletions for cleaning up consumers
+                // Handle router deletion events via discovery
+                Some(router_event_result) = router_event_stream.next() => {
+                    let Ok(router_event) = router_event_result else {
                         continue;
                     };
 
-                    let key = kv.as_ref();
-                    tracing::info!("Detected router replica deletion: {key}");
-
-                    // Only process deletions for routers on the same component
-                    // Must match model_manager.rs kv_chooser_for
-                    if !key.contains(&component.service_name()) {
-                        tracing::trace!(
-                            "Skipping router deletion from different component (key: {key}, subscriber component: {})",
-                            component.service_name()
-                        );
-                        continue;
-                    }
-
-                    // Extract the router UUID from the key
-                    let Some(router_uuid) = key.split('/').next_back() else {
-                        tracing::warn!("Could not extract UUID from router key: {key}");
+                    let DiscoveryEvent::Removed(router_instance_id) = router_event else {
+                        // We only care about removals for cleaning up consumers
                         continue;
                     };
 
-                    // The consumer UUID is the router UUID
-                    let consumer_to_delete = router_uuid.to_string();
+                    // The consumer UUID is the instance_id in hex format
+                    let consumer_to_delete = router_instance_id.to_string();
 
-                    tracing::info!("Attempting to delete orphaned consumer: {consumer_to_delete}");
+                    tracing::info!(
+                        router_instance_id = router_instance_id,
+                        "DISCOVERY: Router instance removed, attempting to delete orphaned consumer: {consumer_to_delete}"
+                    );
 
                     // Delete the consumer (allow race condition if multiple routers try to delete)
                     if let Err(e) = nats_queue.shutdown(Some(consumer_to_delete.clone())).await {
@@ -463,43 +449,34 @@ pub async fn start_kv_router_background(
 async fn cleanup_orphaned_consumers(
     nats_queue: &mut NatsQueue,
     component: &Component,
-    consumer_uuid: &str,
+    consumer_id: &str,
 ) {
     let Ok(consumers) = nats_queue.list_consumers().await else {
         return;
     };
 
-    // Get active routers from store
-    let store = component.drt().store();
-    let Ok(Some(router_bucket)) = store.get_bucket(KV_ROUTERS_ROOT_PATH).await else {
-        tracing::debug!("No router bucket found, skipping cleanup");
+    // Get active routers from discovery
+    let discovery = component.drt().discovery();
+    let Ok(router_instances) = discovery
+        .list(router_discovery_query(component.namespace().name()))
+        .await
+    else {
+        tracing::debug!("Failed to list router instances from discovery, skipping cleanup");
         return;
     };
 
-    let Ok(entries) = router_bucket.entries().await else {
-        return;
-    };
-
-    // Filter to only routers for this component
-    let component_path = component.service_name();
-    let active_uuids: HashSet<String> = entries
+    // Build set of active router instance IDs
+    let active_instance_ids: HashSet<String> = router_instances
         .iter()
-        .filter_map(|(key, _)| {
-            // Check if key contains this component's path
-            if !key.as_ref().contains(&component_path) {
-                return None;
-            }
-            // Extract the last part (should be the UUID)
-            key.as_ref().split('/').next_back().map(str::to_string)
-        })
+        .map(|instance| instance.instance_id().to_string())
         .collect();
 
     for consumer in consumers {
-        if consumer == consumer_uuid {
+        if consumer == consumer_id {
             // Never delete myself (extra/redundant safeguard)
             continue;
         }
-        if !active_uuids.contains(&consumer) {
+        if !active_instance_ids.contains(&consumer) {
             tracing::info!("Cleaning up orphaned consumer: {consumer}");
             let _ = nats_queue.shutdown(Some(consumer)).await;
         }
