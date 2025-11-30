@@ -70,6 +70,9 @@ pub struct DistributedRuntime {
     // Health Status
     system_health: Arc<parking_lot::Mutex<SystemHealth>>,
 
+    // Local endpoint registry for in-process calls
+    local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry,
+
     // This hierarchy's own metrics registry
     metrics_registry: MetricsRegistry,
 }
@@ -195,6 +198,7 @@ impl DistributedRuntime {
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
+            local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
         };
 
         if let Some(nats_client_for_metrics) = nats_client_for_metrics {
@@ -314,6 +318,13 @@ impl DistributedRuntime {
     // TODO: Don't hand out pointers, instead provide system health related services.
     pub fn system_health(&self) -> Arc<parking_lot::Mutex<SystemHealth>> {
         self.system_health.clone()
+    }
+
+    /// Get the local endpoint registry for in-process endpoint calls
+    pub fn local_endpoint_registry(
+        &self,
+    ) -> &crate::local_endpoint_registry::LocalEndpointRegistry {
+        &self.local_endpoint_registry
     }
 
     pub fn connection_id(&self) -> u64 {
