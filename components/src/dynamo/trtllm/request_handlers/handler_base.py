@@ -44,6 +44,7 @@ from dynamo.trtllm.utils.disagg_utils import (
 
 configure_dynamo_logging()
 
+
 @dataclass
 class RequestHandlerConfig:
     """
@@ -205,22 +206,34 @@ class HandlerBase:
         # Setup disaggregated_params for PREFILL mode
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             if ep_disaggregated_params:
-                logging.info(f"PREFILL: Using ep_disaggregated_params from encoder (EPD flow)")
-                logging.info(f"PREFILL: ep_disaggregated_params has multimodal_embedding_handles: {hasattr(ep_disaggregated_params, 'multimodal_embedding_handles') and ep_disaggregated_params.multimodal_embedding_handles is not None}")
+                logging.info(
+                    "PREFILL: Using ep_disaggregated_params from encoder (EPD flow)"
+                )
+                logging.info(
+                    f"PREFILL: ep_disaggregated_params has multimodal_embedding_handles: {hasattr(ep_disaggregated_params, 'multimodal_embedding_handles') and ep_disaggregated_params.multimodal_embedding_handles is not None}"
+                )
                 ep_disaggregated_params.request_type = "context_only"
                 disaggregated_params = ep_disaggregated_params
             else:
-                logging.info("PREFILL: Creating new LlmDisaggregatedParams (standard flow)")
+                logging.info(
+                    "PREFILL: Creating new LlmDisaggregatedParams (standard flow)"
+                )
                 disaggregated_params = LlmDisaggregatedParams(
                     request_type="context_only"
                 )
             if ep_disaggregated_params:
-                logging.info(f"PREFILL: Using ep_disaggregated_params from encoder (EPD flow)")
-                logging.info(f"PREFILL: ep_disaggregated_params has multimodal_embedding_handles: {hasattr(ep_disaggregated_params, 'multimodal_embedding_handles') and ep_disaggregated_params.multimodal_embedding_handles is not None}")
+                logging.info(
+                    "PREFILL: Using ep_disaggregated_params from encoder (EPD flow)"
+                )
+                logging.info(
+                    f"PREFILL: ep_disaggregated_params has multimodal_embedding_handles: {hasattr(ep_disaggregated_params, 'multimodal_embedding_handles') and ep_disaggregated_params.multimodal_embedding_handles is not None}"
+                )
                 ep_disaggregated_params.request_type = "context_only"
                 disaggregated_params = ep_disaggregated_params
             else:
-                logging.info("PREFILL: Creating new LlmDisaggregatedParams (standard flow)")
+                logging.info(
+                    "PREFILL: Creating new LlmDisaggregatedParams (standard flow)"
+                )
                 disaggregated_params = LlmDisaggregatedParams(
                     request_type="context_only"
                 )
@@ -229,60 +242,81 @@ class HandlerBase:
         # or directly in request (legacy/direct routing)
         prefill_result = request.get("prefill_result")
         epd_metadata = {}
-        
+
         if prefill_result and "disaggregated_params" in prefill_result:
             # Decode from prefill_result (new frontend disaggregated routing)
             logging.info("DECODE: Received disaggregated_params from prefill_result")
             params_dict = prefill_result["disaggregated_params"]
-            
+
             # Extract EPD metadata that was packed by prefill worker
             if "_epd_metadata" in params_dict:
                 epd_metadata = params_dict.pop("_epd_metadata")
-                logging.info(f"DECODE: Extracted _epd_metadata with {len(epd_metadata)} fields")
+                logging.info(
+                    f"DECODE: Extracted _epd_metadata with {len(epd_metadata)} fields"
+                )
                 for key in ["_epd_processed_prompt", "_epd_prompt_token_ids"]:
                     if key in epd_metadata:
                         value = epd_metadata[key]
                         if isinstance(value, list):
                             logging.info(f"DECODE: {key} length={len(value)}")
                         else:
-                            logging.info(f"DECODE: {key}={value[:50]}..." if len(str(value)) > 50 else f"DECODE: {key}={value}")
-            
+                            logging.info(
+                                f"DECODE: {key}={value[:50]}..."
+                                if len(str(value)) > 50
+                                else f"DECODE: {key}={value}"
+                            )
+
             disaggregated_params = DisaggregatedParamsCodec.decode(
                 DisaggregatedParams(**params_dict)
             )
-            logging.info(f"DECODE: disaggregated_params decoded successfully from prefill_result")
-            logging.info(f"DECODE: Has multimodal_embedding_handles: {hasattr(disaggregated_params, 'multimodal_embedding_handles') and disaggregated_params.multimodal_embedding_handles is not None}")
+            logging.info(
+                "DECODE: disaggregated_params decoded successfully from prefill_result"
+            )
+            logging.info(
+                f"DECODE: Has multimodal_embedding_handles: {hasattr(disaggregated_params, 'multimodal_embedding_handles') and disaggregated_params.multimodal_embedding_handles is not None}"
+            )
             # For full EPD flow, make decoded params available to multimodal processor
             ep_disaggregated_params = disaggregated_params
             disaggregated_params.request_type = "generation_only"
-            
+
             # In generation-only mode, multimodal embeddings are already processed and in KV cache
             # Remove multimodal_embedding_handles to avoid TRT-LLM validation error
-            if hasattr(disaggregated_params, 'multimodal_embedding_handles') and disaggregated_params.multimodal_embedding_handles:
-                logging.info(f"DECODE: Removing multimodal_embedding_handles from disaggregated_params (already processed in prefill)")
+            if (
+                hasattr(disaggregated_params, "multimodal_embedding_handles")
+                and disaggregated_params.multimodal_embedding_handles
+            ):
+                logging.info(
+                    "DECODE: Removing multimodal_embedding_handles from disaggregated_params (already processed in prefill)"
+                )
                 disaggregated_params.multimodal_embedding_handles = None
-            
-            logging.info(f"DECODE: Set request_type to generation_only")
+
+            logging.info("DECODE: Set request_type to generation_only")
         elif "disaggregated_params" in request:
             # Decode from request dict (legacy/direct decode flow)
             logging.info("DECODE: Received disaggregated_params directly in request")
             disaggregated_params = DisaggregatedParamsCodec.decode(
                 DisaggregatedParams(**request["disaggregated_params"])
             )
-            logging.info(f"DECODE: disaggregated_params decoded successfully")
-            logging.info(f"DECODE: Has multimodal_embedding_handles: {hasattr(disaggregated_params, 'multimodal_embedding_handles') and disaggregated_params.multimodal_embedding_handles is not None}")
+            logging.info("DECODE: disaggregated_params decoded successfully")
+            logging.info(
+                f"DECODE: Has multimodal_embedding_handles: {hasattr(disaggregated_params, 'multimodal_embedding_handles') and disaggregated_params.multimodal_embedding_handles is not None}"
+            )
             # For full EPD flow, make decoded params available to multimodal processor
             ep_disaggregated_params = disaggregated_params
             disaggregated_params.request_type = "generation_only"
-            
+
             # In generation-only mode, multimodal embeddings are already processed and in KV cache
             # Remove multimodal_embedding_handles to avoid TRT-LLM validation error
-            if hasattr(disaggregated_params, 'multimodal_embedding_handles') and disaggregated_params.multimodal_embedding_handles:
-                logging.info(f"DECODE: Removing multimodal_embedding_handles from disaggregated_params (already processed in prefill)")
+            if (
+                hasattr(disaggregated_params, "multimodal_embedding_handles")
+                and disaggregated_params.multimodal_embedding_handles
+            ):
+                logging.info(
+                    "DECODE: Removing multimodal_embedding_handles from disaggregated_params (already processed in prefill)"
+                )
                 disaggregated_params.multimodal_embedding_handles = None
-            
-            logging.info(f"DECODE: Set request_type to generation_only")
 
+            logging.info("DECODE: Set request_type to generation_only")
 
         # Default to text-based input. This will be overwritten if multimodal
         # content is found and processed.
@@ -299,34 +333,40 @@ class HandlerBase:
             # Check epd_metadata (packed by prefill), then prefill_result, then direct request
             epd_prompt = epd_metadata.get("_epd_processed_prompt")
             epd_token_ids = epd_metadata.get("_epd_prompt_token_ids")
-            
+
             if epd_prompt:
                 logging.info("DECODE: Found _epd_processed_prompt in epd_metadata")
             elif prefill_result:
                 epd_prompt = prefill_result.get("_epd_processed_prompt")
                 epd_token_ids = prefill_result.get("_epd_prompt_token_ids")
                 if epd_prompt:
-                    logging.info("DECODE: Found _epd_processed_prompt in prefill_result")
-            
+                    logging.info(
+                        "DECODE: Found _epd_processed_prompt in prefill_result"
+                    )
+
             if not epd_prompt and "_epd_processed_prompt" in request:
                 epd_prompt = request["_epd_processed_prompt"]
                 epd_token_ids = request.get("_epd_prompt_token_ids")
                 logging.info("DECODE: Found _epd_processed_prompt in request")
-            
+
             if epd_prompt:
                 # In EPD generation-only mode (decode), pass the SAME input format as prefill
                 # This matches TRT-LLM's test: llm_decode.generate(inputs, disaggregated_params=...)
                 # The inputs dict provides prompt structure, disaggregated_params provide multimodal embeddings
                 if epd_token_ids:
                     prompt_token_ids = epd_token_ids
-                    logging.info(f"DECODE: Using pre-computed token IDs (length={len(epd_token_ids)})")
+                    logging.info(
+                        f"DECODE: Using pre-computed token IDs (length={len(epd_token_ids)})"
+                    )
                 else:
                     # Fallback: tokenize if token IDs not provided
                     prompt_token_ids = self.engine.llm.tokenizer.encode(
                         epd_prompt, add_special_tokens=False
                     )
-                    logging.info(f"DECODE: Tokenized prompt (length={len(prompt_token_ids)})")
-                
+                    logging.info(
+                        f"DECODE: Tokenized prompt (length={len(prompt_token_ids)})"
+                    )
+
                 # In generation-only mode, multimodal data is in disaggregated_params
                 # BUT the LLaVA model REQUIRES the prompt string (modeling_llava_next.py:185)
                 # Pass the same dict format as prefill: {"prompt": ..., "prompt_token_ids": ...}
@@ -335,19 +375,29 @@ class HandlerBase:
                     "prompt": epd_prompt,
                     "prompt_token_ids": prompt_token_ids,
                 }
-                logging.info(f"DECODE: Using EPD input dict (prompt + token_ids) for generation-only mode")
-                logging.info(f"DECODE: Prompt length: {len(epd_prompt)} chars, Token IDs length: {len(prompt_token_ids)}")
-                logging.info(f"DECODE: Multimodal embedding handles are in disaggregated_params")
-                
+                logging.info(
+                    "DECODE: Using EPD input dict (prompt + token_ids) for generation-only mode"
+                )
+                logging.info(
+                    f"DECODE: Prompt length: {len(epd_prompt)} chars, Token IDs length: {len(prompt_token_ids)}"
+                )
+                logging.info(
+                    "DECODE: Multimodal embedding handles are in disaggregated_params"
+                )
+
                 # Remove ALL multimodal data from request to avoid TRT-LLM validation error
                 # In generation-only mode, ALL multimodal data must be in disaggregated_params only
-                mm_keys_to_remove = ['multi_modal_data', 'image_data', 'mm_data']
+                mm_keys_to_remove = ["multi_modal_data", "image_data", "mm_data"]
                 for key in mm_keys_to_remove:
                     if key in request:
                         removed_data = request.pop(key)
-                        logging.info(f"DECODE: Removed {key} from request (already in disaggregated_params)")
+                        logging.info(
+                            f"DECODE: Removed {key} from request (already in disaggregated_params)"
+                        )
                         if isinstance(removed_data, dict):
-                            logging.info(f"DECODE: {key} had keys: {list(removed_data.keys())}")
+                            logging.info(
+                                f"DECODE: {key} had keys: {list(removed_data.keys())}"
+                            )
             else:
                 # Fallback for text-only requests
                 processed_input = request.get("token_ids")
@@ -356,13 +406,22 @@ class HandlerBase:
             # Encode/Prefill worker: Process multimodal content normally
             # In EPD flow, multimodal_processor should be called in PREFILL/ENCODE modes only
             # DECODE mode should skip this and use EPD metadata from prefill
-            if self.disaggregation_mode == DisaggregationMode.DECODE and ep_disaggregated_params:
-                logging.info("DECODE: Skipping multimodal_processor (EPD flow - using disaggregated_params)")
+            if (
+                self.disaggregation_mode == DisaggregationMode.DECODE
+                and ep_disaggregated_params
+            ):
+                logging.info(
+                    "DECODE: Skipping multimodal_processor (EPD flow - using disaggregated_params)"
+                )
                 processed_input = None  # Will be set from epd_metadata above
             else:
-                logging.info(f"{self.disaggregation_mode.value.upper()}: Calling multimodal_processor")
-                processed_input = await self.multimodal_processor.process_openai_request(
-                    request, embeddings, ep_disaggregated_params
+                logging.info(
+                    f"{self.disaggregation_mode.value.upper()}: Calling multimodal_processor"
+                )
+                processed_input = (
+                    await self.multimodal_processor.process_openai_request(
+                        request, embeddings, ep_disaggregated_params
+                    )
                 )
 
         else:
@@ -414,28 +473,49 @@ class HandlerBase:
         streaming = (
             False if self.disaggregation_mode == DisaggregationMode.PREFILL else True
         )
-        
+
         # Log what we're passing to the engine
-        logging.info(f"{self.disaggregation_mode.value.upper()}: ========== ENGINE CALL INPUT ==========")
+        logging.info(
+            f"{self.disaggregation_mode.value.upper()}: ========== ENGINE CALL INPUT =========="
+        )
         logging.info(f"  - processed_input type: {type(processed_input)}")
         if isinstance(processed_input, dict):
             logging.info(f"  - processed_input keys: {list(processed_input.keys())}")
-            if 'prompt' in processed_input:
-                logging.info(f"  - processed_input['prompt']: {processed_input['prompt'][:80]}...")
-            if 'prompt_token_ids' in processed_input:
-                logging.info(f"  - processed_input['prompt_token_ids'] length: {len(processed_input['prompt_token_ids'])}")
+            if "prompt" in processed_input:
+                logging.info(
+                    f"  - processed_input['prompt']: {processed_input['prompt'][:80]}..."
+                )
+            if "prompt_token_ids" in processed_input:
+                logging.info(
+                    f"  - processed_input['prompt_token_ids'] length: {len(processed_input['prompt_token_ids'])}"
+                )
             # Check for any multimodal-related keys that shouldn't be there
-            mm_keys = [k for k in processed_input.keys() if 'multi' in k.lower() or 'image' in k.lower() or 'mm_' in k]
+            mm_keys = [
+                k
+                for k in processed_input.keys()
+                if "multi" in k.lower() or "image" in k.lower() or "mm_" in k
+            ]
             if mm_keys:
                 logging.warning(f"  - FOUND MULTIMODAL KEYS IN INPUT: {mm_keys}")
         elif isinstance(processed_input, list):
             logging.info(f"  - processed_input list length: {len(processed_input)}")
-        logging.info(f"  - disaggregated_params: {'None' if disaggregated_params is None else 'present'}")
+        logging.info(
+            f"  - disaggregated_params: {'None' if disaggregated_params is None else 'present'}"
+        )
         if disaggregated_params:
-            logging.info(f"  - disaggregated_params.request_type: {getattr(disaggregated_params, 'request_type', 'NOT SET')}")
-            has_mm_handles = hasattr(disaggregated_params, 'multimodal_embedding_handles') and disaggregated_params.multimodal_embedding_handles
-            logging.info(f"  - disaggregated_params.multimodal_embedding_handles: {'present (' + str(len(disaggregated_params.multimodal_embedding_handles)) + ' handle(s))' if has_mm_handles else 'None'}")
-        logging.info(f"{self.disaggregation_mode.value.upper()}: ========================================")
+            logging.info(
+                f"  - disaggregated_params.request_type: {getattr(disaggregated_params, 'request_type', 'NOT SET')}"
+            )
+            has_mm_handles = (
+                hasattr(disaggregated_params, "multimodal_embedding_handles")
+                and disaggregated_params.multimodal_embedding_handles
+            )
+            logging.info(
+                f"  - disaggregated_params.multimodal_embedding_handles: {'present (' + str(len(disaggregated_params.multimodal_embedding_handles)) + ' handle(s))' if has_mm_handles else 'None'}"
+            )
+        logging.info(
+            f"{self.disaggregation_mode.value.upper()}: ========================================"
+        )
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
 
@@ -451,7 +531,9 @@ class HandlerBase:
         )
 
         # Final validation before calling engine
-        logging.info(f"{self.disaggregation_mode.value.upper()}: ========== FINAL VALIDATION ==========")
+        logging.info(
+            f"{self.disaggregation_mode.value.upper()}: ========== FINAL VALIDATION =========="
+        )
         logging.info(f"  - inputs type: {type(processed_input)}")
         logging.info(f"  - inputs is dict: {isinstance(processed_input, dict)}")
         if isinstance(processed_input, dict):
@@ -464,11 +546,15 @@ class HandlerBase:
                     logging.info(f"    - {k}: {val_type} (len={val_len})")
                 else:
                     logging.info(f"    - {k}: {type(processed_input[k]).__name__}")
-        logging.info(f"  - disaggregated_params is None: {disaggregated_params is None}")
+        logging.info(
+            f"  - disaggregated_params is None: {disaggregated_params is None}"
+        )
         if disaggregated_params:
-            logging.info(f"  - disaggregated_params.request_type: {disaggregated_params.request_type}")
-        logging.info(f"=========================================")
-        
+            logging.info(
+                f"  - disaggregated_params.request_type: {disaggregated_params.request_type}"
+            )
+        logging.info("=========================================")
+
         try:
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
@@ -506,62 +592,108 @@ class HandlerBase:
                     if self.disaggregation_mode == DisaggregationMode.PREFILL:
                         # Return the disaggregated params only when operating in prefill mode.
                         # In EPD flow, output.disaggregated_params might be None, use the input params
-                        logging.info(f"PREFILL: output.disaggregated_params is {'None' if output.disaggregated_params is None else 'present'}")
-                        logging.info(f"PREFILL: input disaggregated_params is {'None' if disaggregated_params is None else 'present'}")
-                        
-                        params_to_encode = output.disaggregated_params if output.disaggregated_params is not None else disaggregated_params
-                        
+                        logging.info(
+                            f"PREFILL: output.disaggregated_params is {'None' if output.disaggregated_params is None else 'present'}"
+                        )
+                        logging.info(
+                            f"PREFILL: input disaggregated_params is {'None' if disaggregated_params is None else 'present'}"
+                        )
+
+                        params_to_encode = (
+                            output.disaggregated_params
+                            if output.disaggregated_params is not None
+                            else disaggregated_params
+                        )
+
                         # In EPD flow, manually preserve multimodal_embedding_handles from input
                         # because TRT-LLM engine may not propagate them through prefill
-                        if (params_to_encode is not None and disaggregated_params is not None):
-                            input_handles = getattr(disaggregated_params, 'multimodal_embedding_handles', None)
-                            output_handles = getattr(params_to_encode, 'multimodal_embedding_handles', None)
-                            
+                        if (
+                            params_to_encode is not None
+                            and disaggregated_params is not None
+                        ):
+                            input_handles = getattr(
+                                disaggregated_params,
+                                "multimodal_embedding_handles",
+                                None,
+                            )
+                            output_handles = getattr(
+                                params_to_encode, "multimodal_embedding_handles", None
+                            )
+
                             if input_handles is not None and output_handles is None:
-                                logging.info(f"PREFILL: Preserving multimodal_embedding_handles from input (EPD flow)")
-                                params_to_encode.multimodal_embedding_handles = input_handles
+                                logging.info(
+                                    "PREFILL: Preserving multimodal_embedding_handles from input (EPD flow)"
+                                )
+                                params_to_encode.multimodal_embedding_handles = (
+                                    input_handles
+                                )
                                 # Also preserve hashes if they exist
-                                input_hashes = getattr(disaggregated_params, 'multimodal_hashes', None)
+                                input_hashes = getattr(
+                                    disaggregated_params, "multimodal_hashes", None
+                                )
                                 if input_hashes is not None:
                                     params_to_encode.multimodal_hashes = input_hashes
-                        
+
                         if params_to_encode is not None:
-                            logging.info(f"PREFILL: params_to_encode has multimodal_embedding_handles: {hasattr(params_to_encode, 'multimodal_embedding_handles') and params_to_encode.multimodal_embedding_handles is not None}")
-                            logging.info(f"PREFILL: params_to_encode.request_type: {getattr(params_to_encode, 'request_type', 'NOT SET')}")
+                            logging.info(
+                                f"PREFILL: params_to_encode has multimodal_embedding_handles: {hasattr(params_to_encode, 'multimodal_embedding_handles') and params_to_encode.multimodal_embedding_handles is not None}"
+                            )
+                            logging.info(
+                                f"PREFILL: params_to_encode.request_type: {getattr(params_to_encode, 'request_type', 'NOT SET')}"
+                            )
                         else:
-                            logging.warning("PREFILL: params_to_encode is None - no disaggregated params to send!")
-                        
+                            logging.warning(
+                                "PREFILL: params_to_encode is None - no disaggregated params to send!"
+                            )
+
                         encoded_params = DisaggregatedParamsCodec.encode(
                             params_to_encode
                         )
-                        
+
                         if encoded_params is not None:
-                            logging.info(f"PREFILL: Successfully encoded disaggregated params")
+                            logging.info(
+                                "PREFILL: Successfully encoded disaggregated params"
+                            )
                             params_dict = asdict(encoded_params)
-                            
+
                             # Pack EPD-specific fields into disaggregated_params to ensure they're forwarded
                             # The frontend only forwards disaggregated_params and prompt_tokens_details from prefill response
                             # Note: max_tokens is already handled by Rust frontend's PrefillRouter
                             epd_metadata = {}
-                            
+
                             if "_epd_processed_prompt" in request and res.prompt:
                                 epd_metadata["_epd_processed_prompt"] = res.prompt
-                                logging.info(f"PREFILL: Packing _epd_processed_prompt into disaggregated_params: {res.prompt[:50]}...")
-                            
-                            if "_epd_prompt_token_ids" in request and res.prompt_token_ids:
-                                epd_metadata["_epd_prompt_token_ids"] = res.prompt_token_ids
-                                logging.info(f"PREFILL: Packing _epd_prompt_token_ids into disaggregated_params (length={len(res.prompt_token_ids)})")
-                            
+                                logging.info(
+                                    f"PREFILL: Packing _epd_processed_prompt into disaggregated_params: {res.prompt[:50]}..."
+                                )
+
+                            if (
+                                "_epd_prompt_token_ids" in request
+                                and res.prompt_token_ids
+                            ):
+                                epd_metadata[
+                                    "_epd_prompt_token_ids"
+                                ] = res.prompt_token_ids
+                                logging.info(
+                                    f"PREFILL: Packing _epd_prompt_token_ids into disaggregated_params (length={len(res.prompt_token_ids)})"
+                                )
+
                             # Add EPD metadata to the disaggregated_params dict
                             if epd_metadata:
                                 params_dict["_epd_metadata"] = epd_metadata
-                                logging.info(f"PREFILL: Added _epd_metadata with {len(epd_metadata)} fields to disaggregated_params")
-                            
+                                logging.info(
+                                    f"PREFILL: Added _epd_metadata with {len(epd_metadata)} fields to disaggregated_params"
+                                )
+
                             out["disaggregated_params"] = params_dict
-                            logging.info(f"PREFILL: Added disaggregated_params to response")
+                            logging.info(
+                                "PREFILL: Added disaggregated_params to response"
+                            )
                         else:
-                            logging.error("PREFILL: encoded_params is None - decode worker will fail!")
-                            
+                            logging.error(
+                                "PREFILL: encoded_params is None - decode worker will fail!"
+                            )
+
                     if out.get("finish_reason"):
                         num_input_tokens = len(request.get("token_ids", []))
 
