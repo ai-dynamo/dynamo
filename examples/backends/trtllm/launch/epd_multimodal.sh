@@ -16,6 +16,7 @@ export ENCODE_ENDPOINT=${ENCODE_ENDPOINT:-"dyn://dynamo.tensorrt_llm_encode.gene
 export MODALITY=${MODALITY:-"multimodal"}
 export ALLOWED_LOCAL_MEDIA_PATH=${ALLOWED_LOCAL_MEDIA_PATH:-"/tmp"}
 export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
+export CUSTOM_TEMPLATE=${CUSTOM_TEMPLATE:-"$DYNAMO_HOME/examples/backends/trtllm/templates/llava_multimodal.jinja"}
 
 # Setup cleanup trap
 cleanup() {
@@ -49,7 +50,8 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --disaggregation-mode prefill \
-  --encode-endpoint "$ENCODE_ENDPOINT" &
+  --encode-endpoint "$ENCODE_ENDPOINT" \
+  --custom-jinja-template "$CUSTOM_TEMPLATE" &
 PREFILL_PID=$!
 
 # run decode worker
@@ -58,7 +60,8 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$DECODE_ENGINE_ARGS" \
   --modality "$MODALITY" \
-  --disaggregation-mode decode &
+  --disaggregation-mode decode \
+  --custom-jinja-template "$CUSTOM_TEMPLATE" &
 DECODE_PID=$!
 
 wait $DYNAMO_PID
