@@ -43,6 +43,12 @@ PyYAML==6.0.3
 scikit-learn==1.7.2
 scipy<1.14.0  # Upper bound for pmdarima compatibility
 sentencepiece==0.2.1
+# sniffio: Required by kr8s for port forwarding. Previously provided transitively via
+# kubernetes→kr8s (requires anyio>=3.7.0)→anyio 4.11.0→sniffio, but anyio 4.12.0 removed
+# sniffio from its dependencies. kr8s 0.20.13 imports sniffio directly without declaring it
+# and doesn't pin anyio to <4.12.0, so we must explicitly include sniffio here to prevent
+# ModuleNotFoundError during kr8s port forwarding.
+sniffio==1.3.1
 tensorboard==2.19.0
 tensorboardX==2.6.2.2
 # Transformers version constraint for container builds
