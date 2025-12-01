@@ -179,6 +179,7 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
+  - dgdscalingadapters
   - dynamocomponentdeployments
   - dynamographdeploymentrequests
   - dynamographdeployments
@@ -194,15 +195,7 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamocomponentdeployments/finalizers
-  - dynamographdeploymentrequests/finalizers
-  - dynamographdeployments/finalizers
-  - dynamomodels/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - nvidia.com
-  resources:
+  - dgdscalingadapters/status
   - dynamocomponentdeployments/status
   - dynamographdeploymentrequests/status
   - dynamographdeployments/status
@@ -210,6 +203,15 @@ rules:
   verbs:
   - get
   - patch
+  - update
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamocomponentdeployments/finalizers
+  - dynamographdeploymentrequests/finalizers
+  - dynamographdeployments/finalizers
+  - dynamomodels/finalizers
+  verbs:
   - update
 - apiGroups:
   - scheduling.run.ai

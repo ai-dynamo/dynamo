@@ -54,6 +54,7 @@ const (
 	KubeLabelValueTrue  = "true"
 
 	KubeLabelDynamoComponentPod = "nvidia.com/dynamo-component-pod"
+	KubeLabelServiceName        = "nvidia.com/service-name"
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
