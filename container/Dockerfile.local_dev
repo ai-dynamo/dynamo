@@ -20,6 +20,9 @@ ARG USER_UID
 ARG USER_GID
 ARG WORKSPACE_DIR=/workspace
 
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
 ARG ARCH
 
 # Update package lists and install developer utilities. Some of these may exist in the base image,

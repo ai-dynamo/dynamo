@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::local_model::LocalModel;
-use dynamo_runtime::distributed::DistributedConfig;
-use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
+use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
+use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
@@ -22,6 +22,7 @@ use std::{
 use tokio::sync::Mutex;
 use tracing::Instrument;
 
+use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
@@ -125,7 +126,10 @@ fn create_request_context(
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
-    if rs::config::env_is_truthy("OTEL_EXPORT_ENABLED") {
+    if std::env::var(env_otlp::OTEL_EXPORT_ENABLED)
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         eprintln!(
             "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
         );
@@ -134,8 +138,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
 
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
+    m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(unregister_llm, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
@@ -168,6 +174,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::ZmqKvEventPublisher>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
+    m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
@@ -209,6 +216,13 @@ where
 #[pyo3(text_signature = "(level, message, module, file, line)")]
 fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) {
     logging::log_message(level, message, module, file, line);
+}
+
+/// Generate a deterministic signed int32 ID from a LoRA name using blake3 hash.
+#[pyfunction]
+#[pyo3(text_signature = "(lora_name)")]
+fn lora_name_to_id(lora_name: &str) -> i32 {
+    llm_rs::utils::lora_name_to_id(lora_name)
 }
 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
@@ -315,6 +329,18 @@ fn register_llm<'p>(
             .await
             .map_err(to_pyerr)?;
 
+        Ok(())
+    })
+}
+
+/// Unregister a model from the endpoint.
+#[pyfunction]
+#[pyo3(signature = (endpoint))]
+fn unregister_llm<'p>(py: Python<'p>, endpoint: Endpoint) -> PyResult<Bound<'p, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        LocalModel::detach_model_from_endpoint(&endpoint.inner)
+            .await
+            .map_err(to_pyerr)?;
         Ok(())
     })
 }
@@ -429,8 +455,9 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    fn new(event_loop: PyObject, store_kv: String) -> PyResult<Self> {
-        let selected_kv_store: KeyValueStoreSelect = store_kv.parse().map_err(to_pyerr)?;
+    fn new(event_loop: PyObject, store_kv: String, request_plane: String) -> PyResult<Self> {
+        let selected_kv_store: kv::Selector = store_kv.parse().map_err(to_pyerr)?;
+        let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
 
         // Try to get existing runtime first, create new Worker only if needed
         // This allows multiple DistributedRuntime instances to share the same tokio runtime
@@ -454,7 +481,10 @@ impl DistributedRuntime {
 
         // Initialize logging in context where tokio runtime is available
         // otel exporter requires it
-        if rs::config::env_is_truthy("OTEL_EXPORT_ENABLED") {
+        if std::env::var(env_otlp::OTEL_EXPORT_ENABLED)
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             runtime.secondary().block_on(async {
                 rs::logging::init();
             });
@@ -462,7 +492,13 @@ impl DistributedRuntime {
 
         let runtime_config = DistributedConfig {
             store_backend: selected_kv_store,
-            nats_config: dynamo_runtime::transports::nats::ClientOptions::default(),
+            // We only need NATS here to monitor it's metrics, so only if it's our request plane.
+            nats_config: if request_plane.is_nats() {
+                Some(dynamo_runtime::transports::nats::ClientOptions::default())
+            } else {
+                None
+            },
+            request_plane,
         };
         let inner = runtime
             .secondary()
@@ -545,15 +581,6 @@ impl Component {
         Ok(Endpoint {
             inner,
             event_loop: self.event_loop.clone(),
-        })
-    }
-
-    /// NATS specific stats/metrics call
-    fn create_service<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let mut inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.add_stats_service().await.map_err(to_pyerr)?;
-            Ok(())
         })
     }
 

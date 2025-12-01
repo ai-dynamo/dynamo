@@ -218,7 +218,7 @@ def setup_prometheus_registry(
     register_engine_metrics_callback(
         endpoint=generate_endpoint,
         registry=registry,
-        metric_prefix_filter="sglang:",
+        metric_prefix_filters=["sglang:"],
     )
     return registry
 

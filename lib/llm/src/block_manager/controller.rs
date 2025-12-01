@@ -39,10 +39,8 @@ pub struct Controller<Locality: LocalityProvider, Metadata: BlockMetadata> {
 impl<Locality: LocalityProvider, Metadata: BlockMetadata> Controller<Locality, Metadata> {
     pub async fn new(
         block_manager: KvBlockManager<Locality, Metadata>,
-        mut component: dynamo_runtime::component::Component,
+        component: dynamo_runtime::component::Component,
     ) -> anyhow::Result<Self> {
-        component.add_stats_service().await?;
-
         let handler = ControllerHandler::new(block_manager.clone());
         let engine = Ingress::for_engine(handler.clone())?;
 

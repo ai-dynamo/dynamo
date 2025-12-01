@@ -22,6 +22,7 @@ pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
     pub busy_threshold: Option<f64>,
+    pub enforce_disagg: bool,
 }
 
 impl RouterConfig {
@@ -30,11 +31,17 @@ impl RouterConfig {
             router_mode,
             kv_router_config,
             busy_threshold: None,
+            enforce_disagg: false,
         }
     }
 
     pub fn with_busy_threshold(mut self, threshold: Option<f64>) -> Self {
         self.busy_threshold = threshold;
+        self
+    }
+
+    pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
+        self.enforce_disagg = enforce_disagg;
         self
     }
 }
@@ -44,14 +51,14 @@ pub enum EngineConfig {
     /// Remote networked engines that we discover via etcd
     Dynamic(Box<LocalModel>),
 
-    /// A Full service engine does it's own tokenization and prompt formatting.
-    StaticFull {
+    /// A Text engine receives text, does it's own tokenization and prompt formatting.
+    InProcessText {
         engine: Arc<dyn StreamingEngine>,
         model: Box<LocalModel>,
     },
 
-    /// A core engine expects to be wrapped with pre/post processors that handle tokenization.
-    StaticCore {
+    /// A Tokens engine receives tokens, expects to be wrapped with pre/post processors that handle tokenization.
+    InProcessTokens {
         engine: ExecutionContext,
         model: Box<LocalModel>,
         is_prefill: bool,
@@ -63,8 +70,8 @@ impl EngineConfig {
         use EngineConfig::*;
         match self {
             Dynamic(lm) => lm,
-            StaticFull { model, .. } => model,
-            StaticCore { model, .. } => model,
+            InProcessText { model, .. } => model,
+            InProcessTokens { model, .. } => model,
         }
     }
 }

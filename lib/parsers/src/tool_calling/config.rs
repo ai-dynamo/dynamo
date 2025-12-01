@@ -55,6 +55,7 @@ impl Default for JsonParserConfig {
 }
 
 /// Configuration for parsing tool calls with different formats
+// TODO(2ez4bz): refactor to allow other parser configs than `JsonParserConfig`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallConfig {
     /// The format type for tool calls
@@ -174,6 +175,30 @@ impl ToolCallConfig {
                 parser_type: JsonParserType::DeepseekV31,
                 ..Default::default()
             },
+        }
+    }
+
+    pub fn deepseek_v3() -> Self {
+        // DeepSeek V3 format:
+        // <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>{type}<｜tool▁sep｜>{function_name}\n```json\n{arguments}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+        // There are some differences between DeepSeek V3 and DeepSeek V3.1
+        Self {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec!["<｜tool▁calls▁begin｜>".to_string()],
+                tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
+                tool_call_separator_tokens: vec!["<｜tool▁sep｜>".to_string()],
+                parser_type: JsonParserType::DeepseekV3,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn qwen3_coder() -> Self {
+        // <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
+        Self {
+            format: ToolCallParserType::Xml,
+            json: JsonParserConfig::default(), // Not used for qwen3_coder but kept for consistency.
         }
     }
 }

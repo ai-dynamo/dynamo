@@ -2,14 +2,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG CUDA_VERSION=12.9.1
+# This section contains build arguments that are common and shared with
+# the plain Dockerfile, so they should NOT have a default. The source of truth is from build.sh.
 
-# Runtime image and build-time configuration (aligned with other backends)
-# TODO: OPS-<number>: Use the same runtime image as the other backends
-ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.9.1-cudnn-runtime-ubuntu24.04"
+ARG BASE_IMAGE
+ARG BASE_IMAGE_TAG
 
-ARG PYTHON_VERSION=3.10
+ARG FRAMEWORK_IMAGE
+ARG FRAMEWORK_IMAGE_TAG
+ARG PYTHON_VERSION
+ARG CUDA_VERSION
+
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 ARG CARGO_BUILD_JOBS
@@ -39,7 +42,8 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 # - Develop or debug framework-level components
 # - Create custom builds with specific optimization flags
 #
-FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS framework
+#FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS framework
+FROM ${FRAMEWORK_IMAGE}:${FRAMEWORK_IMAGE_TAG} AS framework
 
 # Declare all ARGs
 ARG BUILD_TYPE=all
@@ -329,6 +333,10 @@ ${NIXL_PLUGIN_DIR}:\
 /usr/local/nvidia/lib64:\
 ${LD_LIBRARY_PATH}
 
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
+
 # Copy NATS and ETCD from dynamo_base, and UCX/NIXL
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
@@ -358,10 +366,9 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 
 ## Copy attribution files and launch banner with correct ownership
 COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
-COPY --chown=dynamo: container/launch_message.txt /workspace/launch_message.txt
 
 # Setup launch banner in common directory accessible to all users
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
+RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
 
 # Setup environment for all users
@@ -378,6 +385,7 @@ COPY --chown=dynamo: examples /workspace/examples
 COPY --chown=dynamo: benchmarks /workspace/benchmarks
 COPY --chown=dynamo: deploy /workspace/deploy
 COPY --chown=dynamo: components/ /workspace/components/
+COPY --chown=dynamo: recipes/ /workspace/recipes/
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
@@ -399,6 +407,9 @@ FROM runtime AS dev
 
 ARG WORKSPACE_DIR=/sgl-workspace/dynamo
 ARG PYTHON_VERSION
+
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 # NOTE: SGLang uses system Python (not a virtualenv in framework/runtime stages) to align with
 # upstream SGLang Dockerfile: https://github.com/sgl-project/sglang/blob/main/docker/Dockerfile

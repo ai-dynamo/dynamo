@@ -68,11 +68,12 @@ impl DiscoveryDaemon {
         let (reader, writer) = reflector::store();
 
         // Apply label selector to only watch discovery-enabled EndpointSlices
-        let watch_config =
-            Config::default().labels("nvidia.com/dynamo-discovery-backend=kubernetes");
+        let watch_config = Config::default()
+            .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
+            .labels("nvidia.com/dynamo-discovery-enabled=true");
 
         tracing::info!(
-            "Daemon watching EndpointSlices with label: nvidia.com/dynamo-discovery-backend=kubernetes"
+            "Daemon watching EndpointSlices with labels: nvidia.com/dynamo-discovery-backend=kubernetes, nvidia.com/dynamo-discovery-enabled=true"
         );
 
         // Spawn reflector task (runs independently)
@@ -181,8 +182,8 @@ impl DiscoveryDaemon {
     ) -> Result<MetadataSnapshot> {
         let start = std::time::Instant::now();
 
-        // Extract ALL ready endpoints (instance_id, pod_name, pod_ip) directly from reflector
-        let all_endpoints: Vec<(u64, String, String)> = reader
+        // Extract ALL ready endpoints (instance_id, pod_name, pod_ip, system_port) directly from reflector
+        let all_endpoints: Vec<(u64, String, String, u16)> = reader
             .state()
             .iter()
             .flat_map(|arc_slice| extract_endpoint_info(arc_slice.as_ref()))
@@ -194,25 +195,26 @@ impl DiscoveryDaemon {
         );
 
         // Concurrent fetch: Fetch metadata for all endpoints in parallel
-        let fetch_futures = all_endpoints
-            .into_iter()
-            .map(|(instance_id, pod_name, pod_ip)| {
-                let daemon = self.clone();
-                async move {
-                    match daemon.fetch_metadata(&pod_name, &pod_ip).await {
-                        Ok(metadata) => Some((instance_id, metadata)),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to fetch metadata for pod {} (instance_id={:x}): {}",
-                                pod_name,
-                                instance_id,
-                                e
-                            );
-                            None
+        let fetch_futures =
+            all_endpoints
+                .into_iter()
+                .map(|(instance_id, pod_name, pod_ip, system_port)| {
+                    let daemon = self.clone();
+                    async move {
+                        match daemon.fetch_metadata(&pod_name, &pod_ip, system_port).await {
+                            Ok(metadata) => Some((instance_id, metadata)),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to fetch metadata for pod {} (instance_id={:x}): {}",
+                                    pod_name,
+                                    instance_id,
+                                    e
+                                );
+                                None
+                            }
                         }
                     }
-                }
-            });
+                });
 
         // Execute fetches concurrently with bounded parallelism
         let results: Vec<_> = futures::stream::iter(fetch_futures)
@@ -241,7 +243,12 @@ impl DiscoveryDaemon {
     }
 
     /// Fetch metadata for a single pod (with caching)
-    async fn fetch_metadata(&self, pod_name: &str, pod_ip: &str) -> Result<Arc<DiscoveryMetadata>> {
+    async fn fetch_metadata(
+        &self,
+        pod_name: &str,
+        pod_ip: &str,
+        system_port: u16,
+    ) -> Result<Arc<DiscoveryMetadata>> {
         let instance_id = hash_pod_name(pod_name);
 
         // Check cache
@@ -258,7 +265,7 @@ impl DiscoveryDaemon {
         }
 
         // Cache miss: fetch from HTTP
-        let url = format!("http://{}:{}/metadata", pod_ip, self.pod_info.system_port);
+        let url = format!("http://{}:{}/metadata", pod_ip, system_port);
 
         tracing::debug!("Fetching metadata from {url}");
 

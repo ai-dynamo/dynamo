@@ -31,7 +31,7 @@ pub struct Flags {
 
     /// HTTP port. `in=http` only
     /// If tls_cert_path and tls_key_path are provided, this will be TLS/HTTPS.
-    #[arg(long, default_value = "8080")]
+    #[arg(long, default_value = "8000")]
     pub http_port: u16,
 
     /// TLS certificate file
@@ -69,8 +69,8 @@ pub struct Flags {
     pub router_temperature: Option<f64>,
 
     /// KV Router: Whether to use KV events to maintain the view of cached blocks
-    /// If false, would use ApproxKvRouter for predicting block creation / deletion
-    /// based only on incoming requests at a timer.
+    /// If false, the router predicts cache state based on routing decisions
+    /// with TTL-based expiration and pruning, rather than receiving events from workers.
     /// Default: true
     #[arg(long)]
     pub use_kv_events: Option<bool>,
@@ -123,11 +123,14 @@ pub struct Flags {
     /// Which key-value backend to use: etcd, mem, file.
     /// Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details.
     /// File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.
-    #[arg(long, default_value = "etcd")]
+    #[arg(long, default_value = "etcd", value_parser = ["etcd", "file", "mem"])]
     pub store_kv: String,
 
-    /// Everything after a `--`.
-    /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
+    /// Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp].
+    #[arg(long, default_value = "nats", value_parser = ["nats", "http", "tcp"])]
+    pub request_plane: String,
+
+    /// Everything after a `--`. Not currently used.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]
     pub last: Vec<String>,
 }
@@ -184,6 +187,9 @@ impl Flags {
                 self.router_replica_sync,
                 self.router_track_active_blocks,
                 // defaulting below args (no longer maintaining new flags for dynamo-run)
+                None,
+                None,
+                None,
                 None,
                 None,
             ),

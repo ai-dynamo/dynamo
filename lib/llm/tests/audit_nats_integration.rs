@@ -27,7 +27,6 @@ mod tests {
     use dynamo_llm::protocols::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     };
-    use dynamo_runtime::Runtime;
     use dynamo_runtime::transports::nats;
     use futures::StreamExt;
     use serde_json::Value;
@@ -46,15 +45,6 @@ mod tests {
             .connect()
             .await
             .expect("Failed to connect to NATS server")
-    }
-
-    /// Helper to create a test DistributedRuntime with NATS
-    async fn create_test_drt() -> dynamo_runtime::DistributedRuntime {
-        let rt = Runtime::from_current().unwrap();
-        let config = dynamo_runtime::distributed::DistributedConfig::from_settings();
-        dynamo_runtime::DistributedRuntime::new(rt, config)
-            .await
-            .expect("Failed to create DistributedRuntime")
     }
 
     /// Helper to create a minimal test request
@@ -155,7 +145,6 @@ mod tests {
         // Core test: audit records are published to NATS with correct structure
         async_with_vars(
             [
-                ("DYN_AUDIT_ENABLED", Some("1")),
                 ("DYN_AUDIT_SINKS", Some("nats")),
                 ("DYN_AUDIT_NATS_SUBJECT", Some(TEST_SUBJECT)),
             ],
@@ -166,8 +155,7 @@ mod tests {
                 setup_test_stream(&client, &stream_name, TEST_SUBJECT).await;
 
                 bus::init(100);
-                let drt = create_test_drt().await;
-                sink::spawn_workers_from_env(&drt);
+                sink::spawn_workers_from_env().await.unwrap();
                 time::sleep(Duration::from_millis(100)).await;
 
                 // Emit audit record
@@ -212,7 +200,6 @@ mod tests {
 
         async_with_vars(
             [
-                ("DYN_AUDIT_ENABLED", Some("1")),
                 ("DYN_AUDIT_SINKS", Some("nats")),
                 ("DYN_AUDIT_NATS_SUBJECT", Some(TEST_SUBJECT)),
             ],
@@ -223,8 +210,7 @@ mod tests {
                 setup_test_stream(&client, &stream_name, TEST_SUBJECT).await;
 
                 bus::init(100);
-                let drt = create_test_drt().await;
-                sink::spawn_workers_from_env(&drt);
+                sink::spawn_workers_from_env().await.unwrap();
                 time::sleep(Duration::from_millis(100)).await;
 
                 // Request with store=true (should be audited)
