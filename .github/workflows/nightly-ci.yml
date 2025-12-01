@@ -5,16 +5,11 @@ name: Nightly CI pipeline
 
 on:
   schedule:
-    - cron: '0 8 * * *'
-  workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-nightly-${{ github.run_id }}
-  cancel-in-progress: false
+    - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
+  workflow_dispatch: # TODO remove this after testing
 
 permissions:
   contents: read
-  id-token: write
 
 defaults:
   run:
