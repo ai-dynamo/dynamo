@@ -551,6 +551,29 @@ jobs:
         # Redirect all output to a log file while still showing it
         exec > >(tee -a deploy-operator.log) 2>&1
 
+        # Error handler function - collects diagnostics on any command failure
+        handle_error() {
+          local exit_code=$?
+          echo "=== Command failed with exit code $exit_code ==="
+
+          # Capture additional diagnostics if namespace is set
+          if [ -n "$NAMESPACE" ]; then
+            echo "=== Pod Status ==="
+            kubectl get pods -n ${NAMESPACE} -o wide 2>&1 || true
+            echo "=== Events ==="
+            kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' 2>&1 | tail -20 || true
+            echo "=== Deployment Status ==="
+            kubectl get deployments -n ${NAMESPACE} 2>&1 || true
+            echo "=== Helm Status ==="
+            helm status dynamo-platform -n ${NAMESPACE} 2>&1 || true
+          fi
+
+          exit $exit_code
+        }
+
+        # Set trap to call handle_error on any command failure
+        trap 'handle_error' ERR
+
         # Set namespace
         # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
         BRANCH_SANITIZED="${BRANCH//\//-}"
@@ -596,71 +619,28 @@ jobs:
 
         # Check if Helm is available
         echo "Checking Helm availability..."
-        if ! command -v helm &> /dev/null; then
-          ERROR_MSG="Helm is not installed or not available in PATH. Helm installation may have failed during runner setup."
-          echo "$ERROR_MSG"
-          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
-          exit 1
-        fi
-
+        command -v helm
         echo "Helm version: $(helm version --short)"
 
         # Install helm dependencies
         echo "Installing Helm dependencies..."
-        if ! helm repo add bitnami https://charts.bitnami.com/bitnami 2>&1; then
-          ERROR_MSG="Failed to add Helm bitnami repository"
-          echo "$ERROR_MSG"
-          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
-          exit 1
-        fi
+        helm repo add bitnami https://charts.bitnami.com/bitnami
 
         cd deploy/cloud/helm/platform/
-
-        if ! helm dep build . 2>&1; then
-          ERROR_MSG="Failed to build Helm dependencies"
-          echo "$ERROR_MSG"
-          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
-          exit 1
-        fi
+        helm dep build .
 
         # Install platform with namespace restriction for single profile testing
         echo "Installing dynamo-platform Helm chart..."
-        if ! helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+        helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
           --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
-          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret 2>&1; then
-          ERROR_MSG="Failed to install dynamo-platform Helm chart. This may be due to: pre-install hook timeout, image pull failures, or resource constraints."
-          echo "$ERROR_MSG"
-
-          # Capture additional diagnostics
-          echo "=== Pod Status ==="
-          kubectl get pods -n ${NAMESPACE} -o wide || true
-          echo "=== Events ==="
-          kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' | tail -20 || true
-          echo "=== Helm Status ==="
-          helm status dynamo-platform -n ${NAMESPACE} || true
-
-          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
-          exit 1
-        fi
+          --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
 
         # Wait for all deployments to be ready
         echo "Waiting for deployments to be ready..."
-        if ! timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch 2>&1; then
-          ERROR_MSG="Deployment rollout timed out after 300 seconds"
-          echo "$ERROR_MSG"
-
-          # Capture diagnostics
-          echo "=== Pod Status ==="
-          kubectl get pods -n ${NAMESPACE} -o wide || true
-          echo "=== Deployment Status ==="
-          kubectl get deployments -n ${NAMESPACE} || true
-
-          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
-          exit 1
-        fi
+        timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
       continue-on-error: true
 
     - name: Setup Python for Log Analysis
@@ -697,11 +677,6 @@ jobs:
           echo "LOGAI_EXTRACTED_ERROR=Log file not found" >> $GITHUB_ENV
         fi
 
-        # Also preserve any manually captured error
-        if [ -n "$ERROR_MESSAGE" ]; then
-          echo "MANUAL_ERROR_MESSAGE=$ERROR_MESSAGE" >> $GITHUB_ENV
-        fi
-
     - name: Check for Job Failure and Create Annotation
       if: always() && steps.deploy-operator-step.outcome == 'failure'
       env:
@@ -709,13 +684,8 @@ jobs:
       run: |
         set -x
 
-        # Combine LogAI extracted errors with manual captures
+        # Use LogAI extracted errors (actual error lines from logs)
         ERROR_MESSAGE="${LOGAI_EXTRACTED_ERROR:-Unknown error occurred during operator deployment}"
-
-        # Add manually captured error if available
-        if [ -n "$MANUAL_ERROR_MESSAGE" ]; then
-          ERROR_MESSAGE="${ERROR_MESSAGE}\n\nManually Captured Error:\n${MANUAL_ERROR_MESSAGE}"
-        fi
 
         # Get additional context from Kubernetes if namespace is set
         if [ -n "$NAMESPACE" ]; then
@@ -761,7 +731,7 @@ jobs:
               "output": {
                 "title": "Operator Deployment Failed (LogAI Analysis)",
                 "summary": ("Failed to deploy dynamo-platform operator to namespace " + $namespace),
-                "text": ("**Job**: deploy-operator\n**Namespace**: " + $namespace + "\n**Analysis Method**: LogAI + Manual Capture\n\n**Error Details**:\n```\n" + $error_msg + "\n```\n\n[View Job Run](https://github.com/" + $repo + "/actions/runs/" + $run_id + ")"),
+                "text": ("**Job**: deploy-operator\n**Namespace**: " + $namespace + "\n**Analysis Method**: LogAI\n\n**Error Details**:\n```\n" + $error_msg + "\n```\n\n[View Job Run](https://github.com/" + $repo + "/actions/runs/" + $run_id + ")"),
                 "annotations": [{
                   "path": ".github/workflows/container-validation-backends.yml",
                   "start_line": 357,
@@ -833,6 +803,25 @@ jobs:
         # Redirect all output to a log file while still showing it
         exec > >(tee -a test-output.log) 2>&1
 
+        # Error handler function - collects diagnostics on any command failure
+        handle_error() {
+          local exit_code=$?
+          echo "=== Command failed with exit code $exit_code ==="
+
+          # Capture additional diagnostics if variables are set
+          if [ -n "$GRAPH_NAME" ] && [ -n "$NAMESPACE" ]; then
+            echo "=== Pod Status ==="
+            kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $NAMESPACE -o wide 2>&1 || true
+            echo "=== Pod Logs (last 50 lines) ==="
+            kubectl logs -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n $NAMESPACE --tail=50 2>&1 || true
+          fi
+
+          exit $exit_code
+        }
+
+        # Set trap to call handle_error on any command failure
+        trap 'handle_error' ERR
+
         cd examples/backends/$FRAMEWORK
         export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
         export KUBE_NS=$NAMESPACE
@@ -883,12 +872,9 @@ jobs:
           sleep 5
           ATTEMPT=$((ATTEMPT + 1))
         done
-        if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
-          ERROR_MSG="Model $MODEL_NAME not found in /v1/models after $MAX_ATTEMPTS attempts. Last response: $MODELS_RESPONSE"
-          echo "$ERROR_MSG"
-          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
-          exit 1
-        fi
+        # Check if we exceeded max attempts
+        [ $ATTEMPT -le $MAX_ATTEMPTS ]
+
         RESPONSE=$(curl -s -N --no-buffer --retry 10 --retry-delay 5 --retry-connrefused -X POST "${LLM_URL}/v1/chat/completions" \
           -H 'accept: text/event-stream' \
           -H 'Content-Type: application/json' \
@@ -903,34 +889,16 @@ jobs:
             "stream":false,
             "max_tokens": 30,
             "temperature": 0.0
-          }' 2>&1)
+          }')
         echo "Response: $RESPONSE"
-        TEST_RESULT=0
-        ERROR_MSG=""
-        if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
-          ERROR_MSG="Test failed: Response is not valid JSON. Got: $RESPONSE"
-          echo "$ERROR_MSG"
-          TEST_RESULT=1
-        elif ! echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null 2>&1; then
-          ERROR_MSG="Test failed: Message role is not 'assistant'. Got: $(echo "$RESPONSE" | jq '.choices[0].message.role')"
-          echo "$ERROR_MSG"
-          TEST_RESULT=1
-        elif ! echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null 2>&1; then
-          ERROR_MSG="Test failed: Model name is incorrect. Expected: ${MODEL_NAME}, Got: $(echo "$RESPONSE" | jq '.model')"
-          echo "$ERROR_MSG"
-          TEST_RESULT=1
-        elif ! echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 100' >/dev/null 2>&1; then
-          ERROR_MSG="Test failed: Response content length is not greater than 100 characters. Got length: $(echo "$RESPONSE" | jq '.choices[0].message.content | length')"
-          echo "$ERROR_MSG"
-          TEST_RESULT=1
-        else
-          echo "Test passed: Response matches expected format and content"
-        fi
 
-        if [ $TEST_RESULT -ne 0 ]; then
-          echo "ERROR_MESSAGE=$ERROR_MSG" >> $GITHUB_ENV
-        fi
-        exit $TEST_RESULT
+        # Validate response (each command will trigger trap on failure)
+        echo "$RESPONSE" | jq -e . >/dev/null
+        echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null
+        echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null
+        echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 100' >/dev/null
+
+        echo "Test passed: Response matches expected format and content"
       continue-on-error: true
 
     - name: Setup Python for Log Analysis
@@ -967,11 +935,6 @@ jobs:
           echo "LOGAI_EXTRACTED_ERROR=Test log file not found" >> $GITHUB_ENV
         fi
 
-        # Also preserve any manually captured error
-        if [ -n "$ERROR_MESSAGE" ]; then
-          echo "MANUAL_ERROR_MESSAGE=$ERROR_MESSAGE" >> $GITHUB_ENV
-        fi
-
     - name: Check for Job Failure and Create Annotation
       if: always() && steps.run-tests.outcome == 'failure'
       env:
@@ -979,13 +942,8 @@ jobs:
       run: |
         set -x
 
-        # Combine LogAI extracted errors with manual captures
+        # Use LogAI extracted errors (actual error lines from logs)
         ERROR_MESSAGE="${LOGAI_EXTRACTED_ERROR:-Unknown error occurred during deployment test}"
-
-        # Add manually captured error if available
-        if [ -n "$MANUAL_ERROR_MESSAGE" ]; then
-          ERROR_MESSAGE="${ERROR_MESSAGE}\n\nManually Captured Error:\n${MANUAL_ERROR_MESSAGE}"
-        fi
 
         # Get additional context from pod logs if available
         if [ -n "$GRAPH_NAME" ] && [ -n "$NAMESPACE" ]; then
@@ -1026,7 +984,7 @@ jobs:
               "output": {
                 "title": ("Deployment Test Failed: " + $framework + " (" + $profile + ") [LogAI Analysis]"),
                 "summary": ("Deployment test failed for " + $framework + " with profile " + $profile),
-                "text": ("**Job**: " + $job + "\n**Framework**: " + $framework + "\n**Profile**: " + $profile + "\n**Namespace**: " + $namespace + "\n**Analysis Method**: LogAI + Manual Capture\n\n**Error Details**:\n```\n" + $error_msg + "\n```\n\n[View Job Run](https://github.com/" + $repo + "/actions/runs/" + $run_id + ")"),
+                "text": ("**Job**: " + $job + "\n**Framework**: " + $framework + "\n**Profile**: " + $profile + "\n**Namespace**: " + $namespace + "\n**Analysis Method**: LogAI\n\n**Error Details**:\n```\n" + $error_msg + "\n```\n\n[View Job Run](https://github.com/" + $repo + "/actions/runs/" + $run_id + ")"),
                 "annotations": [{
                   "path": ".github/workflows/container-validation-backends.yml",
                   "start_line": 593,

@@ -29,7 +29,7 @@ except ImportError as e:
 class LogErrorExtractor:
     """Extract errors from log files using LogAI or fallback methods."""
 
-    # Common error patterns for fallback
+    # Common error patterns for fallback - just extract the error lines
     ERROR_PATTERNS = [
         # Kubernetes specific errors
         r"error:\s+(no matching resources found)(?:\s+.*)?",
@@ -48,22 +48,6 @@ class LogErrorExtractor:
         r"panic[:\s]+(.+?)(?:\n|$)",
         r"timed out\s+(.+?)(?:\n|$)",
         r"timeout\s+(.+?)(?:\n|$)",
-    ]
-
-    # Error explanations for common patterns
-    ERROR_EXPLANATIONS = {
-        "no matching resources found": "Kubernetes resources (pods) have not been created yet or deployment failed to create them. Check deployment status and events.",
-        "timed out waiting for the condition": "Kubernetes pods did not become ready within the timeout period. Check pod status, events, and logs for issues.",
-        "waiting for the condition": "Kubernetes pod did not become ready within the timeout period. Check pod status, events, and logs for issues.",
-        "timeout": "Operation exceeded the time limit. Check resource availability and system logs.",
-    }
-
-    # Patterns to identify context around errors
-    CONTEXT_PATTERNS = [
-        r"(exit code \d+)",
-        r"(status code \d+)",
-        r"(HTTP \d{3})",
-        r"(line \d+)",
     ]
 
     def __init__(self, log_file: Path):
@@ -174,13 +158,6 @@ class LogErrorExtractor:
                 context_end = min(len(lines), line_num + 3)
                 context = "\n".join(lines[context_start:context_end])
 
-                # Check if we have an explanation for this error
-                explanation = None
-                for key, exp in self.ERROR_EXPLANATIONS.items():
-                    if key.lower() in error_msg.lower():
-                        explanation = exp
-                        break
-
                 if error_msg and len(error_msg) > 10:  # Filter out very short matches
                     error_dict = {
                         "line_number": line_num,
@@ -188,8 +165,6 @@ class LogErrorExtractor:
                         "context": context[:1000],  # Limit context length
                         "source": "fallback",
                     }
-                    if explanation:
-                        error_dict["explanation"] = explanation
                     errors.append(error_dict)
 
         # Deduplicate and sort by line number
@@ -230,8 +205,6 @@ class LogErrorExtractor:
             summary_parts.append(
                 f"{i}. [Line {error['line_number']}] {error['message']}"
             )
-            if "explanation" in error:
-                summary_parts.append(f"   💡 {error['explanation']}")
             if "context" in error:
                 summary_parts.append(f"   Context: {error['context'][:200]}...")
 
@@ -247,10 +220,6 @@ class LogErrorExtractor:
         # Return the first (most relevant) error
         primary = errors[0]
         message = primary["message"]
-
-        # Add explanation if available
-        if "explanation" in primary:
-            message += f"\n\n💡 Explanation:\n{primary['explanation']}"
 
         # Add context if available
         if "context" in primary:
