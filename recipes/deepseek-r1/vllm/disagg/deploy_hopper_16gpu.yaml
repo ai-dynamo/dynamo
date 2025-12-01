@@ -4,14 +4,15 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-dsr1-hopper-16gpu
+  name: test3-vllm-dsr1
 spec:
+  backendFramework: vllm
   pvcs:
     - name: model-cache-pvc
       create: false
   services:
     Frontend:
-      dynamoNamespace: vllm-dsr1-hopper-16gpu
+      dynamoNamespace: vllm-dsr1
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -25,7 +26,7 @@ spec:
             failureThreshold: 60
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
     decode:
-      dynamoNamespace: vllm-dsr1-hopper-16gpu
+      dynamoNamespace: vllm-dsr1
       componentType: worker
       replicas: 1
       multinode:
@@ -33,12 +34,16 @@ spec:
       resources:
         limits:
           gpu: "8"
+          custom:
+            rdma/ib: "8"
       volumeMounts:
         - name: model-cache-pvc
           mountPoint: /model-cache
       sharedMemory:
         size: 80Gi
       extraPodSpec:
+        imagePullSecrets:
+          - name: regcred
         mainContainer:
           startupProbe:
             httpGet:
@@ -50,54 +55,47 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
           workingDir: /workspace/dynamo
           env:
-            - name: GLOO_SOCKET_IFNAME
-              value: eth0
-            - name: NCCL_SOCKET_IFNAME
-              value: eth0
-            - name: NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME
-              value: eth0
-            - name: NVIDIA_GDRCOPY
-              value: enabled
-            - name: NVSHMEM_REMOTE_TRANSPORT
-              value: ibgda
-            - name: NVSHMEM_IB_ENABLE_IBGDA
-              value: "true"
             - name: VLLM_USE_DEEP_GEMM
-              value: "1"
-            - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
-              value: "1"
-            - name: VLLM_SKIP_P2P_CHECK
               value: "1"
             - name: VLLM_ALL2ALL_BACKEND
               value: deepep_low_latency
+            - name: VLLM_MOE_DP_CHUNK_SIZE
+              value: "512"
+            - name: VLLM_SKIP_P2P_CHECK
+              value: "1"
+            - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+              value: "1"
+            - name: NVIDIA_GDRCOPY
+              value: enabled
+            - name: VLLM_MOE_ROUTING_SIMULATION_STRATEGY
+              value: "uniform_random"
+            - name: NVSHMEM_QP_DEPTH
+              value: "1512"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+            - /bin/bash
+            - -c
           args:
-            - --model
-            - /model-cache/deepseek-r1
-            - --served-model-name
-            - deepseek-ai/DeepSeek-R1
-            - --tensor-parallel-size
-            - "1"
-            - --data_parallel_size
-            - "16"
-            - --data-parallel-hybrid-lb
-            - --max-model-len
-            - "2560"
-            - --enable-expert-parallel
-            - --async-scheduling
-            - --enable-dbo
-            - --dbo-decode-token-threshold
-            - "32"
-            - --enable-eplb
-            - --eplb-config
-            - '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}'
-            - --compilation_config
-            - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+            - |
+              exec python3 -m dynamo.vllm \
+                --model /model-cache/deepseek-r1 \
+                --served-model-name deepseek-ai/DeepSeek-R1 \
+                --data-parallel-hybrid-lb \
+                --tensor-parallel-size 1 \
+                --data-parallel-size 16 \
+                --enable-expert-parallel \
+                --no-enable-prefix-caching \
+                --max-model-len 16384 \
+                --enable-dbo \
+                --dbo-decode-token-threshold 32 \
+                --async-scheduling \
+                --enable-eplb \
+                --eplb-config '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}' \
+                --max-num-seqs 512 \
+                --compilation_config '{"pass_config":{"enable_fusion":true,"enable_attn_fusion":true,"enable_noop":true},"custom_ops":["+rms_norm"],"cudagraph_mode":"FULL_DECODE_ONLY"}'
     prefill:
-      dynamoNamespace: vllm-dsr1-hopper-16gpu
+      dynamoNamespace: vllm-dsr1
       componentType: worker
       replicas: 1
       multinode:
@@ -105,12 +103,16 @@ spec:
       resources:
         limits:
           gpu: "8"
+          custom:
+            rdma/ib: "8"
       volumeMounts:
         - name: model-cache-pvc
           mountPoint: /model-cache
       sharedMemory:
         size: 80Gi
       extraPodSpec:
+        imagePullSecrets:
+          - name: regcred
         mainContainer:
           startupProbe:
             httpGet:
@@ -122,50 +124,44 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
           workingDir: /workspace/dynamo
           env:
-            - name: GLOO_SOCKET_IFNAME
-              value: eth0
-            - name: NCCL_SOCKET_IFNAME
-              value: eth0
-            - name: NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME
-              value: eth0
-            - name: NVIDIA_GDRCOPY
-              value: enabled
-            - name: NVSHMEM_REMOTE_TRANSPORT
-              value: ibgda
-            - name: NVSHMEM_IB_ENABLE_IBGDA
-              value: "true"
             - name: VLLM_USE_DEEP_GEMM
-              value: "1"
-            - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
-              value: "1"
-            - name: VLLM_SKIP_P2P_CHECK
               value: "1"
             - name: VLLM_ALL2ALL_BACKEND
               value: deepep_high_throughput
+            - name: VLLM_MOE_DP_CHUNK_SIZE
+              value: "512"
+            - name: VLLM_SKIP_P2P_CHECK
+              value: "1"
+            - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+              value: "1"
+            - name: NVIDIA_GDRCOPY
+              value: enabled
+            - name: VLLM_MOE_ROUTING_SIMULATION_STRATEGY
+              value: "uniform_random"
+            - name: NVSHMEM_QP_DEPTH
+              value: "1512"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+            - /bin/bash
+            - -c
           args:
-            - --model
-            - /model-cache/deepseek-r1
-            - --served-model-name
-            - deepseek-ai/DeepSeek-R1
-            - --tensor-parallel-size
-            - "1"
-            - --data_parallel_size
-            - "16"
-            - --data-parallel-hybrid-lb
-            - --max-model-len
-            - "1048"
-            - --enable-expert-parallel
-            - --async-scheduling
-            - --enable-dbo
-            - --enforce-eager
-            - --dbo-decode-token-threshold
-            - "32"
-            - --enable-eplb
-            - --eplb-config
-            - '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}'
-            - --is-prefill-worker
+            - |
+              exec python3 -m dynamo.vllm \
+                --model /model-cache/deepseek-r1 \
+                --is-prefill-worker \
+                --served-model-name deepseek-ai/DeepSeek-R1 \
+                --data-parallel-hybrid-lb \
+                --tensor-parallel-size 1 \
+                --data-parallel-size 16 \
+                --enable-expert-parallel \
+                --no-enable-prefix-caching \
+                --max-model-len 16384 \
+                --enable-dbo \
+                --dbo-decode-token-threshold 32 \
+                --async-scheduling \
+                --enable-eplb \
+                --eplb-config '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}' \
+                --max-num-seqs 512 \
+                --compilation_config '{"pass_config":{"enable_fusion":true,"enable_attn_fusion":true,"enable_noop":true},"custom_ops":["+rms_norm"],"cudagraph_mode":"FULL_DECODE_ONLY"}'
 
