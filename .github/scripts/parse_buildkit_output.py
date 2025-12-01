@@ -173,11 +173,11 @@ def main():
     """Main entry point"""
     if len(sys.argv) < 3:
         print(
-            "Usage: parse_buildkit_output.py <output_json> <stage1_name:log_file> [stage2_name:log_file] ... [--metadata=<container_metadata_json>]",
+            "Usage: parse_buildkit_output.py <output_json> <stage1_name:log_file> [stage2_name:log_file] ... [--metadata=<container_metadata_json>] [--sccache=<sccache_json>]",
             file=sys.stderr,
         )
         print(
-            "Example: parse_buildkit_output.py output.json base:base.log runtime:framework.log --metadata=meta.json",
+            "Example: parse_buildkit_output.py output.json base:base.log runtime:framework.log --metadata=meta.json --sccache=sccache.json",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -187,10 +187,13 @@ def main():
     # Parse arguments to find stage logs and metadata
     stage_logs = []  # List of (stage_name, log_file) tuples
     container_metadata_file = None
+    sccache_file = None
 
     for arg in sys.argv[2:]:
         if arg.startswith("--metadata="):
             container_metadata_file = arg.split("=", 1)[1]
+        elif arg.startswith("--sccache="):
+            sccache_file = arg.split("=", 1)[1]
         elif ":" in arg:
             stage_name, log_file = arg.split(":", 1)
             stage_logs.append((stage_name, log_file))
@@ -274,6 +277,25 @@ def main():
         except Exception as e:
             print(f"Warning: Could not read container metadata: {e}", file=sys.stderr)
 
+    # Merge sccache statistics if provided
+    if sccache_file:
+        try:
+            with open(sccache_file, "r") as f:
+                sccache_data = json.load(f)
+                # Only add if there's actual data
+                if sccache_data and len(sccache_data) > 0:
+                    build_data["container"]["sccache"] = sccache_data
+                    print(
+                        f"✅ sccache metrics added to container: {len(sccache_data)} metrics",
+                        file=sys.stderr,
+                    )
+                else:
+                    print("ℹ️  No sccache metrics found", file=sys.stderr)
+        except FileNotFoundError:
+            print(f"⚠️  sccache stats file not found: {sccache_file}", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Could not read sccache stats: {e}", file=sys.stderr)
+
     # Output JSON
     try:
         with open(output_json, "w") as f:
@@ -297,6 +319,25 @@ def main():
         f"   Cache Hit Rate: {container['overall_cache_hit_rate']:.1f}%",
         file=sys.stderr,
     )
+
+    # Print sccache summary if available
+    if "sccache" in container:
+        sccache = container["sccache"]
+        print("", file=sys.stderr)
+        print("🔨 sccache Summary:", file=sys.stderr)
+        if "compile_requests" in sccache:
+            print(
+                f"   Compile Requests: {sccache['compile_requests']}", file=sys.stderr
+            )
+        if "cache_hits" in sccache:
+            print(f"   Cache Hits: {sccache['cache_hits']}", file=sys.stderr)
+        if "cache_misses" in sccache:
+            print(f"   Cache Misses: {sccache['cache_misses']}", file=sys.stderr)
+        if "cache_hits_rate_percent" in sccache:
+            print(
+                f"   Cache Hit Rate: {sccache['cache_hits_rate_percent']:.2f}%",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":

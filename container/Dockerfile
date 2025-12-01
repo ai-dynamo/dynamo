@@ -412,7 +412,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
     fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo"
+    /tmp/use-sccache.sh show-stats "Dynamo" && \
+    /tmp/use-sccache.sh export-stats-json "/tmp/sccache-stats.json" "Dynamo"
 
 ##############################################
 ########## Runtime image ##############
