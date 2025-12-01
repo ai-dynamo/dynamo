@@ -266,7 +266,7 @@ class BaseWorkerHandler(ABC):
                         out["finish_reason"] = output.finish_reason
                         out["completion_usage"] = (
                             BaseWorkerHandler._build_completion_usage(
-                                request_output=res
+                                request_output=res,
                             )
                         )
                     if output.stop_reason:
@@ -525,9 +525,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                     output: Dict[str, Any] = {
                         "token_ids": list(token_ids),
-                        "disaggregated_params": disaggregated_params if disaggregated_params else None,
+                        "disaggregated_params": (
+                            disaggregated_params if disaggregated_params else None
+                        ),
                         "completion_usage": BaseWorkerHandler._build_completion_usage(
-                            request_output=res
+                            request_output=res,
                         ),
                     }
 
