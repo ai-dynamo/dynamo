@@ -187,7 +187,7 @@ class MultimodalRequestProcessor:
                 )
             else:
                 logging.warning("MM PROCESSOR: No prompt_token_ids from encoder")
-            return result    
+            return result
         loader_kwargs = {}
         if embeddings is not None:
             # EPD flow
