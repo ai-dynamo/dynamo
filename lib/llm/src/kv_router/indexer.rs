@@ -1611,7 +1611,7 @@ impl KvIndexerInterface for KvIndexerSharded {
                 early_exit: false,
                 resp: match_tx,
             }) {
-                tracing::warn!(
+                tracing::error!(
                     error = ?e,
                     "Failed to broadcast sharded match request; returning empty overlaps"
                 );
