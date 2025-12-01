@@ -61,9 +61,7 @@ class ToolCallingChatPayload(ChatPayload):
 
         # If expected tool name is provided, validate it
         if self.expected_tool_name:
-            tool_names = [
-                tc.get("function", {}).get("name") for tc in tool_calls
-            ]
+            tool_names = [tc.get("function", {}).get("name") for tc in tool_calls]
             assert (
                 self.expected_tool_name in tool_names
             ), f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
