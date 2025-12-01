@@ -380,17 +380,17 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             let mut nvext_obj = serde_json::Map::new();
 
             // Extract worker_id if present and requested
-            if self.is_extra_field_requested("worker_id") {
-                if let Some(worker_id_json) = disaggregated_params.get("worker_id") {
-                    nvext_obj.insert("worker_id".to_string(), worker_id_json.clone());
-                }
+            if self.is_extra_field_requested("worker_id")
+                && let Some(worker_id_json) = disaggregated_params.get("worker_id")
+            {
+                nvext_obj.insert("worker_id".to_string(), worker_id_json.clone());
             }
 
             // Extract timing_metrics if present and requested
-            if self.is_extra_field_requested("timing_metrics") {
-                if let Some(timing_metrics_json) = disaggregated_params.get("timing_metrics") {
-                    nvext_obj.insert("timing_metrics".to_string(), timing_metrics_json.clone());
-                }
+            if self.is_extra_field_requested("timing_metrics")
+                && let Some(timing_metrics_json) = disaggregated_params.get("timing_metrics")
+            {
+                nvext_obj.insert("timing_metrics".to_string(), timing_metrics_json.clone());
             }
 
             // Only set nvext if we have at least one field
