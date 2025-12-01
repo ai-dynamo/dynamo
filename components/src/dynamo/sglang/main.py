@@ -11,6 +11,7 @@ import sglang as sgl
 import uvloop
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -32,26 +33,6 @@ from dynamo.sglang.request_handlers import (
 )
 
 configure_dynamo_logging()
-
-
-def parse_endpoint_types(endpoint_types_str: str) -> ModelType:
-    """Parse endpoint types string into ModelType flags."""
-    types = [t.strip().lower() for t in endpoint_types_str.split(",")]
-
-    result = None
-    for t in types:
-        if t == "chat":
-            flag = ModelType.Chat
-        elif t == "completions":
-            flag = ModelType.Completions
-        else:
-            raise ValueError(
-                f"Invalid endpoint type: '{t}'. Valid options: 'chat', 'completions'"
-            )
-
-        result = flag if result is None else result | flag
-
-    return result
 
 
 async def _handle_non_leader_node(
