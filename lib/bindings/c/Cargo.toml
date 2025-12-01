@@ -45,4 +45,5 @@ uuid = { workspace = true }
 async-once-cell = { version = "0.5.4" }
 libc = { version = "0.2" }
 once_cell = { version = "1" }
+portable-atomic = { version = "1", features = ["float"] }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

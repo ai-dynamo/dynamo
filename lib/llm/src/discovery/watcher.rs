@@ -402,6 +402,13 @@ impl ModelWatcher {
                     )
                 });
 
+            // Get or create the shared busy threshold for this model
+            // This allows dynamic updates via the ModelManager
+            let busy_threshold = self
+                .router_config
+                .busy_threshold
+                .and_then(|threshold| self.manager.busy_threshold(card.name(), Some(threshold)));
+
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
                 let chat_engine = entrypoint::build_routed_pipeline::<
@@ -411,7 +418,7 @@ impl ModelWatcher {
                     card,
                     &client,
                     self.router_config.router_mode,
-                    self.router_config.busy_threshold,
+                    busy_threshold.clone(),
                     kv_chooser.clone(),
                     tokenizer_hf.clone(),
                     prefill_chooser.clone(),
@@ -442,7 +449,7 @@ impl ModelWatcher {
                     card,
                     &client,
                     self.router_config.router_mode,
-                    self.router_config.busy_threshold,
+                    busy_threshold,
                     kv_chooser,
                     preprocessor,
                     tokenizer_hf,

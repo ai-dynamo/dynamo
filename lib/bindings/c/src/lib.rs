@@ -1028,6 +1028,10 @@ pub async fn create_worker_selection_pipeline_chat(
         .tokenizer_hf()
         .with_context(|| format!("Failed to load tokenizer for: {}", card.display_name))?;
 
+    // Convert busy_threshold to Arc<AtomicF64> for dynamic updates
+    let busy_threshold_atomic =
+        busy_threshold.map(|t| std::sync::Arc::new(portable_atomic::AtomicF64::new(t)));
+
     let engine = build_routed_pipeline::<
         NvCreateChatCompletionRequest,
         NvCreateChatCompletionStreamResponse,
@@ -1035,7 +1039,7 @@ pub async fn create_worker_selection_pipeline_chat(
         &card_with_local_files,
         &client,
         router_mode,
-        busy_threshold,
+        busy_threshold_atomic,
         chooser,
         hf_tokenizer,
         None,  // prefill_chooser

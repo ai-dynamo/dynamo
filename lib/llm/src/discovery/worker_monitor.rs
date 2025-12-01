@@ -9,6 +9,7 @@ use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::EventSubscriber;
+use portable_atomic::{AtomicF64, Ordering};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio_stream::StreamExt;
@@ -53,12 +54,13 @@ impl WorkerLoadState {
 pub struct KvWorkerMonitor {
     client: Arc<Client>,
     worker_load_states: Arc<RwLock<HashMap<u64, WorkerLoadState>>>,
-    busy_threshold: f64,
+    busy_threshold: Arc<AtomicF64>,
 }
 
 impl KvWorkerMonitor {
-    /// Create a new worker monitor with custom threshold
-    pub fn new(client: Arc<Client>, busy_threshold: f64) -> Self {
+    /// Create a new worker monitor with a shared atomic threshold.
+    /// The threshold can be dynamically updated via the ModelManager.
+    pub fn new(client: Arc<Client>, busy_threshold: Arc<AtomicF64>) -> Self {
         Self {
             client,
             worker_load_states: Arc::new(RwLock::new(HashMap::new())),
@@ -96,7 +98,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
         let worker_load_states = self.worker_load_states.clone();
         let client = self.client.clone();
-        let busy_threshold = self.busy_threshold;
+        let busy_threshold = self.busy_threshold.clone();
 
         // Spawn background monitoring task
         tokio::spawn(async move {
@@ -147,12 +149,15 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             state.kv_active_blocks.insert(dp_rank, active_blocks);
                             drop(states);
 
+                            // Load threshold dynamically - allows runtime updates
+                            let current_threshold = busy_threshold.load(Ordering::Relaxed);
+
                             // Recalculate all busy instances and update
                             let states = worker_load_states.read().unwrap();
                             let busy_instances: Vec<u64> = states
                                 .iter()
                                 .filter_map(|(&id, state)| {
-                                    state.is_busy(busy_threshold).then_some(id)
+                                    state.is_busy(current_threshold).then_some(id)
                                 })
                                 .collect();
                             drop(states);

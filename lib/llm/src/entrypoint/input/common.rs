@@ -32,6 +32,7 @@ use dynamo_runtime::{
         ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
 };
+use portable_atomic::AtomicF64;
 use std::sync::Arc;
 
 pub struct PreparedEngine {
@@ -166,7 +167,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
     router_mode: RouterMode,
-    busy_threshold: Option<f64>,
+    busy_threshold: Option<Arc<AtomicF64>>,
     chooser: Option<Arc<KvRouter>>,
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
@@ -204,7 +205,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
     router_mode: RouterMode,
-    busy_threshold: Option<f64>,
+    busy_threshold: Option<Arc<AtomicF64>>,
     chooser: Option<Arc<KvRouter>>,
     preprocessor: Arc<OpenAIPreprocessor>,
     hf_tokenizer: tokenizers::Tokenizer,
@@ -237,18 +238,24 @@ where
     };
 
     // Create worker monitor only if busy_threshold is set
-    let worker_monitor = busy_threshold.map(|threshold| {
+    // The threshold is now an atomic, allowing dynamic updates via the ModelManager
+    let worker_monitor = busy_threshold.as_ref().map(|threshold| {
         Arc::new(crate::discovery::KvWorkerMonitor::new(
             Arc::new(router_client.clone()),
-            threshold,
+            threshold.clone(),
         )) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>
     });
+
+    // Pass the current threshold value to enable busy detection in PushRouter
+    let threshold_value = busy_threshold
+        .as_ref()
+        .map(|t| t.load(portable_atomic::Ordering::Relaxed));
 
     let router =
         PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
             router_client,
             router_mode,
-            busy_threshold,
+            threshold_value,
             worker_monitor,
         )
         .await?;
