@@ -20,6 +20,9 @@ import numpy as np
 import yaml
 
 from benchmarks.profiler.utils.config import Config, DgdPlannerServiceConfig
+from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
+    ParallelizationMapping,
+)
 from benchmarks.profiler.utils.planner_utils import build_planner_args_from_namespace
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.defaults import SubComponentType
@@ -28,11 +31,10 @@ from dynamo.planner.defaults import SubComponentType
 def generate_dgd_config_with_planner(
     config_path: str,
     config_modifier,
-    best_prefill_gpus: int,
-    best_decode_gpus: int,
     output_dir: str,
     args,
-    is_moe_model: bool = False,
+    best_prefill_mapping: ParallelizationMapping,
+    best_decode_mapping: ParallelizationMapping,
     num_gpus_per_node: int = 8,
 ):
     """Generate DGD config with planner based on profiling results.
@@ -40,12 +42,11 @@ def generate_dgd_config_with_planner(
     Args:
         config_path: Path to the YAML config file
         config_modifier: Config modifier instance (e.g., SGLangConfigModifier)
-        best_prefill_gpus: Number of GPUs for prefill engine
-        best_decode_gpus: Number of GPUs for decode engine
         output_dir: Output directory for profile results
         args: Parsed arguments namespace from profile_sla
-        is_moe_model: Whether this is an MoE model
-        num_gpus_per_node: Number of GPUs per node (for MoE models)
+        best_prefill_mapping: Parallel mapping for prefill (TP/TEP/DEP)
+        best_decode_mapping: Parallel mapping for decode (TP/TEP/DEP)
+        num_gpus_per_node: Number of GPUs per node (for TEP/DEP models)
 
     Returns:
         list[dict] | dict: If a ConfigMap is generated for planner data, returns a list
@@ -61,28 +62,52 @@ def generate_dgd_config_with_planner(
     if args.dgd_image:
         config = config_modifier.update_image(config, args.dgd_image)
 
-    if not is_moe_model:
-        # dense model, use TP for both prefill and decode
+    # Apply prefill parallelization based on the actual mapping used in profiling
+    if best_prefill_mapping.tp is not None:
+        # Dense model or TP for prefill
         config = config_modifier.set_config_tp_size(
-            config, best_prefill_gpus, SubComponentType.PREFILL
+            config, best_prefill_mapping.tp, SubComponentType.PREFILL
         )
-        config = config_modifier.set_config_tp_size(
-            config, best_decode_gpus, SubComponentType.DECODE
-        )
-    else:
-        # MoE model, use TEP for prefill and DEP for decode
+    elif best_prefill_mapping.tep is not None:
+        # MoE model with TEP for prefill
         config = config_modifier.set_config_tep_size(
             config,
-            best_prefill_gpus,
+            best_prefill_mapping.tep,
             num_gpus_per_node,
             SubComponentType.PREFILL,
         )
+    elif best_prefill_mapping.dep is not None:
+        # MoE model with DEP for prefill
         config = config_modifier.set_config_dep_size(
             config,
-            best_decode_gpus,
+            best_prefill_mapping.dep,
+            num_gpus_per_node,
+            SubComponentType.PREFILL,
+        )
+
+    # Apply decode parallelization based on the actual mapping used in profiling
+    if best_decode_mapping.tp is not None:
+        # Dense model or TP for decode
+        config = config_modifier.set_config_tp_size(
+            config, best_decode_mapping.tp, SubComponentType.DECODE
+        )
+    elif best_decode_mapping.tep is not None:
+        # MoE model with TEP for decode
+        config = config_modifier.set_config_tep_size(
+            config,
+            best_decode_mapping.tep,
             num_gpus_per_node,
             SubComponentType.DECODE,
         )
+    elif best_decode_mapping.dep is not None:
+        # MoE model with DEP for decode
+        config = config_modifier.set_config_dep_size(
+            config,
+            best_decode_mapping.dep,
+            num_gpus_per_node,
+            SubComponentType.DECODE,
+        )
+
     config = Config.model_validate(config)
 
     # add the planner service
@@ -121,8 +146,8 @@ def generate_dgd_config_with_planner(
     planner_args.extend(
         [
             f"--namespace={frontend_namespace}",
-            f"--prefill-engine-num-gpu={best_prefill_gpus}",
-            f"--decode-engine-num-gpu={best_decode_gpus}",
+            f"--prefill-engine-num-gpu={best_prefill_mapping.get_num_gpus()}",
+            f"--decode-engine-num-gpu={best_decode_mapping.get_num_gpus()}",
             f"--profile-results-dir={cm_mount_path}",
         ]
     )
