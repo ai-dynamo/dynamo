@@ -172,10 +172,9 @@ class MultimodalRequestProcessor:
 
         processed_prompt_from_encoder = request.get("_epd_processed_prompt")
 
-        if (
-            processed_prompt_from_encoder is not None
-            or ep_disaggregated_params is not None
-        ):
+        # Only use EPD flow if we actually have encoder data
+        # For PD flow (no encoder), fall through to embedding_paths handling
+        if processed_prompt_from_encoder is not None:
             logging.info(
                 "MM PROCESSOR: Full EPD flow - skipping default_multimodal_input_loader"
             )

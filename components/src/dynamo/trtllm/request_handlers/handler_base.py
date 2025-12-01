@@ -398,35 +398,40 @@ class HandlerBase:
                             logging.info(
                                 f"DECODE: {key} had keys: {list(removed_data.keys())}"
                             )
-            else:
-                # Fallback for text-only requests
-                processed_input = request.get("token_ids")
-                logging.info("DECODE: Using token_ids for text-only request")
-        elif self.multimodal_processor:
-            # Encode/Prefill worker: Process multimodal content normally
-            # In EPD flow, multimodal_processor should be called in PREFILL/ENCODE modes only
-            # DECODE mode should skip this and use EPD metadata from prefill
-            if (
-                self.disaggregation_mode == DisaggregationMode.DECODE
-                and ep_disaggregated_params
-            ):
-                logging.info(
-                    "DECODE: Skipping multimodal_processor (EPD flow - using disaggregated_params)"
-                )
-                processed_input = None  # Will be set from epd_metadata above
-            else:
-                logging.info(
-                    f"{self.disaggregation_mode.value.upper()}: Calling multimodal_processor"
-                )
+            elif self.multimodal_processor:
+                # Encode/Prefill worker: Process multimodal content normally
+                # In EPD flow, multimodal_processor should be called in PREFILL/ENCODE modes only
+                # DECODE mode should skip this and use EPD metadata from prefill
                 processed_input = (
                     await self.multimodal_processor.process_openai_request(
                         request, embeddings, ep_disaggregated_params
                     )
                 )
-
+            else:
+                logging.info(
+                    "DECODE: No multimodal_processor found, using request token_ids"
+                )
         else:
-            # text-only flow
-            processed_input = request.get("token_ids")
+            # PREFILL/ENCODE mode
+            if self.multimodal_processor:
+                # Process multimodal content in PREFILL mode
+                processed_input = (
+                    await self.multimodal_processor.process_openai_request(
+                        request, embeddings, ep_disaggregated_params
+                    )
+                )
+                if processed_input:
+                    logging.info(
+                        "PREFILL: Multimodal content processed by multimodal_processor"
+                    )
+                else:
+                    # Fallback to text-only if no multimodal content
+                    processed_input = request.get("token_ids")
+                    logging.info("PREFILL: No multimodal content, using token_ids")
+            else:
+                # text-only flow
+                processed_input = request.get("token_ids")
+                logging.info("PREFILL: No multimodal_processor, using token_ids")
 
         # Check if there is an error in the publisher error queue
         publishers_error = (
@@ -481,14 +486,6 @@ class HandlerBase:
         logging.info(f"  - processed_input type: {type(processed_input)}")
         if isinstance(processed_input, dict):
             logging.info(f"  - processed_input keys: {list(processed_input.keys())}")
-            if "prompt" in processed_input:
-                logging.info(
-                    f"  - processed_input['prompt']: {processed_input['prompt'][:80]}..."
-                )
-            if "prompt_token_ids" in processed_input:
-                logging.info(
-                    f"  - processed_input['prompt_token_ids'] length: {len(processed_input['prompt_token_ids'])}"
-                )
             # Check for any multimodal-related keys that shouldn't be there
             mm_keys = [
                 k
