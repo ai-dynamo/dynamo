@@ -318,6 +318,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
         enable_multimodal=config.enable_multimodal,
+        use_vllm_tokenizer=config.use_vllm_tokenizer,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -376,8 +377,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     # Register prefill model with ModelType.Prefill
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        model_input = (
+            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+        )
         await register_vllm_model(
-            ModelInput.Tokens,
+            model_input,
             ModelType.Prefill,
             generate_endpoint,
             config,
@@ -450,6 +454,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
         enable_multimodal=config.enable_multimodal,
+        use_vllm_tokenizer=config.use_vllm_tokenizer,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -507,8 +512,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        model_input = (
+            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+        )
         await register_vllm_model(
-            ModelInput.Tokens,
+            model_input,
             ModelType.Chat | ModelType.Completions,
             generate_endpoint,
             config,
