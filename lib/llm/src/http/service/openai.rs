@@ -56,6 +56,39 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
+/// Injects `request_completed_seconds` into the nvext timing_metrics field.
+/// This captures the exact moment when the response is about to leave the server.
+fn inject_request_completed_seconds(nvext: &mut Option<serde_json::Value>) {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .ok();
+
+    if let Some(ts) = ts {
+        let nvext = nvext.get_or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(obj) = nvext.as_object_mut() {
+            if let Some(timing) = obj.get_mut("timing_metrics") {
+                if let Some(timing_obj) = timing.as_object_mut() {
+                    timing_obj.insert(
+                        "request_completed_seconds".to_string(),
+                        serde_json::Value::from(ts),
+                    );
+                }
+            } else {
+                let mut timing_obj = serde_json::Map::new();
+                timing_obj.insert(
+                    "request_completed_seconds".to_string(),
+                    serde_json::Value::from(ts),
+                );
+                obj.insert(
+                    "timing_metrics".to_string(),
+                    serde_json::Value::Object(timing_obj),
+                );
+            }
+        }
+    }
+}
+
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
 /// Can be configured at compile time using the DYN_FRONTEND_BODY_LIMIT_MB environment variable
@@ -281,8 +314,20 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateCompletionRequest>,
+    Json(mut request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
+    // Capture received timestamp immediately when request arrives at the frontend
+    let request_received_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .ok();
+
+    // Set request_received_seconds in nvext for timing metrics
+    if request_received_seconds.is_some() {
+        let nvext = request.nvext.get_or_insert_with(Default::default);
+        nvext.request_received_seconds = request_received_seconds;
+    }
+
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -404,6 +449,23 @@ async fn completions_single(
 
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
+
+    // Inject request_completed_seconds into nvext when final content chunk is sent
+    // Only inject on the chunk with finish_reason (not the usage-only chunk)
+    // because timing_metrics is populated by the backend on the finish_reason chunk
+    let stream = stream.map(|mut annotated| {
+        if let Some(ref mut response) = annotated.data {
+            let has_finish_reason = response
+                .inner
+                .choices
+                .iter()
+                .any(|choice| choice.finish_reason.is_some());
+            if has_finish_reason {
+                inject_request_completed_seconds(&mut response.inner.nvext);
+            }
+        }
+        annotated
+    });
 
     if streaming {
         // For streaming, we'll drop the http_queue_guard on the first token
@@ -686,8 +748,20 @@ async fn embeddings(
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateChatCompletionRequest>,
+    Json(mut request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
+    // Capture received timestamp immediately when request arrives at the frontend
+    let request_received_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .ok();
+
+    // Set request_received_seconds in nvext for timing metrics
+    if request_received_seconds.is_some() {
+        let nvext = request.nvext.get_or_insert_with(Default::default);
+        nvext.request_received_seconds = request_received_seconds;
+    }
+
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -820,6 +894,22 @@ async fn chat_completions(
 
     // todo - tap the stream and propagate request level metrics
     // note - we might do this as part of the post processing set to make it more generic
+
+    // Inject request_completed_seconds into nvext when final content chunk is sent
+    // Only inject on the chunk with finish_reason (not the usage-only chunk)
+    // because timing_metrics is populated by the backend on the finish_reason chunk
+    let stream = stream.map(|mut annotated| {
+        if let Some(ref mut response) = annotated.data {
+            let has_finish_reason = response
+                .choices
+                .iter()
+                .any(|choice| choice.finish_reason.is_some());
+            if has_finish_reason {
+                inject_request_completed_seconds(&mut response.nvext);
+            }
+        }
+        annotated
+    });
 
     if streaming {
         stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
@@ -2054,5 +2144,42 @@ mod tests {
             assert!(msg.contains("add_special_tokens"));
             assert!(msg.contains("response_format"));
         }
+    }
+
+    // Tests for inject_request_completed_seconds function
+    #[test]
+    fn test_inject_request_completed_seconds_into_existing_timing_metrics() {
+        let mut nvext = Some(serde_json::json!({
+            "timing_metrics": {
+                "request_received_seconds": 1700000000.0,
+                "decode_end_seconds": 1700000001.5
+            }
+        }));
+
+        inject_request_completed_seconds(&mut nvext);
+
+        let nvext = nvext.unwrap();
+        let timing = nvext.get("timing_metrics").unwrap();
+        assert!(timing.get("request_completed_seconds").is_some());
+        // Verify existing fields are preserved
+        assert_eq!(
+            timing.get("request_received_seconds").unwrap().as_f64(),
+            Some(1700000000.0)
+        );
+        assert_eq!(
+            timing.get("decode_end_seconds").unwrap().as_f64(),
+            Some(1700000001.5)
+        );
+    }
+
+    #[test]
+    fn test_inject_request_completed_seconds_creates_nvext_if_none() {
+        let mut nvext: Option<serde_json::Value> = None;
+
+        inject_request_completed_seconds(&mut nvext);
+
+        let nvext = nvext.unwrap();
+        let timing = nvext.get("timing_metrics").unwrap();
+        assert!(timing.get("request_completed_seconds").is_some());
     }
 }

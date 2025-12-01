@@ -101,6 +101,12 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_fields: Option<Vec<String>>,
+
+    /// Timestamp when the request was received by the frontend (seconds since epoch)
+    /// Used for timing metrics to track end-to-end latency
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_received_seconds: Option<f64>,
 }
 
 impl PreprocessedRequest {

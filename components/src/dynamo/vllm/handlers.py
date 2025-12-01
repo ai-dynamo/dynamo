@@ -5,9 +5,10 @@ import asyncio
 import logging
 import os
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, Final
+from typing import Any, AsyncGenerator, Dict, Final, List, Optional
 
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
@@ -71,6 +72,19 @@ def build_sampling_params(
         sampling_params.max_tokens = dynamic_default
 
     return sampling_params
+
+
+def _should_include_timing_metrics(request: Dict[str, Any]) -> bool:
+    """Check if timing_metrics is requested in extra_fields."""
+    extra_fields: Optional[List[str]] = request.get("extra_fields")
+    if extra_fields is None:
+        return False
+    return "timing_metrics" in extra_fields
+
+
+def _get_current_time_seconds() -> float:
+    """Get the current time in seconds since epoch as a float."""
+    return time.time()
 
 
 class BaseWorkerHandler(ABC):
@@ -250,10 +264,10 @@ class BaseWorkerHandler(ABC):
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
                     if output.finish_reason:
                         out["finish_reason"] = output.finish_reason
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res
+                        out["completion_usage"] = (
+                            BaseWorkerHandler._build_completion_usage(
+                                request_output=res
+                            )
                         )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
@@ -296,6 +310,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
 
+        # Check if timing metrics are requested
+        include_timing = _should_include_timing_metrics(request)
+
+        # Initialize timing metrics using request_received_seconds from frontend (passed via PreprocessedRequest)
+        timing_metrics: Optional[Dict[str, float]] = None
+        if include_timing:
+            timing_metrics = {}
+            # Use request_received_seconds from the request (set by frontend) if available
+            frontend_received = request.get("request_received_seconds")
+            if frontend_received is not None:
+                timing_metrics["request_received_seconds"] = frontend_received
+
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
 
@@ -313,6 +339,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             kv_params = prefill_result.get("disaggregated_params", {}).get(
                 "kv_transfer_params"
             )
+            # Extract prefill timing from prefill_result if available
+            if include_timing:
+                prefill_timing = prefill_result.get("disaggregated_params", {}).get(
+                    "timing_metrics"
+                )
+                if prefill_timing:
+                    # Merge prefill timing but keep the frontend's request_received_seconds
+                    received = timing_metrics.get("request_received_seconds")
+                    timing_metrics.update(prefill_timing)
+                    if received is not None:
+                        timing_metrics["request_received_seconds"] = received
         else:
             kv_params = None
 
@@ -329,15 +366,52 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         dp_rank = request.get("dp_rank", None)
 
+        # Track decode timing
+        first_token_sent = False
+        decode_start_seconds: Optional[float] = None
+
         async with self._abort_monitor(context, request_id):
             try:
+                # Record decode start time
+                if include_timing:
+                    decode_start_seconds = _get_current_time_seconds()
+                    # If this is aggregated mode (no prefill_result), prefill_start == decode_start
+                    if prefill_result is None:
+                        timing_metrics["prefill_start_seconds"] = decode_start_seconds
+                    timing_metrics["decode_start_seconds"] = decode_start_seconds
+
                 async for tok in self.generate_tokens(
                     prompt, sampling_params, request_id, data_parallel_rank=dp_rank
                 ):
+                    # Capture first token timing
+                    if include_timing and not first_token_sent:
+                        first_token_time = _get_current_time_seconds()
+                        timing_metrics["decode_first_token_seconds"] = first_token_time
+                        # If aggregated mode, prefill finishes when first token is generated
+                        if prefill_result is None:
+                            timing_metrics["prefill_end_seconds"] = first_token_time
+                        first_token_sent = True
+
                     if prefill_result is not None and "completion_usage" in tok:
                         tok["completion_usage"][
                             "prompt_tokens_details"
                         ] = prefill_prompt_tokens_details
+
+                    # On finish, record decode_end_seconds and inject timing_metrics
+                    # Note: request_finish_seconds is set in the Rust HTTP layer when the response actually leaves the server
+                    if tok.get("finish_reason") is not None and include_timing:
+                        timing_metrics["decode_end_seconds"] = (
+                            _get_current_time_seconds()
+                        )
+
+                        # Inject timing_metrics into disaggregated_params
+                        if (
+                            "disaggregated_params" not in tok
+                            or tok["disaggregated_params"] is None
+                        ):
+                            tok["disaggregated_params"] = {}
+                        tok["disaggregated_params"]["timing_metrics"] = timing_metrics
+
                     yield tok
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")
@@ -369,6 +443,21 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
         logger.debug(f"Prefill Request ID: {request_id}")
+
+        # Check if timing metrics are requested
+        include_timing = _should_include_timing_metrics(request)
+
+        # Initialize timing metrics using request_received_seconds from frontend (passed via PreprocessedRequest)
+        timing_metrics: Optional[Dict[str, float]] = None
+        if include_timing:
+            timing_metrics = {}
+            # Use request_received_seconds from the request (set by frontend) if available
+            frontend_received = request.get("request_received_seconds")
+            if frontend_received is not None:
+                timing_metrics["request_received_seconds"] = frontend_received
+
+            # Record prefill_start as when we start processing in the prefill worker
+            timing_metrics["prefill_start_seconds"] = _get_current_time_seconds()
 
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
@@ -422,13 +511,21 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                     token_ids = res.outputs[0].token_ids if res.outputs else []
 
+                    # Build disaggregated_params with kv_transfer_params and timing_metrics
+                    disaggregated_params: Optional[Dict[str, Any]] = {}
+
+                    if res.kv_transfer_params:
+                        disaggregated_params["kv_transfer_params"] = res.kv_transfer_params
+
+                    if include_timing and timing_metrics:
+                        timing_metrics["prefill_end_seconds"] = (
+                            _get_current_time_seconds()
+                        )
+                        disaggregated_params["timing_metrics"] = timing_metrics
+
                     output: Dict[str, Any] = {
                         "token_ids": list(token_ids),
-                        "disaggregated_params": (
-                            {"kv_transfer_params": res.kv_transfer_params}
-                            if res.kv_transfer_params
-                            else None
-                        ),
+                        "disaggregated_params": disaggregated_params if disaggregated_params else None,
                         "completion_usage": BaseWorkerHandler._build_completion_usage(
                             request_output=res
                         ),
