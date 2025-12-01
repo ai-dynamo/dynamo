@@ -66,7 +66,7 @@ runs:
         else
           echo "🚀 Running pytest in normal mode"
           PYTEST_CMD="pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
-          
+
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
           if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
