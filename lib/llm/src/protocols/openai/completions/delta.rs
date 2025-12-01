@@ -326,9 +326,13 @@ mod tests {
 
     #[test]
     fn test_completions_delta_extracts_timing_metrics_from_disaggregated_params() {
+        let options = DeltaGeneratorOptions {
+            extra_fields: Some(vec!["worker_id".to_string(), "timing_metrics".to_string()]),
+            ..Default::default()
+        };
         let mut generator = DeltaGenerator::new(
             "test-model".to_string(),
-            DeltaGeneratorOptions::default(),
+            options,
             "test-request-id".to_string(),
         );
 
