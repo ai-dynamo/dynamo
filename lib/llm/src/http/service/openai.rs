@@ -67,7 +67,8 @@ fn inject_request_completed_seconds(nvext: &mut Option<serde_json::Value>) {
 
     // Only inject if nvext and timing_metrics already exist (user requested timing_metrics)
     if let Some(ts) = ts {
-        if let Some(timing_obj) = nvext.as_mut()
+        if let Some(timing_obj) = nvext
+            .as_mut()
             .and_then(|v| v.as_object_mut())
             .and_then(|obj| obj.get_mut("timing_metrics"))
             .and_then(|timing| timing.as_object_mut())
