@@ -45,7 +45,7 @@ def generate_dgd_config_with_planner(
     best_prefill_mapping: ParallelizationMapping,
     best_decode_mapping: ParallelizationMapping,
     num_gpus_per_node: int = 8,
-):
+) -> tuple[list[dict] | dict, list[dict] | dict]:
     """Generate DGD config with planner based on profiling results.
 
     Args:
@@ -61,7 +61,8 @@ def generate_dgd_config_with_planner(
         tuple: (dgd_config, mocker_config) where:
             - dgd_config: list[dict] | dict - If a ConfigMap is generated for planner data,
               returns a list of two YAML documents [ConfigMap, DGD]; otherwise returns a single DGD dict.
-            - mocker_config: dict - Mocker DGD config with planner for testing purposes.
+            - mocker_config: list[dict] | dict - Mocker DGD config with planner for testing purposes.
+              If a ConfigMap is generated, returns [ConfigMap, DGD]; otherwise returns a single DGD dict.
     """
 
     # Load config from file
@@ -273,7 +274,7 @@ def _generate_mocker_config_with_planner(
     cm_mount_path: str,
     config_map_obj: Optional[dict],
     planner_dict: dict,
-) -> dict:
+) -> list[dict] | dict:
     """Generate mocker DGD config with planner for testing purposes.
 
     This loads the mocker disagg.yaml, updates the worker image, mounts the
@@ -286,7 +287,8 @@ def _generate_mocker_config_with_planner(
         planner_dict: The planner service dict to reuse (includes planner image)
 
     Returns:
-        dict: Mocker DGD config with planner service
+        list[dict] | dict: If a ConfigMap is generated, returns [ConfigMap, DGD];
+            otherwise returns a single DGD dict.
     """
     # Load mocker disagg config
     workspace_dir = get_workspace_dir()
@@ -375,4 +377,7 @@ def _generate_mocker_config_with_planner(
 
     mocker_config["spec"]["services"]["Planner"] = mocker_planner_dict
 
+    # Return multi-doc YAML (ConfigMap + DGD) when ConfigMap is created; else DGD only
+    if config_map_obj is not None:
+        return [config_map_obj, mocker_config]
     return mocker_config

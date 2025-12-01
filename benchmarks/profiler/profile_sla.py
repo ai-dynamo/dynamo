@@ -723,9 +723,8 @@ async def run_profile(args):
         # save mocker config with planner for testing purposes
         logger.debug(f"Mocker config with planner: {mocker_config}")
         with open(f"{args.output_dir}/mocker_config_with_planner.yaml", "w") as f:
-            if isinstance(config, list):
-                # config[0] is the ConfigMap, reuse it for mocker config
-                yaml.dump_all([config[0], mocker_config], f)
+            if isinstance(mocker_config, list):
+                yaml.dump_all(mocker_config, f)
             else:
                 yaml.dump(mocker_config, f)
 
