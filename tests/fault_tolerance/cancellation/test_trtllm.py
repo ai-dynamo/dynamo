@@ -367,7 +367,7 @@ def test_request_cancellation_trtllm_prefill_cancel(
 
 
 @pytest.mark.trtllm_marker
-@pytest.mark.gpu_1
+@pytest.mark.gpu_2
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 def test_request_cancellation_trtllm_kv_transfer_cancel(
