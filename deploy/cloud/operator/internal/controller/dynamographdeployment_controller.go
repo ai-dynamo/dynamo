@@ -49,6 +49,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
+	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook/validation"
 	rbacv1 "k8s.io/api/rbac/v1"
 )
 
@@ -149,6 +150,28 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		logger.Info("Reconciliation done")
 	}()
+
+	// Validate the DynamoGraphDeployment spec (defense in depth - only when webhooks are disabled)
+	if !r.Config.WebhooksEnabled {
+		validator := webhookvalidation.NewDynamoGraphDeploymentValidator(dynamoDeployment)
+		if _, validationErr := validator.Validate(); validationErr != nil {
+			logger.Error(validationErr, "DynamoGraphDeployment validation failed, refusing to reconcile")
+
+			// Set validation error state and reason (defer will update status)
+			state = FailedState
+			reason = Reason("ValidationFailed")
+			message = Message(fmt.Sprintf("Validation failed: %v", validationErr))
+
+			// Record event for visibility
+			r.Recorder.Event(dynamoDeployment, corev1.EventTypeWarning, "ValidationFailed", validationErr.Error())
+
+			// Don't requeue - user must fix the spec
+			logger.Info("DynamoGraphDeployment is invalid, not reconciling until spec is fixed")
+
+			// Return without error so defer updates status but doesn't requeue
+			return ctrl.Result{}, nil
+		}
+	}
 
 	deleted, err := commonController.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
 	if err != nil {

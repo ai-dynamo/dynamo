@@ -18,6 +18,7 @@ from dynamo._core import KvPushRouter as KvPushRouter
 from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouterConfig as KvRouterConfig
 from dynamo._core import KvStats as KvStats
+from dynamo._core import LoRADownloader as LoRADownloader
 from dynamo._core import MediaDecoder as MediaDecoder
 from dynamo._core import MediaFetcher as MediaFetcher
 from dynamo._core import ModelInput as ModelInput
@@ -40,5 +41,6 @@ from dynamo._core import lora_name_to_id as lora_name_to_id
 from dynamo._core import make_engine
 from dynamo._core import register_llm as register_llm
 from dynamo._core import run_input
+from dynamo._core import unregister_llm as unregister_llm
 
 from .exceptions import HttpError

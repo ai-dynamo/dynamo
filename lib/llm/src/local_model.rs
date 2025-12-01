@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::discovery::DiscoveryInstance;
 use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
@@ -443,6 +444,29 @@ impl LocalModel {
             &self.card,
         )?;
         let _instance = discovery.register(spec).await?;
+
+        Ok(())
+    }
+
+    /// Helper associated function to detach a model from an endpoint
+    pub async fn detach_model_from_endpoint(endpoint: &Endpoint) -> anyhow::Result<()> {
+        let drt = endpoint.drt();
+        let instance_id = drt.connection_id();
+
+        let endpoint_id = endpoint.id();
+
+        let instance = DiscoveryInstance::Model {
+            namespace: endpoint_id.namespace,
+            component: endpoint_id.component,
+            endpoint: endpoint_id.name,
+            instance_id,
+            card_json: serde_json::Value::Null,
+        };
+
+        let discovery = drt.discovery();
+        discovery.unregister(instance).await?;
+
+        tracing::info!("Successfully unregistered model from discovery");
 
         Ok(())
     }

@@ -3,9 +3,6 @@
 
 from typing import Optional
 
-# Keeping this import is important because it runs the code in nixl’s __init__.py
-# to set up the Nixl plugin path.
-import nixl  # noqa: F401
 import torch
 from kvbm.trtllm_integration.rust import KvConnectorWorker as RustKvConnectorWorker
 from kvbm.utils import is_dyn_runtime_enabled

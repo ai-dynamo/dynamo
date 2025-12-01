@@ -3,7 +3,7 @@
 
 use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
-use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
+use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
@@ -141,6 +141,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(unregister_llm, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
@@ -173,6 +174,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::ZmqKvEventPublisher>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
+    m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
@@ -331,6 +333,18 @@ fn register_llm<'p>(
     })
 }
 
+/// Unregister a model from the endpoint.
+#[pyfunction]
+#[pyo3(signature = (endpoint))]
+fn unregister_llm<'p>(py: Python<'p>, endpoint: Endpoint) -> PyResult<Bound<'p, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        LocalModel::detach_model_from_endpoint(&endpoint.inner)
+            .await
+            .map_err(to_pyerr)?;
+        Ok(())
+    })
+}
+
 /// Download a model from Hugging Face, returning it's local path
 /// Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
 #[pyfunction]
@@ -442,7 +456,7 @@ enum ModelInput {
 impl DistributedRuntime {
     #[new]
     fn new(event_loop: PyObject, store_kv: String, request_plane: String) -> PyResult<Self> {
-        let selected_kv_store: KeyValueStoreSelect = store_kv.parse().map_err(to_pyerr)?;
+        let selected_kv_store: kv::Selector = store_kv.parse().map_err(to_pyerr)?;
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
 
         // Try to get existing runtime first, create new Worker only if needed
@@ -478,7 +492,12 @@ impl DistributedRuntime {
 
         let runtime_config = DistributedConfig {
             store_backend: selected_kv_store,
-            nats_config: dynamo_runtime::transports::nats::ClientOptions::default(),
+            // We only need NATS here to monitor it's metrics, so only if it's our request plane.
+            nats_config: if request_plane.is_nats() {
+                Some(dynamo_runtime::transports::nats::ClientOptions::default())
+            } else {
+                None
+            },
             request_plane,
         };
         let inner = runtime
@@ -562,15 +581,6 @@ impl Component {
         Ok(Endpoint {
             inner,
             event_loop: self.event_loop.clone(),
-        })
-    }
-
-    /// NATS specific stats/metrics call
-    fn create_service<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let mut inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.add_stats_service().await.map_err(to_pyerr)?;
-            Ok(())
         })
     }
 

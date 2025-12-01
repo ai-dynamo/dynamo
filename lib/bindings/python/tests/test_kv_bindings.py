@@ -29,10 +29,7 @@ pytestmark = pytest.mark.pre_merge
 
 @pytest.fixture
 async def distributed_runtime():
-    """Function-scoped runtime fixture for use with @pytest.mark.forked tests.
-
-    Each test gets its own runtime in a forked process to avoid singleton conflicts.
-    """
+    """Function-scoped runtime fixture for distributed runtime tests."""
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(loop, "etcd", "nats")
     yield runtime
@@ -40,7 +37,6 @@ async def distributed_runtime():
 
 
 @pytest.mark.asyncio
-@pytest.mark.forked
 async def test_radix_tree_binding(distributed_runtime):
     """Test RadixTree binding directly with store event and find matches"""
     import json
@@ -107,7 +103,6 @@ async def test_radix_tree_binding(distributed_runtime):
 
 
 @pytest.mark.asyncio
-@pytest.mark.forked
 @pytest.mark.parametrize("num_threads", [2, 3, 5, 128])
 @pytest.mark.parametrize("prepopulate_worker_ids", [True, False])
 @pytest.mark.parametrize("expiration_duration_secs", [None])
@@ -209,24 +204,18 @@ async def test_radix_tree_thread_safety(
     ), f"Expected {expected_blocks_after_removal} block events after removal, got {len(blocks_after_removal)}"
 
 
-# TODO Figure out how to test with different kv_block_size
-# Right now I get an error in EventPublisher init when I run this test
-# back to back. It occurs when calling dynamo_llm_init and I think is related to the
-# OnceCell initializations not being reset.
-# The test works individually if I run it with 32, then 11, then 64.
-# @pytest.mark.parametrize("kv_block_size", [11, 32, 64])
 @pytest.mark.asyncio
-@pytest.mark.forked
-@pytest.mark.skip(reason="Flakey in CI. Likely race condition going on.")
 async def test_event_handler(distributed_runtime):
     kv_block_size = 32
     namespace = "kv_test"
     component = "event"
     kv_listener = distributed_runtime.namespace(namespace).component(component)
-    await kv_listener.create_service()
 
     # publisher
-    worker_id = 233
+    # Get actual worker_id from component (KvEventPublisher ignores the passed worker_id and uses component's connection_id)
+    # Create a dummy endpoint to access connection_id since Component doesn't expose it directly
+    dummy_endpoint = kv_listener.endpoint("dummy")
+    worker_id = dummy_endpoint.connection_id()
     event_publisher = EventPublisher(kv_listener, worker_id, kv_block_size)
 
     # indexer
@@ -238,67 +227,53 @@ async def test_event_handler(distributed_runtime):
     assert not scores.scores
 
     event_publisher.store_event(test_token, lora_id)
-    # wait for the event to be processed as it is sent asynchronously
-    # Retry loop for CI environments where processing may take longer
-    worker_key = (worker_id, 0)  # (worker_id, dp_rank)
-    for retry in range(10):  # Try up to 10 times
-        await asyncio.sleep(0.5)  # Wait 500ms between retries
-        scores = await indexer.find_matches_for_request(test_token, lora_id)
-        if (
-            scores.scores
-            and worker_key in scores.scores
-            and scores.scores[worker_key] == 1
-        ):
-            break
-        if retry == 9:  # Last iteration
-            # Provide detailed error message for debugging
-            assert scores.scores, f"No scores found after {(retry+1)*0.5}s"
-            assert (
-                worker_key in scores.scores
-            ), f"Worker {worker_key} not in scores after {(retry+1)*0.5}s"
-            assert (
-                scores.scores[worker_key] == 1
-            ), f"Expected score 1, got {scores.scores.get(worker_key)} after {(retry+1)*0.5}s"
+    # Wait for the event to be processed (sent asynchronously)
+    await asyncio.sleep(0.2)
 
-    # remove event
+    scores = await indexer.find_matches_for_request(test_token, lora_id)
+    worker_key = (worker_id, 0)  # (worker_id, dp_rank)
+    assert scores.scores, "No scores found"
+    assert worker_key in scores.scores, f"Worker {worker_key} not found in scores"
+    assert (
+        scores.scores[worker_key] == 1
+    ), f"Expected score 1, got {scores.scores[worker_key]}"
+
+    # Remove event and verify
     event_publisher.remove_event()
-    # Retry loop for event removal verification
-    for retry in range(10):  # Try up to 10 times
-        await asyncio.sleep(0.5)  # Wait 500ms between retries
-        scores = await indexer.find_matches_for_request(test_token, lora_id)
-        if not scores.scores:
-            break
-        if retry == 9:  # Last iteration
-            assert (
-                not scores.scores
-            ), f"Scores still present after {(retry+1)*0.5}s: {scores.scores}"
+    await asyncio.sleep(0.2)
+
+    scores = await indexer.find_matches_for_request(test_token, lora_id)
+    assert not scores.scores, f"Scores still present: {scores.scores}"
 
 
 @pytest.mark.asyncio
-@pytest.mark.forked
 async def test_approx_kv_indexer(distributed_runtime):
+    """Test ApproxKvIndexer with TTL-based block tracking"""
     kv_block_size = 32
     namespace = "kv_test"
     component = "approx_kv"
     kv_listener = distributed_runtime.namespace(namespace).component(component)
-    await kv_listener.create_service()
 
-    indexer = ApproxKvIndexer(kv_listener, kv_block_size, 30.0)
+    # Create ApproxKvIndexer with default TTL (120s)
+    indexer = ApproxKvIndexer(kv_listener, kv_block_size)
 
     tokens = [0] * (kv_block_size * 2)
 
+    # Initially no matches
     scores = await indexer.find_matches_for_request(tokens)
     assert not scores.scores
 
     worker_id = 0
 
+    # Process routing decision - this should add blocks to the indexer
     await indexer.process_routing_decision_for_request(tokens, worker_id)
 
+    # Now we should have matches
     scores = await indexer.find_matches_for_request(tokens)
     assert scores.scores
     worker_key = (worker_id, 0)  # (worker_id, dp_rank)
     assert worker_key in scores.scores
-    assert scores.scores[worker_key] == 2
+    assert scores.scores[worker_key] == 2  # 2 blocks (tokens is 2 blocks long)
 
 
 class EventPublisher:

@@ -154,8 +154,16 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 		envVarsStr,
 		wrappedCommand)
 
-	// Combine SSH setup and mpirun command
-	fullCommand := strings.Join(append(sshSetupCommands, mpirunCmd), " && ")
+	// Combine SSH setup and mpirun command, optionally adding DNS wait for deployers that need it
+	var allCommands []string
+	if multinodeDeployer.NeedsDNSWait() {
+		// Wait for DNS resolution of all worker nodes (needed for LWS)
+		dnsWaitCmd := fmt.Sprintf(`TIMEOUT=300; START_TIME=$(date +%%s); for worker in $(echo "%s" | tr ',' ' '); do echo "Waiting for DNS: $worker"; until getent hosts $worker >/dev/null 2>&1; do CURRENT_TIME=$(date +%%s); if [ $((CURRENT_TIME - START_TIME)) -gt $TIMEOUT ]; then echo "ERROR: Timeout waiting for DNS: $worker"; exit 1; fi; echo "DNS not ready for $worker, retrying..."; sleep 2; done; echo "✓ DNS resolved: $worker"; done; echo "All workers DNS ready"`, workerHosts)
+		allCommands = append(sshSetupCommands, dnsWaitCmd, mpirunCmd)
+	} else {
+		allCommands = append(sshSetupCommands, mpirunCmd)
+	}
+	fullCommand := strings.Join(allCommands, " && ")
 
 	// Update container to use bash with the full command
 	container.Command = []string{"/bin/sh", "-c"}
@@ -216,7 +224,7 @@ func getCommonTRTLLMEnvVars() map[string]bool {
 		"CUDA_VISIBLE_DEVICES": true, "MODEL_PATH": true, "HF_TOKEN": true, "HUGGING_FACE_HUB_TOKEN": true, "HF_ENDPOINT": true,
 		"TOKENIZERS_PARALLELISM": true, "NCCL_DEBUG": true, "NCCL_IB_DISABLE": true, "NCCL_P2P_DISABLE": true,
 		"TENSORRT_LLM_CACHE_DIR": true, "HF_HOME": true, "TRANSFORMERS_CACHE": true, "HF_DATASETS_CACHE": true,
-		"PATH": true, "LD_LIBRARY_PATH": true, "PYTHONPATH": true, "HOME": true, "USER": true,
+		"PATH": true, "LD_LIBRARY_PATH": true, "PYTHONPATH": true, "HOME": true, "USER": true, "TRTLLM_USE_UCX_KVCACHE": true,
 	}
 }
 

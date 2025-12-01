@@ -20,16 +20,15 @@ This document describes how LMCache is integrated into Dynamo's vLLM backend to 
 
 ### Configuration
 
-LMCache is enabled by setting the `ENABLE_LMCACHE` environment variable:
+LMCache is enabled using the `--connector lmcache` flag:
 
 ```bash
-export ENABLE_LMCACHE=1
+python -m dynamo.vllm --model <model_name> --connector lmcache
 ```
 
-Additional LMCache configuration can be customized via environment variables:
-- `LMCACHE_CHUNK_SIZE=256` - Token chunk size for cache granularity (default: 256)
-- `LMCACHE_LOCAL_CPU=True` - Enable CPU memory backend for offloading
-- `LMCACHE_MAX_LOCAL_CPU_SIZE=20` - CPU memory limit in GB (user can adjust based on available RAM to a fixed value)
+### Customization
+
+LMCache configuration can be customized via environment variables listed [here](https://docs.lmcache.ai/api_reference/configurations.html).
 
 For advanced configurations, LMCache supports multiple [storage backends](https://docs.lmcache.ai/index.html):
 - **CPU RAM**: Fast local memory offloading
@@ -59,10 +58,6 @@ In aggregated mode, the system uses:
 ## Disaggregated Serving
 
 Disaggregated serving separates prefill and decode operations into dedicated workers. This provides better resource utilization and scalability for production deployments.
-
-### Configuration
-
-The same `ENABLE_LMCACHE=1` environment variable enables LMCache, but the system automatically configures different connector setups for prefill and decode workers.
 
 ### Deployment
 
@@ -100,7 +95,7 @@ The system automatically configures KV transfer based on the deployment mode and
 #### Prefill Worker (Disaggregated Mode)
 ```python
 kv_transfer_config = KVTransferConfig(
-    kv_connector="MultiConnector",
+    kv_connector="PdConnector",
     kv_role="kv_both",
     kv_connector_extra_config={
         "connectors": [
@@ -127,22 +122,9 @@ kv_transfer_config = KVTransferConfig(
 )
 ```
 
-### Environment Setup
-
-The system automatically configures LMCache environment variables when enabled:
-
-```python
-lmcache_config = {
-    "LMCACHE_CHUNK_SIZE": "256",
-    "LMCACHE_LOCAL_CPU": "True",
-    "LMCACHE_MAX_LOCAL_CPU_SIZE": "20"
-}
-```
-
 ### Integration Points
 
 1. **Argument Parsing** (`args.py`):
-   - Detects `ENABLE_LMCACHE` environment variable
    - Configures appropriate KV transfer settings
    - Sets up connector configurations based on worker type
 
@@ -167,8 +149,19 @@ lmcache_config = {
    - Shared context across sessions
    - Long-running services with warm caches
 
+## Metrics and Monitoring
+
+When LMCache is enabled with `--connector lmcache` and `DYN_SYSTEM_PORT` is set, LMCache metrics are automatically exposed via Dynamo's `/metrics` endpoint alongside vLLM and Dynamo metrics.
+
+**Requirements to access LMCache metrics:**
+- `--connector lmcache` - Enables LMCache
+- `DYN_SYSTEM_PORT=8081` - Enables metrics HTTP endpoint
+
+For detailed information on LMCache metrics, including the complete list of available metrics and how to access them, see the **[LMCache Metrics section](prometheus.md#lmcache-metrics)** in the vLLM Prometheus Metrics Guide.
+
 ## References and Additional Resources
 
 - [LMCache Documentation](https://docs.lmcache.ai/index.html) - Comprehensive guide and API reference
 - [Configuration Reference](https://docs.lmcache.ai/api_reference/configurations.html) - Detailed configuration options
+- [LMCache Observability Guide](https://docs.lmcache.ai/production/observability/vllm_endpoint.html) - Metrics and monitoring details
 
