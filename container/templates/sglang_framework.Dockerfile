@@ -1,20 +1,3 @@
-ARG CUDA_VERSION={{ context.sglang.cuda_version }}
-
-# Runtime image and build-time configuration (aligned with other backends)
-# TODO: OPS-<number>: Use the same runtime image as the other backends
-ARG SGLANG_RUNTIME_IMAGE="{{ context.sglang.runtime_image }}"
-ARG SGLANG_RUNTIME_IMAGE_TAG="{{ context.sglang.runtime_image_tag }}"
-
-ARG PYTHON_VERSION={{ context.sglang.python_version }}
-ARG ARCH={{ platform}}
-ARG ARCH_ALT={{ "x86_64" if platform == "amd64" else "aarch64" }}
-ARG CARGO_BUILD_JOBS
-
-# sccache configuration - inherit from base build
-ARG USE_SCCACHE
-ARG SCCACHE_BUCKET=""
-ARG SCCACHE_REGION=""
-
 ########################################################
 ########## Framework Development Image ################
 ########################################################

@@ -1,38 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-ARG TRTLLM_BASE_IMAGE={{ context.trtllm.base_image }}
-ARG TRTLLM_BASE_IMAGE_TAG={{ context.trtllm.base_image_tag }}
-
-ARG PYTORCH_BASE_IMAGE={{ context.trtllm.pytorch_base_image }}
-ARG PYTORCH_BASE_IMAGE_TAG={{ context.trtllm.pytorch_base_image_tag }}
-ARG ENABLE_KVBM={{ context.dynamo_base.enable_kvbm }}
-ARG TRTLLM_RUNTIME_IMAGE={{ context.trtllm.runtime_image }}
-ARG TRTLLM_RUNTIME_IMAGE_TAG={{ context.trtllm.runtime_image_tag }}
-
-# TensorRT-LLM specific configuration
-ARG HAS_TRTLLM_CONTEXT=0
-ARG TENSORRTLLM_PIP_WHEEL={{ context.trtllm.pip_wheel }}
-ARG TENSORRTLLM_INDEX_URL={{ context.trtllm.index_url }}
-ARG GITHUB_TRTLLM_COMMIT
-
-# Define general architecture ARGs for supporting both x86 and aarch64 builds.
-#   ARCH: Used for package suffixes (e.g., amd64, arm64)
-#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
-#
-# Default values are for x86/amd64:
-#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
-#
-# For arm64/aarch64, build with:
-#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
-#
-# NOTE: There isn't an easy way to define one of these values based on the other value
-# without adding if statements everywhere, so just define both as ARGs for now.
-ARG ARCH={{ platform }}
-ARG ARCH_ALT={{ "x86_64" if platform == "amd64" else "aarch64" }}
-# Python configuration
-ARG PYTHON_VERSION={{ context.trtllm.python_version }}
-
 # Copy artifacts from NGC PyTorch image
 FROM ${PYTORCH_BASE_IMAGE}:${PYTORCH_BASE_IMAGE_TAG} AS pytorch_base
 
@@ -49,7 +14,7 @@ FROM ${PYTORCH_BASE_IMAGE}:${PYTORCH_BASE_IMAGE_TAG} AS pytorch_base
 #
 # The completed venv is then copied to runtime stage with dynamo ownership
 
-FROM ${TRTLLM_BASE_IMAGE}:${TRTLLM_BASE_IMAGE_TAG} AS framework
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 
 ARG ARCH_ALT
 ARG PYTHON_VERSION

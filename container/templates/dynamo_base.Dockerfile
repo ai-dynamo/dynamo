@@ -1,46 +1,4 @@
 ##################################
-########## Build Arguments ########
-##################################
-
-# Base image configuration
-ARG BASE_IMAGE={{ context.dynamo_base.base_image }}
-# TODO OPS-612: NCCL will hang with 25.03, so use 25.01 for now
-# Please check https://github.com/ai-dynamo/dynamo/pull/1065
-# for details and reproducer to manually test if the image
-# can be updated to later versions.
-ARG BASE_IMAGE_TAG={{ context.dynamo_base.base_image_tag }}
-
-# Build configuration
-ARG ENABLE_KVBM={{ context.dynamo_base.enable_kvbm }}
-ARG CARGO_BUILD_JOBS
-
-# Define general architecture ARGs for supporting both x86 and aarch64 builds.
-#   ARCH: Used for package suffixes (e.g., amd64, arm64)
-#   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
-#
-# Default values are for x86/amd64:
-#   --build-arg ARCH=amd64 --build-arg ARCH_ALT=x86_64
-#
-# For arm64/aarch64, build with:
-#   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
-#TODO OPS-592: Leverage uname -m to determine ARCH instead of passing it as an arg
-ARG ARCH={{ platform }}
-ARG ARCH_ALT={{ "x86_64" if platform == "amd64" else "aarch64" }}
-
-# SCCACHE configuration
-ARG USE_SCCACHE
-ARG SCCACHE_BUCKET=""
-ARG SCCACHE_REGION=""
-
-# NIXL configuration
-ARG NIXL_UCX_REF={{ context.dynamo_base.nixl_ucx_ref }}
-ARG NIXL_REF={{ context.dynamo_base.nixl_ref }}
-ARG NIXL_GDRCOPY_REF={{ context.dynamo_base.nixl_gdrcopy_ref }}
-
-# Python configuration
-ARG PYTHON_VERSION={{ context.dynamo_base.python_version }}
-
-##################################
 ########## Base Image ############
 ##################################
 
