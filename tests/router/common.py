@@ -1882,3 +1882,183 @@ def _test_router_decisions(
             f"All events correctly routed to worker_id={expected_worker_id} as expected. "
             f"KV events synchronized correctly."
         )
+
+
+def _test_busy_threshold_endpoint(
+    engine_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    store_backend: str = "etcd",
+):
+    """Test that the /busy_threshold endpoint can be hit and responds correctly.
+
+    TODO: This doesn't actually test any e2e rejection for now. A proper test would:
+    1. Set a very low threshold
+    2. Send enough requests to exceed the threshold
+    3. Verify that subsequent requests are rejected with 503
+
+    For now, this test only verifies the endpoint is accessible and returns valid responses.
+
+    Args:
+        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        block_size: Block size for KV cache
+        request: Pytest request fixture for managing resources
+        frontend_port: Port for the frontend HTTP server
+        test_payload: Base test payload (used to extract model name)
+        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+
+    Raises:
+        AssertionError: If endpoint responses are incorrect
+    """
+    import aiohttp
+
+    try:
+        # Start KV router frontend
+        logger.info(f"Starting KV router frontend on port {frontend_port}")
+        kv_router = KVRouterProcess(
+            request, block_size, frontend_port, engine_workers.namespace, store_backend
+        )
+        kv_router.__enter__()
+
+        frontend_url = f"http://localhost:{frontend_port}"
+        busy_threshold_url = f"{frontend_url}/busy_threshold"
+
+        # Wait for workers to register with frontend
+        logger.info("Waiting for workers to register with frontend...")
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=engine_workers.num_workers,
+                timeout=120,
+            )
+        )
+
+        model_name = test_payload.get("model", "test-model")
+
+        async def test_busy_threshold_api():
+            async with aiohttp.ClientSession() as session:
+                # Test 1: GET /busy_threshold - list all thresholds (should be empty initially)
+                logger.info("Testing GET /busy_threshold (list all)")
+                async with session.get(busy_threshold_url) as response:
+                    assert (
+                        response.status == 200
+                    ), f"GET /busy_threshold failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        "thresholds" in data
+                    ), f"Expected 'thresholds' key in response: {data}"
+                    logger.info(f"GET /busy_threshold response: {data}")
+
+                # Test 2: POST /busy_threshold with model only (get threshold, may not exist yet)
+                logger.info(
+                    f"Testing POST /busy_threshold to get threshold for model '{model_name}'"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name},
+                ) as response:
+                    # May return 404 if threshold not set yet, or 200 with threshold
+                    status = response.status
+                    data = await response.json()
+                    logger.info(
+                        f"POST /busy_threshold (get) response: status={status}, data={data}"
+                    )
+                    assert status in (200, 404), f"Unexpected status {status}: {data}"
+
+                # Test 3: POST /busy_threshold to set a threshold
+                test_threshold = 0.75
+                logger.info(
+                    f"Testing POST /busy_threshold to set threshold={test_threshold}"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name, "threshold": test_threshold},
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (set) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("model") == model_name
+                    ), f"Expected model={model_name}: {data}"
+                    assert (
+                        data.get("threshold") == test_threshold
+                    ), f"Expected threshold={test_threshold}: {data}"
+                    logger.info(f"POST /busy_threshold (set) response: {data}")
+
+                # Test 4: POST /busy_threshold to get the threshold we just set
+                logger.info("Testing POST /busy_threshold to verify threshold was set")
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name},
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (get after set) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("threshold") == test_threshold
+                    ), f"Expected threshold={test_threshold}: {data}"
+                    logger.info(
+                        f"POST /busy_threshold (get after set) response: {data}"
+                    )
+
+                # Test 5: POST /busy_threshold to update the threshold
+                new_threshold = 0.5
+                logger.info(
+                    f"Testing POST /busy_threshold to update threshold={new_threshold}"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name, "threshold": new_threshold},
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (update) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("threshold") == new_threshold
+                    ), f"Expected threshold={new_threshold}: {data}"
+                    logger.info(f"POST /busy_threshold (update) response: {data}")
+
+                # Test 6: GET /busy_threshold - verify threshold appears in list
+                logger.info("Testing GET /busy_threshold to verify threshold in list")
+                async with session.get(busy_threshold_url) as response:
+                    assert (
+                        response.status == 200
+                    ), f"GET /busy_threshold failed with status {response.status}"
+                    data = await response.json()
+                    thresholds = data.get("thresholds", [])
+                    # thresholds is an array of {model, threshold} objects
+                    model_thresholds = {t["model"]: t["threshold"] for t in thresholds}
+                    assert (
+                        model_name in model_thresholds
+                    ), f"Expected model '{model_name}' in thresholds: {data}"
+                    assert (
+                        model_thresholds[model_name] == new_threshold
+                    ), f"Expected threshold={new_threshold} for model '{model_name}': {data}"
+                    logger.info(f"GET /busy_threshold (after set) response: {data}")
+
+                # Test 7: Invalid threshold value (should fail validation)
+                logger.info(
+                    "Testing POST /busy_threshold with invalid threshold (>1.0)"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name, "threshold": 1.5},
+                ) as response:
+                    assert (
+                        response.status == 400
+                    ), f"Expected 400 for invalid threshold, got {response.status}"
+                    data = await response.json()
+                    logger.info(f"POST /busy_threshold (invalid) response: {data}")
+
+                logger.info("All busy_threshold endpoint tests passed!")
+
+        asyncio.run(test_busy_threshold_api())
+
+    finally:
+        if "kv_router" in locals():
+            kv_router.__exit__(None, None, None)
