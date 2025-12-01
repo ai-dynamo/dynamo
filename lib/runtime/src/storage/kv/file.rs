@@ -65,7 +65,13 @@ impl FileStore {
             let ttl = self.shortest_ttl();
             let keep_alive_interval = cmp::max(ttl / 3, MIN_KEEP_ALIVE);
 
+            // Check before and after the sleep
+            if self.cancel_token.is_cancelled() {
+                break;
+            }
+
             thread::sleep(keep_alive_interval);
+
             if self.cancel_token.is_cancelled() {
                 break;
             }
@@ -485,7 +491,8 @@ mod tests {
     async fn test_entries_full_path() {
         let t = tempfile::tempdir().unwrap();
 
-        let m = FileStore::new(CancellationToken::new(), t.path());
+        let cancel_token = CancellationToken::new();
+        let m = FileStore::new(cancel_token.clone(), t.path());
         let bucket = m.get_or_create_bucket("v1/tests", None).await.unwrap();
         let _ = bucket
             .insert(&Key::new("key1/multi/part".to_string()), "value1".into(), 0)
@@ -497,6 +504,7 @@ mod tests {
             .unwrap();
         let entries = bucket.entries().await.unwrap();
         let keys: HashSet<Key> = entries.into_keys().collect();
+        cancel_token.cancel(); // stop the background thread
 
         assert!(keys.contains(&Key::new("v1/tests/key1/multi/part".to_string())));
         assert!(keys.contains(&Key::new("v1/tests/key2".to_string())));
