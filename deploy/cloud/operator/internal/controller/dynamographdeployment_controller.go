@@ -687,8 +687,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 }
 
 // generateAdapterName creates a consistent name for a DynamoGraphDeploymentScalingAdapter
+// Service names are lowercased to comply with Kubernetes DNS subdomain naming requirements
 func generateAdapterName(dgdName, serviceName string) string {
-	return fmt.Sprintf("%s-%s", dgdName, serviceName)
+	return fmt.Sprintf("%s-%s", dgdName, strings.ToLower(serviceName))
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
