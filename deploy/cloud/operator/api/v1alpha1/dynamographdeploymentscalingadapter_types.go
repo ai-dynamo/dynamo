@@ -21,8 +21,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// DGDScalingAdapterSpec defines the desired state of DGDScalingAdapter
-type DGDScalingAdapterSpec struct {
+// DynamoGraphDeploymentScalingAdapterSpec defines the desired state of DynamoGraphDeploymentScalingAdapter
+type DynamoGraphDeploymentScalingAdapterSpec struct {
 	// Replicas is the desired number of replicas for the target service.
 	// This field is modified by external autoscalers (HPA/KEDA/Planner) or manually by users.
 	// +kubebuilder:validation:Required
@@ -31,7 +31,7 @@ type DGDScalingAdapterSpec struct {
 
 	// DGDRef references the DynamoGraphDeployment and the specific service to scale.
 	// +kubebuilder:validation:Required
-	DGDRef DGDServiceRef `json:"dgdRef"`
+	DGDRef DynamoGraphDeploymentServiceRef `json:"dgdRef"`
 
 	// ScalingPolicy defines optional constraints for scaling behavior.
 	// These constraints are enforced by the adapter controller, providing
@@ -40,8 +40,8 @@ type DGDScalingAdapterSpec struct {
 	ScalingPolicy *ScalingPolicy `json:"scalingPolicy,omitempty"`
 }
 
-// DGDServiceRef identifies a specific service within a DynamoGraphDeployment
-type DGDServiceRef struct {
+// DynamoGraphDeploymentServiceRef identifies a specific service within a DynamoGraphDeployment
+type DynamoGraphDeploymentServiceRef struct {
 	// Name of the DynamoGraphDeployment
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
@@ -76,8 +76,8 @@ type ScalingPolicy struct {
 	ScaleDownStabilizationSeconds *int32 `json:"scaleDownStabilizationSeconds,omitempty"`
 }
 
-// DGDScalingAdapterStatus defines the observed state of DGDScalingAdapter
-type DGDScalingAdapterStatus struct {
+// DynamoGraphDeploymentScalingAdapterStatus defines the observed state of DynamoGraphDeploymentScalingAdapter
+type DynamoGraphDeploymentScalingAdapterStatus struct {
 	// Replicas is the current number of replicas for the target service.
 	// This is synced from the DGD's service replicas.
 	// +optional
@@ -112,41 +112,41 @@ type DGDScalingAdapterStatus struct {
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:resource:shortName={dgdsa}
 
-// DGDScalingAdapter provides a scaling interface for individual services
+// DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual services
 // within a DynamoGraphDeployment. It implements the Kubernetes scale
 // subresource, enabling integration with HPA, KEDA, and custom autoscalers.
 //
 // The adapter acts as an intermediary between autoscalers and the DGD,
 // ensuring that only the adapter controller modifies the DGD's service replicas.
 // This prevents conflicts when multiple autoscaling mechanisms are in play.
-type DGDScalingAdapter struct {
+type DynamoGraphDeploymentScalingAdapter struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DGDScalingAdapterSpec   `json:"spec,omitempty"`
-	Status DGDScalingAdapterStatus `json:"status,omitempty"`
+	Spec   DynamoGraphDeploymentScalingAdapterSpec   `json:"spec,omitempty"`
+	Status DynamoGraphDeploymentScalingAdapterStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// DGDScalingAdapterList contains a list of DGDScalingAdapter
-type DGDScalingAdapterList struct {
+// DynamoGraphDeploymentScalingAdapterList contains a list of DynamoGraphDeploymentScalingAdapter
+type DynamoGraphDeploymentScalingAdapterList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []DGDScalingAdapter `json:"items"`
+	Items           []DynamoGraphDeploymentScalingAdapter `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&DGDScalingAdapter{}, &DGDScalingAdapterList{})
+	SchemeBuilder.Register(&DynamoGraphDeploymentScalingAdapter{}, &DynamoGraphDeploymentScalingAdapterList{})
 }
 
-// Condition types for DGDScalingAdapter
+// Condition types for DynamoGraphDeploymentScalingAdapter
 const (
-	// ConditionTypeReady indicates the adapter is synced with DGD and functioning correctly
+	// ConditionTypeAdapterReady indicates the adapter is synced with DGD and functioning correctly
 	ConditionTypeAdapterReady = "Ready"
 )
 
-// Condition reasons for DGDScalingAdapter
+// Condition reasons for DynamoGraphDeploymentScalingAdapter
 const (
 	// ReasonDGDNotFound indicates the referenced DGD does not exist
 	ReasonDGDNotFound = "DGDNotFound"
@@ -159,7 +159,7 @@ const (
 )
 
 // SetCondition updates or adds a condition to the adapter's status
-func (a *DGDScalingAdapter) SetCondition(condType string, status metav1.ConditionStatus, reason, message string) {
+func (a *DynamoGraphDeploymentScalingAdapter) SetCondition(condType string, status metav1.ConditionStatus, reason, message string) {
 	now := metav1.Now()
 	condition := metav1.Condition{
 		Type:               condType,
@@ -184,7 +184,7 @@ func (a *DGDScalingAdapter) SetCondition(condType string, status metav1.Conditio
 }
 
 // GetCondition returns the condition with the given type, or nil if not found
-func (a *DGDScalingAdapter) GetCondition(condType string) *metav1.Condition {
+func (a *DynamoGraphDeploymentScalingAdapter) GetCondition(condType string) *metav1.Condition {
 	for i := range a.Status.Conditions {
 		if a.Status.Conditions[i].Type == condType {
 			return &a.Status.Conditions[i]
@@ -194,7 +194,7 @@ func (a *DGDScalingAdapter) GetCondition(condType string) *metav1.Condition {
 }
 
 // IsReady returns true if the adapter is in Ready state
-func (a *DGDScalingAdapter) IsReady() bool {
+func (a *DynamoGraphDeploymentScalingAdapter) IsReady() bool {
 	cond := a.GetCondition(ConditionTypeAdapterReady)
 	return cond != nil && cond.Status == metav1.ConditionTrue
 }

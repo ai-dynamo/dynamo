@@ -366,10 +366,10 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dgdscalingadapters
   - dynamocomponentdeployments
   - dynamographdeploymentrequests
   - dynamographdeployments
+  - dynamographdeploymentscalingadapters
   - dynamomodels
   verbs:
   - create
@@ -382,7 +382,6 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dgdscalingadapters/finalizers
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
@@ -392,10 +391,10 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dgdscalingadapters/status
   - dynamocomponentdeployments/status
   - dynamographdeploymentrequests/status
   - dynamographdeployments/status
+  - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
   verbs:
   - get

@@ -20,16 +20,16 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.4
     helm.sh/resource-policy: keep
-  name: dgdscalingadapters.nvidia.com
+  name: dynamographdeploymentscalingadapters.nvidia.com
 spec:
   group: nvidia.com
   names:
-    kind: DGDScalingAdapter
-    listKind: DGDScalingAdapterList
-    plural: dgdscalingadapters
+    kind: DynamoGraphDeploymentScalingAdapter
+    listKind: DynamoGraphDeploymentScalingAdapterList
+    plural: dynamographdeploymentscalingadapters
     shortNames:
       - dgdsa
-    singular: dgdscalingadapter
+    singular: dynamographdeploymentscalingadapter
   scope: Namespaced
   versions:
     - additionalPrinterColumns:
@@ -60,7 +60,7 @@ spec:
       schema:
         openAPIV3Schema:
           description: |-
-            DGDScalingAdapter provides a scaling interface for individual services
+            DynamoGraphDeploymentScalingAdapter provides a scaling interface for individual services
             within a DynamoGraphDeployment. It implements the Kubernetes scale
             subresource, enabling integration with HPA, KEDA, and custom autoscalers.
 
@@ -86,7 +86,7 @@ spec:
             metadata:
               type: object
             spec:
-              description: DGDScalingAdapterSpec defines the desired state of DGDScalingAdapter
+              description: DynamoGraphDeploymentScalingAdapterSpec defines the desired state of DynamoGraphDeploymentScalingAdapter
               properties:
                 dgdRef:
                   description: DGDRef references the DynamoGraphDeployment and the specific service to scale.
@@ -145,7 +145,7 @@ spec:
                 - replicas
               type: object
             status:
-              description: DGDScalingAdapterStatus defines the observed state of DGDScalingAdapter
+              description: DynamoGraphDeploymentScalingAdapterStatus defines the observed state of DynamoGraphDeploymentScalingAdapter
               properties:
                 conditions:
                   description: Conditions represent the latest available observations of the adapter's state.

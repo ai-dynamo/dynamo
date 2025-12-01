@@ -578,7 +578,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.DGDScalingAdapterReconciler{
+	if err = (&controller.DynamoGraphDeploymentScalingAdapterReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("dgdscalingadapter"),

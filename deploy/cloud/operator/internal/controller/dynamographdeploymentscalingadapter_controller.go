@@ -42,24 +42,24 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 )
 
-// DGDScalingAdapterReconciler reconciles a DGDScalingAdapter object
-type DGDScalingAdapterReconciler struct {
+// DynamoGraphDeploymentScalingAdapterReconciler reconciles a DynamoGraphDeploymentScalingAdapter object
+type DynamoGraphDeploymentScalingAdapterReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	Config   commonController.Config
 }
 
-// +kubebuilder:rbac:groups=nvidia.com,resources=dgdscalingadapters,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=nvidia.com,resources=dgdscalingadapters/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentscalingadapters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentscalingadapters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;update;patch
 
-// Reconcile implements the reconciliation loop for DGDScalingAdapter
-func (r *DGDScalingAdapterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile implements the reconciliation loop for DynamoGraphDeploymentScalingAdapter
+func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// 1. Fetch the DGDScalingAdapter
-	adapter := &nvidiacomv1alpha1.DGDScalingAdapter{}
+	// 1. Fetch the DynamoGraphDeploymentScalingAdapter
+	adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{}
 	if err := r.Get(ctx, req.NamespacedName, adapter); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -205,7 +205,7 @@ func (r *DGDScalingAdapterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 // applyScalingPolicy enforces min/max constraints
 // Returns the constrained replica count and a violation message (empty if no violation)
-func (r *DGDScalingAdapterReconciler) applyScalingPolicy(adapter *nvidiacomv1alpha1.DGDScalingAdapter, desired int32) (int32, string) {
+func (r *DynamoGraphDeploymentScalingAdapterReconciler) applyScalingPolicy(adapter *nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter, desired int32) (int32, string) {
 	if adapter.Spec.ScalingPolicy == nil {
 		return desired, ""
 	}
@@ -224,7 +224,7 @@ func (r *DGDScalingAdapterReconciler) applyScalingPolicy(adapter *nvidiacomv1alp
 }
 
 // canScaleDown checks if scale-down is allowed based on stabilization window
-func (r *DGDScalingAdapterReconciler) canScaleDown(adapter *nvidiacomv1alpha1.DGDScalingAdapter) bool {
+func (r *DynamoGraphDeploymentScalingAdapterReconciler) canScaleDown(adapter *nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter) bool {
 	if adapter.Spec.ScalingPolicy == nil ||
 		adapter.Spec.ScalingPolicy.ScaleDownStabilizationSeconds == nil ||
 		*adapter.Spec.ScalingPolicy.ScaleDownStabilizationSeconds == 0 {
@@ -240,25 +240,16 @@ func (r *DGDScalingAdapterReconciler) canScaleDown(adapter *nvidiacomv1alpha1.DG
 }
 
 // buildPodSelector constructs a label selector for the pods managed by this service
-func (r *DGDScalingAdapterReconciler) buildPodSelector(dgd *nvidiacomv1alpha1.DynamoGraphDeployment, serviceName string) string {
+func (r *DynamoGraphDeploymentScalingAdapterReconciler) buildPodSelector(dgd *nvidiacomv1alpha1.DynamoGraphDeployment, serviceName string) string {
 	return fmt.Sprintf("%s=%s,%s=%s",
 		consts.KubeLabelDynamoGraphDeploymentName, dgd.Name,
 		consts.KubeLabelServiceName, serviceName)
 }
 
-// getServiceKeys returns the keys of the services map for logging purposes
-func getServiceKeys(services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) []string {
-	keys := make([]string, 0, len(services))
-	for k := range services {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
 // SetupWithManager sets up the controller with the Manager
-func (r *DGDScalingAdapterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1alpha1.DGDScalingAdapter{}, builder.WithPredicates(
+		For(&nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{}, builder.WithPredicates(
 			predicate.GenerationChangedPredicate{},
 		)).
 		Named("dgdscalingadapter").
@@ -286,47 +277,16 @@ func (r *DGDScalingAdapterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// servicesEqual compares two services maps to detect changes in replica counts
-func servicesEqual(old, new map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) bool {
-	if len(old) != len(new) {
-		return false
-	}
-
-	for key, oldSvc := range old {
-		newSvc, exists := new[key]
-		if !exists {
-			return false
-		}
-
-		// Compare replicas
-		oldReplicas := int32(1)
-		if oldSvc.Replicas != nil {
-			oldReplicas = *oldSvc.Replicas
-		}
-
-		newReplicas := int32(1)
-		if newSvc.Replicas != nil {
-			newReplicas = *newSvc.Replicas
-		}
-
-		if oldReplicas != newReplicas {
-			return false
-		}
-	}
-
-	return true
-}
-
 // findAdaptersForDGD maps DGD changes to adapter reconcile requests
 // Uses label selector to efficiently query only adapters for this specific DGD
-func (r *DGDScalingAdapterReconciler) findAdaptersForDGD(ctx context.Context, obj client.Object) []reconcile.Request {
+func (r *DynamoGraphDeploymentScalingAdapterReconciler) findAdaptersForDGD(ctx context.Context, obj client.Object) []reconcile.Request {
 	dgd, ok := obj.(*nvidiacomv1alpha1.DynamoGraphDeployment)
 	if !ok {
 		return nil
 	}
 
 	// Use label selector to filter at API level (more efficient than in-memory filtering)
-	adapterList := &nvidiacomv1alpha1.DGDScalingAdapterList{}
+	adapterList := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterList{}
 	if err := r.List(ctx, adapterList,
 		client.InNamespace(dgd.Namespace),
 		client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name},

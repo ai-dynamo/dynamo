@@ -226,7 +226,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return "", "", "", fmt.Errorf("failed to reconcile top-level PVCs: %w", err)
 	}
 
-	// Reconcile DGDScalingAdapters for each service
+	// Reconcile DynamoGraphDeploymentScalingAdapters for each service
 	err = r.reconcileScalingAdapters(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile scaling adapters")
@@ -615,7 +615,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dyn
 	return nil
 }
 
-// reconcileScalingAdapters ensures a DGDScalingAdapter exists for each service in the DGD
+// reconcileScalingAdapters ensures a DynamoGraphDeploymentScalingAdapter exists for each service in the DGD
 // This enables pluggable autoscaling via HPA, KEDA, or Planner
 func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
@@ -629,9 +629,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 		}
 
 		// Use SyncResource to handle creation/updates
-		_, _, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DGDScalingAdapter, bool, error) {
+		_, _, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter, bool, error) {
 			adapterName := generateAdapterName(dynamoDeployment.Name, serviceName)
-			adapter := &nvidiacomv1alpha1.DGDScalingAdapter{
+			adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      adapterName,
 					Namespace: dynamoDeployment.Namespace,
@@ -640,9 +640,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 						consts.KubeLabelServiceName:               serviceName,
 					},
 				},
-				Spec: nvidiacomv1alpha1.DGDScalingAdapterSpec{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
 					Replicas: currentReplicas,
-					DGDRef: nvidiacomv1alpha1.DGDServiceRef{
+					DGDRef: nvidiacomv1alpha1.DynamoGraphDeploymentServiceRef{
 						Name:    dynamoDeployment.Name,
 						Service: serviceName,
 					},
@@ -652,18 +652,18 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 		})
 
 		if err != nil {
-			logger.Error(err, "Failed to sync DGDScalingAdapter", "service", serviceName)
+			logger.Error(err, "Failed to sync DynamoGraphDeploymentScalingAdapter", "service", serviceName)
 			return err
 		}
 	}
 
 	// Clean up orphaned adapters (services that no longer exist in DGD)
-	adapterList := &nvidiacomv1alpha1.DGDScalingAdapterList{}
+	adapterList := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterList{}
 	if err := r.List(ctx, adapterList,
 		client.InNamespace(dynamoDeployment.Namespace),
 		client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dynamoDeployment.Name},
 	); err != nil {
-		logger.Error(err, "Failed to list DGDScalingAdapters")
+		logger.Error(err, "Failed to list DynamoGraphDeploymentScalingAdapters")
 		return err
 	}
 
@@ -673,7 +673,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 
 		// Check if service still exists in DGD
 		if _, exists := dynamoDeployment.Spec.Services[serviceName]; !exists {
-			logger.Info("Deleting orphaned DGDScalingAdapter", "adapter", adapter.Name, "service", serviceName)
+			logger.Info("Deleting orphaned DynamoGraphDeploymentScalingAdapter", "adapter", adapter.Name, "service", serviceName)
 			if err := r.Delete(ctx, adapter); err != nil && !errors.IsNotFound(err) {
 				logger.Error(err, "Failed to delete orphaned adapter", "adapter", adapter.Name)
 				return err
@@ -686,7 +686,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 	return nil
 }
 
-// generateAdapterName creates a consistent name for a DGDScalingAdapter
+// generateAdapterName creates a consistent name for a DynamoGraphDeploymentScalingAdapter
 func generateAdapterName(dgdName, serviceName string) string {
 	return fmt.Sprintf("%s-%s", dgdName, serviceName)
 }
@@ -710,7 +710,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
-		Owns(&nvidiacomv1alpha1.DGDScalingAdapter{}, builder.WithPredicates(predicate.Funcs{
+		Owns(&nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the adapter
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
