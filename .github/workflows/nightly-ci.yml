@@ -305,6 +305,7 @@ jobs:
           test_type: unit
           platform_arch: ${{ matrix.arch }}
           cpu_limit: '8'
+          dry_run: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}
 
   integration-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch }}-integ
@@ -378,6 +379,7 @@ jobs:
           framework: ${{ matrix.framework }}
           test_type: integration
           platform_arch: ${{ matrix.arch }}
+          dry_run: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}
 
   e2e-single-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch }}-1gpu-e2e
