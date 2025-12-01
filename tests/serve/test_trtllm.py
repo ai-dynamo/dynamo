@@ -123,7 +123,7 @@ trtllm_configs = {
 @pytest.fixture(params=params_with_model_mark(trtllm_configs))
 def trtllm_config_test(request):
     """Fixture that provides different trtllm test configurations"""
-    return request.param
+    return trtllm_configs[request.param]
 
 
 @pytest.mark.trtllm
