@@ -38,7 +38,7 @@ spec:
 
       containers:
         - name: epp
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/frontend:<my-tag>
           imagePullPolicy: IfNotPresent
           resources:
             requests:
@@ -76,7 +76,7 @@ spec:
             - name: DYNAMO_NAMESPACE
               value: "$(POD_NAMESPACE)-llama3-70b-agg"
             - name: DYNAMO_MODEL
-              value: "llama3-70b-agg"
+              value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
             - name: DYNAMO_KV_BLOCK_SIZE
               value: "128" # UPDATE to match the --block-size in your deploy.yaml engine command
             - name: USE_STREAMING

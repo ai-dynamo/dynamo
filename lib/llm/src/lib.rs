@@ -23,6 +23,7 @@ pub mod hub;
 pub mod audit;
 pub mod kv_router;
 pub mod local_model;
+pub mod lora;
 pub mod migration;
 pub mod mocker;
 pub mod model_card;

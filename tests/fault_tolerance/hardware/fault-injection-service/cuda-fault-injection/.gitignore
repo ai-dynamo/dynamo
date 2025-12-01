@@ -1,0 +1,17 @@
+# Compiled library
+*.so
+*.o
+*.a
+
+# Build artifacts
+*.dylib
+*.dll
+
+# Editor files
+*.swp
+*~
+.DS_Store
+
+# Test outputs
+test_output.txt
+
