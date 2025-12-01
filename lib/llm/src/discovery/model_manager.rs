@@ -7,11 +7,12 @@ use std::{
 };
 
 use parking_lot::{Mutex, RwLock};
-use portable_atomic::{AtomicF64, Ordering};
 use tokio::sync::oneshot;
 
+use crate::discovery::KvWorkerMonitor;
+
 use dynamo_runtime::{
-    component::{Endpoint, build_transport_type},
+    component::{Client, Endpoint, build_transport_type},
     discovery::DiscoverySpec,
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
@@ -68,10 +69,10 @@ pub struct ModelManager {
     kv_choosers: Mutex<HashMap<EndpointId, Arc<KvRouter>>>,
     prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
 
-    /// Per-model busy thresholds for dynamic KV cache load rejection.
-    /// Key: model name, Value: atomic threshold (0.0-1.0).
-    /// Shared with KvWorkerMonitor for dynamic updates via HTTP endpoint.
-    busy_thresholds: RwLock<HashMap<String, Arc<AtomicF64>>>,
+    /// Per-model worker monitors for dynamic KV cache load rejection.
+    /// Key: model name, Value: cloneable monitor (all fields are Arc).
+    /// HTTP endpoint can update thresholds via monitor.set_threshold().
+    worker_monitors: RwLock<HashMap<String, KvWorkerMonitor>>,
 }
 
 impl Default for ModelManager {
@@ -91,7 +92,7 @@ impl ModelManager {
             cards: Mutex::new(HashMap::new()),
             kv_choosers: Mutex::new(HashMap::new()),
             prefill_router_activators: Mutex::new(HashMap::new()),
-            busy_thresholds: RwLock::new(HashMap::new()),
+            worker_monitors: RwLock::new(HashMap::new()),
         }
     }
 
@@ -484,65 +485,80 @@ impl ModelManager {
         crate::protocols::openai::ParsingOptions::new(tool_call_parser, reasoning_parser)
     }
 
-    /// Gets or sets the busy threshold for a model.
+    /// Gets or sets the busy threshold for a model via its worker monitor.
     ///
-    /// The busy threshold (0.0 to 1.0) controls when workers are marked as "busy"
-    /// based on KV cache utilization. When all workers exceed their threshold,
-    /// new requests are rejected.
+    /// This is the primary API for HTTP endpoints and external callers.
+    /// The threshold (0.0 to 1.0) controls when workers are marked as "busy"
+    /// based on KV cache utilization.
     ///
     /// # Arguments
     ///
     /// * `model` - The model name
-    /// * `threshold` - `Some(value)` to set/create, `None` to get existing
+    /// * `threshold` - `Some(value)` to set, `None` to get existing
     ///
     /// # Returns
     ///
-    /// The `Arc<AtomicF64>` for the threshold if it exists or was created,
-    /// or `None` if no threshold exists and none was provided.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// // Set a threshold (creates if doesn't exist)
-    /// let threshold = manager.busy_threshold("llama-3-70b", Some(0.85));
-    ///
-    /// // Get existing threshold
-    /// let threshold = manager.busy_threshold("llama-3-70b", None);
-    ///
-    /// // Read current value
-    /// if let Some(t) = threshold {
-    ///     let value = t.load(Ordering::Relaxed);
-    /// }
-    /// ```
-    pub fn busy_threshold(&self, model: &str, threshold: Option<f64>) -> Option<Arc<AtomicF64>> {
+    /// The threshold value as f64, or `None` if no monitor exists for this model.
+    /// Note: Setting a threshold for a non-existent model returns `None` (monitor
+    /// must be created via `get_or_create_worker_monitor` during model discovery).
+    pub fn busy_threshold(&self, model: &str, threshold: Option<f64>) -> Option<f64> {
+        let monitors = self.worker_monitors.read();
+        let monitor = monitors.get(model)?;
+
         match threshold {
             Some(value) => {
-                // Set or create the threshold
-                let mut thresholds = self.busy_thresholds.write();
-                if let Some(existing) = thresholds.get(model) {
-                    existing.store(value, Ordering::Relaxed);
-                    Some(existing.clone())
-                } else {
-                    let new_threshold = Arc::new(AtomicF64::new(value));
-                    thresholds.insert(model.to_string(), new_threshold.clone());
-                    Some(new_threshold)
-                }
+                monitor.set_threshold(value);
+                Some(value)
             }
-            None => {
-                // Just get the existing threshold
-                self.busy_thresholds.read().get(model).cloned()
-            }
+            None => Some(monitor.threshold()),
         }
     }
 
-    /// Lists all models that have busy thresholds configured.
+    /// Gets or creates a worker monitor for a model.
+    ///
+    /// If a monitor already exists, updates its threshold and returns a clone.
+    /// If no monitor exists, creates one with the given client and threshold.
+    ///
+    /// # Arguments
+    ///
+    /// * `model` - The model name
+    /// * `client` - The client for subscribing to KV metrics (only used if creating new)
+    /// * `threshold` - The initial/updated threshold value (0.0-1.0)
+    ///
+    /// # Returns
+    ///
+    /// A cloneable monitor that shares state with the stored instance.
+    pub fn get_or_create_worker_monitor(
+        &self,
+        model: &str,
+        client: Arc<Client>,
+        threshold: f64,
+    ) -> KvWorkerMonitor {
+        let mut monitors = self.worker_monitors.write();
+
+        if let Some(existing) = monitors.get(model) {
+            existing.set_threshold(threshold);
+            existing.clone()
+        } else {
+            let monitor = KvWorkerMonitor::new(client, threshold);
+            monitors.insert(model.to_string(), monitor.clone());
+            monitor
+        }
+    }
+
+    /// Gets an existing worker monitor for a model, if one exists.
+    pub fn get_worker_monitor(&self, model: &str) -> Option<KvWorkerMonitor> {
+        self.worker_monitors.read().get(model).cloned()
+    }
+
+    /// Lists all models that have worker monitors (and thus busy thresholds) configured.
     ///
     /// Returns a vector of (model_name, threshold_value) tuples.
     pub fn list_busy_thresholds(&self) -> Vec<(String, f64)> {
-        self.busy_thresholds
+        self.worker_monitors
             .read()
             .iter()
-            .map(|(k, v)| (k.clone(), v.load(Ordering::Relaxed)))
+            .map(|(k, monitor)| (k.clone(), monitor.threshold()))
             .collect()
     }
 }

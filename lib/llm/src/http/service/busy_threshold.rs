@@ -121,10 +121,21 @@ async fn busy_threshold_handler(
 
     let manager = state.manager();
 
-    // Get or set the threshold
-    let result = manager.busy_threshold(&request.model, request.threshold);
+    // Get or set the threshold via the model's worker monitor
+    let threshold = manager.busy_threshold(&request.model, request.threshold);
 
-    let threshold = result.map(|t| t.load(portable_atomic::Ordering::Relaxed));
+    // If trying to SET but model has no monitor, return 404
+    if request.threshold.is_some() && threshold.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!(ErrorResponse {
+                error: format!(
+                    "Model '{}' not found. Thresholds can only be set for discovered models.",
+                    request.model
+                ),
+            })),
+        );
+    }
 
     if request.threshold.is_some() {
         tracing::info!(

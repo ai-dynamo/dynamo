@@ -1587,7 +1587,6 @@ dependencies = [
  "offset-allocator",
  "oneshot",
  "parking_lot",
- "portable-atomic",
  "prometheus",
  "prost 0.13.5",
  "rand 0.9.2",

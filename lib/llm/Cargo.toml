@@ -88,7 +88,6 @@ offset-allocator = "0.2"
 regex = "1"
 rayon = "1"
 dashmap = { version = "5.5.3" }
-portable-atomic = { version = "1", features = ["float"] }
 bincode = { version = "2.0.1", features = ["serde", "derive"] }
 
 # lora

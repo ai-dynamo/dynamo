@@ -402,12 +402,15 @@ impl ModelWatcher {
                     )
                 });
 
-            // Get or create the shared busy threshold for this model
-            // This allows dynamic updates via the ModelManager
-            let busy_threshold = self
-                .router_config
-                .busy_threshold
-                .and_then(|threshold| self.manager.busy_threshold(card.name(), Some(threshold)));
+            // Get or create the worker monitor for this model
+            // This allows dynamic threshold updates via the ModelManager
+            let worker_monitor = self.router_config.busy_threshold.map(|threshold| {
+                self.manager.get_or_create_worker_monitor(
+                    card.name(),
+                    Arc::new(client.clone()),
+                    threshold,
+                )
+            });
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
@@ -418,7 +421,7 @@ impl ModelWatcher {
                     card,
                     &client,
                     self.router_config.router_mode,
-                    busy_threshold.clone(),
+                    worker_monitor.clone(),
                     kv_chooser.clone(),
                     tokenizer_hf.clone(),
                     prefill_chooser.clone(),
@@ -449,7 +452,7 @@ impl ModelWatcher {
                     card,
                     &client,
                     self.router_config.router_mode,
-                    busy_threshold,
+                    worker_monitor,
                     kv_chooser,
                     preprocessor,
                     tokenizer_hf,

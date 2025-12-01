@@ -37,6 +37,7 @@ class KVRouterProcess(ManagedProcess):
         namespace: str,
         store_backend: str = "etcd",
         enforce_disagg: bool = False,
+        busy_threshold: float | None = None,
     ):
         command = [
             "python3",
@@ -56,6 +57,9 @@ class KVRouterProcess(ManagedProcess):
 
         if enforce_disagg:
             command.append("--enforce-disagg")
+
+        if busy_threshold is not None:
+            command.extend(["--busy-threshold", str(busy_threshold)])
 
         super().__init__(
             command=command,
@@ -1912,13 +1916,19 @@ def _test_busy_threshold_endpoint(
     Raises:
         AssertionError: If endpoint responses are incorrect
     """
-    import aiohttp
+    # Initial threshold - we need to start with one so the monitor is created
+    initial_threshold = 0.9
 
     try:
-        # Start KV router frontend
+        # Start KV router frontend with initial busy_threshold to create monitor
         logger.info(f"Starting KV router frontend on port {frontend_port}")
         kv_router = KVRouterProcess(
-            request, block_size, frontend_port, engine_workers.namespace, store_backend
+            request,
+            block_size,
+            frontend_port,
+            engine_workers.namespace,
+            store_backend,
+            busy_threshold=initial_threshold,
         )
         kv_router.__enter__()
 
@@ -1939,7 +1949,8 @@ def _test_busy_threshold_endpoint(
 
         async def test_busy_threshold_api():
             async with aiohttp.ClientSession() as session:
-                # Test 1: GET /busy_threshold - list all thresholds (should be empty initially)
+                # Test 1: GET /busy_threshold - list all thresholds
+                # Should have the initial threshold since we started with --busy-threshold
                 logger.info("Testing GET /busy_threshold (list all)")
                 async with session.get(busy_threshold_url) as response:
                     assert (
@@ -1949,9 +1960,12 @@ def _test_busy_threshold_endpoint(
                     assert (
                         "thresholds" in data
                     ), f"Expected 'thresholds' key in response: {data}"
+                    thresholds = data.get("thresholds", [])
+                    # Should have at least the model with initial_threshold
                     logger.info(f"GET /busy_threshold response: {data}")
 
-                # Test 2: POST /busy_threshold with model only (get threshold, may not exist yet)
+                # Test 2: POST /busy_threshold with model only (get threshold)
+                # Should return the initial threshold since we started with --busy-threshold
                 logger.info(
                     f"Testing POST /busy_threshold to get threshold for model '{model_name}'"
                 )
@@ -1959,13 +1973,16 @@ def _test_busy_threshold_endpoint(
                     busy_threshold_url,
                     json={"model": model_name},
                 ) as response:
-                    # May return 404 if threshold not set yet, or 200 with threshold
-                    status = response.status
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (get) failed with status {response.status}"
                     data = await response.json()
+                    assert (
+                        data.get("threshold") == initial_threshold
+                    ), f"Expected initial threshold={initial_threshold}: {data}"
                     logger.info(
-                        f"POST /busy_threshold (get) response: status={status}, data={data}"
+                        f"POST /busy_threshold (get) response: status={response.status}, data={data}"
                     )
-                    assert status in (200, 404), f"Unexpected status {status}: {data}"
 
                 # Test 3: POST /busy_threshold to set a threshold
                 test_threshold = 0.75
