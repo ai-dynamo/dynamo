@@ -10,7 +10,7 @@ dynamo_base:
   nixl_ucx_ref: v1.19.0
   nixl_gdrcopy_ref: v2.5.1
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
-  enable_kvbm: true
+  enable_kvbm: "true"
 
 vllm:
   ref: v0.11.0
