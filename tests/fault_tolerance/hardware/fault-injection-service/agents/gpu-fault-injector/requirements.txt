@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+fastapi==0.111.0
+httpx==0.26.0
+kubernetes==28.1.0
+pydantic==2.5.3
+python-multipart==0.0.20
+pyyaml==6.0.1
+uvicorn[standard]==0.27.0
