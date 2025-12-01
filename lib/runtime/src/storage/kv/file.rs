@@ -21,9 +21,7 @@ use futures::StreamExt;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event};
 use parking_lot::Mutex;
 
-use crate::storage::key_value_store::KeyValue;
-
-use super::{Key, KeyValueBucket, KeyValueStore, StoreError, StoreOutcome, WatchEvent};
+use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 
 /// How long until a key expires. We keep the keys alive by touching the files.
 /// 10s is the same as our etcd lease expiry.
@@ -100,7 +98,7 @@ impl FileStore {
 }
 
 #[async_trait]
-impl KeyValueStore for FileStore {
+impl Store for FileStore {
     type Bucket = Directory;
 
     /// A "bucket" is a directory
@@ -278,7 +276,7 @@ impl fmt::Display for Directory {
 }
 
 #[async_trait]
-impl KeyValueBucket for Directory {
+impl Bucket for Directory {
     /// Write a file to the directory
     async fn insert(
         &self,
@@ -471,9 +469,7 @@ fn to_fs_err<E: std::error::Error>(err: E) -> StoreError {
 mod tests {
     use std::collections::HashSet;
 
-    use crate::storage::key_value_store::{
-        FileStore, Key, KeyValueBucket as _, KeyValueStore as _,
-    };
+    use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _};
 
     #[tokio::test]
     async fn test_entries_full_path() {

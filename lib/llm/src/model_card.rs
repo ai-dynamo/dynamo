@@ -21,7 +21,7 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
 use derive_builder::Builder;
-use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned};
+use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 
@@ -543,7 +543,7 @@ impl PartialEq for ModelDeploymentCard {
 }
 
 /// A ModelDeploymentCard is published a single time per instance and never updated.
-impl Versioned for ModelDeploymentCard {
+impl kv::Versioned for ModelDeploymentCard {
     fn revision(&self) -> u64 {
         0
     }

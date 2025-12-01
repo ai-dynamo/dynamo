@@ -60,7 +60,8 @@ if [[ -n "$SERVED_MODEL_NAME" ]]; then
 fi
 
 # run ingress
-python3 -m dynamo.frontend --http-port=8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python3 -m dynamo.frontend &
 DYNAMO_PID=$!
 
 # run SGLang multimodal processor
