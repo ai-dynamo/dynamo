@@ -5,7 +5,6 @@
 //!
 //! This module provides validation functions to ensure block transfers are safe and correct.
 
-#[cfg(debug_assertions)]
 use crate::BlockId;
 
 use super::PhysicalLayout;

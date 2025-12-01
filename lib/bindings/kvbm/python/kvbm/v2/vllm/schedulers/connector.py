@@ -19,12 +19,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+from vllm.v1.core.kv_cache_manager import KVCacheConfig
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorHandshakeMetadata,
+    )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -52,23 +56,45 @@ class DynamoConnector(KVConnectorBase_V1):
     provides no actual KV transfer functionality.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: Optional[KVCacheConfig] = None,
+    ):
+        import sys
+
+        print(
+            f"[KVBM DEBUG] DynamoConnector.__init__ called with role={role}", flush=True
+        )
+        sys.stdout.flush()
+
+        super().__init__(
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
+        )
 
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
+
+        print(
+            f"[KVBM DEBUG] engine_id={self.engine_id}, creating {'SCHEDULER' if role == KVConnectorRole.SCHEDULER else 'WORKER'} connector...",
+            flush=True,
+        )
+        sys.stdout.flush()
 
         if role == KVConnectorRole.SCHEDULER:
             self._scheduler = SchedulerConnectorLeader(
                 vllm_config=vllm_config, engine_id=self.engine_id
             )
             self._worker = None
+            print("[KVBM DEBUG] DynamoConnector SCHEDULER init complete", flush=True)
         elif role == KVConnectorRole.WORKER:
             self._worker = SchedulerConnectorWorker(
                 vllm_config=vllm_config, engine_id=self.engine_id
             )
             self._scheduler = None
+            print("[KVBM DEBUG] DynamoConnector WORKER init complete", flush=True)
         else:
             raise ValueError(
                 f"Invalid KVConnectorRole: {role}. Must be SCHEDULER or WORKER."
@@ -84,7 +110,6 @@ class DynamoConnector(KVConnectorBase_V1):
         """Always returns (0, False) - no external tokens available."""
         if self._scheduler is None:
             raise RuntimeError("Cannot call scheduler methods on WORKER role")
-        self._create_slot(request)
         return self._scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
     def update_state_after_alloc(
@@ -93,7 +118,6 @@ class DynamoConnector(KVConnectorBase_V1):
         """No-op since we never have external tokens."""
         if self._scheduler is None:
             raise RuntimeError("Cannot call scheduler methods on WORKER role")
-        self._create_slot(request)
         self._scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
 
     def build_connector_meta(
@@ -121,7 +145,7 @@ class DynamoConnector(KVConnectorBase_V1):
         """No-op - no state updates needed."""
         if self._scheduler is None:
             raise RuntimeError("Cannot call scheduler methods on WORKER role")
-        self._scheduler.update_connector_output()
+        self._scheduler.update_connector_output(connector_output)
 
     # added in v0.11
     def take_events(self):
@@ -136,6 +160,15 @@ class DynamoConnector(KVConnectorBase_V1):
         if self._scheduler is None:
             raise RuntimeError("Cannot call scheduler methods on WORKER role")
         return self._scheduler.get_finished_count()
+
+    # added in v0.11.1
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, "KVConnectorHandshakeMetadata"]
+    ) -> None:
+        """No-op - handshake metadata not used."""
+        if self._scheduler is None:
+            raise RuntimeError("Cannot call scheduler methods on WORKER role")
+        self._scheduler.set_xfer_handshake_metadata(metadata)
 
     # added in v0.11
     @classmethod
@@ -153,10 +186,13 @@ class DynamoConnector(KVConnectorBase_V1):
     def _build_kv_connector_stats_impl(data=None):
         return None
 
-    def _create_slot(self, request: "Request") -> None:
-        if self._scheduler is None:
-            raise RuntimeError("Cannot call scheduler methods on WORKER role")
-        self._scheduler._create_slot(request)
+    # added in v0.11.1
+    @classmethod
+    def build_prom_metrics(
+        cls, vllm_config, metric_types, labelnames, per_engine_labelvalues
+    ):
+        """Returns None - no Prometheus metrics."""
+        return None
 
     # Worker methods
 
@@ -219,11 +255,6 @@ class DynamoConnector(KVConnectorBase_V1):
     # Internal helpers
     # ------------------------------------------------------------------ #
 
-    def _create_slot(self, request: "Request") -> None:
-        if self._scheduler is None:
-            raise RuntimeError("Cannot call scheduler methods on WORKER role")
-        self._scheduler._create_slot(request)
-
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
@@ -242,8 +273,7 @@ class DynamoConnector(KVConnectorBase_V1):
     # added in v0.11
     def shutdown(self):
         """No-op - no resources to cleanup."""
-        if self._worker is None:
-            raise RuntimeError("Cannot call worker methods on SCHEDULER role")
+        # Note: shutdown can be called on both SCHEDULER and WORKER roles
         pass
 
     # added in v0.11
@@ -252,3 +282,17 @@ class DynamoConnector(KVConnectorBase_V1):
         if self._worker is None:
             raise RuntimeError("Cannot call worker methods on SCHEDULER role")
         return None
+
+    # added in v0.11.1
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Returns empty set - no load errors tracked."""
+        if self._worker is None:
+            raise RuntimeError("Cannot call worker methods on SCHEDULER role")
+        return self._worker.get_block_ids_with_load_errors()
+
+    # added in v0.11.1
+    def get_handshake_metadata(self):
+        """Returns None - no handshake metadata."""
+        if self._worker is None:
+            raise RuntimeError("Cannot call worker methods on SCHEDULER role")
+        return self._worker.get_handshake_metadata()

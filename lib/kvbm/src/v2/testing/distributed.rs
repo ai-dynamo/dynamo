@@ -359,8 +359,9 @@ pub fn create_direct_worker(
     let layout = physical::create_fc_layout_with_config(agent, storage, layout_config.clone());
     let g2_handle = manager.register_layout(layout)?;
 
-    // Create DirectWorker with G2 handle
-    let direct_worker = DirectWorker::new(manager.clone()).with_g2_handle(g2_handle);
+    // Create DirectWorker and set G2 handle
+    let direct_worker = DirectWorker::new(manager.clone());
+    direct_worker.set_g2_handle(g2_handle)?;
 
     Ok(TestWorker {
         instance_id,

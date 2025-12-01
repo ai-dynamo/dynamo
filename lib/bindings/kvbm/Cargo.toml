@@ -25,8 +25,11 @@ block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc", "dep:kv
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }
-dynamo-kvbm = { path = "../../kvbm" }
+dynamo-kvbm = { path = "../../kvbm", features = ["etcd"] }
+dynamo-kvbm-config = { path = "../../kvbm-config" }
 dynamo-memory = { path = "../../memory" }
+dynamo-nova = { path = "../../nova" }
+dynamo-nova-backend = { path = "../../nova-backend" }
 dynamo-runtime = { path = "../../runtime" }
 kvbm_kernels = { path = "../../kvbm-kernels", package = "dynamo-kvbm-kernels", optional = true }
 

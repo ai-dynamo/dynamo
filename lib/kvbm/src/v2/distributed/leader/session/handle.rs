@@ -213,9 +213,7 @@ impl SessionHandle {
         let msg = SessionMessage::TriggerStaging {
             session_id: self.session_id,
         };
-        self.transport
-            .send_session(self.remote_instance, msg)
-            .await
+        self.transport.send_session(self.remote_instance, msg).await
     }
 
     /// Notify remote that blocks have been pulled.
@@ -226,9 +224,7 @@ impl SessionHandle {
             session_id: self.session_id,
             pulled_hashes,
         };
-        self.transport
-            .send_session(self.remote_instance, msg)
-            .await
+        self.transport.send_session(self.remote_instance, msg).await
     }
 
     /// Detach from the session.
@@ -239,9 +235,7 @@ impl SessionHandle {
             peer: self.local_instance,
             session_id: self.session_id,
         };
-        self.transport
-            .send_session(self.remote_instance, msg)
-            .await
+        self.transport.send_session(self.remote_instance, msg).await
     }
 
     // =========================================================================
@@ -257,9 +251,7 @@ impl SessionHandle {
             peer: self.local_instance,
             session_id: self.session_id,
         };
-        self.transport
-            .send_session(self.remote_instance, msg)
-            .await
+        self.transport.send_session(self.remote_instance, msg).await
     }
 
     /// Attempt to acquire control from the remote peer.
@@ -270,9 +262,7 @@ impl SessionHandle {
             peer: self.local_instance,
             session_id: self.session_id,
         };
-        self.transport
-            .send_session(self.remote_instance, msg)
-            .await
+        self.transport.send_session(self.remote_instance, msg).await
     }
 
     // =========================================================================

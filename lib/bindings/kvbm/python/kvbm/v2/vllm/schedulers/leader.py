@@ -6,18 +6,36 @@ Minimal scheduler connector leader implementation for testing.
 
 This is a barebones implementation that returns minimal/no-op responses,
 used specifically for scheduler integration testing without actual KV transfer.
+
+For Phase 1, the leader:
+- Builds a KvbmRuntime with Nova (no etcd discovery)
+- Receives worker peer info via set_xfer_handshake_metadata()
+- Registers workers as Nova peers and tracks rank→instance_id mapping
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional
 
-from kvbm._core.v2 import KvbmRequest
-from kvbm._core.v2 import KvConnectorLeader as RustKvConnectorLeader
-from kvbm._core.v2 import RustSchedulerOutput
+from kvbm._core import v2 as _v2
+
+KvbmRuntime = _v2.KvbmRuntime
+ConnectorLeader = _v2.ConnectorLeader
+
+# TODO: Re-enable when v2 connector bindings are updated
+# These classes need to be updated for v2 API changes in kvbm crate
+# KvbmRequest = _v2.KvbmRequest
+# RustKvConnectorLeader = _v2.KvConnectorLeader
+# RustSchedulerOutput = _v2.RustSchedulerOutput
+
+# Import the handshake metadata type from worker module
+from .worker import NovaPeerMetadata
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorHandshakeMetadata,
+    )
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.request import Request
@@ -29,14 +47,35 @@ class SchedulerConnectorLeader:
 
     This connector is used for scheduler integration where no actual
     KV transfer is needed. All methods return minimal valid responses.
+
+    In Phase 1, the leader:
+    - Builds a KvbmRuntime with Nova (no etcd discovery)
+    - Receives worker peer info via set_xfer_handshake_metadata()
+    - Registers workers as Nova peers and tracks rank→instance_id mapping
     """
 
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
         """Initialize the scheduler connector leader."""
+        print("[KVBM DEBUG] SchedulerConnectorLeader.__init__ START", flush=True)
+
         self.vllm_config = vllm_config
         self.engine_id = engine_id
-        self._connector = RustKvConnectorLeader(engine_id)
-        print(f"SchedulerConnectorLeader initialized with engine_id: {engine_id}")
+
+        # Build KvbmRuntime with Nova (no etcd discovery)
+        self.runtime = KvbmRuntime.build_leader()
+
+        # Create leader service for coordination (separate from runtime)
+        self.leader = ConnectorLeader(self.runtime)
+
+        # Track active slots (request_id -> True)
+        self._slots: dict[str, bool] = {}
+
+        instance_id = self.runtime.instance_id()
+        print(
+            f"SchedulerConnectorLeader initialized - engine_id: {engine_id}, "
+            f"Nova instance: {instance_id.hex()[:8]}...",
+            flush=True,
+        )
 
     def get_num_new_matched_tokens(
         self,
@@ -49,13 +88,22 @@ class SchedulerConnectorLeader:
         Returns:
             (0, False): No external tokens, no async loading
         """
-        self._create_slot(request)
-        total_tokens = getattr(request, "num_tokens", 0)
-        return self._connector.get_num_new_matched_tokens(
-            request.request_id,
-            total_tokens,
-            num_computed_tokens,
+        self._ensure_slot(request.request_id)
+        # No external tokens available - return (0, False)
+        matched_tokens = 0
+        print(
+            f"[KVBM] get_num_new_matched_tokens: request={request.request_id}, "
+            f"computed={num_computed_tokens}, matched={matched_tokens} (cache_hits=0)"
         )
+        return (matched_tokens, False)
+
+        # TODO: Re-enable when v2 connector bindings are updated
+        # total_tokens = getattr(request, "num_tokens", 0)
+        # return self._connector.get_num_new_matched_tokens(
+        #     request.request_id,
+        #     total_tokens,
+        #     num_computed_tokens,
+        # )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -65,72 +113,81 @@ class SchedulerConnectorLeader:
 
         This should never be called with num_external_tokens > 0.
         """
-        self._create_slot(request)
-        block_ids = [int(block_id) for block_id in blocks.get_block_ids()[0]]
-        self._connector.update_state_after_alloc(
-            request.request_id,
-            block_ids,
-            num_external_tokens,
-        )
+        self._ensure_slot(request.request_id)
+        # No-op for Phase 1
 
-    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
+        # TODO: Re-enable when v2 connector bindings are updated
+        # block_ids = [int(block_id) for block_id in blocks.get_block_ids()[0]]
+        # self._connector.update_state_after_alloc(
+        #     request.request_id,
+        #     block_ids,
+        #     num_external_tokens,
+        # )
+
+    def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> bytes:
         """
-        Build minimal connector metadata.
+        Build connector metadata for workers.
+
+        Workers are already initialized via configure_layouts RPC in
+        set_xfer_handshake_metadata, so we just return empty bytes.
 
         Returns:
-            Empty bytes object
+            bytes: Empty bytes (no additional metadata needed)
         """
-        output = RustSchedulerOutput()
+        return b""
 
-        for req in scheduler_output.scheduled_new_reqs:
-            prompt_ids = [int(token) for token in req.prompt_token_ids]
-            block_ids = [int(block_id) for block_id in req.block_ids[0]]
-            output.add_new_request(
-                req.req_id,
-                prompt_ids,
-                block_ids,
-                int(req.num_computed_tokens),
-            )
-
-        cached = scheduler_output.scheduled_cached_reqs
-        if cached is not None:
-            for (
-                req_id,
-                resumed_from_preemption,
-                new_token_ids,
-                new_block_ids,
-                num_computed_tokens,
-            ) in zip(
-                cached.req_ids,
-                cached.resumed_from_preemption,
-                cached.new_token_ids,
-                cached.new_block_ids,
-                cached.num_computed_tokens,
-            ):
-                tokens = (
-                    [int(token) for token in new_token_ids] if new_token_ids else []
-                )
-                block_ids = (
-                    [int(block_id) for block_id in new_block_ids[0]]
-                    if new_block_ids is not None and len(new_block_ids) > 0
-                    else []
-                )
-                output.add_cached_request(
-                    req_id,
-                    bool(resumed_from_preemption),
-                    tokens,
-                    block_ids,
-                    int(num_computed_tokens),
-                )
-
-        counts_source = getattr(scheduler_output, "num_scheduled_tokens", None)
-        if counts_source:
-            counts = {
-                str(req_id): int(value) for req_id, value in counts_source.items()
-            }
-            output.set_num_scheduled_tokens(counts)
-
-        return bytes(self._connector.build_connector_metadata(output))
+        # TODO: Re-enable when v2 connector bindings are updated
+        # output = RustSchedulerOutput()
+        #
+        # for req in scheduler_output.scheduled_new_reqs:
+        #     prompt_ids = [int(token) for token in req.prompt_token_ids]
+        #     block_ids = [int(block_id) for block_id in req.block_ids[0]]
+        #     output.add_new_request(
+        #         req.req_id,
+        #         prompt_ids,
+        #         block_ids,
+        #         int(req.num_computed_tokens),
+        #     )
+        #
+        # cached = scheduler_output.scheduled_cached_reqs
+        # if cached is not None:
+        #     for (
+        #         req_id,
+        #         resumed_from_preemption,
+        #         new_token_ids,
+        #         new_block_ids,
+        #         num_computed_tokens,
+        #     ) in zip(
+        #         cached.req_ids,
+        #         cached.resumed_from_preemption,
+        #         cached.new_token_ids,
+        #         cached.new_block_ids,
+        #         cached.num_computed_tokens,
+        #     ):
+        #         tokens = (
+        #             [int(token) for token in new_token_ids] if new_token_ids else []
+        #         )
+        #         block_ids = (
+        #             [int(block_id) for block_id in new_block_ids[0]]
+        #             if new_block_ids is not None and len(new_block_ids) > 0
+        #             else []
+        #         )
+        #         output.add_cached_request(
+        #             req_id,
+        #             bool(resumed_from_preemption),
+        #             tokens,
+        #             block_ids,
+        #             int(num_computed_tokens),
+        #         )
+        #
+        # counts_source = getattr(scheduler_output, "num_scheduled_tokens", None)
+        # if counts_source:
+        #     counts = {
+        #         str(req_id): int(value) for req_id, value in counts_source.items()
+        #     }
+        #     output.set_num_scheduled_tokens(counts)
+        #
+        # return bytes(self._connector.build_connector_metadata(output))
 
     def request_finished(
         self,
@@ -143,41 +200,102 @@ class SchedulerConnectorLeader:
         Returns:
             (False, None): Don't delay block freeing, no KV transfer params
         """
-        assert self._connector.has_slot(
-            request.request_id
-        ), f"Slot not found for request {request.request_id}"
-        delay = self._connector.request_finished(request.request_id)
-        return (delay, None)
+        # Remove slot tracking
+        self._slots.pop(request.request_id, None)
+        print(
+            f"[KVBM] request_finished: request={request.request_id}, "
+            f"blocks={len(block_ids)}, pending=False"
+        )
+        # Don't delay block freeing
+        return (False, None)
+
+        # TODO: Re-enable when v2 connector bindings are updated
+        # assert self._connector.has_slot(
+        #     request.request_id
+        # ), f"Slot not found for request {request.request_id}"
+        # delay = self._connector.request_finished(request.request_id)
+        # return (delay, None)
 
     def update_connector_output(self, connector_output) -> None:
-        _ = connector_output
+        """No-op for Phase 1."""
+        pass
 
     def get_finished_count(self) -> Optional[int]:
+        """No finished count tracking for Phase 1."""
         return None
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, "KVConnectorHandshakeMetadata"]
+    ) -> None:
+        """
+        Register all worker Nova peers and trigger layout initialization.
+
+        This is called by vLLM after aggregating handshake metadata from all
+        TP workers. We:
+        1. Register each worker as a Nova peer
+        2. Track the mapping from TP rank to instance_id
+        3. Determine G2/G3 layout configuration from vLLM config
+        4. Send configure_layouts RPC to each worker to trigger initialization
+
+        Args:
+            metadata: Dictionary mapping tp_rank (int) to NovaPeerMetadata
+        """
+        # Create sorted list of (tp_rank, worker_meta) tuples sorted by tp_rank
+        sorted_workers = sorted(metadata.items(), key=lambda x: x[0])
+
+        # Validate that we have consecutive tp_ranks from 0 to N-1
+        num_workers = len(sorted_workers)
+        expected_ranks = list(range(num_workers))
+        actual_ranks = [tp_rank for tp_rank, _ in sorted_workers]
+
+        if actual_ranks != expected_ranks:
+            raise ValueError(
+                f"Expected consecutive tp_ranks from 0 to {num_workers - 1}, "
+                f"got {actual_ranks}"
+            )
+
+        # Validate all metadata types and register workers in sorted order
+        for tp_rank, worker_meta in sorted_workers:
+            if not isinstance(worker_meta, NovaPeerMetadata):
+                raise ValueError(
+                    f"Expected NovaPeerMetadata, got {type(worker_meta).__name__}"
+                )
+            self.leader.register_worker(
+                tp_rank, worker_meta.instance_id, worker_meta.worker_address
+            )
+
+        # Single call to initialize all workers
+        self.leader.initialize_workers()
 
     # Utility functions
 
-    def _create_slot(self, request: "Request") -> None:
-        if self._connector.has_slot(request.request_id):
-            return
+    def _ensure_slot(self, request_id: str) -> None:
+        """Ensure we're tracking this request."""
+        if request_id not in self._slots:
+            self._slots[request_id] = True
 
-        if bool(getattr(request, "mm_features", None)) or bool(
-            getattr(request, "mm_positions", None)
-        ):
-            raise ValueError("Unsupported request - requires mm extra keys")
-
-        all_token_ids = [
-            [int(token) for token in tokens] for tokens in request.all_token_ids
-        ]
-
-        kv_request = KvbmRequest(
-            request_id=request.request_id,
-            lora_name=request.lora_request.lora_name()
-            if request.lora_request
-            else None,
-            salt_hash=str(getattr(request, "cache_salt", None))
-            if getattr(request, "cache_salt", None) is not None
-            else None,
-        )
-
-        self._connector.create_slot(kv_request, all_token_ids)
+    # TODO: Re-enable when v2 connector bindings are updated
+    # def _create_slot(self, request: "Request") -> None:
+    #     if self._connector.has_slot(request.request_id):
+    #         return
+    #
+    #     if bool(getattr(request, "mm_features", None)) or bool(
+    #         getattr(request, "mm_positions", None)
+    #     ):
+    #         raise ValueError("Unsupported request - requires mm extra keys")
+    #
+    #     all_token_ids = [
+    #         [int(token) for token in tokens] for tokens in request.all_token_ids
+    #     ]
+    #
+    #     kv_request = KvbmRequest(
+    #         request_id=request.request_id,
+    #         lora_name=request.lora_request.lora_name()
+    #         if request.lora_request
+    #         else None,
+    #         salt_hash=str(getattr(request, "cache_salt", None))
+    #         if getattr(request, "cache_salt", None) is not None
+    #         else None,
+    #     )
+    #
+    #     self._connector.create_slot(kv_request, all_token_ids)

@@ -7,8 +7,10 @@
 //! `crate::v2::integrations::connector::slot`.
 
 pub mod console;
-pub mod testing;
 pub use console::{ConnectorConsoleHook, ConsoleHookRef, NoopConsoleHook};
+
+#[cfg(test)]
+pub mod testing;
 
 pub use crate::v2::integrations::connector::slot::*;
 

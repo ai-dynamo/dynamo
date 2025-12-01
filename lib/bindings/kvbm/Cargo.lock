@@ -1920,12 +1920,14 @@ dependencies = [
  "dynamo-nova-backend",
  "etcd-client",
  "figment",
+ "fs4",
  "futures",
  "libp2p",
  "libp2p-identity",
  "libp2p-kad",
  "libp2p-mdns",
  "libp2p-swarm",
+ "notify 8.2.0",
  "parking_lot",
  "serde",
  "serde_json",
@@ -1968,6 +1970,7 @@ dependencies = [
  "derive_builder",
  "dynamo-config",
  "dynamo-identity",
+ "dynamo-kvbm-config",
  "dynamo-kvbm-kernels",
  "dynamo-memory",
  "dynamo-nova",
@@ -1987,6 +1990,24 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-kvbm-config"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "dynamo-discovery",
+ "dynamo-memory",
+ "dynamo-nova",
+ "dynamo-nova-backend",
+ "figment",
+ "nix 0.30.1",
+ "serde",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "validator",
 ]
 
 [[package]]
@@ -2234,7 +2255,7 @@ dependencies = [
  "log",
  "nid",
  "nix 0.29.0",
- "notify",
+ "notify 6.1.1",
  "nuid",
  "once_cell",
  "opentelemetry",
@@ -2664,6 +2685,17 @@ checksum = "6ad492b2cf1d89d568a43508ab24f98501fe03f2f31c01e1d0fe7366a71745d2"
 dependencies = [
  "autocfg",
  "tokio",
+]
+
+[[package]]
+name = "fs4"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8640e34b88f7652208ce9e88b1a37a2ae95227d84abec377ccd3c5cfeb141ed4"
+dependencies = [
+ "rustix 1.1.2",
+ "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4258,9 +4290,12 @@ dependencies = [
  "derive-getters",
  "dlpark",
  "dynamo-kvbm",
+ "dynamo-kvbm-config",
  "dynamo-kvbm-kernels",
  "dynamo-llm",
  "dynamo-memory",
+ "dynamo-nova",
+ "dynamo-nova-backend",
  "dynamo-runtime",
  "either",
  "futures",
@@ -5009,6 +5044,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69d83b0086dc8ecf3ce9ae2874b2d1290252e2a30720bea58a5c6639b0092873"
 dependencies = [
  "libc",
+ "log",
  "wasi",
  "windows-sys 0.61.2",
 ]
@@ -5358,6 +5394,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "cfg_aliases",
  "libc",
+ "memoffset 0.9.1",
 ]
 
 [[package]]
@@ -5445,6 +5482,30 @@ dependencies = [
  "walkdir",
  "windows-sys 0.48.0",
 ]
+
+[[package]]
+name = "notify"
+version = "8.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d3d07927151ff8575b7087f245456e549fea62edf0ec4e565a5ee50c8402bc3"
+dependencies = [
+ "bitflags 2.10.0",
+ "fsevent-sys",
+ "inotify 0.11.0",
+ "kqueue",
+ "libc",
+ "log",
+ "mio 1.1.0",
+ "notify-types",
+ "walkdir",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "notify-types"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e0826a989adedc2a244799e823aece04662b66609d96af8dff7ac6df9a8925d"
 
 [[package]]
 name = "nu-ansi-term"

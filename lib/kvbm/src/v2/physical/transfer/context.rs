@@ -28,7 +28,7 @@ pub use super::notifications::TransferCompleteNotification;
 #[derive(Clone, Builder)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"), public)]
 #[allow(dead_code)] // Fields are used in build() but derive macros confuse dead code analysis
-pub(crate) struct TransferConfig {
+pub struct TransferConfig {
     #[builder(default = "LocalEventSystem::new_local_only()")]
     event_system: Arc<LocalEventSystem>,
 
@@ -37,7 +37,7 @@ pub(crate) struct TransferConfig {
     nixl_agent_name: Option<String>,
 
     /// Backend configuration for NIXL backends to enable
-    #[builder(default = "NixlBackendConfig::new()")]
+    #[builder(default = "NixlBackendConfig::default()")]
     nixl_backend_config: NixlBackendConfig,
 
     #[builder(default = "0")]
@@ -54,6 +54,26 @@ pub(crate) struct TransferConfig {
 }
 
 impl TransferConfigBuilder {
+    /// Initialize builder with components from KvbmRuntime.
+    ///
+    /// This extracts the event_system and tokio runtime handle from the runtime,
+    /// ensuring consistency with Nova's event system. Use this when the runtime
+    /// has already been constructed and you want components to share the same
+    /// event notification infrastructure.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let runtime = KvbmRuntime::from_env_leader().await?;
+    /// let transfer_mgr = TransferConfigBuilder::default()
+    ///     .from_runtime(&runtime)
+    ///     .cuda_device_id(0)
+    ///     .build()?;
+    /// ```
+    pub fn from_runtime(self, runtime: &crate::v2::KvbmRuntime) -> Self {
+        self.event_system(runtime.event_system())
+            .tokio_runtime(TokioRuntime::Handle(runtime.handle()))
+    }
+
     /// Directly provide a pre-configured wrapped NIXL agent (mainly for testing).
     ///
     /// This bypasses the agent creation and backend initialization logic,
@@ -70,7 +90,7 @@ impl TransferConfigBuilder {
     pub fn nixl_backend(mut self, backend: impl Into<String>) -> Self {
         let config = self
             .nixl_backend_config
-            .get_or_insert_with(NixlBackendConfig::new);
+            .get_or_insert_with(NixlBackendConfig::default);
         *config = config.clone().with_backend(backend);
         self
     }
@@ -83,7 +103,7 @@ impl TransferConfigBuilder {
         let env_config = NixlBackendConfig::from_env()?;
         let config = self
             .nixl_backend_config
-            .get_or_insert_with(NixlBackendConfig::new);
+            .get_or_insert_with(NixlBackendConfig::default);
         *config = config.clone().merge(env_config);
         Ok(self)
     }

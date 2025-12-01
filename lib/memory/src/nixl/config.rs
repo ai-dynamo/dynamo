@@ -7,7 +7,8 @@
 //! environment variables with the pattern: `DYN_KVBM_NIXL_BACKEND_<backend>_<key>=<value>`
 
 use anyhow::{Result, bail};
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 use dynamo_config::parse_bool;
 
@@ -19,16 +20,20 @@ use dynamo_config::parse_bool;
 /// - Valid values: true/false, 1/0, on/off, yes/no (case-insensitive)
 /// - Invalid values (e.g., "maybe", "random") will cause an error
 /// - Custom params (e.g., `DYN_KVBM_NIXL_BACKEND_UCX_PARAM1=value`) will cause an error
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NixlBackendConfig {
     /// Set of enabled backends (just backend names, no custom params yet)
     backends: HashSet<String>,
+    params: HashMap<String, HashMap<String, String>>,
 }
 
 impl NixlBackendConfig {
     /// Create a new empty configuration.
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(
+        backends: HashSet<String>,
+        params: HashMap<String, HashMap<String, String>>,
+    ) -> Self {
+        Self { backends, params }
     }
 
     /// Create configuration from environment variables.
@@ -75,7 +80,10 @@ impl NixlBackendConfig {
             backends.insert("UCX".to_string());
         }
 
-        Ok(Self { backends })
+        Ok(Self {
+            backends,
+            params: HashMap::new(),
+        })
     }
 
     /// Add a backend to the configuration.
@@ -89,6 +97,10 @@ impl NixlBackendConfig {
     /// Get the set of enabled backends.
     pub fn backends(&self) -> &HashSet<String> {
         &self.backends
+    }
+
+    pub fn backend_params(&self, backend: &str) -> Option<&HashMap<String, String>> {
+        self.params.get(backend)
     }
 
     /// Check if a specific backend is enabled.
@@ -111,13 +123,13 @@ mod tests {
 
     #[test]
     fn test_new_config_is_empty() {
-        let config = NixlBackendConfig::new();
+        let config = NixlBackendConfig::default();
         assert!(config.backends().is_empty());
     }
 
     #[test]
     fn test_with_backend() {
-        let config = NixlBackendConfig::new()
+        let config = NixlBackendConfig::default()
             .with_backend("ucx")
             .with_backend("gds_mt");
 
@@ -130,8 +142,8 @@ mod tests {
 
     #[test]
     fn test_merge_configs() {
-        let config1 = NixlBackendConfig::new().with_backend("ucx");
-        let config2 = NixlBackendConfig::new().with_backend("gds");
+        let config1 = NixlBackendConfig::default().with_backend("ucx");
+        let config2 = NixlBackendConfig::default().with_backend("gds");
 
         let merged = config1.merge(config2);
 
@@ -141,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_backend_name_case_insensitive() {
-        let config = NixlBackendConfig::new()
+        let config = NixlBackendConfig::default()
             .with_backend("ucx")
             .with_backend("Gds_mt")
             .with_backend("OTHER");

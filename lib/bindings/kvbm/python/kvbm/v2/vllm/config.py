@@ -95,10 +95,13 @@ def extract_vllm_config_for_kvbm(
     }
 
     # Extract cache/attention configuration
+    # num_gpu_blocks and num_cpu_blocks may be None at connector construction time
+    # They get set later during KV cache allocation
+    # The actual block count can be derived from tensor shape in register_kv_caches
     attention_dict = {
         "block_size": cfg.cache_config.block_size,
-        "num_gpu_blocks": cfg.cache_config.num_gpu_blocks,
-        "num_cpu_blocks": cfg.cache_config.num_cpu_blocks,
+        "num_gpu_blocks": cfg.cache_config.num_gpu_blocks or 0,
+        "num_cpu_blocks": cfg.cache_config.num_cpu_blocks or 0,
         "cache_dtype_bytes": _get_cache_dtype_bytes(cfg),
         "kv_cache_layout": get_kv_cache_layout(),
         "head_size": cfg.model_config.get_head_size(),
@@ -134,8 +137,9 @@ def _get_cache_dtype_bytes(vllm_config: VllmConfig) -> int:
     cache_dtype = vllm_config.cache_config.cache_dtype
     model_dtype = vllm_config.model_config.dtype
 
-    # Convert dtype to bytes
+    # Convert dtype to string for comparison
     dtype_str = str(cache_dtype).lower()
+    model_dtype_str = str(model_dtype).lower()
 
     if "float16" in dtype_str or "fp16" in dtype_str or "half" in dtype_str:
         return 2
@@ -146,11 +150,15 @@ def _get_cache_dtype_bytes(vllm_config: VllmConfig) -> int:
     elif "int8" in dtype_str or "fp8" in dtype_str:
         return 1
     elif "auto" in dtype_str:
-        if model_dtype == "auto":
+        # Use model_dtype_str for string comparisons (model_dtype may be torch.dtype)
+        if "auto" in model_dtype_str:
             return 2
-        elif model_dtype in ["half", "float16", "fp16", "bfloat16", "bf16"]:
+        elif any(
+            t in model_dtype_str
+            for t in ["half", "float16", "fp16", "bfloat16", "bf16"]
+        ):
             return 2
-        elif model_dtype in ["float32", "fp32", "float"]:
+        elif any(t in model_dtype_str for t in ["float32", "fp32"]):
             return 4
         else:
             raise ValueError(f"Unknown model dtype: {model_dtype}")

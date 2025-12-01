@@ -125,6 +125,24 @@ pub struct InstanceLeaderBuilder {
 }
 
 impl InstanceLeaderBuilder {
+    /// Initialize builder with components from KvbmRuntime.
+    ///
+    /// This extracts Nova from the runtime. Use this when the runtime
+    /// has already been constructed and you want the leader to share
+    /// the same Nova instance for distributed communication.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let runtime = KvbmRuntime::from_env_leader().await?;
+    /// let leader = InstanceLeaderBuilder::default()
+    ///     .from_runtime(&runtime)
+    ///     .g2_manager(g2_manager)
+    ///     .build()?;
+    /// ```
+    pub fn from_runtime(self, runtime: &crate::v2::KvbmRuntime) -> Self {
+        self.nova(runtime.nova().clone())
+    }
+
     pub fn nova(mut self, nova: Arc<Nova>) -> Self {
         self.nova = Some(nova);
         self

@@ -4,6 +4,7 @@
 mod instance;
 mod nova;
 pub mod session;
+mod state;
 
 pub use instance::InstanceLeader;
 pub use nova::NovaLeaderService;
@@ -12,6 +13,7 @@ pub use session::{
     G3BlockInfo, InitiatorSession, RemoteSessionHandle, RemoteSessionMessage, RemoteSessionPhase,
     RemoteSessionState, ResponderSession, SessionId,
 };
+pub use state::{LeaderState, RemoteLeaderInfo, route_local_to_remote};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

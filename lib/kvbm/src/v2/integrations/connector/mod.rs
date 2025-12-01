@@ -10,8 +10,11 @@
 // pub mod slot;
 // pub use slot::*;
 
+pub mod coordinator;
 pub mod leader;
 pub mod worker;
+
+pub use coordinator::{MockCoordinator, TransferCoordinator};
 
 pub mod metadata;
 pub use metadata::ConnectorMetadataBuilder;

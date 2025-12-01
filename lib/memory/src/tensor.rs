@@ -94,6 +94,14 @@ pub trait TensorDescriptorExt: TensorDescriptor {
         }
         stride
     }
+
+    /// Returns the CUDA device ID if the tensor is on a CUDA device.
+    fn cuda_device_id(&self) -> Option<usize> {
+        match self.storage_kind() {
+            StorageKind::Device(idx) => Some(idx as usize),
+            _ => None,
+        }
+    }
 }
 
 // Blanket impl for all TensorDescriptor types

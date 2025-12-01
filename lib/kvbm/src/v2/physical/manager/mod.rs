@@ -170,6 +170,38 @@ impl TransferManager {
         self.registry.read().unwrap().worker_address()
     }
 
+    /// Get a reference to the NIXL agent.
+    ///
+    /// This is useful for building layouts that need to register memory
+    /// with the same agent that the TransferManager uses.
+    pub fn nixl_agent(&self) -> &NixlAgent {
+        self.context.nixl_agent()
+    }
+
+    /// Get the layout configuration for a registered layout.
+    ///
+    /// Returns a clone of the layout's configuration, which includes
+    /// dimensions like num_blocks, num_layers, page_size, etc.
+    ///
+    /// # Arguments
+    /// * `handle` - Handle to a registered layout (local or remote)
+    ///
+    /// # Returns
+    /// A clone of the layout's configuration
+    ///
+    /// # Errors
+    /// Returns an error if the handle is not found
+    pub fn get_layout_config(
+        &self,
+        handle: LayoutHandle,
+    ) -> Result<crate::v2::physical::layout::LayoutConfig> {
+        let registry = self.registry.read().unwrap();
+        let physical_layout = registry
+            .get_layout(handle)
+            .ok_or_else(|| anyhow!("invalid handle: {}", handle))?;
+        Ok(physical_layout.layout().config().clone())
+    }
+
     // ===== Handle-Based Transfer API =====
 
     /// Transfer complete blocks between layouts using handles.

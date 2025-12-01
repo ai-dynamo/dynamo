@@ -1,35 +1,48 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::physical::TransferManager;
 use crate::physical::{manager::SerializedLayout, transfer::context::TransferConfigBuilder};
 
 use super::{
-    Arc, DirectWorker, LocalTransferMessage, RemoteOffloadMessage, RemoteOnboardMessage, Result,
-    TransferOptions, WorkerTransfers,
+    Arc, DirectWorker, LeaderLayoutConfig, LocalTransferMessage, RemoteOffloadMessage,
+    RemoteOnboardMessage, Result, TransferOptions, WorkerTransfers,
 };
 
 use bytes::Bytes;
+use derive_builder::Builder;
+
 use dynamo_nova::Nova;
 use dynamo_nova::am::NovaHandler;
 
+/// Builder for NovaWorkerService - provides flexibility in construction.
+///
+/// Use this builder when you need to:
+/// - Pass a pre-built DirectWorker (when caller manages layout registration)
+/// - Pass a pre-built TransferManager (service creates DirectWorker)
+/// - Have more control over worker configuration
+#[derive(Builder)]
+#[builder(pattern = "owned")]
 pub struct NovaWorkerService {
     nova: Arc<Nova>,
     worker: Arc<DirectWorker>,
 }
 
 impl NovaWorkerService {
-    // todo: this is where we need to expand the options with a builder/figment to pass configuration parameters to the
-    // TransferConfigBuilder produced from TransferManager::builder().
-    /// Create a new NovaWorkerService and register all handlers
-    pub fn new(nova: Arc<Nova>, transfer_builder: TransferConfigBuilder) -> Result<Self> {
-        let transport_manager = transfer_builder
-            .event_system(nova.events().local().clone())
-            .build()?;
-        let worker = Arc::new(DirectWorker::new(transport_manager));
+    pub fn new(nova: Arc<Nova>, worker: Arc<DirectWorker>) -> Result<Self> {
         let service = Self { nova, worker };
-
         service.register_handlers()?;
         Ok(service)
+    }
+
+    /// Access the underlying DirectWorker.
+    ///
+    /// This is useful for:
+    /// - Registering additional layouts after service creation
+    /// - Exporting metadata for handshake
+    /// - Accessing the TransferManager
+    pub fn worker(&self) -> &Arc<DirectWorker> {
+        &self.worker
     }
 
     /// Register all worker handlers with Nova
@@ -177,4 +190,43 @@ impl NovaWorkerService {
         self.nova.register_handler(handler)?;
         Ok(())
     }
+
+    // /// Handler: "kvbm.worker.get_layout_config"
+    // ///
+    // /// Returns the current G1 layout config for validation by the leader.
+    // /// The leader gathers this from all workers and validates they match.
+    // fn register_get_layout_config_handler(&self) -> Result<()> {
+    //     let worker = self.worker.clone();
+
+    //     let handler = NovaHandler::unary_handler("kvbm.worker.get_layout_config", move |_ctx| {
+    //         let config = worker.export_layout_config()?;
+    //         Ok(Some(Bytes::from(serde_json::to_vec(&config)?)))
+    //     })
+    //     .build();
+
+    //     self.nova.register_handler(handler)?;
+    //     Ok(())
+    // }
+
+    // /// Handler: "kvbm.worker.configure_layouts"
+    // ///
+    // /// Creates G2/G3 layouts based on leader-provided configuration.
+    // /// Called during Phase 3 coordination after the leader validates layout configs.
+    // fn register_configure_layouts_handler(&self) -> Result<()> {
+    //     let worker = self.worker.clone();
+
+    //     let handler = NovaHandler::typed_unary_async("kvbm.worker.configure_layouts", move |ctx| {
+    //         let worker = worker.clone();
+
+    //         async move {
+    //             let config: LeaderLayoutConfig = ctx.input;
+    //             let response = worker.configure_additional_layouts(config)?;
+    //             Ok(response)
+    //         }
+    //     })
+    //     .build();
+
+    //     self.nova.register_handler(handler)?;
+    //     Ok(())
+    // }
 }

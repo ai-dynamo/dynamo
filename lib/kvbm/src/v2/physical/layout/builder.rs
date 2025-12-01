@@ -293,6 +293,75 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
             ),
         )
     }
+
+    /// Register external KV cache tensors with NIXL for RDMA access.
+    ///
+    /// This is the **CRITICAL** step that enables remote GPU-to-GPU transfers.
+    /// Each tensor's memory is wrapped in `ExternalDeviceMemory` and registered
+    /// with NIXL via the agent's UCX backend.
+    ///
+    /// # Arguments
+    /// * `tensors` - KV cache tensors from vLLM (one per layer). All tensors must:
+    ///   - Be on the same CUDA device
+    ///   - Be contiguous in memory
+    ///   - Have the same shape
+    ///
+    /// # Requirements
+    /// - The NIXL agent must have UCX backend enabled for VRAM registration
+    /// - The external framework (vLLM) must keep the tensors valid while registered
+    ///
+    /// # Example
+    /// ```ignore
+    /// let physical_layout = PhysicalLayoutBuilder::new(nixl_agent)
+    ///     .with_config(layout_config)
+    ///     .layer_separate(block_dim)
+    ///     .with_external_device_regions(kv_tensors)?  // NIXL registration here
+    ///     .build()?;
+    /// ```
+    pub fn with_external_device_regions(
+        self,
+        tensors: Vec<Arc<dyn dynamo_memory::TensorDescriptor>>,
+    ) -> Result<PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory>> {
+        use dynamo_memory::TensorDescriptorExt;
+
+        if tensors.is_empty() {
+            bail!("with_external_device_regions requires at least one tensor");
+        }
+
+        let (agent, config, layout_kind, _memory) = self.into_parts();
+
+        let mut entries = Vec::with_capacity(tensors.len());
+
+        for (index, tensor) in tensors.into_iter().enumerate() {
+            // Verify the tensor is on a CUDA device
+            if tensor.cuda_device_id().is_none() {
+                bail!("tensor at index {} is not on a CUDA device", index);
+            }
+
+            // Register tensor with NIXL for RDMA
+            // Arc<dyn TensorDescriptor> implements both MemoryDescriptor and NixlCompatible,
+            // so we can register it directly. This is the critical step that enables
+            // remote GPU-to-GPU transfers via UCX backend.
+            let entry = register_storage(tensor, &agent).map_err(|e| {
+                anyhow!(
+                    "failed to register tensor {} with NIXL (UCX backend required for VRAM): {}",
+                    index,
+                    e
+                )
+            })?;
+
+            entries.push(entry);
+        }
+
+        Ok(
+            PhysicalLayoutBuilder::<HasConfig, HasLayout, HasMemory>::from_parts(
+                agent,
+                config,
+                layout_kind,
+                Some(MemoryPlan::Provided(entries)),
+            ),
+        )
+    }
 }
 
 impl PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {

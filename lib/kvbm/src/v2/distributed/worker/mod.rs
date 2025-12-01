@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod coordinated;
 mod direct;
 mod nova;
 
+pub use coordinated::CoordinatedWorker;
 pub use direct::DirectWorker;
 
 use anyhow::Result;
+use dynamo_memory::nixl::NixlBackendConfig;
 use dynamo_nova::events::LocalEventWaiter;
 use futures::future::{Either, Ready, ready};
 use serde::{Deserialize, Serialize};
@@ -24,7 +27,7 @@ pub use crate::{
     v2::{BlockId, InstanceId, SequenceHash, logical::LogicalLayoutHandle},
 };
 
-pub use nova::{NovaWorkerClient, NovaWorkerService};
+pub use nova::{NovaWorkerClient, NovaWorkerService, NovaWorkerServiceBuilder};
 
 pub type SerializedResponseAwaiter = dynamo_nova::am::TypedUnaryResult<SerializedLayout>;
 pub type ImportMetadataResponseAwaiter = dynamo_nova::am::TypedUnaryResult<Vec<LayoutHandle>>;
@@ -154,6 +157,7 @@ impl std::future::IntoFuture for ConnectRemoteResponse {
     }
 }
 
+/// Remote descriptor for transfer operations.
 #[derive(Serialize, Deserialize, Clone)]
 pub enum RemoteDescriptor {
     Layout {
@@ -163,6 +167,34 @@ pub enum RemoteDescriptor {
     Object {
         keys: Vec<SequenceHash>,
     },
+}
+
+/// Configuration sent from leader to workers for G2/G3 layout creation.
+///
+/// This message is sent via Nova RPC during Phase 3 coordination.
+/// Workers use this to create additional cache tiers beyond G1 (GPU KV).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaderLayoutConfig {
+    /// Number of host/pinned blocks for G2 tier.
+    pub host_block_count: usize,
+
+    /// Number of disk blocks for G3 tier (None = no disk tier).
+    pub disk_block_count: Option<usize>,
+
+    /// Backend configuration (which NIXL backends to enable and their params).
+    pub backend_config: NixlBackendConfig,
+}
+
+/// Worker's response after configuring additional layouts (G2, G3).
+///
+/// Returned in response to a `LeaderLayoutConfig` request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerLayoutResponse {
+    /// Full exported metadata including all registered layouts (G1, G2, G3).
+    pub metadata: SerializedLayout,
+
+    /// Which logical layouts were successfully created in this operation.
+    pub created_layouts: Vec<LogicalLayoutHandle>,
 }
 
 pub trait WorkerTransfers: Send + Sync {

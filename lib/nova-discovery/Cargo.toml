@@ -60,6 +60,10 @@ libp2p-swarm = { version = "0.47", optional = true }
 libp2p-identity = { version = "0.2", optional = true }
 blake2 = { version = "0.10", optional = true }
 
+# Filesystem discovery dependencies (optional)
+fs4 = { version = "0.13", features = ["tokio"], optional = true }
+notify = { version = "8", optional = true }
+
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full", "test-util"] }
 clap = { version = "4", features = ["derive"] }
@@ -68,10 +72,10 @@ testcontainers = "0.25"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
-default = ["p2p", "etcd"]
+default = ["p2p", "etcd", "filesystem"]
 etcd = ["dep:etcd-client", "dep:tonic"]
 p2p = ["dep:libp2p", "dep:libp2p-kad", "dep:libp2p-mdns", "dep:libp2p-swarm", "dep:libp2p-identity", "dep:blake2"]
-filesystem = []  # Filesystem-based discovery for development/testing
+filesystem = ["dep:fs4", "dep:notify"]  # Filesystem-based discovery for development/testing
 full = ["etcd", "p2p", "filesystem"]
 testing-etcd = []  # Enable etcd tests (default on, disable with --no-default-features)
 integration-etcd = []  # Feature flag for integration tests with real etcd (requires Docker)

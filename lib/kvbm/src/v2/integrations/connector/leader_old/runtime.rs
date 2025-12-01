@@ -233,7 +233,7 @@ impl ConnectorLeader {
     /// Called when workers report they've finished offloading (device->host/disk).
     /// This means a request that returned `Pending` from request_finished can now
     /// be safely cleaned up.
-    fn handle_finished_offload(&mut self, request_id: &str) -> Result<()> {
+    pub fn handle_finished_offload(&mut self, request_id: &str) -> Result<()> {
         // Gracefully handle missing slot
         let Some(slot_mutex) = self.slots.get(request_id) else {
             tracing::debug!(request_id, "Offload finished for unknown slot");
@@ -273,7 +273,7 @@ impl ConnectorLeader {
     ///
     /// Called when workers report they've finished onboarding (host/disk->device).
     /// Clears onboarding state so request can continue to prefill/decode.
-    fn handle_finished_onboard(&mut self, request_id: &str) -> Result<()> {
+    pub fn handle_finished_onboard(&mut self, request_id: &str) -> Result<()> {
         // Gracefully handle missing slot
         let Some(slot_mutex) = self.slots.get(request_id) else {
             tracing::debug!(request_id, "Onboard finished for unknown slot");

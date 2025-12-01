@@ -235,3 +235,57 @@ impl Worker for NovaWorkerClient {
         Ok(ImportMetadataResponse::from_awaiter(awaiter))
     }
 }
+
+impl NovaWorkerClient {
+    /// Create a new NovaWorkerClient for communicating with a remote worker.
+    pub fn new(nova: Arc<Nova>, remote: InstanceId) -> Self {
+        Self { nova, remote }
+    }
+
+    /// Get the layout configuration from the remote worker.
+    ///
+    /// This calls the `kvbm.worker.get_layout_config` handler on the remote worker.
+    /// Used by the leader during Phase 3 to gather G1 layout configs from all workers
+    /// and validate they match before creating G2/G3 layouts.
+    ///
+    /// # Returns
+    /// A typed unary result that resolves to the layout configuration
+    pub fn get_layout_config(&self) -> Result<dynamo_nova::am::TypedUnaryResult<LayoutConfig>> {
+        let instance = self.remote;
+
+        let awaiter = self
+            .nova
+            .typed_unary::<LayoutConfig>("kvbm.worker.get_layout_config")?
+            .instance(instance)
+            .send();
+
+        Ok(awaiter)
+    }
+
+    /// Configure additional layouts (G2, G3) on the remote worker.
+    ///
+    /// This calls the `kvbm.worker.configure_layouts` handler on the remote worker.
+    /// The worker will create host/pinned cache (G2) and optionally disk cache (G3)
+    /// based on the provided configuration.
+    ///
+    /// # Arguments
+    /// * `config` - Leader-provided configuration specifying block counts and backends
+    ///
+    /// # Returns
+    /// A typed unary result that resolves to the worker's response with updated metadata
+    pub fn configure_layouts(
+        &self,
+        config: LeaderLayoutConfig,
+    ) -> Result<dynamo_nova::am::TypedUnaryResult<WorkerLayoutResponse>> {
+        let instance = self.remote;
+
+        let awaiter = self
+            .nova
+            .typed_unary::<WorkerLayoutResponse>("kvbm.worker.configure_layouts")?
+            .payload(config)?
+            .instance(instance)
+            .send();
+
+        Ok(awaiter)
+    }
+}

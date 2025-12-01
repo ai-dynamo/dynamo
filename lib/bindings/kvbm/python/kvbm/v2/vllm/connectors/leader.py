@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Minimal scheduler connector leader implementation for testing.
+Scheduler connector leader implementation for v2 vLLM integration.
 
-This is a barebones implementation that returns minimal/no-op responses,
-used specifically for scheduler integration testing without actual KV transfer.
+This implementation delegates to the Rust PyKvConnectorLeader when available,
+falling back to stub responses when the Rust bindings are not loaded.
 """
 
 from __future__ import annotations
@@ -19,30 +19,45 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.request import Request
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorOutput
 
 from .connector import DynamoSchedulerConnectorMetadata
 
 
 class SchedulerConnectorLeader:
     """
-    Minimal scheduler connector leader that returns no-op responses.
+    Scheduler connector leader that delegates to Rust implementation.
 
-    This connector is used for scheduler integration where no actual
-    KV transfer is needed. All methods return minimal valid responses.
+    When the Rust bindings (kvbm._core.v2.KvConnectorLeader) are available,
+    this class delegates all operations to the Rust implementation which
+    provides proper slot state tracking and transfer coordination.
+
+    When bindings are unavailable, falls back to stub responses for testing.
     """
 
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
         """Initialize the scheduler connector leader."""
         self.vllm_config = vllm_config
         self.engine_id = engine_id
-        print(f"SchedulerConnectorLeader initialized with engine_id: {engine_id}")
+        self._rust_leader = None
 
+        # Try to load Rust bindings
         try:
-            from kvbm.libkvbm_py3 import ConnectorMetadataBuilder  # type: ignore
+            from kvbm._core.v2 import KvbmVllmConfig, KvConnectorLeader
 
-            self._metadata_builder = ConnectorMetadataBuilder()
-        except ImportError:
-            self._metadata_builder = None
+            # Extract config from vllm_config
+            from ..config import extract_vllm_config_for_kvbm
+
+            kvbm_config = extract_vllm_config_for_kvbm(vllm_config)
+            self._rust_leader = KvConnectorLeader(engine_id, kvbm_config)
+            print(
+                f"SchedulerConnectorLeader initialized with Rust backing, engine_id: {engine_id}"
+            )
+        except (ImportError, Exception) as e:
+            print(
+                f"SchedulerConnectorLeader initialized in stub mode (no Rust backing): {e}"
+            )
+            print(f"Engine ID: {engine_id}")
 
     def get_num_new_matched_tokens(
         self,
@@ -50,40 +65,49 @@ class SchedulerConnectorLeader:
         num_computed_tokens: int,
     ) -> tuple[Optional[int], bool]:
         """
-        Always returns (0, False) indicating no external tokens available.
+        Get the number of new matched tokens for the given request.
 
         Returns:
-            (0, False): No external tokens, no async loading
+            (Option<int>, bool): Number of matched tokens (None if evaluating),
+                                 and whether async loading is in progress.
         """
+        if self._rust_leader is not None:
+            return self._rust_leader.get_num_new_matched_tokens(
+                request.request_id, num_computed_tokens
+            )
+        # Stub: no external tokens available
         return (0, False)
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ) -> None:
         """
-        No-op since we never have external tokens.
+        Update state after block allocation for onboarding.
 
-        This should never be called with num_external_tokens > 0.
+        Called when scheduler allocates blocks for a request with matched tokens.
         """
-        if num_external_tokens > 0:
+        if self._rust_leader is not None:
+            block_ids = list(blocks.get_unhashed_block_ids())
+            self._rust_leader.update_state_after_alloc(
+                request.request_id, block_ids, num_external_tokens
+            )
+        elif num_external_tokens > 0:
             print(
                 f"Warning: update_state_after_alloc called with {num_external_tokens} "
-                f"external tokens for request {request.request_id}, but scheduler "
-                "connector always returns 0 external tokens"
+                f"external tokens for request {request.request_id}, but no Rust backing"
             )
 
     def build_connector_meta(
-        self, scheduler_output: SchedulerOutput
+        self, scheduler_output: "SchedulerOutput"
     ) -> KVConnectorMetadata:
         """
-        Build minimal connector metadata.
+        Build connector metadata for the forward pass.
 
         Returns:
-            Serialized bytes containing pending metadata events.
+            Serialized metadata bytes for workers.
         """
-        _ = scheduler_output  # Reserved for future use
-        if self._metadata_builder is None:
-            return DynamoSchedulerConnectorMetadata(b"")
+        # TODO: Wire up to Rust build_connector_metadata when SchedulerOutput
+        # conversion is implemented
         return DynamoSchedulerConnectorMetadata(b"")
 
     def request_finished(
@@ -92,9 +116,48 @@ class SchedulerConnectorLeader:
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
-        Never delays block freeing.
+        Notify leader that a request has finished.
 
         Returns:
-            (False, None): Don't delay block freeing, no KV transfer params
+            (is_pending, connector_metadata):
+            - is_pending=True: Don't free blocks yet (transfer in progress)
+            - is_pending=False: Safe to free blocks
         """
+        if self._rust_leader is not None:
+            is_pending = self._rust_leader.request_finished(
+                request.request_id, block_ids
+            )
+            return (is_pending, None)
+        # Stub: never delay block freeing
         return (False, None)
+
+    def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
+        """
+        Process worker reports of finished transfers.
+
+        Called by the scheduler after workers report get_finished() results.
+        Updates slot state based on completed onboarding/offloading operations.
+        """
+        if self._rust_leader is None:
+            return
+
+        # Process finished offloading (sends)
+        if connector_output.finished_sending:
+            for req_id in connector_output.finished_sending:
+                try:
+                    self._rust_leader.handle_finished_offload(req_id)
+                except Exception as e:
+                    print(f"Error handling finished offload for {req_id}: {e}")
+
+        # Process finished onboarding (receives)
+        if connector_output.finished_recving:
+            for req_id in connector_output.finished_recving:
+                try:
+                    self._rust_leader.handle_finished_onboard(req_id)
+                except Exception as e:
+                    print(f"Error handling finished onboard for {req_id}: {e}")
+
+    def set_xfer_handshake_metadata(self, metadata) -> None:
+        """Set transfer handshake metadata from workers."""
+        # TODO: Wire up to Rust if needed for distributed coordination
+        pass

@@ -25,6 +25,9 @@ from vllm.v1.outputs import KVConnectorOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorHandshakeMetadata,
+    )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -134,6 +137,15 @@ class DynamoConnector(KVConnectorBase_V1):
             raise RuntimeError("Cannot call scheduler methods on WORKER role")
         return None
 
+    # added in v0.11.1
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, "KVConnectorHandshakeMetadata"]
+    ) -> None:
+        """No-op - handshake metadata not used."""
+        if self._leader is None:
+            raise RuntimeError("Cannot call scheduler methods on WORKER role")
+        self._leader.set_xfer_handshake_metadata(metadata)
+
     # added in v0.11
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config):
@@ -144,6 +156,14 @@ class DynamoConnector(KVConnectorBase_V1):
     @classmethod
     def build_kv_connector_stats(cls, data=None):
         """Returns None - no custom stats."""
+        return None
+
+    # added in v0.11.1
+    @classmethod
+    def build_prom_metrics(
+        cls, vllm_config, metric_types, labelnames, per_engine_labelvalues
+    ):
+        """Returns None - no Prometheus metrics."""
         return None
 
     # Worker methods
@@ -231,3 +251,17 @@ class DynamoConnector(KVConnectorBase_V1):
         if self._worker is None:
             raise RuntimeError("Cannot call worker methods on SCHEDULER role")
         return None
+
+    # added in v0.11.1
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Returns empty set - no load errors tracked."""
+        if self._worker is None:
+            raise RuntimeError("Cannot call worker methods on SCHEDULER role")
+        return self._worker.get_block_ids_with_load_errors()
+
+    # added in v0.11.1
+    def get_handshake_metadata(self):
+        """Returns None - no handshake metadata."""
+        if self._worker is None:
+            raise RuntimeError("Cannot call worker methods on SCHEDULER role")
+        return self._worker.get_handshake_metadata()

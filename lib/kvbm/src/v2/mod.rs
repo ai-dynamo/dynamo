@@ -16,6 +16,7 @@
 pub mod distributed;
 pub mod logical;
 pub mod physical;
+pub mod runtime;
 pub mod sessions;
 pub mod utils;
 
@@ -30,6 +31,7 @@ pub mod integrations;
 
 // Re-export common types and traits
 // pub use config::{AttentionConfig, ParallelConfig};
+pub use runtime::{KvbmRuntime, KvbmRuntimeBuilder, RuntimeHandle};
 pub use types::{CacheDtype, CacheLayout, ModelExecutorBackend};
 
 // Test infrastructure

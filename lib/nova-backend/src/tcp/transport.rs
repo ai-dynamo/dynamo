@@ -402,6 +402,35 @@ fn parse_tcp_endpoint(endpoint: &[u8]) -> Result<SocketAddr> {
         .ok_or_else(|| anyhow::anyhow!("no addresses resolved"))
 }
 
+/// Resolve a wildcard bind address to a routable address for advertisement.
+///
+/// When binding to 0.0.0.0 (IPv4 unspecified) or :: (IPv6 unspecified),
+/// we need to advertise a routable address that peers can actually connect to.
+///
+/// For 0.0.0.0, we use 127.0.0.1 (localhost) which works for same-machine communication.
+/// For ::, we use ::1 (IPv6 localhost).
+///
+/// In a production multi-node deployment, this should be replaced with actual
+/// network interface discovery or explicit configuration.
+fn resolve_advertise_address(bind_addr: SocketAddr) -> SocketAddr {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    match bind_addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => {
+            // 0.0.0.0 -> 127.0.0.1 for local testing
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bind_addr.port())
+        }
+        IpAddr::V6(ip) if ip.is_unspecified() => {
+            // :: -> ::1 for local testing
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), bind_addr.port())
+        }
+        _ => {
+            // Already a specific address, use as-is
+            bind_addr
+        }
+    }
+}
+
 /// Builder for TcpTransport
 pub struct TcpTransportBuilder {
     bind_addr: Option<SocketAddr>,
@@ -468,8 +497,9 @@ impl TcpTransportBuilder {
             .ok_or_else(|| anyhow::anyhow!("bind_addr is required"))?;
         let key = self.key.unwrap_or_else(|| TransportKey::from("tcp"));
 
-        // Build local address (just the bind address for now)
-        let local_endpoint = format!("tcp://{}", bind_addr);
+        // Resolve advertise address (handle 0.0.0.0 -> 127.0.0.1 for local testing)
+        let advertise_addr = resolve_advertise_address(bind_addr);
+        let local_endpoint = format!("tcp://{}", advertise_addr);
         let mut addr_builder = WorkerAddress::builder();
         addr_builder.add_entry(key.clone(), local_endpoint.as_bytes().to_vec())?;
         let local_address = addr_builder.build()?;
@@ -540,5 +570,37 @@ mod tests {
         assert!(result.is_err());
         let err_msg = format!("{}", result.err().unwrap());
         assert!(err_msg.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn test_resolve_advertise_address_ipv4_unspecified() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // 0.0.0.0 should resolve to 127.0.0.1
+        let bind_addr: SocketAddr = "0.0.0.0:12345".parse().unwrap();
+        let resolved = resolve_advertise_address(bind_addr);
+        assert_eq!(resolved.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(resolved.port(), 12345);
+
+        // Already specific address should remain unchanged
+        let specific: SocketAddr = "192.168.1.100:8080".parse().unwrap();
+        let resolved = resolve_advertise_address(specific);
+        assert_eq!(resolved, specific);
+    }
+
+    #[test]
+    fn test_resolve_advertise_address_ipv6_unspecified() {
+        use std::net::{IpAddr, Ipv6Addr};
+
+        // :: should resolve to ::1
+        let bind_addr: SocketAddr = "[::]:12345".parse().unwrap();
+        let resolved = resolve_advertise_address(bind_addr);
+        assert_eq!(resolved.ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+        assert_eq!(resolved.port(), 12345);
+
+        // Already specific IPv6 address should remain unchanged
+        let specific: SocketAddr = "[::1]:8080".parse().unwrap();
+        let resolved = resolve_advertise_address(specific);
+        assert_eq!(resolved, specific);
     }
 }

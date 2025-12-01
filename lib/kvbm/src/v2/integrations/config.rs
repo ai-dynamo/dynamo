@@ -94,6 +94,12 @@ pub struct IntegrationsConfig {
 
     /// Attention and cache configuration
     pub attention: Arc<dyn AttentionConfig>,
+
+    /// Optional host cache (G2 tier) configuration
+    pub host_cache: Option<dynamo_kvbm_config::HostCacheConfig>,
+
+    /// Optional disk cache (G3 tier) configuration
+    pub disk_cache: Option<dynamo_kvbm_config::DiskCacheConfig>,
 }
 
 impl std::fmt::Debug for IntegrationsConfig {
@@ -101,6 +107,8 @@ impl std::fmt::Debug for IntegrationsConfig {
         f.debug_struct("IntegrationsConfig")
             .field("parallel", &self.parallel)
             .field("attention", &self.attention)
+            .field("host_cache", &self.host_cache)
+            .field("disk_cache", &self.disk_cache)
             .finish()
     }
 }
@@ -111,7 +119,21 @@ impl IntegrationsConfig {
         Self {
             parallel,
             attention,
+            host_cache: None,
+            disk_cache: None,
         }
+    }
+
+    /// Set the host cache configuration.
+    pub fn with_host_cache(mut self, config: dynamo_kvbm_config::HostCacheConfig) -> Self {
+        self.host_cache = Some(config);
+        self
+    }
+
+    /// Set the disk cache configuration.
+    pub fn with_disk_cache(mut self, config: dynamo_kvbm_config::DiskCacheConfig) -> Self {
+        self.disk_cache = Some(config);
+        self
     }
 
     /// Get the block size from attention configuration.

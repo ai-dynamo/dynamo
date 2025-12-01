@@ -331,7 +331,7 @@ impl MockSlot {
 
         SlotFinishStatus::Pending {
             outstanding,
-            finish_event: Some(EventHandle::from_raw(0)),
+            finish_event: None, // Mock doesn't need a real event handle
         }
     }
 

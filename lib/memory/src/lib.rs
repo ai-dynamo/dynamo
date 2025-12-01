@@ -17,6 +17,7 @@ pub mod prelude;
 
 mod device;
 mod disk;
+mod external;
 mod pinned;
 mod system;
 mod tensor;
@@ -27,6 +28,7 @@ mod tests;
 pub use arena::{ArenaAllocator, ArenaBuffer, ArenaError};
 pub use device::DeviceStorage;
 pub use disk::DiskStorage;
+pub use external::ExternalDeviceMemory;
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use system::SystemStorage;
