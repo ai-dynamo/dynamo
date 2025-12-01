@@ -241,6 +241,8 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         libnuma1 \
         librdmacm1 \
         rdma-core \
+        # Libfabric
+        libhwloc15 \
         # OpenMPI dependencies
         openssh-client \
         openssh-server \
@@ -312,9 +314,11 @@ ENV HOME=/home/dynamo
 ENV DYNAMO_HOME=/workspace
 
 # Copy UCX from framework image as plugin for NIXL
+# Copy Libfabric from framework image
 # Copy NIXL source from framework image
 # Copy dynamo wheels for gitlab artifacts
 COPY --chown=dynamo: --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo: --from=dynamo_base /usr/local/libfabric /usr/local/libfabric
 COPY --chown=dynamo: --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
 
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
@@ -323,6 +327,7 @@ $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
+/usr/local/libfabric/lib:\
 /opt/hpcx/ompi/lib:\
 $LD_LIBRARY_PATH
 ENV OPAL_PREFIX=/opt/hpcx/ompi
