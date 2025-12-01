@@ -646,10 +646,15 @@ pub type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + 
 pub type PrometheusExpositionFormatCallback =
     Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync + 'static>;
 
-/// Structure to hold Prometheus registries and associated callbacks for a given hierarchy
+/// Structure to hold Prometheus registries and associated callbacks for a given hierarchy.
+///
+/// All fields are Arc-wrapped, so cloning shares state. This ensures metrics registered
+/// on cloned instances (e.g., cloned Client/Endpoint) are visible to the original.
+#[derive(Clone)]
 pub struct MetricsRegistry {
-    /// The Prometheus registry for this hierarchy (with interior mutability for thread-safe access)
-    pub prometheus_registry: std::sync::RwLock<prometheus::Registry>,
+    /// The Prometheus registry for this hierarchy.
+    /// Arc-wrapped so clones share the same registry (metrics registered on clones are visible everywhere).
+    pub prometheus_registry: Arc<std::sync::RwLock<prometheus::Registry>>,
 
     /// Update callbacks invoked before metrics are scraped.
     /// Wrapped in Arc to preserve callbacks across clones (prevents callback loss when MetricsRegistry is cloned).
@@ -683,25 +688,11 @@ impl std::fmt::Debug for MetricsRegistry {
     }
 }
 
-impl Clone for MetricsRegistry {
-    fn clone(&self) -> Self {
-        Self {
-            prometheus_registry: std::sync::RwLock::new(
-                self.prometheus_registry.read().unwrap().clone(),
-            ),
-            // Clone the Arc to share callbacks across all clones (prevents callback loss).
-            // Previously used Vec::new() here, which caused vllm: metrics to disappear.
-            prometheus_update_callbacks: Arc::clone(&self.prometheus_update_callbacks),
-            prometheus_expfmt_callbacks: Arc::clone(&self.prometheus_expfmt_callbacks),
-        }
-    }
-}
-
 impl MetricsRegistry {
     /// Create a new metrics registry with an empty Prometheus registry and callback lists
     pub fn new() -> Self {
         Self {
-            prometheus_registry: std::sync::RwLock::new(prometheus::Registry::new()),
+            prometheus_registry: Arc::new(std::sync::RwLock::new(prometheus::Registry::new())),
             prometheus_update_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_expfmt_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
