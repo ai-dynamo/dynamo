@@ -404,6 +404,9 @@ COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/whe
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 COPY --chown=dynamo: --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
+# Copy sccache statistics for metrics collection
+COPY --chown=dynamo: --from=wheel_builder /tmp/sccache-stats.json /tmp/sccache-stats.json
+
 COPY --chown=dynamo: ./ /workspace/
 
 RUN uv pip install \
