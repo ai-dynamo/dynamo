@@ -50,6 +50,7 @@ impl NvCreateChatCompletionRequest {
                 .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
+            extra_fields: self.nvext.as_ref().and_then(|nv| nv.extra_fields.clone()),
             runtime_config: ModelRuntimeConfig::default(),
         };
 
@@ -64,6 +65,8 @@ pub struct DeltaGeneratorOptions {
     pub enable_usage: bool,
     /// Determines whether log probabilities should be included in the response.
     pub enable_logprobs: bool,
+    /// Extra fields to include in response nvext (e.g., "worker_id", "timing_metrics")
+    pub extra_fields: Option<Vec<String>>,
 
     pub runtime_config: ModelRuntimeConfig,
 }
@@ -288,6 +291,15 @@ impl DeltaGenerator {
     pub fn is_usage_enabled(&self) -> bool {
         self.options.enable_usage
     }
+
+    /// Check if an extra field is requested
+    fn is_extra_field_requested(&self, field: &str) -> bool {
+        self.options
+            .extra_fields
+            .as_ref()
+            .map(|fields| fields.iter().any(|f| f == field))
+            .unwrap_or(false)
+    }
 }
 
 /// Implements the [`crate::protocols::openai::DeltaGeneratorExt`] trait for [`DeltaGenerator`], allowing
@@ -363,17 +375,22 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
         // Extract worker_id and timing_metrics from disaggregated_params and inject into nvext
+        // Only include fields that were explicitly requested via extra_fields
         if let Some(ref disaggregated_params) = delta.disaggregated_params {
             let mut nvext_obj = serde_json::Map::new();
 
-            // Extract worker_id if present
-            if let Some(worker_id_json) = disaggregated_params.get("worker_id") {
-                nvext_obj.insert("worker_id".to_string(), worker_id_json.clone());
+            // Extract worker_id if present and requested
+            if self.is_extra_field_requested("worker_id") {
+                if let Some(worker_id_json) = disaggregated_params.get("worker_id") {
+                    nvext_obj.insert("worker_id".to_string(), worker_id_json.clone());
+                }
             }
 
-            // Extract timing_metrics if present (pass through as-is)
-            if let Some(timing_metrics_json) = disaggregated_params.get("timing_metrics") {
-                nvext_obj.insert("timing_metrics".to_string(), timing_metrics_json.clone());
+            // Extract timing_metrics if present and requested
+            if self.is_extra_field_requested("timing_metrics") {
+                if let Some(timing_metrics_json) = disaggregated_params.get("timing_metrics") {
+                    nvext_obj.insert("timing_metrics".to_string(), timing_metrics_json.clone());
+                }
             }
 
             // Only set nvext if we have at least one field

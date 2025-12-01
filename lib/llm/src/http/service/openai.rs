@@ -58,6 +58,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 /// Injects `request_completed_seconds` into the nvext timing_metrics field.
 /// This captures the exact moment when the response is about to leave the server.
+/// Only injects if timing_metrics already exists (i.e., the user requested it via extra_fields).
 fn inject_request_completed_seconds(nvext: &mut Option<serde_json::Value>) {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -65,25 +66,17 @@ fn inject_request_completed_seconds(nvext: &mut Option<serde_json::Value>) {
         .ok();
 
     if let Some(ts) = ts {
-        let nvext = nvext.get_or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-        if let Some(obj) = nvext.as_object_mut() {
-            if let Some(timing) = obj.get_mut("timing_metrics") {
-                if let Some(timing_obj) = timing.as_object_mut() {
-                    timing_obj.insert(
-                        "request_completed_seconds".to_string(),
-                        serde_json::Value::from(ts),
-                    );
+        // Only inject if nvext and timing_metrics already exist (user requested timing_metrics)
+        if let Some(nvext) = nvext.as_mut() {
+            if let Some(obj) = nvext.as_object_mut() {
+                if let Some(timing) = obj.get_mut("timing_metrics") {
+                    if let Some(timing_obj) = timing.as_object_mut() {
+                        timing_obj.insert(
+                            "request_completed_seconds".to_string(),
+                            serde_json::Value::from(ts),
+                        );
+                    }
                 }
-            } else {
-                let mut timing_obj = serde_json::Map::new();
-                timing_obj.insert(
-                    "request_completed_seconds".to_string(),
-                    serde_json::Value::from(ts),
-                );
-                obj.insert(
-                    "timing_metrics".to_string(),
-                    serde_json::Value::Object(timing_obj),
-                );
             }
         }
     }
@@ -2173,13 +2166,31 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_request_completed_seconds_creates_nvext_if_none() {
+    fn test_inject_request_completed_seconds_does_not_create_nvext_if_none() {
+        // If nvext is None (user didn't request timing_metrics), we should NOT create it
         let mut nvext: Option<serde_json::Value> = None;
 
         inject_request_completed_seconds(&mut nvext);
 
+        assert!(
+            nvext.is_none(),
+            "nvext should remain None when timing_metrics was not requested"
+        );
+    }
+
+    #[test]
+    fn test_inject_request_completed_seconds_does_not_create_timing_metrics_if_missing() {
+        // If nvext exists but timing_metrics is not present, we should NOT create it
+        let mut nvext = Some(serde_json::json!({
+            "worker_id": {"prefill_worker_id": 42}
+        }));
+
+        inject_request_completed_seconds(&mut nvext);
+
         let nvext = nvext.unwrap();
-        let timing = nvext.get("timing_metrics").unwrap();
-        assert!(timing.get("request_completed_seconds").is_some());
+        assert!(
+            nvext.get("timing_metrics").is_none(),
+            "timing_metrics should not be created if not already present"
+        );
     }
 }
