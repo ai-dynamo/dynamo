@@ -182,9 +182,6 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
 # Install Python, build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -306,6 +303,10 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 
 USER dynamo
 
+# Set DYNAMO_COMMIT_SHA late to avoid cache invalidation
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
@@ -326,9 +327,6 @@ FROM runtime AS dev
 
 # Don't want ubuntu to be editable, just change uid and gid.
 ARG WORKSPACE_DIR=/workspace
-
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 USER root
 # Install utilities as root
@@ -376,6 +374,10 @@ COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
 # Editable install of dynamo
 RUN uv pip install maturin[patchelf] && \
     uv pip install --no-deps -e .
+
+# Set DYNAMO_COMMIT_SHA late to avoid cache invalidation
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
