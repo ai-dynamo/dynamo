@@ -10,11 +10,10 @@ use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
 
 use dynamo_runtime::{
-    component::{Endpoint, TransportType},
+    component::{Endpoint, build_transport_type},
     discovery::DiscoverySpec,
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
-    transports::nats,
 };
 
 use crate::{
@@ -318,18 +317,18 @@ impl ModelManager {
         // Register router via discovery mechanism
         let discovery = endpoint.component().drt().discovery();
         let instance_id = discovery.instance_id();
+        let request_plane_mode = endpoint.drt().request_plane();
 
-        // Build NATS transport subject for the router endpoint
+        // Build transport for router endpoint based on request plane mode
         // Use KV_ROUTER_COMPONENT as the component name to distinguish from the generate endpoint's component
         let router_endpoint_id = router_endpoint_id(endpoint.id().namespace);
-        // Placeholder subject - router is not callable, only registered for lifecycle coordination
-        let nats_subject = nats::instance_subject(&router_endpoint_id, instance_id);
+        let transport = build_transport_type(request_plane_mode, &router_endpoint_id, instance_id);
 
         let discovery_spec = DiscoverySpec::Endpoint {
             namespace: router_endpoint_id.namespace.clone(),
             component: router_endpoint_id.component.clone(),
             endpoint: router_endpoint_id.name.clone(),
-            transport: TransportType::Nats(nats_subject),
+            transport,
         };
 
         discovery.register(discovery_spec).await?;
