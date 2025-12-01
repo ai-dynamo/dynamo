@@ -24,6 +24,7 @@ use crate::runtime::Runtime;
 use async_once_cell::OnceCell;
 
 use std::fmt;
+use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
@@ -252,6 +253,29 @@ impl DistributedRuntime {
                         .system_status_server
                         .set(Arc::new(system_status_server_info))
                         .expect("System status server info should only be set once");
+
+                    // Register metrics endpoint with discovery
+                    // Use "system" namespace for the system status server's metrics endpoint
+                    let advertise_host = system_status_server::resolve_advertise_host(&host);
+                    let metrics_url = format!("http://{}:{}/metrics", advertise_host, addr.port());
+                    let metrics_spec = crate::discovery::DiscoverySpec::MetricsEndpoint {
+                        namespace: "system".to_string(),
+                        url: metrics_url.clone(),
+                        gpu_uuids: system_status_server::get_local_gpu_uuids(),
+                    };
+
+                    match distributed_runtime
+                        .discovery_client
+                        .register(metrics_spec)
+                        .await
+                    {
+                        Ok(_) => {
+                            tracing::info!("Registered system metrics endpoint: {}", metrics_url);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to register system metrics endpoint: {}", e);
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("System status server startup failed: {}", e);

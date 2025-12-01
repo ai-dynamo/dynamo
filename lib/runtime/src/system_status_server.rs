@@ -9,7 +9,8 @@ use crate::logging::make_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
-use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
+use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -88,6 +89,82 @@ impl SystemStatusState {
     }
 }
 
+/// Get local NVIDIA GPU UUIDs using NVML
+/// Returns an empty vector if NVML initialization fails or no GPUs are found
+/// Respects CUDA_VISIBLE_DEVICES if set, filtering to only the specified devices.
+/// CUDA_VISIBLE_DEVICES can contain either numeric indices (e.g., "0,1,2") or
+/// GPU UUIDs (e.g., "GPU-abc123,GPU-def456").
+pub fn get_local_gpu_uuids() -> Vec<String> {
+    let visible_devices = std::env::var("CUDA_VISIBLE_DEVICES").ok();
+
+    match nvml_wrapper::Nvml::init() {
+        Ok(nvml) => {
+            let count = nvml.device_count().unwrap_or(0);
+            let all_gpus: Vec<_> = (0..count)
+                .filter_map(|i| {
+                    let device = nvml.device_by_index(i).ok()?;
+                    Some((i, device.uuid().ok()?))
+                })
+                .collect();
+
+            match visible_devices {
+                Some(visible) if !visible.is_empty() => {
+                    // Parse CUDA_VISIBLE_DEVICES - can be indices or UUIDs
+                    let visible_entries: Vec<&str> = visible.split(',').map(|s| s.trim()).collect();
+
+                    // Check if entries are numeric indices or UUIDs
+                    let has_uuid = visible_entries.iter().any(|s| s.starts_with("GPU-"));
+
+                    if has_uuid {
+                        // Filter by UUID match (exact or prefix match)
+                        let visible_set: std::collections::HashSet<&str> =
+                            visible_entries.into_iter().collect();
+                        all_gpus
+                            .into_iter()
+                            .filter(|(_, uuid)| visible_set.iter().any(|v| uuid.starts_with(v)))
+                            .map(|(_, uuid)| uuid)
+                            .collect()
+                    } else {
+                        // Filter by numeric index
+                        let visible_indices: std::collections::HashSet<u32> = visible_entries
+                            .into_iter()
+                            .filter_map(|s| s.parse::<u32>().ok())
+                            .collect();
+                        all_gpus
+                            .into_iter()
+                            .filter(|(idx, _)| visible_indices.contains(idx))
+                            .map(|(_, uuid)| uuid)
+                            .collect()
+                    }
+                }
+                _ => all_gpus.into_iter().map(|(_, uuid)| uuid).collect(),
+            }
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Resolve a hostname for advertising in discovery.
+/// If the configured host is a wildcard (0.0.0.0, ::, etc.), returns the system hostname.
+/// In Kubernetes, this returns the pod name; on bare metal, the machine hostname.
+pub fn resolve_advertise_host(configured_host: &str) -> String {
+    if configured_host.is_empty()
+        || configured_host == "0.0.0.0"
+        || configured_host == "::"
+        || configured_host == "[::]"
+    {
+        hostname::get()
+            .ok()
+            .and_then(|h| {
+                let s = h.to_string_lossy().trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            })
+            .unwrap_or_else(|| configured_host.to_string())
+    } else {
+        configured_host.to_string()
+    }
+}
+
 /// Start system status server with metrics support
 pub async fn spawn_system_status_server(
     host: &str,
@@ -138,6 +215,13 @@ pub async fn spawn_system_status_server(
             get({
                 let state = Arc::clone(&server_state);
                 move || metadata_handler(state)
+            }),
+        )
+        .route(
+            "/metrics_endpoints",
+            get({
+                let state = Arc::clone(&server_state);
+                move || metrics_endpoints_handler(state)
             }),
         )
         .fallback(|| async {
@@ -267,6 +351,74 @@ async fn metadata_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
                 .into_response()
         }
     }
+}
+
+/// Metrics endpoints discovery handler
+#[tracing::instrument(skip_all, level = "trace")]
+async fn metrics_endpoints_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+    let discovery = state.drt().discovery();
+
+    let metrics_endpoints = match discovery
+        .list(crate::discovery::DiscoveryQuery::AllMetricsEndpoints)
+        .await
+    {
+        Ok(endpoints) => endpoints,
+        Err(e) => {
+            tracing::error!("Failed to list metrics endpoints: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Failed to list metrics endpoints",
+                    "message": e.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let endpoints = metrics_endpoints
+        .into_iter()
+        .filter_map(|instance| {
+            if let crate::discovery::DiscoveryInstance::MetricsEndpoint {
+                namespace,
+                instance_id,
+                url,
+                gpu_uuids,
+            } = instance
+            {
+                Some(MetricsEndpointListing {
+                    namespace,
+                    instance_id: format!("{:x}", instance_id),
+                    url,
+                    gpu_uuids,
+                })
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    tracing::trace!("Returning {} metrics endpoints", endpoints.len());
+
+    Json(ListMetricsEndpoints {
+        object: "list",
+        data: endpoints,
+    })
+    .into_response()
+}
+
+#[derive(Serialize)]
+struct ListMetricsEndpoints {
+    object: &'static str,
+    data: Vec<MetricsEndpointListing>,
+}
+
+#[derive(Serialize)]
+struct MetricsEndpointListing {
+    namespace: String,
+    instance_id: String,
+    url: String,
+    gpu_uuids: Vec<String>,
 }
 
 // Regular tests: cargo test system_status_server --lib
@@ -747,6 +899,60 @@ mod integration_tests {
                     );
                 }
                 // DRT handles server cleanup automatically
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_metrics_endpoints_route_uses_advertise_host() {
+        temp_env::async_with_vars(
+            [
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (env_system::DYN_SYSTEM_HOST, Some("0.0.0.0")),
+                ("POD_NAME", Some("ipp1-0807")),
+            ],
+            async {
+                let drt = Arc::new(create_test_drt_async().await);
+
+                let system_info = drt
+                    .system_status_server_info()
+                    .expect("System status server should be started by DRT");
+                let addr = system_info.socket_addr;
+
+                let client = reqwest::Client::new();
+                let url = format!("http://{}{}", addr, "/metrics_endpoints");
+                let response = client.get(&url).send().await.unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "metrics endpoints route should return 200"
+                );
+
+                let body = response.text().await.unwrap();
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&body).expect("response should be valid JSON");
+
+                assert_eq!(parsed["object"], "list");
+                let data = parsed["data"].as_array().expect("data should be an array");
+
+                let entry = data
+                    .iter()
+                    .find(|entry| {
+                        entry.get("namespace").and_then(|ns| ns.as_str()) == Some("system")
+                    })
+                    .expect("system namespace entry should exist");
+
+                let url = entry
+                    .get("url")
+                    .and_then(|val| val.as_str())
+                    .expect("url should be present");
+
+                assert_eq!(
+                    url,
+                    format!("http://ipp1-0807:{}/metrics", addr.port()),
+                    "metric endpoint should advertise resolved hostname"
+                );
             },
         )
         .await;
