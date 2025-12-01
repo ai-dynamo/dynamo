@@ -85,6 +85,7 @@ RUN apt-get update \
         # Python (using other python versions as needed)
         python${PYTHON_VERSION}-dev \
         python${PYTHON_VERSION}-venv \
+        python${PYTHON_VERSION}-distutils \
         python3-pip \
         # Build essentials
         build-essential \
@@ -156,8 +157,6 @@ RUN apt-get update \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python /usr/bin/python${PYTHON_VERSION} \
-    # Remove EXTERNALLY-MANAGED marker to allow pip installs in Docker (PEP 668)
-    && rm -f /usr/lib/python${PYTHON_VERSION}/EXTERNALLY-MANAGED \
     # Set up locale
     && locale-gen en_US.UTF-8 \
     # Cleanup
@@ -253,7 +252,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cmake --build build --target install -j${CMAKE_BUILD_PARALLEL_LEVEL} && \
     /tmp/use-sccache.sh show-stats "NVSHMEM"
 
-# Build nvshmem4py wheels separately for the configured Python version (CUDA 12) to avoid building the python library twice for multiple python versions
+# Build nvshmem4py wheels separately (Python 3.10, CUDA 12) to avoid building the python library twice for multiple python versions
 # Need to reconfigure with PYTHON_LIB=ON to add the nvshmem4py subdirectory
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
