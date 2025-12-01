@@ -29,7 +29,7 @@ ARG GRACE_BLACKWELL={{ context.sglang.grace_blackwell }}
 ARG CMAKE_BUILD_PARALLEL_LEVEL={{ context.sglang.cmake_build_parallel_level }}
 ARG ARCH
 ARG ARCH_ALT
-ARG PYTHON_VERSION
+ARG SGLANG_PYTHON_VERSION
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
@@ -55,9 +55,9 @@ RUN apt-get update \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # Python (using other python versions as needed)
-        python${PYTHON_VERSION}-dev \
-        python${PYTHON_VERSION}-venv \
-        python${PYTHON_VERSION}-distutils \
+        python${SGLANG_PYTHON_VERSION}-dev \
+        python${SGLANG_PYTHON_VERSION}-venv \
+        python${SGLANG_PYTHON_VERSION}-distutils \
         python3-pip \
         # Build essentials
         build-essential \
@@ -125,10 +125,10 @@ RUN apt-get update \
         libsubunit0 \
         libsubunit-dev \
     # Set Python alternatives
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --set python /usr/bin/python${PYTHON_VERSION} \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${SGLANG_PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${SGLANG_PYTHON_VERSION} \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python${SGLANG_PYTHON_VERSION} 1 \
+    && update-alternatives --set python /usr/bin/python${SGLANG_PYTHON_VERSION} \
     # Set up locale
     && locale-gen en_US.UTF-8 \
     # Cleanup
@@ -240,7 +240,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
     NVSHMEM_USE_GDRCOPY=1 \
     cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} -DNVSHMEM_BUILD_PYTHON_LIB=ON && \
-    cmake --build build --target build_nvshmem4py_wheel_cu12_${PYTHON_VERSION} -j${CMAKE_BUILD_PARALLEL_LEVEL} && \
+    cmake --build build --target build_nvshmem4py_wheel_cu12_${SGLANG_PYTHON_VERSION} -j${CMAKE_BUILD_PARALLEL_LEVEL} && \
     /tmp/use-sccache.sh show-stats "NVSHMEM4PY"
 
 # Install DeepEP

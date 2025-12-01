@@ -21,7 +21,7 @@ WORKDIR /workspace
 
 ARG ARCH
 ARG ARCH_ALT
-ARG PYTHON_VERSION
+ARG SGLANG_PYTHON_VERSION
 
 ENV DYNAMO_HOME=/opt/dynamo
 ENV NVSHMEM_DIR=/sgl-workspace/nvshmem/install
