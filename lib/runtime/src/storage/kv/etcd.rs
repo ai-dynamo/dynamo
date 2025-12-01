@@ -5,15 +5,12 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Duration;
 
-use crate::{
-    storage::key_value_store::{Key, KeyValue, WatchEvent},
-    transports::etcd,
-};
+use crate::transports::etcd;
 use async_stream::stream;
 use async_trait::async_trait;
 use etcd_client::{Compare, CompareOp, EventType, PutOptions, Txn, TxnOp, WatchOptions};
 
-use super::{KeyValueBucket, KeyValueStore, StoreError, StoreOutcome};
+use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 
 #[derive(Clone)]
 pub struct EtcdStore {
@@ -27,7 +24,7 @@ impl EtcdStore {
 }
 
 #[async_trait]
-impl KeyValueStore for EtcdStore {
+impl Store for EtcdStore {
     type Bucket = EtcdBucket;
 
     /// A "bucket" in etcd is a path prefix
@@ -66,7 +63,7 @@ pub struct EtcdBucket {
 }
 
 #[async_trait]
-impl KeyValueBucket for EtcdBucket {
+impl Bucket for EtcdBucket {
     async fn insert(
         &self,
         key: &Key,

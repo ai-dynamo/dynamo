@@ -14,6 +14,7 @@ use dynamo_runtime::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
     },
+    protocols::EndpointId,
     protocols::annotated::Annotated,
     traits::DistributedRuntimeProvider,
 };
@@ -78,6 +79,27 @@ pub const RADIX_STATE_FILE: &str = "radix-state";
 
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_QUERY_SUBJECT: &str = "worker_kv_indexer_query";
+// for router discovery registration
+pub const KV_ROUTER_COMPONENT: &str = "kv-router";
+pub const KV_ROUTER_ENDPOINT: &str = "generate";
+
+/// Creates an EndpointId for the KV router in the given namespace.
+pub fn router_endpoint_id(namespace: String) -> EndpointId {
+    EndpointId {
+        namespace,
+        component: KV_ROUTER_COMPONENT.to_string(),
+        name: KV_ROUTER_ENDPOINT.to_string(),
+    }
+}
+
+/// Creates a DiscoveryQuery for the KV router in the given namespace.
+pub fn router_discovery_query(namespace: String) -> DiscoveryQuery {
+    DiscoveryQuery::Endpoint {
+        namespace,
+        component: KV_ROUTER_COMPONENT.to_string(),
+        endpoint: KV_ROUTER_ENDPOINT.to_string(),
+    }
+}
 
 /// A trait that users can implement to define custom selection logic
 pub trait WorkerSelector {
@@ -261,7 +283,7 @@ impl KvRouter {
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
-        consumer_uuid: String,
+        consumer_id: String,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         let component = endpoint.component();
@@ -318,7 +340,7 @@ impl KvRouter {
             runtime_configs_rx,
             selector,
             kv_router_config.router_replica_sync,
-            consumer_uuid.clone(),
+            consumer_id.clone(),
         )
         .await?;
 
@@ -328,7 +350,7 @@ impl KvRouter {
         {
             start_kv_router_background(
                 component.clone(),
-                consumer_uuid,
+                consumer_id,
                 kv_indexer.event_sender(),
                 kv_indexer.remove_worker_sender(),
                 kv_router_config
@@ -658,14 +680,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
         backend_input.dp_rank = Some(dp_rank);
 
-        // Check if worker_id is requested in extra_fields
-        let should_populate_worker_id = backend_input
-            .extra_fields
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .any(|s| s == "worker_id");
-
         // Get prefill worker ID if available (stored by PrefillRouter)
         // In aggregated mode, prefill_worker_id is None, so we use decode_worker_id for both
         let decode_worker_id = instance_id;
@@ -707,24 +721,30 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             prefill_marked = true;
                         }
 
-                        // Inject worker_id in first item's disaggregated_params if requested
-                        if first_item && should_populate_worker_id {
-                            if let Some(ref mut data) = item.data {
-                                // Add worker_id to disaggregated_params
-                                let worker_id_json = json!({
-                                    "prefill_worker_id": prefill_worker_id,
-                                    "decode_worker_id": decode_worker_id,
-                                });
-
-                                if let Some(ref mut params) = data.disaggregated_params {
-                                    if let Some(obj) = params.as_object_mut() {
-                                        obj.insert("worker_id".to_string(), worker_id_json);
-                                    }
-                                } else {
-                                    data.disaggregated_params = Some(json!({"worker_id": worker_id_json}));
-                                }
-                            }
+                        // Always inject worker_id in first item's disaggregated_params
+                        // This is needed for:
+                        // 1. PrefillRouter to know which prefill worker was chosen
+                        // 2. Client response when extra_fields contains "worker_id"
+                        if first_item {
                             first_item = false;
+
+                            let Some(ref mut data) = item.data else {
+                                yield item;
+                                continue;
+                            };
+
+                            // prefill_worker_id comes from context (set by PrefillRouter) or falls back to instance_id
+                            // decode_worker_id is always the current instance_id
+                            let worker_id_json = json!({
+                                "prefill_worker_id": prefill_worker_id,
+                                "decode_worker_id": decode_worker_id,
+                            });
+
+                            if let Some(obj) = data.disaggregated_params.as_mut().and_then(|p| p.as_object_mut()) {
+                                obj.insert("worker_id".to_string(), worker_id_json);
+                            } else {
+                                data.disaggregated_params = Some(json!({"worker_id": worker_id_json}));
+                            }
                         }
 
                         yield item;

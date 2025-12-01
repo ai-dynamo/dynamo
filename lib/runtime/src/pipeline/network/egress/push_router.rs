@@ -90,7 +90,7 @@ impl RouterMode {
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     // Get network manager and create client (no mode checks!)
-    let manager = endpoint.drt().network_manager().await?;
+    let manager = endpoint.drt().network_manager();
     let req_client = manager.create_client()?;
     let resp_transport = endpoint.drt().tcp_server().await?;
 
@@ -147,8 +147,8 @@ where
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
                 ));
             }
             instance_ids[counter % count]
@@ -166,8 +166,8 @@ where
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
                 ));
             }
             let counter = rand::rng().random::<u64>() as usize;
@@ -189,8 +189,8 @@ where
 
         if !found {
             return Err(anyhow::anyhow!(
-                "instance_id={instance_id} not found for endpoint {:?}",
-                self.client.endpoint.etcd_root()
+                "instance_id={instance_id} not found for endpoint {}",
+                self.client.endpoint.id()
             ));
         }
 
