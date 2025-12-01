@@ -1,47 +1,56 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Version Pinning Strategy:
+# - Use == for packages that are pure Python and well-tested
+# - Use <= or < for packages that may have platform-specific versions (CUDA, system packages)
+# - Never use >= as it allows untested future versions that may introduce breaking changes,
+#   create non-reproducible builds, and cause dependency conflicts. Every installed version
+#   should be explicitly tested, not an unknown future release.
+# - Platform differences: Some packages (especially CUDA-related) may have different
+#   maximum versions available on different platforms (x86_64 vs aarch64, different CUDA versions)
+
 # For Multimodal EPD (required for device_map="auto" in vision model loading)
-accelerate
+accelerate==1.12.0
 aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@5554d2eb8206738c66048bf2d72183e9bcd85759
-aiofiles
+aiofiles==24.1.0
 aiperf @ git+https://github.com/ai-dynamo/aiperf.git@4d3fa29403c8f75da22a14f1f7b3aeb27db9288f
 av==15.0.0
 fastapi==0.120.1
-ftfy
+ftfy==6.3.1
 genai-perf==0.0.15
-grpcio-tools==1.66.0
-httpx
-kr8s
+grpcio-tools<=1.66.0  # May have platform-specific builds
+httpx==0.28.1
+kr8s==0.20.13
 kubernetes==32.0.1
-kubernetes_asyncio
-matplotlib
-msgspec
-mypy
-nvidia-ml-py==13.580.65
-opentelemetry-api
-opentelemetry-sdk
-pip
-pmdarima
-pre-commit
-prometheus-api-client
-prometheus_client
-prophet
+kubernetes_asyncio<=32.1.1  # May vary by platform
+matplotlib==3.10.7
+msgspec==0.19.0
+mypy==1.18.2
+nvidia-ml-py<=13.580.65  # NVIDIA/CUDA related, may vary by driver version
+opentelemetry-api<=1.38.0  # May need to stay in sync with other components
+opentelemetry-sdk<=1.38.0  # May need to stay in sync with other components
+pip<=25.0.1  # System pip, varies by platform
+pmdarima==2.1.1
+pre-commit==4.5.0
+prometheus-api-client==0.6.0
+prometheus_client==0.23.1
+prophet==1.2.1
 protobuf==5.29.5
-pydantic>=2.10.6
-pyright
-PyYAML
-scikit-learn
-scipy<1.14.0  # Pin scipy version for pmdarima compatibility
-sentencepiece
+pydantic>=2.11.4,<2.12  # Required by aiconfigurator==0.4.0
+pyright==1.1.407
+PyYAML==6.0.3
+scikit-learn==1.7.2
+scipy<1.14.0  # Upper bound for pmdarima compatibility
+sentencepiece==0.2.1
 tensorboard==2.19.0
 tensorboardX==2.6.2.2
 # Transformers version constraint for container builds
 # - vLLM 0.11.0: >=4.55.2, vLLM 0.11.2: >=4.56.0,<5
 # - TensorRT-LLM 1.2.0rc2/rc3: ==4.56.0
 # - SGLang 0.5.4.post3: ==4.57.1
-# Using >=4.56.0 to satisfy all frameworks
+# Using >=4.56.0 and <=4.57.1 to satisfy all frameworks
 transformers>=4.56.0,<=4.57.1
-types-aiofiles
-types-PyYAML
-uvicorn
+types-aiofiles==25.1.0.20251011
+types-PyYAML==6.0.12.20250915
+uvicorn==0.38.0

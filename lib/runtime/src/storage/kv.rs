@@ -112,8 +112,8 @@ pub enum WatchEvent {
 }
 
 #[async_trait]
-pub trait KeyValueStore: Send + Sync {
-    type Bucket: KeyValueBucket + Send + Sync + 'static;
+pub trait Store: Send + Sync {
+    type Bucket: Bucket + Send + Sync + 'static;
 
     async fn get_or_create_bucket(
         &self,
@@ -130,7 +130,7 @@ pub trait KeyValueStore: Send + Sync {
 }
 
 #[derive(Clone, Debug, Default)]
-pub enum KeyValueStoreSelect {
+pub enum Selector {
     // Box it because it is significantly bigger than the other variants
     Etcd(Box<etcd_transport::ClientOptions>),
     File(PathBuf),
@@ -139,23 +139,23 @@ pub enum KeyValueStoreSelect {
     // Nats not listed because likely we want to remove that impl. It is not currently used and not well tested.
 }
 
-impl fmt::Display for KeyValueStoreSelect {
+impl fmt::Display for Selector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            KeyValueStoreSelect::Etcd(opts) => {
+            Selector::Etcd(opts) => {
                 let urls = opts.etcd_url.join(",");
                 write!(f, "Etcd({urls})")
             }
-            KeyValueStoreSelect::File(path) => write!(f, "File({})", path.display()),
-            KeyValueStoreSelect::Memory => write!(f, "Memory"),
+            Selector::File(path) => write!(f, "File({})", path.display()),
+            Selector::Memory => write!(f, "Memory"),
         }
     }
 }
 
-impl FromStr for KeyValueStoreSelect {
+impl FromStr for Selector {
     type Err = anyhow::Error;
 
-    fn from_str(s: &str) -> anyhow::Result<KeyValueStoreSelect> {
+    fn from_str(s: &str) -> anyhow::Result<Selector> {
         match s {
             "etcd" => Ok(Self::Etcd(Box::default())),
             "file" => {
@@ -170,16 +170,16 @@ impl FromStr for KeyValueStoreSelect {
     }
 }
 
-impl TryFrom<String> for KeyValueStoreSelect {
+impl TryFrom<String> for Selector {
     type Error = anyhow::Error;
 
-    fn try_from(s: String) -> anyhow::Result<KeyValueStoreSelect> {
+    fn try_from(s: String) -> anyhow::Result<Selector> {
         s.parse()
     }
 }
 
 #[allow(clippy::large_enum_variant)]
-pub enum KeyValueStoreEnum {
+enum KeyValueStoreEnum {
     Memory(MemoryStore),
     Nats(NATSStore),
     Etcd(EtcdStore),
@@ -192,7 +192,7 @@ impl KeyValueStoreEnum {
         bucket_name: &str,
         // auto-delete items older than this
         ttl: Option<Duration>,
-    ) -> Result<Box<dyn KeyValueBucket>, StoreError> {
+    ) -> Result<Box<dyn Bucket>, StoreError> {
         use KeyValueStoreEnum::*;
         Ok(match self {
             Memory(x) => Box::new(x.get_or_create_bucket(bucket_name, ttl).await?),
@@ -202,28 +202,25 @@ impl KeyValueStoreEnum {
         })
     }
 
-    async fn get_bucket(
-        &self,
-        bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError> {
+    async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Box<dyn Bucket>>, StoreError> {
         use KeyValueStoreEnum::*;
-        let maybe_bucket: Option<Box<dyn KeyValueBucket>> = match self {
+        let maybe_bucket: Option<Box<dyn Bucket>> = match self {
             Memory(x) => x
                 .get_bucket(bucket_name)
                 .await?
-                .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
+                .map(|b| Box::new(b) as Box<dyn Bucket>),
             Nats(x) => x
                 .get_bucket(bucket_name)
                 .await?
-                .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
+                .map(|b| Box::new(b) as Box<dyn Bucket>),
             Etcd(x) => x
                 .get_bucket(bucket_name)
                 .await?
-                .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
+                .map(|b| Box::new(b) as Box<dyn Bucket>),
             File(x) => x
                 .get_bucket(bucket_name)
                 .await?
-                .map(|b| Box::new(b) as Box<dyn KeyValueBucket>),
+                .map(|b| Box::new(b) as Box<dyn Bucket>),
         };
         Ok(maybe_bucket)
     }
@@ -250,15 +247,15 @@ impl KeyValueStoreEnum {
 }
 
 #[derive(Clone)]
-pub struct KeyValueStoreManager(pub Arc<KeyValueStoreEnum>);
+pub struct Manager(Arc<KeyValueStoreEnum>);
 
-impl Default for KeyValueStoreManager {
+impl Default for Manager {
     fn default() -> Self {
-        KeyValueStoreManager::memory()
+        Manager::memory()
     }
 }
 
-impl KeyValueStoreManager {
+impl Manager {
     /// In-memory KeyValueStoreManager for testing
     pub fn memory() -> Self {
         Self::new(KeyValueStoreEnum::Memory(MemoryStore::new()))
@@ -272,8 +269,8 @@ impl KeyValueStoreManager {
         Self::new(KeyValueStoreEnum::File(FileStore::new(root)))
     }
 
-    fn new(s: KeyValueStoreEnum) -> KeyValueStoreManager {
-        KeyValueStoreManager(Arc::new(s))
+    fn new(s: KeyValueStoreEnum) -> Manager {
+        Manager(Arc::new(s))
     }
 
     pub async fn get_or_create_bucket(
@@ -281,14 +278,14 @@ impl KeyValueStoreManager {
         bucket_name: &str,
         // auto-delete items older than this
         ttl: Option<Duration>,
-    ) -> Result<Box<dyn KeyValueBucket>, StoreError> {
+    ) -> Result<Box<dyn Bucket>, StoreError> {
         self.0.get_or_create_bucket(bucket_name, ttl).await
     }
 
     pub async fn get_bucket(
         &self,
         bucket_name: &str,
-    ) -> Result<Option<Box<dyn KeyValueBucket>>, StoreError> {
+    ) -> Result<Option<Box<dyn Bucket>>, StoreError> {
         self.0.get_bucket(bucket_name).await
     }
 
@@ -397,7 +394,7 @@ impl KeyValueStoreManager {
 
 /// An online storage for key-value config values.
 #[async_trait]
-pub trait KeyValueBucket: Send + Sync {
+pub trait Bucket: Send + Sync {
     /// A bucket is a collection of key/value pairs.
     /// Insert a value into a bucket, if it doesn't exist already
     /// The Key should be the name of the item, not including the bucket name.

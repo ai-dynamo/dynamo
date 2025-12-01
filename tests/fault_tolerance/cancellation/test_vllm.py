@@ -35,7 +35,7 @@ class DynamoWorkerProcess(ManagedProcess):
             "--gpu-memory-utilization",
             "0.45",
             "--max-model-len",
-            "8192",
+            "16384",
             "--migration-limit",
             "3",
         ]

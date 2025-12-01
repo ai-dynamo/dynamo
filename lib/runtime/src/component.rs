@@ -65,6 +65,7 @@ mod registry;
 pub mod service;
 
 pub use client::Client;
+pub use endpoint::build_transport_type;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
