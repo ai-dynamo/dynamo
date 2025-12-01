@@ -15,9 +15,10 @@ usage() {
 Usage: $0 [COMMAND] [OPTIONS]
 
 Commands:
-    install         Install sccache binary (requires ARCH_ALT environment variable)
-    show-stats      Display sccache statistics with optional build name
-    help            Show this help message
+    install             Install sccache binary (requires ARCH_ALT environment variable)
+    show-stats          Display sccache statistics with optional build name
+    export-stats-json   Export sccache statistics as JSON to a file
+    help                Show this help message
 
 Environment variables:
     USE_SCCACHE             Set to 'true' to enable sccache
@@ -31,6 +32,8 @@ Examples:
     ARCH_ALT=x86_64 $0 install
     # Show stats with build name
     $0 show-stats "UCX"
+    # Export stats to JSON file
+    $0 export-stats-json /path/to/output.json "BuildName"
 EOF
 }
 
@@ -59,6 +62,85 @@ show_stats() {
     fi
 }
 
+export_stats_json() {
+    local output_file="${1:-/tmp/sccache-stats.json}"
+    local build_name="${2:-unknown}"
+
+    if ! command -v sccache >/dev/null 2>&1; then
+        echo '{"error": "sccache is not available"}' > "$output_file"
+        return 1
+    fi
+
+    # Get raw stats output
+    local stats_output
+    stats_output=$(sccache --show-stats 2>&1)
+
+    # Parse the output and convert to JSON using awk
+    echo "$stats_output" | awk -v build_name="$build_name" '
+    BEGIN {
+        print "{"
+        print "  \"build_name\": \"" build_name "\","
+        first = 1
+    }
+
+    # Match lines with format: "Key    Value" or "Key    Value %"
+    /^[A-Za-z]/ {
+        # Extract key and value
+        key = ""
+        value = ""
+        unit = ""
+
+        # Find the position where multiple spaces start (separator between key and value)
+        for (i = 1; i <= NF; i++) {
+            if ($i ~ /^[0-9.]+$/) {
+                # Found the start of the value
+                value = $i
+                # Check if there'\''s a unit after the value
+                if (i + 1 <= NF && ($( i+1) == "%" || $(i+1) == "s")) {
+                    unit = $(i+1)
+                }
+                # Everything before this is the key
+                for (j = 1; j < i; j++) {
+                    if (key == "") {
+                        key = $j
+                    } else {
+                        key = key " " $j
+                    }
+                }
+                break
+            }
+        }
+
+        if (key != "" && value != "") {
+            # Convert key to snake_case
+            gsub(/[()]/, "", key)  # Remove parentheses
+            gsub(/\//, "_", key)   # Replace / with _
+            gsub(/ /, "_", key)    # Replace spaces with _
+            key = tolower(key)
+
+            # Add unit suffix if applicable
+            if (unit == "%") {
+                key = key "_percent"
+            } else if (unit == "s") {
+                key = key "_seconds"
+            }
+
+            # Print JSON field
+            if (!first) print ","
+            printf "  \"%s\": %s", key, value
+            first = 0
+        }
+    }
+
+    END {
+        print ""
+        print "}"
+    }
+    ' > "$output_file"
+
+    echo "✅ sccache stats exported to: $output_file"
+}
+
 main() {
     case "${1:-help}" in
         install)
@@ -71,6 +153,10 @@ main() {
         show-stats)
             shift  # Remove the command from arguments
             show_stats "$@"  # Pass all remaining arguments
+            ;;
+        export-stats-json)
+            shift  # Remove the command from arguments
+            export_stats_json "$@"  # Pass all remaining arguments
             ;;
         help|--help|-h)
             usage
