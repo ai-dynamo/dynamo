@@ -64,9 +64,17 @@ runs:
           GPU_FLAGS=""
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
-          echo "🚀 Running pytest in normal mode with GPU"
-          GPU_FLAGS="--runtime=nvidia --gpus all"
+          echo "🚀 Running pytest in normal mode"
           PYTEST_CMD="pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          
+          # Detect GPU availability and conditionally add GPU flags
+          GPU_FLAGS=""
+          if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+            echo "✓ GPU detected, enabling GPU runtime"
+            GPU_FLAGS="--runtime=nvidia --gpus all"
+          else
+            echo "⚠️  No GPU detected, running in CPU-only mode"
+          fi
         fi
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
