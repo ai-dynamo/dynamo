@@ -527,7 +527,11 @@ pub mod openai_preprocessor_tests {
 
         let oai_preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
         let request = Request::from(SINGLE_CHAT_MESSAGE, None, None, mdc.slug().to_string());
-        let preprocessed_request = oai_preprocessor.preprocess_request(&request).unwrap().0;
+        let preprocessed_request = oai_preprocessor
+            .preprocess_request(&request)
+            .await
+            .unwrap()
+            .0;
         assert!(
             preprocessed_request
                 .stop_conditions
