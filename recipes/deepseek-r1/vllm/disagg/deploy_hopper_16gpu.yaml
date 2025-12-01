@@ -24,7 +24,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1800
             failureThreshold: 60
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     decode:
       dynamoNamespace: vllm-dsr1
       componentType: worker
@@ -42,8 +42,6 @@ spec:
       sharedMemory:
         size: 80Gi
       extraPodSpec:
-        imagePullSecrets:
-          - name: regcred
         mainContainer:
           startupProbe:
             httpGet:
@@ -52,7 +50,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/dynamo
           env:
             - name: VLLM_USE_DEEP_GEMM
@@ -111,8 +109,6 @@ spec:
       sharedMemory:
         size: 80Gi
       extraPodSpec:
-        imagePullSecrets:
-          - name: regcred
         mainContainer:
           startupProbe:
             httpGet:
@@ -121,7 +117,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/dynamo
           env:
             - name: VLLM_USE_DEEP_GEMM
