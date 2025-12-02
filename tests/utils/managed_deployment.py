@@ -867,8 +867,6 @@ class ManagedDeployment:
             logging.getLogger("httpx").setLevel(logging.WARNING)
             await self._init_kubernetes()
             await self._delete_deployment()
-            await self._restart_etcd()
-            await self._restart_nats()
             await self._create_deployment()
             await self._wait_for_ready()
 
