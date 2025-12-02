@@ -332,9 +332,6 @@ FROM runtime AS dev
 # Don't want ubuntu to be editable, just change uid and gid.
 ARG WORKSPACE_DIR=/workspace
 
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
 USER root
 # Install utilities as root
 RUN apt-get update -y && \

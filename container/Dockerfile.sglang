@@ -407,9 +407,6 @@ FROM runtime AS dev
 ARG WORKSPACE_DIR=/sgl-workspace/dynamo
 ARG PYTHON_VERSION
 
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
 # NOTE: SGLang uses system Python (not a virtualenv in framework/runtime stages) to align with
 # upstream SGLang Dockerfile: https://github.com/sgl-project/sglang/blob/main/docker/Dockerfile
 # For dev stage, we create a lightweight venv with --system-site-packages to satisfy maturin develop
