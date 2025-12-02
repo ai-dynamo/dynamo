@@ -82,11 +82,6 @@ def _should_include_timing_metrics(request: Dict[str, Any]) -> bool:
     return "timing_metrics" in extra_fields
 
 
-def _get_current_time_seconds() -> float:
-    """Get the current time in seconds since epoch as a float."""
-    return time.time()
-
-
 class BaseWorkerHandler(ABC):
     """
     Request handler for the generate and clear_kv_blocks endpoints.
@@ -368,13 +363,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Track decode timing
         first_token_sent = False
-        decode_start_seconds: Optional[float] = None
 
         async with self._abort_monitor(context, request_id):
             try:
                 # Record decode start time
                 if include_timing:
-                    decode_start_seconds = _get_current_time_seconds()
+                    decode_start_seconds = time.time()
                     # If this is aggregated mode (no prefill_result), prefill_start == decode_start
                     if prefill_result is None:
                         timing_metrics["prefill_start_seconds"] = decode_start_seconds
@@ -385,9 +379,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     # Capture first token timing
                     if include_timing and not first_token_sent:
-                        first_token_time = _get_current_time_seconds()
+                        first_token_time = time.time()
                         timing_metrics["decode_first_token_seconds"] = first_token_time
-                        # If aggregated mode, prefill finishes when first token is generated
+                        # In aggregated mode, prefill finishes when first token is generated
                         if prefill_result is None:
                             timing_metrics["prefill_end_seconds"] = first_token_time
                         first_token_sent = True
@@ -402,7 +396,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if tok.get("finish_reason") is not None and include_timing:
                         timing_metrics[
                             "decode_end_seconds"
-                        ] = _get_current_time_seconds()
+                        ] = time.time()
 
                         # Inject timing_metrics into disaggregated_params
                         if (
@@ -457,7 +451,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 timing_metrics["request_received_seconds"] = frontend_received
 
             # Record prefill_start as when we start processing in the prefill worker
-            timing_metrics["prefill_start_seconds"] = _get_current_time_seconds()
+            timing_metrics["prefill_start_seconds"] = time.time()
 
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
@@ -522,7 +516,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     if include_timing and timing_metrics:
                         timing_metrics[
                             "prefill_end_seconds"
-                        ] = _get_current_time_seconds()
+                        ] = time.time()
                         disaggregated_params["timing_metrics"] = timing_metrics
 
                     output: Dict[str, Any] = {

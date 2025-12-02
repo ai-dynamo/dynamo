@@ -66,7 +66,7 @@ pub struct NvExt {
     /// for timing metrics calculation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    pub request_received_seconds: Option<f64>,
+    pub request_received_seconds: Option<f32>,
 }
 
 impl Default for NvExt {

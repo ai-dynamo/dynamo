@@ -62,7 +62,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 fn inject_request_completed_seconds(nvext: &mut Option<serde_json::Value>) {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
+        .map(|d| d.as_secs_f32())
         .ok();
 
     // Only inject if nvext and timing_metrics already exist (user requested timing_metrics)
@@ -307,7 +307,7 @@ async fn handler_completions(
     // Capture received timestamp immediately when request arrives at the frontend
     let request_received_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
+        .map(|d| d.as_secs_f32())
         .ok();
 
     // Set request_received_seconds in nvext for timing metrics
@@ -741,7 +741,7 @@ async fn handler_chat_completions(
     // Capture received timestamp immediately when request arrives at the frontend
     let request_received_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
+        .map(|d| d.as_secs_f32())
         .ok();
 
     // Set request_received_seconds in nvext for timing metrics
