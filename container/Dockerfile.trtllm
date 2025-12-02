@@ -317,6 +317,7 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
+/usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13/:\
 $TENSORRT_LIB_DIR:\
 $LD_LIBRARY_PATH
 ENV OPAL_PREFIX=/opt/hpcx/ompi
