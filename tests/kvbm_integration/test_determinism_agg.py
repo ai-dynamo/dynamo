@@ -5,18 +5,24 @@
 """
 Determinism test for KVBM in aggregated mode.
 
-To make sure KVBM's accuracy, this test suite checks if the model produces
-deterministic outputs when same requests are served 1) without KVBM onboarded KV
-blocks and 2) with KVBM onboarded KV blocks, when given the same inputs with
-fixed seed and temperature=0.
+This test suite validates KVBM determinism in two modes:
 
-The expected results should be 100% match between the two cases. Compared to
-disaggregated mode, aggregated mode has less randomness chances.
+1. **Standalone Mode** (Light Integration Tests):
+   Uses `vllm serve` or `trtllm-serve` directly with KVBM connector config.
+   Proves KVBM works as a standalone library with these frameworks.
+
+2. **Dynamo Mode** (Robust Determinism Tests):
+   Uses Dynamo frontend/worker architecture (`dynamo.frontend` + `dynamo.vllm --connector kvbm`
+   or `dynamo.trtllm`). Full integration testing with the Dynamo infrastructure.
+
+The expected results should be 100% match between requests with and without
+KVBM onboarded KV blocks, when given the same inputs with fixed seed and temperature=0.
 """
 
 import importlib.util
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -27,6 +33,9 @@ from typing import Any, Dict, Optional, TextIO
 
 import pytest
 import requests
+
+# Import testing utilities
+from tests.utils.managed_process import ManagedProcess
 
 from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism
@@ -276,6 +285,334 @@ class LLMServerManager:
             return False
 
 
+# =============================================================================
+# Dynamo Frontend/Worker Architecture Support
+# =============================================================================
+
+
+class DynamoFrontendProcess(ManagedProcess):
+    """Process manager for Dynamo frontend in KVBM tests."""
+
+    _logger = logging.getLogger(__name__)
+
+    def __init__(self, request, port: int = 8000):
+        command = [
+            "python",
+            "-m",
+            "dynamo.frontend",
+            "--http-port",
+            str(port),
+            "--router-mode",
+            "round-robin",
+        ]
+
+        env = os.environ.copy()
+        # Frontend doesn't use system metrics server
+        env.pop("DYN_SYSTEM_PORT", None)
+
+        log_dir = f"{request.node.name}_frontend"
+
+        # Clean up any existing log directory from previous runs
+        try:
+            shutil.rmtree(log_dir)
+        except FileNotFoundError:
+            pass
+
+        super().__init__(
+            command=command,
+            env=env,
+            display_output=True,
+            terminate_existing=True,
+            health_check_ports=[port],
+            log_dir=log_dir,
+            timeout=120,
+        )
+        self.port = port
+        self.base_url = f"http://localhost:{port}"
+
+
+class DynamoVLLMWorkerProcess(ManagedProcess):
+    """Process manager for Dynamo vLLM worker with KVBM connector."""
+
+    _logger = logging.getLogger(__name__)
+
+    def __init__(
+        self,
+        request,
+        model: str,
+        cpu_cache_gb: int = 20,
+        cpu_cache_blocks: Optional[int] = None,
+        gpu_cache_blocks: Optional[int] = None,
+    ):
+        command = [
+            "python",
+            "-m",
+            "dynamo.vllm",
+            "--model",
+            model,
+            "--connector",
+            "kvbm",
+            "--enforce-eager",
+            "--max-model-len",
+            "8000",
+        ]
+
+        if gpu_cache_blocks is not None:
+            command.extend(["--num-gpu-blocks-override", str(gpu_cache_blocks)])
+
+        env = os.environ.copy()
+        env["DYN_KVBM_CPU_CACHE_GB"] = str(cpu_cache_gb)
+        env["RUST_BACKTRACE"] = "1"
+        env["NATS_SERVER"] = "nats://localhost:4222"
+        env["ETCD_ENDPOINTS"] = "http://localhost:2379"
+
+        if cpu_cache_blocks is not None:
+            env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_cache_blocks)
+
+        log_dir = f"{request.node.name}_vllm_worker"
+        try:
+            shutil.rmtree(log_dir)
+        except FileNotFoundError:
+            pass
+
+        super().__init__(
+            command=command,
+            env=env,
+            display_output=True,
+            terminate_existing=True,
+            stragglers=["VLLM:EngineCore"],
+            log_dir=log_dir,
+            timeout=600,
+        )
+
+
+class DynamoTRTLLMWorkerProcess(ManagedProcess):
+    """Process manager for Dynamo TRT-LLM worker with KVBM connector."""
+
+    _logger = logging.getLogger(__name__)
+
+    def __init__(
+        self,
+        request,
+        model: str,
+        cpu_cache_gb: int = 20,
+        cpu_cache_blocks: Optional[int] = None,
+        gpu_cache_blocks: Optional[int] = None,
+    ):
+        # Generate KVBM config for TRT-LLM
+        config_path = f"/tmp/kvbm_llm_api_config_{request.node.name}.yaml"
+        self._generate_kvbm_config(config_path, gpu_cache_blocks)
+
+        command = [
+            "python",
+            "-m",
+            "dynamo.trtllm",
+            "--model-path",
+            model,
+            "--served-model-name",
+            model,
+            "--extra-engine-args",
+            config_path,
+        ]
+
+        env = os.environ.copy()
+        env["DYN_KVBM_CPU_CACHE_GB"] = str(cpu_cache_gb)
+        env["RUST_BACKTRACE"] = "1"
+        env["NATS_SERVER"] = "nats://localhost:4222"
+        env["ETCD_ENDPOINTS"] = "http://localhost:2379"
+
+        if cpu_cache_blocks is not None:
+            env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_cache_blocks)
+
+        log_dir = f"{request.node.name}_trtllm_worker"
+        try:
+            shutil.rmtree(log_dir)
+        except FileNotFoundError:
+            pass
+
+        super().__init__(
+            command=command,
+            env=env,
+            display_output=True,
+            terminate_existing=True,
+            stragglers=["TRTLLM:EngineCore"],
+            log_dir=log_dir,
+            timeout=600,
+        )
+
+    def _generate_kvbm_config(
+        self, config_path: str, gpu_cache_blocks: Optional[int] = None
+    ):
+        """Generate KVBM-enabled config YAML for TRT-LLM."""
+        import yaml
+
+        config: Dict[str, Any] = {
+            # Disable CUDA graph (Connector API doesn't support it yet)
+            "cuda_graph_config": None,
+            "kv_cache_config": {
+                "enable_partial_reuse": False,
+                "free_gpu_memory_fraction": 0.10,
+            },
+            "kv_connector_config": {
+                "connector_module": "kvbm.trtllm_integration.connector",
+                "connector_scheduler_class": "DynamoKVBMConnectorLeader",
+                "connector_worker_class": "DynamoKVBMConnectorWorker",
+            },
+        }
+
+        if gpu_cache_blocks is not None:
+            del config["kv_cache_config"]["free_gpu_memory_fraction"]
+            config["kv_cache_config"]["max_tokens"] = int(gpu_cache_blocks) * 32
+
+        with open(config_path, "w") as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+
+class DynamoKVBMServerManager:
+    """Manages Dynamo frontend + worker lifecycle for KVBM determinism testing.
+
+    This class manages both the frontend and worker processes together,
+    providing a similar interface to LLMServerManager but using the
+    Dynamo architecture instead of standalone vllm serve / trtllm-serve.
+    """
+
+    def __init__(
+        self,
+        request,
+        base_url: Optional[str] = None,
+        port: Optional[int] = None,
+        cpu_cache_blocks: Optional[int] = None,
+        gpu_cache_blocks: Optional[int] = None,
+        cpu_cache_gb: int = 20,
+        server_type: str = ServerType.vllm,
+    ):
+        self.request = request
+        self.server_type = server_type
+        self.port = port or int(os.environ.get("KVBM_SERVER_PORT", "8000"))
+        self.base_url = base_url or f"http://localhost:{self.port}"
+        self.cpu_cache_blocks = cpu_cache_blocks
+        self.gpu_cache_blocks = gpu_cache_blocks
+        self.cpu_cache_gb = cpu_cache_gb
+        self.model = os.environ.get(
+            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+        )
+
+        self.frontend_process: Optional[DynamoFrontendProcess] = None
+        self.worker_process: Optional[ManagedProcess] = None
+
+    def start_server(self, timeout: int = 600) -> bool:
+        """Start Dynamo frontend and worker processes."""
+        logger = logging.getLogger(__name__)
+        logger.info(
+            f"Starting Dynamo KVBM server (type={self.server_type}, model={self.model})"
+        )
+
+        try:
+            # Start frontend first
+            self.frontend_process = DynamoFrontendProcess(self.request, self.port)
+            self.frontend_process.__enter__()
+            logger.info(f"Frontend started on port {self.port}")
+
+            # Start worker based on server type
+            if self.server_type == ServerType.vllm:
+                self.worker_process = DynamoVLLMWorkerProcess(
+                    self.request,
+                    self.model,
+                    self.cpu_cache_gb,
+                    self.cpu_cache_blocks,
+                    self.gpu_cache_blocks,
+                )
+            elif self.server_type == ServerType.trtllm:
+                self.worker_process = DynamoTRTLLMWorkerProcess(
+                    self.request,
+                    self.model,
+                    self.cpu_cache_gb,
+                    self.cpu_cache_blocks,
+                    self.gpu_cache_blocks,
+                )
+            else:
+                raise ValueError(f"Unsupported server type: {self.server_type}")
+
+            self.worker_process.__enter__()
+            logger.info(f"{self.server_type} worker started")
+
+            # Wait for the server to be fully ready
+            return self._wait_for_ready(timeout)
+
+        except Exception as e:
+            logger.error(f"Failed to start Dynamo KVBM server: {e}")
+            self.stop_server()
+            return False
+
+    def _wait_for_ready(self, timeout: int = 600) -> bool:
+        """Wait for the server to be fully ready to serve requests."""
+        logger = logging.getLogger(__name__)
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            try:
+                # Check /v1/models endpoint
+                response = requests.get(f"{self.base_url}/v1/models", timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("data") and len(data["data"]) > 0:
+                        # Try a test request
+                        test_payload = {
+                            "model": self.model,
+                            "messages": [{"role": "user", "content": "test"}],
+                            "max_completion_tokens": 1,
+                            "temperature": 0,
+                        }
+                        response = requests.post(
+                            f"{self.base_url}/v1/chat/completions",
+                            json=test_payload,
+                            timeout=30,
+                        )
+                        if response.status_code == 200:
+                            logger.info("Dynamo KVBM server is ready")
+                            return True
+            except requests.exceptions.RequestException:
+                pass
+
+            time.sleep(5)
+            elapsed = time.time() - start_time
+            if int(elapsed) % 30 == 0:
+                logger.info(
+                    f"Still waiting for server... ({elapsed:.0f}s / {timeout}s)"
+                )
+
+        logger.error(f"Server did not become ready within {timeout}s")
+        return False
+
+    def stop_server(self):
+        """Stop Dynamo frontend and worker processes."""
+        logger = logging.getLogger(__name__)
+
+        if self.worker_process:
+            try:
+                self.worker_process.__exit__(None, None, None)
+                logger.info("Worker process stopped")
+            except Exception as e:
+                logger.warning(f"Error stopping worker: {e}")
+            self.worker_process = None
+
+        if self.frontend_process:
+            try:
+                self.frontend_process.__exit__(None, None, None)
+                logger.info("Frontend process stopped")
+            except Exception as e:
+                logger.warning(f"Error stopping frontend: {e}")
+            self.frontend_process = None
+
+    def is_server_running(self) -> bool:
+        """Check if the server is responding to requests."""
+        try:
+            response = requests.get(f"{self.base_url}/health", timeout=5)
+            return response.status_code == 200
+        except requests.exceptions.RequestException:
+            return False
+
+
 class AggDeterminismTester(DeterminismTester):
     """Aggregated architecture specific determinism tester."""
 
@@ -315,9 +652,139 @@ class AggDeterminismTester(DeterminismTester):
         print("Cache reset done")
 
 
+# =============================================================================
+# Fixtures for Standalone Mode (vllm serve / trtllm-serve)
+# =============================================================================
+
+
+@pytest.fixture(scope="function")
+def standalone_llm_server(request, runtime_services):
+    """Start and stop a standalone LLM server (vllm serve / trtllm-serve) for each test.
+
+    This fixture uses standalone server commands to test KVBM as an independent library.
+
+    To parametrize, use:
+      @pytest.mark.parametrize("standalone_llm_server", [{"cpu_blocks": 10000, "gpu_blocks": 2048}], indirect=True)
+    """
+    logger = logging.getLogger("pytest")
+    logger.setLevel(logging.INFO)
+
+    cpu_blocks = getattr(request, "param", {}).get("cpu_blocks", None)
+    gpu_blocks = getattr(request, "param", {}).get("gpu_blocks", None)
+    port = getattr(request, "param", {}).get("port", None)
+
+    # Put logs in the per-test directory set up by tests/conftest.py
+    log_dir = Path(request.node.name)
+
+    if importlib.util.find_spec("vllm") is not None:
+        server_type = ServerType.vllm
+    elif importlib.util.find_spec("tensorrt_llm") is not None:
+        server_type = ServerType.trtllm
+    else:
+        raise Exception(
+            "Neither the vllm nor the tensorrt_llm module is available in the current environment."
+        )
+
+    server_manager = LLMServerManager(
+        port=port,
+        cpu_cache_blocks=cpu_blocks,
+        gpu_cache_blocks=gpu_blocks,
+        log_dir=log_dir,
+        server_type=server_type,
+    )
+
+    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
+    if not server_manager.start_server(timeout=start_timeout):
+        pytest.fail(
+            f"Failed to start {server_type} server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
+        )
+
+    yield server_manager
+
+    server_manager.stop_server()
+
+
+@pytest.fixture(scope="function")
+def standalone_tester(standalone_llm_server):
+    """Create determinism tester bound to the standalone server's base URL."""
+    t = AggDeterminismTester(
+        base_url=standalone_llm_server.base_url,
+        server_type=standalone_llm_server.server_type,
+    )
+    t.download_shakespeare_text()
+    return t
+
+
+# =============================================================================
+# Fixtures for Dynamo Mode (dynamo.frontend + dynamo.vllm/trtllm)
+# =============================================================================
+
+
+@pytest.fixture(scope="function")
+def dynamo_llm_server(request, runtime_services):
+    """Start and stop a Dynamo-based LLM server for each test.
+
+    This fixture uses Dynamo frontend + worker architecture for robust KVBM testing.
+
+    To parametrize, use:
+      @pytest.mark.parametrize("dynamo_llm_server", [{"cpu_blocks": 10000, "gpu_blocks": 2048}], indirect=True)
+    """
+    logger = logging.getLogger("pytest")
+    logger.setLevel(logging.INFO)
+
+    cpu_blocks = getattr(request, "param", {}).get("cpu_blocks", None)
+    gpu_blocks = getattr(request, "param", {}).get("gpu_blocks", None)
+    port = getattr(request, "param", {}).get("port", None)
+    cpu_cache_gb = getattr(request, "param", {}).get("cpu_cache_gb", 20)
+
+    if importlib.util.find_spec("vllm") is not None:
+        server_type = ServerType.vllm
+    elif importlib.util.find_spec("tensorrt_llm") is not None:
+        server_type = ServerType.trtllm
+    else:
+        raise Exception(
+            "Neither the vllm nor the tensorrt_llm module is available in the current environment."
+        )
+
+    server_manager = DynamoKVBMServerManager(
+        request=request,
+        port=port,
+        cpu_cache_blocks=cpu_blocks,
+        gpu_cache_blocks=gpu_blocks,
+        cpu_cache_gb=cpu_cache_gb,
+        server_type=server_type,
+    )
+
+    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
+    if not server_manager.start_server(timeout=start_timeout):
+        pytest.fail(
+            f"Failed to start Dynamo {server_type} server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
+        )
+
+    yield server_manager
+
+    server_manager.stop_server()
+
+
+@pytest.fixture(scope="function")
+def dynamo_tester(dynamo_llm_server):
+    """Create determinism tester bound to the Dynamo server's base URL."""
+    t = AggDeterminismTester(
+        base_url=dynamo_llm_server.base_url,
+        server_type=dynamo_llm_server.server_type,
+    )
+    t.download_shakespeare_text()
+    return t
+
+
+# =============================================================================
+# Legacy fixture aliases for backward compatibility
+# =============================================================================
+
+
 @pytest.fixture(scope="function")
 def llm_server(request, runtime_services):
-    """Start and stop a LLM server for each test with optional cache block overrides.
+    """Legacy alias - uses standalone mode by default.
 
     To parametrize, use:
       @pytest.mark.parametrize("llm_server", [{"cpu_blocks": 10000, "gpu_blocks": 2048}], indirect=True)
@@ -362,7 +829,7 @@ def llm_server(request, runtime_services):
 
 @pytest.fixture(scope="function")
 def tester(llm_server):
-    """Create determinism tester bound to the running server's base URL."""
+    """Legacy alias - Create determinism tester bound to the running server's base URL."""
     t = AggDeterminismTester(
         base_url=llm_server.base_url, server_type=llm_server.server_type
     )
@@ -370,8 +837,113 @@ def tester(llm_server):
     return t
 
 
+# =============================================================================
+# Standalone Mode Tests (Light Integration - vllm serve / trtllm-serve)
+# =============================================================================
+
+
+class TestDeterminismAggStandalone(BaseTestDeterminism):
+    """Test class for determinism validation using standalone vllm serve / trtllm-serve.
+
+    These tests validate that KVBM works correctly as a standalone library
+    integrated directly with vllm serve or trtllm-serve commands.
+    """
+
+    @pytest.mark.parametrize(
+        "standalone_llm_server",
+        [
+            {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000"))},
+        ],
+        indirect=True,
+    )
+    @pytest.mark.kvbm_standalone
+    def test_determinism_standalone_with_cache_reset(
+        self, standalone_tester, standalone_llm_server, runtime_services
+    ):
+        """Test determinism with standalone vllm serve / trtllm-serve."""
+        super().base_test_determinism_with_cache_reset(
+            standalone_tester, standalone_llm_server, runtime_services
+        )
+
+    @pytest.mark.parametrize(
+        "standalone_llm_server",
+        [
+            {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000"))},
+        ],
+        indirect=True,
+    )
+    @pytest.mark.kvbm_standalone
+    @pytest.mark.kvbm_v2
+    def test_determinism_standalone_with_cache_reset_v2(
+        self, standalone_tester, standalone_llm_server, runtime_services, monkeypatch
+    ):
+        """Test determinism with standalone server and V2 transfer."""
+        monkeypatch.setenv("DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL", "1")
+        super().base_test_determinism_with_cache_reset(
+            standalone_tester, standalone_llm_server, runtime_services
+        )
+
+
+# =============================================================================
+# Dynamo Mode Tests (Robust Integration - dynamo.frontend + dynamo.vllm/trtllm)
+# =============================================================================
+
+
+class TestDeterminismAggDynamo(BaseTestDeterminism):
+    """Test class for determinism validation using Dynamo frontend/worker architecture.
+
+    These tests validate KVBM determinism using the full Dynamo infrastructure:
+    - dynamo.frontend for HTTP API handling
+    - dynamo.vllm --connector kvbm for vLLM backend
+    - dynamo.trtllm with KVBM connector config for TRT-LLM backend
+    """
+
+    @pytest.mark.parametrize(
+        "dynamo_llm_server",
+        [
+            {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000"))},
+        ],
+        indirect=True,
+    )
+    @pytest.mark.kvbm_dynamo
+    def test_determinism_dynamo_with_cache_reset(
+        self, dynamo_tester, dynamo_llm_server, runtime_services
+    ):
+        """Test determinism with Dynamo frontend/worker architecture."""
+        super().base_test_determinism_with_cache_reset(
+            dynamo_tester, dynamo_llm_server, runtime_services
+        )
+
+    @pytest.mark.parametrize(
+        "dynamo_llm_server",
+        [
+            {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000"))},
+        ],
+        indirect=True,
+    )
+    @pytest.mark.kvbm_dynamo
+    @pytest.mark.kvbm_v2
+    def test_determinism_dynamo_with_cache_reset_v2(
+        self, dynamo_tester, dynamo_llm_server, runtime_services, monkeypatch
+    ):
+        """Test determinism with Dynamo architecture and V2 transfer."""
+        monkeypatch.setenv("DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL", "1")
+        super().base_test_determinism_with_cache_reset(
+            dynamo_tester, dynamo_llm_server, runtime_services
+        )
+
+
+# =============================================================================
+# Legacy Test Class (Backward Compatibility)
+# =============================================================================
+
+
 class TestDeterminismAgg(BaseTestDeterminism):
-    """Test class for determinism validation."""
+    """Legacy test class for determinism validation.
+
+    These tests use standalone mode by default for backward compatibility.
+    Consider using TestDeterminismAggStandalone or TestDeterminismAggDynamo instead.
+    """
 
     @pytest.mark.parametrize(
         "llm_server",
