@@ -1334,8 +1334,14 @@ impl LocalKvIndexer {
 
     /// TODO implement method which returns all events
     /// starting and/or ending in a given event id
-    pub fn get_events_in_id_range(&self, _start_id: u64, _end_id: u64) -> Vec<(WorkerId, KvCacheEvent)> {
-        todo!("Implement method which returns all events starting and/or ending in a given event id")
+    pub fn get_events_in_id_range(
+        &self,
+        _start_id: u64,
+        _end_id: u64,
+    ) -> Vec<(WorkerId, KvCacheEvent)> {
+        todo!(
+            "Implement method which returns all events starting and/or ending in a given event id"
+        )
     }
 
     /// Record an event in the buffer

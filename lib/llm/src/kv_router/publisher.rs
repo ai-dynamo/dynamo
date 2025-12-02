@@ -16,7 +16,9 @@ use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
 use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
-use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher, events::EventSubscriber};
+use dynamo_runtime::traits::{
+    DistributedRuntimeProvider, events::EventPublisher, events::EventSubscriber,
+};
 use dynamo_runtime::{
     component::{Component, Namespace},
     transports::nats::{NatsQueue, QUEUE_NAME, Slug},
@@ -99,7 +101,7 @@ pub struct KvEventPublisher {
     /// Optional worker-local indexer for tracking this worker's own KV cache.
     /// When present, events are applied to this indexer before being published to NATS.
     local_indexer: Option<Arc<LocalKvIndexer>>,
-    /// Optional runtime for router->local indexer comm
+    /// Optional runtime for router->local indexer comm (TODO might be refactored)
     local_indexer_query_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -109,7 +111,7 @@ impl KvEventPublisher {
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
-        Self::new_with_local_indexer(component, kv_block_size, source_config, false)
+        Self::new_with_local_indexer(component, kv_block_size, source_config, true)
     }
 
     pub fn new_with_local_indexer(
@@ -124,6 +126,18 @@ impl KvEventPublisher {
 
         // Infer worker_id from component's connection
         let worker_id = component.drt().connection_id();
+
+        tracing::info!(
+            worker_id,
+            component = component.name(),
+            "Initializing KvEventPublisher for worker {worker_id} in component {component}"
+        );
+
+        if enable_local_indexer {
+            tracing::info!(
+                "LocalKvIndexer enabled for worker {worker_id} in component {component}"
+            );
+        }
 
         // Create our event source (if any)
         let mut source = None;
@@ -155,13 +169,15 @@ impl KvEventPublisher {
             let component = component.clone();
             let local_indexer = local_indexer_ref.clone();
 
-            component.drt().runtime().secondary().spawn(
-                start_worker_kv_query_service(
+            component
+                .drt()
+                .runtime()
+                .secondary()
+                .spawn(start_worker_kv_query_service(
                     component,
                     worker_id,
                     local_indexer,
-                )
-            )
+                ))
         });
 
         let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
@@ -277,6 +293,7 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
                 if let Err(e) = publisher.publish(QUEUE_NAME, &router_event).await {
                     tracing::error!("Failed to publish event to NATS: {}", e);
                 }
+
             }
         }
     }
@@ -293,15 +310,19 @@ async fn start_worker_kv_query_service(
 
     // Create NATS subscriber on a subject specific to worker's id
     let subject = format!("{}.{}", WORKER_KV_INDEXER_QUERY_SUBJECT, worker_id);
-    let full_subject = format!("namespace.{}.{}", component.namespace().name(), subject);
+    let full_subject = format!("namespace.{}.{}", component.namespace().name(), subject); // TODO make a helper like subject()
     let mut subscriber = match component.namespace().subscribe(&subject).await {
         Ok(sub) => sub,
         Err(e) => {
             tracing::error!("Failed to subscribe to {}: {}", subject, e);
-            return;  // No ? because function doesn't return Result
+            return; // No ? because function doesn't return Result
         }
     };
-    tracing::info!("Query service on worker {} listening on NATS subject: {}", worker_id, full_subject);
+    tracing::info!(
+        "Query service on worker {} listening on NATS subject: {}",
+        worker_id,
+        full_subject
+    );
 
     // Receive query request from router, retrieve event(s) from LocalKvIndexer, return response
     // TODO: currently just dumps all events from LocalKvIndexer; need to implement
@@ -347,7 +368,12 @@ async fn start_worker_kv_query_service(
                         }
                     };
 
-                    if let Err(e) = component.namespace().publish(&reply_subject, &payload).await {
+                    // Publish through DRT/NATS directly instead of namespace (adds a prefix)
+                    if let Err(e) = component
+                        .drt()
+                        .kv_router_nats_publish(reply_subject.to_string(), payload.into())
+                        .await
+                    {
                         tracing::error!("Failed to send reply: {}", e);
                     }
                 }
@@ -1145,9 +1171,9 @@ mod test_event_processing {
 #[cfg(test)]
 mod tests_startup_helpers {
     use super::*;
+    use crate::kv_router::KvIndexer;
     use crate::kv_router::indexer::KvIndexerInterface;
     use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
-    use crate::kv_router::KvIndexer;
     use async_trait;
     use bytes::Bytes;
     use std::sync::{Arc, Mutex};
@@ -1678,19 +1704,19 @@ mod tests_startup_helpers {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Simulate JetStream: forward worker's published event to router
-        {
+        let (subject, bytes) = {
             let published = worker_published.lock().unwrap();
             assert_eq!(published.len(), 1, "Worker should have published 1 event");
-            let (subject, bytes) = &published[0];
-            assert_eq!(subject, QUEUE_NAME);
+            (published[0].0.clone(), published[0].1.clone())
+        }; // drop worker_published before await
+        assert_eq!(subject, QUEUE_NAME);
 
-            let router_event: RouterEvent = rmp_serde::from_slice(bytes).unwrap();
-            router_indexer
-                .event_sender()
-                .send(router_event)
-                .await
-                .unwrap();
-        }
+        let router_event: RouterEvent = rmp_serde::from_slice(&bytes).unwrap();
+        router_indexer
+            .event_sender()
+            .send(router_event)
+            .await
+            .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -1767,9 +1793,7 @@ mod tests_startup_helpers {
             .unwrap();
         let router_overlap = overlap
             .scores
-            .get(&crate::kv_router::protocols::WorkerWithDpRank::from_worker_id(
-                worker_1_id,
-            ))
+            .get(&crate::kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
             .copied()
             .unwrap_or(0);
         assert_eq!(
@@ -1797,9 +1821,7 @@ mod tests_startup_helpers {
         let overlap = router_indexer.find_matches(block_hashes_2).await.unwrap();
         let router_overlap_after = overlap
             .scores
-            .get(&crate::kv_router::protocols::WorkerWithDpRank::from_worker_id(
-                worker_1_id,
-            ))
+            .get(&crate::kv_router::protocols::WorkerWithDpRank::from_worker_id(worker_1_id))
             .copied()
             .unwrap_or(0);
         assert_eq!(
@@ -1874,8 +1896,7 @@ mod tests_local_indexer_query {
 
         // Test serialization/deserialization (simulating NATS round-trip)
         let serialized = serde_json::to_vec(&response).unwrap();
-        let deserialized: WorkerKvQueryResponse =
-            serde_json::from_slice(&serialized).unwrap();
+        let deserialized: WorkerKvQueryResponse = serde_json::from_slice(&serialized).unwrap();
 
         // Verify response correctness
         assert_eq!(deserialized.worker_id, worker_id);
@@ -1948,6 +1969,7 @@ mod test_integration_publisher {
     use super::*;
     use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
+    use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::traits::events::EventSubscriber;
     use futures::StreamExt;
 
@@ -2135,5 +2157,363 @@ mod test_integration_publisher {
         println!(
             "✅ KvStatsPrometheusGauges constructor and publish() work correctly with real Component"
         );
+    }
+
+    /// Integration test: KvPushRouter end-to-end routing with mock engines.
+    ///
+    /// Validates that KvPushRouter::generate can route requests across two workers by leveraging
+    /// the existing KV routing infrastructure (JetStream, KvIndexer, schedulers).
+    #[tokio::test]
+    #[ignore] // Requires NATS/etcd. Run with: cargo test --package dynamo-llm --lib --features integration test_e2e_router -- --ignored --nocapture
+    async fn test_distributed_kvindexer_e2e_single() -> anyhow::Result<()> {
+        use dynamo_runtime::protocols::annotated::Annotated;
+        use crate::kv_router::scheduler::DefaultWorkerSelector;
+        use crate::kv_router::{
+            KvPushRouter, KvRouter, KvRouterConfig, worker_query::WorkerQueryClient,
+        };
+        use crate::mocker::engine::MOCKER_COMPONENT;
+        use crate::mocker::engine::MockVllmEngine;
+        use crate::mocker::protocols::{MockEngineArgs, WorkerType};
+        use crate::protocols::common::{
+            OutputOptions, SamplingOptions, StopConditions,
+            llm_backend::{LLMEngineOutput, PreprocessedRequest},
+        };
+        use dynamo_runtime::pipeline::{Context, PushRouter, RouterMode, network::Ingress};
+
+        const BLOCK_SIZE: u32 = 4;
+        const NUM_REQUESTS: usize = 4;
+
+        dynamo_runtime::logging::init();
+
+        // === SETUP: Distributed runtime and namespace ===
+        let distributed = create_test_drt_async().await;
+        let namespace = distributed.namespace("test_e2e_router")?;
+        let component = namespace.component(MOCKER_COMPONENT)?;
+
+        // === SETUP: Start mocker workers  ===
+        let mocker_args = MockEngineArgs::builder()
+            .block_size(BLOCK_SIZE as usize)
+            .dp_size(1) // single worker test
+            .worker_type(WorkerType::Aggregated)
+            .speedup_ratio(50.0)
+            .enable_prefix_caching(true)
+            .build()?;
+
+        let engine = Arc::new(MockVllmEngine::new(mocker_args));
+        engine.start(component.clone()).await?;
+        tracing::info!("MockVllmEngine started");
+
+        // Attach engine to endpoint and launch server
+        let ingress = Ingress::for_engine(engine.clone())?;
+        let endpoint_component = component.clone();
+        let server_handle = tokio::spawn(async move {
+            if let Err(e) = endpoint_component
+                .endpoint("generate")
+                .endpoint_builder()
+                .handler(ingress)
+                .start()
+                .await
+            {
+                tracing::error!("Generate endpoint failed: {e}");
+            }
+        });
+        tracing::info!("Generate endpoint server launched");
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // === SETUP: Build KvPushRouter ===
+        let endpoint = component.endpoint("generate");
+        let client = endpoint.client().await?;
+        let kv_router_config = KvRouterConfig::default();
+        let selector = Box::new(DefaultWorkerSelector::new(Some(kv_router_config)));
+        let consumer_id = format!("test-router-{}", distributed.connection_id());
+
+        let kv_router: Arc<KvRouter> = Arc::new(
+            KvRouter::new(
+                endpoint,
+                client.clone(),
+                BLOCK_SIZE,
+                Some(selector),
+                Some(kv_router_config),
+                consumer_id,
+            )
+            .await?,
+        );
+
+        let push_router =
+            PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+                client,
+                RouterMode::KV,
+                None,
+                None,
+            )
+            .await?;
+
+        let kv_push_router = KvPushRouter::new(push_router, kv_router.clone());
+
+        // === STEP: Send routed requests ===
+        let create_request = |tokens: Vec<u32>| {
+            PreprocessedRequest::builder()
+                .model("mock".to_string())
+                .token_ids(tokens)
+                .stop_conditions(StopConditions {
+                    max_tokens: Some(10),
+                    ..Default::default()
+                })
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .eos_token_ids(vec![])
+                .build()
+                .unwrap()
+        };
+
+        for i in 0..NUM_REQUESTS {
+            tracing::info!("Sending routed request {}", i + 1);
+            let tokens = vec![1, 2, 3, 4, 5, i as u32];
+            let request = create_request(tokens);
+
+            let response_stream = kv_push_router.generate(Context::new(request)).await?;
+            let responses: Vec<Annotated<LLMEngineOutput>> = response_stream.collect().await;
+            assert!(
+                !responses.is_empty(),
+                "Request {} should produce at least one response",
+                i + 1
+            );
+        }
+
+        tracing::info!("KvPushRouter generate() succeeded for {NUM_REQUESTS} requests");
+
+        // === STEP: Query worker's local KV indexer via WorkerQueryClient ===
+        let worker_id = component.drt().connection_id();
+        let query_client = WorkerQueryClient::new(namespace.clone());
+        let response = query_client.query_worker(worker_id).await?;
+        tracing::info!(
+            worker_id,
+            events = response.events.len(),
+            "Queried worker's LocalKvIndexer"
+        );
+
+        assert_eq!(response.worker_id, worker_id);
+        assert!(
+            !response.events.is_empty(),
+            "Worker query should return buffered KV events"
+        );
+
+        // Cleanup
+        server_handle.abort();
+        distributed.shutdown();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires NATS/etcd. Run with: cargo test --package dynamo-llm --lib --features integration test_e2e_router -- --ignored --nocapture
+    async fn test_distributed_kvindexer_e2e_two() -> anyhow::Result<()> {
+        use dynamo_runtime::protocols::annotated::Annotated;
+        use crate::kv_router::scheduler::DefaultWorkerSelector;
+        use crate::kv_router::{
+            KvPushRouter, KvRouter, KvRouterConfig, worker_query::WorkerQueryClient,
+        };
+        use crate::mocker::engine::MOCKER_COMPONENT;
+        use crate::mocker::engine::MockVllmEngine;
+        use crate::mocker::protocols::{MockEngineArgs, WorkerType};
+        use crate::protocols::common::{
+            OutputOptions, SamplingOptions, StopConditions,
+            llm_backend::{LLMEngineOutput, PreprocessedRequest},
+        };
+        use dynamo_runtime::pipeline::{Context, PushRouter, RouterMode, network::Ingress};
+
+        const BLOCK_SIZE: u32 = 4;
+        const NUM_REQUESTS: usize = 4;
+
+        dynamo_runtime::logging::init();
+
+        // === SETUP: Distributed runtimes and namespaces ===
+        let shared_store_dir = tempfile::tempdir()?;
+        let shared_store_path = shared_store_dir.path().to_path_buf();
+
+        let distributed1 = create_shared_drt(&shared_store_path).await?;
+        let distributed2 = create_shared_drt(&shared_store_path).await?;
+        let component1 = distributed1
+            .namespace("test_e2e_router")?
+            .component(MOCKER_COMPONENT)?;
+        let component2 = distributed2
+            .namespace("test_e2e_router")?
+            .component(MOCKER_COMPONENT)?;
+
+        // === SETUP: Start mocker workers  ===
+        let mocker_args = MockEngineArgs::builder()
+            .block_size(BLOCK_SIZE as usize)
+            .dp_size(1) // single worker per runtime
+            .worker_type(WorkerType::Aggregated)
+            .speedup_ratio(50.0)
+            .enable_prefix_caching(true)
+            .build()?;
+
+        let worker_components = vec![component1.clone(), component2.clone()];
+        let mut server_handles = Vec::new();
+        let mut worker_ids = Vec::new();
+
+        for comp in worker_components {
+            let engine = Arc::new(MockVllmEngine::new(mocker_args.clone()));
+            engine.start(comp.clone()).await?;
+            tracing::info!("MockVllmEngine started for {:?}", comp);
+
+            let ingress = Ingress::for_engine(engine.clone())?;
+            let endpoint_component = comp.clone();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = endpoint_component
+                    .endpoint("generate")
+                    .endpoint_builder()
+                    .handler(ingress)
+                    .start()
+                    .await
+                {
+                    tracing::error!("Generate endpoint failed: {e}");
+                }
+            });
+            server_handles.push(handle);
+            worker_ids.push(comp.drt().connection_id());
+        }
+        tracing::info!("Generate endpoint servers launched");
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // === SETUP: Build KvPushRouter ===
+        let router_distributed = create_shared_drt(&shared_store_path).await?;
+        let router_namespace = router_distributed.namespace("test_e2e_router")?;
+        let backend_component = router_namespace.component(MOCKER_COMPONENT)?;
+        let backend_endpoint = backend_component.endpoint("generate");
+        let client = backend_endpoint.client().await?;
+        let kv_router_config = KvRouterConfig::default();
+        let selector = Box::new(DefaultWorkerSelector::new(Some(kv_router_config)));
+        let consumer_id = format!("test-router-{}", router_distributed.connection_id());
+
+        let kv_router: Arc<KvRouter> = Arc::new(
+            KvRouter::new(
+                backend_endpoint.clone(),
+                client.clone(),
+                BLOCK_SIZE,
+                Some(selector),
+                Some(kv_router_config),
+                consumer_id,
+            )
+            .await?,
+        );
+
+        let push_router =
+            PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+                client,
+                RouterMode::KV,
+                None,
+                None,
+            )
+            .await?;
+
+        let kv_push_router = KvPushRouter::new(push_router, kv_router.clone());
+
+        // === STEP: Send routed requests ===
+        let create_request = |tokens: Vec<u32>| {
+            PreprocessedRequest::builder()
+                .model("mock".to_string())
+                .token_ids(tokens)
+                .stop_conditions(StopConditions {
+                    max_tokens: Some(10),
+                    ..Default::default()
+                })
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .eos_token_ids(vec![])
+                .build()
+                .unwrap()
+        }; // from mocker/engine.rs
+
+        for i in 0..NUM_REQUESTS {
+            tracing::info!("Sending routed request {}", i + 1);
+            let tokens = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, i as u32];
+            let request = create_request(tokens.clone());
+
+            let response_stream = kv_push_router.generate(Context::new(request)).await?;
+            let responses: Vec<Annotated<LLMEngineOutput>> = response_stream.collect().await;
+            assert!(
+                !responses.is_empty(),
+                "Request {} should produce at least one response",
+                i + 1
+            );
+
+            // wait_for_cached_blocks(&kv_router, &tokens, Duration::from_secs(5)).await?;
+        }
+
+        tracing::info!("KvPushRouter generate() succeeded for {NUM_REQUESTS} requests");
+
+        // === STEP: Query worker local KV indexers via WorkerQueryClient ===
+        let query_client = WorkerQueryClient::new(router_namespace.clone());
+        let mut best_worker_info: Option<(u64, usize)> = None;
+
+        for &worker_id in &worker_ids {
+            let response = query_client.query_worker(worker_id).await?;
+            assert_eq!(response.worker_id, worker_id);
+
+            if !response.events.is_empty() {
+                let event_count = response.events.len();
+                tracing::info!(
+                    worker_id,
+                    events = event_count,
+                    "Worker query on worker {worker_id} returned buffered KV events"
+                );
+                best_worker_info = Some((worker_id, event_count));
+                break;
+            }
+        }
+
+        let (best_worker_id, best_worker_event_count) =
+            best_worker_info.expect("At least one worker should have buffered KV events");
+
+        tracing::info!(
+            "Best worker is {best_worker_id} with {best_worker_event_count} buffered KV events"
+        );
+
+        for &worker_id in &worker_ids {
+            if worker_id == best_worker_id {
+                continue;
+            }
+
+            let response = query_client.query_worker(worker_id).await?;
+            assert!(
+                response.events.is_empty(),
+                "Worker {worker_id} should not report buffered KV events; best worker {best_worker_id} reported {best_worker_event_count}"
+            );
+        }
+
+        // Cleanup
+        for handle in server_handles {
+            handle.abort();
+        }
+        distributed1.shutdown();
+        distributed2.shutdown();
+        router_distributed.shutdown();
+
+        Ok(())
+    }
+
+    async fn create_shared_drt(
+        store_path: &std::path::Path,
+    ) -> anyhow::Result<dynamo_runtime::distributed::DistributedRuntime> {
+        use dynamo_runtime::{
+            DistributedRuntime, Runtime,
+            distributed::{DistributedConfig, RequestPlaneMode},
+            storage::kv,
+            transports::nats,
+        };
+
+        let runtime = Runtime::from_current()?;
+        let config = DistributedConfig {
+            store_backend: kv::Selector::File(store_path.to_path_buf()),
+            nats_config: Some(nats::ClientOptions::default()),
+            request_plane: RequestPlaneMode::Nats,
+        };
+        DistributedRuntime::new(runtime, config)
+            .await
+            .map_err(Into::into)
     }
 }

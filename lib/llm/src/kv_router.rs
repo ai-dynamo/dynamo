@@ -79,6 +79,7 @@ pub const RADIX_STATE_FILE: &str = "radix-state";
 
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_QUERY_SUBJECT: &str = "worker_kv_indexer_query";
+
 // for router discovery registration
 pub const KV_ROUTER_COMPONENT: &str = "kv-router";
 pub const KV_ROUTER_ENDPOINT: &str = "generate";
@@ -366,16 +367,16 @@ impl KvRouter {
             .await?;
         }
 
-        // Initialize worker query client by creating NATS client from env (same pattern as subscriber)
-        let worker_query_client = if let Ok(nats_server) =
-            std::env::var(dynamo_runtime::config::environment_names::nats::NATS_SERVER)
+        // Initialize worker query client using the namespace abstraction
+        // NATS client is managed by DRT and accessed through namespace.drt()
+        let worker_query_client = if std::env::var(
+            dynamo_runtime::config::environment_names::nats::NATS_SERVER,
+        )
+        .is_ok()
         {
-            let client_options = dynamo_runtime::transports::nats::Client::builder()
-                .server(&nats_server)
-                .build()?;
-            let nats_client = client_options.connect().await?;
-            let namespace_name = component.namespace().name();
-            Some(worker_query::WorkerQueryClient::new(nats_client, namespace_name))
+            Some(worker_query::WorkerQueryClient::new(
+                component.namespace().clone(),
+            ))
         } else {
             None
         };
