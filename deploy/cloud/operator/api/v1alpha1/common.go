@@ -18,7 +18,6 @@
 package v1alpha1
 
 import (
-	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -51,14 +50,6 @@ type VolumeMount struct {
 	// When true, backend-specific environment variables will be set and default mount points may be used.
 	// +kubebuilder:default=false
 	UseAsCompilationCache bool `json:"useAsCompilationCache,omitempty"`
-}
-
-type Autoscaling struct {
-	Enabled     bool                                           `json:"enabled,omitempty"`
-	MinReplicas int                                            `json:"minReplicas,omitempty"`
-	MaxReplicas int                                            `json:"maxReplicas,omitempty"`
-	Behavior    *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
-	Metrics     []autoscalingv2.MetricSpec                     `json:"metrics,omitempty"`
 }
 
 type SharedMemorySpec struct {

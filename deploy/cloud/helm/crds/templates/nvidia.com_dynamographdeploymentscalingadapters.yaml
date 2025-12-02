@@ -41,18 +41,10 @@ spec:
           jsonPath: .spec.dgdRef.service
           name: SERVICE
           type: string
-        - description: Desired replicas
-          jsonPath: .spec.replicas
-          name: DESIRED
-          type: integer
         - description: Current replicas
           jsonPath: .status.replicas
-          name: CURRENT
+          name: REPLICAS
           type: integer
-        - description: Ready status
-          jsonPath: .status.conditions[?(@.type=='Ready')].status
-          name: READY
-          type: string
         - jsonPath: .metadata.creationTimestamp
           name: AGE
           type: date
@@ -110,36 +102,6 @@ spec:
                   format: int32
                   minimum: 0
                   type: integer
-                scalingPolicy:
-                  description: |-
-                    ScalingPolicy defines optional constraints for scaling behavior.
-                    These constraints are enforced by the adapter controller, providing
-                    an additional safety layer beyond HPA's own min/max settings.
-                  properties:
-                    maxReplicas:
-                      description: |-
-                        MaxReplicas is the upper bound for scaling.
-                        The adapter will not scale above this value even if the autoscaler requests it.
-                      format: int32
-                      minimum: 1
-                      type: integer
-                    minReplicas:
-                      description: |-
-                        MinReplicas is the lower bound for scaling.
-                        The adapter will not scale below this value even if the autoscaler requests it.
-                      format: int32
-                      minimum: 0
-                      type: integer
-                    scaleDownStabilizationSeconds:
-                      default: 0
-                      description: |-
-                        ScaleDownStabilizationSeconds is the time to wait before scaling down
-                        after the last scale operation. This provides additional protection against
-                        rapid scale oscillations beyond what HPA provides.
-                      format: int32
-                      minimum: 0
-                      type: integer
-                  type: object
               required:
                 - dgdRef
                 - replicas
@@ -147,65 +109,6 @@ spec:
             status:
               description: DynamoGraphDeploymentScalingAdapterStatus defines the observed state of DynamoGraphDeploymentScalingAdapter
               properties:
-                conditions:
-                  description: Conditions represent the latest available observations of the adapter's state.
-                  items:
-                    description: Condition contains details for one aspect of the current state of this API Resource.
-                    properties:
-                      lastTransitionTime:
-                        description: |-
-                          lastTransitionTime is the last time the condition transitioned from one status to another.
-                          This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                        format: date-time
-                        type: string
-                      message:
-                        description: |-
-                          message is a human readable message indicating details about the transition.
-                          This may be an empty string.
-                        maxLength: 32768
-                        type: string
-                      observedGeneration:
-                        description: |-
-                          observedGeneration represents the .metadata.generation that the condition was set based upon.
-                          For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                          with respect to the current state of the instance.
-                        format: int64
-                        minimum: 0
-                        type: integer
-                      reason:
-                        description: |-
-                          reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                          Producers of specific condition types may define expected values and meanings for this field,
-                          and whether the values are considered a guaranteed API.
-                          The value should be a CamelCase string.
-                          This field may not be empty.
-                        maxLength: 1024
-                        minLength: 1
-                        pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
-                        type: string
-                      status:
-                        description: status of the condition, one of True, False, Unknown.
-                        enum:
-                          - "True"
-                          - "False"
-                          - Unknown
-                        type: string
-                      type:
-                        description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                        maxLength: 316
-                        pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
-                        type: string
-                    required:
-                      - lastTransitionTime
-                      - message
-                      - reason
-                      - status
-                      - type
-                    type: object
-                  type: array
-                  x-kubernetes-list-map-keys:
-                    - type
-                  x-kubernetes-list-type: map
                 lastScaleTime:
                   description: LastScaleTime is the last time the adapter scaled the target service.
                   format: date-time
@@ -213,7 +116,7 @@ spec:
                 replicas:
                   description: |-
                     Replicas is the current number of replicas for the target service.
-                    This is synced from the DGD's service replicas.
+                    This is synced from the DGD's service replicas and is required for the scale subresource.
                   format: int32
                   type: integer
                 selector:

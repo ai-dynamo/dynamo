@@ -637,7 +637,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 					Namespace: dynamoDeployment.Namespace,
 					Labels: map[string]string{
 						consts.KubeLabelDynamoGraphDeploymentName: dynamoDeployment.Name,
-						consts.KubeLabelServiceName:               serviceName,
+						consts.KubeLabelDynamoComponent:           serviceName,
 					},
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterSpec{

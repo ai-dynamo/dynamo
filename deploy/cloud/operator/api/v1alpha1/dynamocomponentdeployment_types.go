@@ -74,8 +74,6 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Resources requested and limits for this component, including CPU, memory,
 	// GPUs/devices, and any runtime-specific resources.
 	Resources *Resources `json:"resources,omitempty"`
-	// Autoscaling config for this component (replica range, target utilization, etc.).
-	Autoscaling *Autoscaling `json:"autoscaling,omitempty"`
 	// Envs defines additional environment variables to inject into the component containers.
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
 	// EnvFromSecret references a Secret whose key/value pairs will be exposed as

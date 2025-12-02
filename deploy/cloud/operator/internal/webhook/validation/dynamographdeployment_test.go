@@ -94,28 +94,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			errMsg:  "spec.services[main].replicas must be non-negative",
 		},
 		{
-			name: "service with invalid autoscaling",
-			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-graph",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						"prefill": {
-							Autoscaling: &nvidiacomv1alpha1.Autoscaling{
-								Enabled:     true,
-								MinReplicas: 10,
-								MaxReplicas: 5,
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.services[prefill].autoscaling.maxReplicas must be > minReplicas",
-		},
-		{
 			name: "service with invalid ingress",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{

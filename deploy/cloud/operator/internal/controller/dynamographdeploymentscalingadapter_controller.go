@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -79,16 +78,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 	if err := r.Get(ctx, dgdKey, dgd); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Error(err, "Referenced DGD not found", "dgd", dgdKey)
-			adapter.SetCondition(
-				nvidiacomv1alpha1.ConditionTypeAdapterReady,
-				metav1.ConditionFalse,
-				nvidiacomv1alpha1.ReasonDGDNotFound,
-				fmt.Sprintf("DGD %s not found", dgdKey),
-			)
-			statusErr := r.Status().Update(ctx, adapter)
-			if statusErr != nil {
-				logger.Error(statusErr, "Failed to update adapter status")
-			}
+			// DGD doesn't exist, can't proceed
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, err
@@ -101,16 +91,6 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 			"service", adapter.Spec.DGDRef.Service,
 			"dgd", dgd.Name,
 			"availableServices", getServiceKeys(dgd.Spec.Services))
-		adapter.SetCondition(
-			nvidiacomv1alpha1.ConditionTypeAdapterReady,
-			metav1.ConditionFalse,
-			nvidiacomv1alpha1.ReasonServiceNotFound,
-			fmt.Sprintf("Service %s not found in DGD %s", adapter.Spec.DGDRef.Service, dgd.Name),
-		)
-		statusErr := r.Status().Update(ctx, adapter)
-		if statusErr != nil {
-			logger.Error(statusErr, "Failed to update adapter status")
-		}
 		return ctrl.Result{}, fmt.Errorf("service %s not found in DGD", adapter.Spec.DGDRef.Service)
 	}
 
@@ -139,28 +119,10 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 			"Synced adapter from DGD manual edit: replicas=%d", currentReplicas)
 	}
 
-	// 5. Apply scaling policy constraints
-	desiredReplicas, policyViolation := r.applyScalingPolicy(adapter, adapter.Spec.Replicas)
-	if policyViolation != "" {
-		logger.Info("Scaling policy violation", "violation", policyViolation, "desired", adapter.Spec.Replicas, "constrained", desiredReplicas)
-		r.Recorder.Eventf(adapter, corev1.EventTypeWarning, "ScalingPolicyViolation", policyViolation)
-	}
-
-	// 6. Check scale-down stabilization
-	if desiredReplicas < currentReplicas {
-		if !r.canScaleDown(adapter) {
-			logger.Info("Scale-down blocked by stabilization window",
-				"current", currentReplicas,
-				"desired", desiredReplicas,
-				"lastScaleTime", adapter.Status.LastScaleTime)
-			desiredReplicas = currentReplicas
-		}
-	}
-
-	// 7. Update DGD if replicas changed
-	if currentReplicas != desiredReplicas {
+	// 5. Update DGD if replicas changed
+	if currentReplicas != adapter.Spec.Replicas {
 		// Update the service's replicas in DGD
-		component.Replicas = &desiredReplicas
+		component.Replicas = &adapter.Spec.Replicas
 		dgd.Spec.Services[adapter.Spec.DGDRef.Service] = component
 
 		if err := r.Update(ctx, dgd); err != nil {
@@ -174,26 +136,19 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 			"dgd", dgd.Name,
 			"service", adapter.Spec.DGDRef.Service,
 			"from", currentReplicas,
-			"to", desiredReplicas)
+			"to", adapter.Spec.Replicas)
 
 		r.Recorder.Eventf(adapter, corev1.EventTypeNormal, "Scaled",
-			"Scaled service %s from %d to %d replicas", adapter.Spec.DGDRef.Service, currentReplicas, desiredReplicas)
+			"Scaled service %s from %d to %d replicas", adapter.Spec.DGDRef.Service, currentReplicas, adapter.Spec.Replicas)
 
 		// Record scaling event
 		now := metav1.Now()
 		adapter.Status.LastScaleTime = &now
 	}
 
-	// 8. Update adapter status
-	adapter.Status.Replicas = desiredReplicas
+	// 7. Update adapter status
+	adapter.Status.Replicas = adapter.Spec.Replicas
 	adapter.Status.Selector = r.buildPodSelector(dgd, adapter.Spec.DGDRef.Service)
-
-	adapter.SetCondition(
-		nvidiacomv1alpha1.ConditionTypeAdapterReady,
-		metav1.ConditionTrue,
-		nvidiacomv1alpha1.ReasonSynced,
-		"Adapter synced with DGD",
-	)
 
 	if err := r.Status().Update(ctx, adapter); err != nil {
 		logger.Error(err, "Failed to update adapter status")
@@ -203,47 +158,14 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 	return ctrl.Result{}, nil
 }
 
-// applyScalingPolicy enforces min/max constraints
-// Returns the constrained replica count and a violation message (empty if no violation)
-func (r *DynamoGraphDeploymentScalingAdapterReconciler) applyScalingPolicy(adapter *nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter, desired int32) (int32, string) {
-	if adapter.Spec.ScalingPolicy == nil {
-		return desired, ""
-	}
-
-	policy := adapter.Spec.ScalingPolicy
-
-	if policy.MinReplicas != nil && desired < *policy.MinReplicas {
-		return *policy.MinReplicas, fmt.Sprintf("Desired replicas %d below minimum %d", desired, *policy.MinReplicas)
-	}
-
-	if policy.MaxReplicas != nil && desired > *policy.MaxReplicas {
-		return *policy.MaxReplicas, fmt.Sprintf("Desired replicas %d exceeds maximum %d", desired, *policy.MaxReplicas)
-	}
-
-	return desired, ""
-}
-
-// canScaleDown checks if scale-down is allowed based on stabilization window
-func (r *DynamoGraphDeploymentScalingAdapterReconciler) canScaleDown(adapter *nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter) bool {
-	if adapter.Spec.ScalingPolicy == nil ||
-		adapter.Spec.ScalingPolicy.ScaleDownStabilizationSeconds == nil ||
-		*adapter.Spec.ScalingPolicy.ScaleDownStabilizationSeconds == 0 {
-		return true
-	}
-
-	if adapter.Status.LastScaleTime == nil {
-		return true
-	}
-
-	stabilization := time.Duration(*adapter.Spec.ScalingPolicy.ScaleDownStabilizationSeconds) * time.Second
-	return time.Since(adapter.Status.LastScaleTime.Time) >= stabilization
-}
-
 // buildPodSelector constructs a label selector for the pods managed by this service
 func (r *DynamoGraphDeploymentScalingAdapterReconciler) buildPodSelector(dgd *nvidiacomv1alpha1.DynamoGraphDeployment, serviceName string) string {
+	// Pods are labeled with:
+	// - nvidia.com/dynamo-graph-deployment-name = dgd.Name
+	// - nvidia.com/dynamo-component = serviceName (the key from spec.services map)
 	return fmt.Sprintf("%s=%s,%s=%s",
 		consts.KubeLabelDynamoGraphDeploymentName, dgd.Name,
-		consts.KubeLabelServiceName, serviceName)
+		consts.KubeLabelDynamoComponent, serviceName)
 }
 
 // SetupWithManager sets up the controller with the Manager

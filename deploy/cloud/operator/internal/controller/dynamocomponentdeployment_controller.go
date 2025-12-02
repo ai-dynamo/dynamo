@@ -338,21 +338,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 
 		deployment = obj
-
-		// create or update api-server hpa
-		modified_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
-			return r.generateHPA(generateResourceOption{
-				dynamoComponentDeployment: dynamoComponentDeployment,
-			})
-		})
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-
-		if modified_ {
-			modified = true
-		}
-
 	}
 
 	// create or update api-server service
@@ -1112,63 +1097,6 @@ type generateResourceOption struct {
 	isDebugPodReceiveProductionTraffic      bool
 	isGenericService                        bool
 	instanceID                              *int
-}
-
-func (r *DynamoComponentDeploymentReconciler) generateHPA(opt generateResourceOption) (*autoscalingv2.HorizontalPodAutoscaler, bool, error) {
-	labels := r.getKubeLabels(opt.dynamoComponentDeployment)
-
-	annotations := r.getKubeAnnotations(opt.dynamoComponentDeployment)
-
-	kubeName := r.getKubeName(opt.dynamoComponentDeployment, false)
-
-	kubeNs := opt.dynamoComponentDeployment.Namespace
-
-	hpaConf := opt.dynamoComponentDeployment.Spec.Autoscaling
-
-	kubeHpa := &autoscalingv2.HorizontalPodAutoscaler{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        kubeName,
-			Namespace:   kubeNs,
-			Labels:      labels,
-			Annotations: annotations,
-		},
-	}
-
-	if hpaConf == nil || !hpaConf.Enabled {
-		// if hpa is not enabled, we need to delete the hpa
-		return kubeHpa, true, nil
-	}
-
-	minReplica := int32(hpaConf.MinReplicas)
-
-	kubeHpa.Spec = autoscalingv2.HorizontalPodAutoscalerSpec{
-		MinReplicas: &minReplica,
-		MaxReplicas: int32(hpaConf.MaxReplicas),
-		ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
-			APIVersion: "apps/v1",
-			Kind:       "Deployment",
-			Name:       kubeName,
-		},
-		Metrics: hpaConf.Metrics,
-	}
-
-	if len(kubeHpa.Spec.Metrics) == 0 {
-		averageUtilization := int32(commonconsts.HPACPUDefaultAverageUtilization)
-		kubeHpa.Spec.Metrics = []autoscalingv2.MetricSpec{
-			{
-				Type: autoscalingv2.ResourceMetricSourceType,
-				Resource: &autoscalingv2.ResourceMetricSource{
-					Name: corev1.ResourceCPU,
-					Target: autoscalingv2.MetricTarget{
-						Type:               autoscalingv2.UtilizationMetricType,
-						AverageUtilization: &averageUtilization,
-					},
-				},
-			},
-		}
-	}
-
-	return kubeHpa, false, nil
 }
 
 //nolint:gocyclo,nakedret

@@ -32,12 +32,6 @@ type DynamoGraphDeploymentScalingAdapterSpec struct {
 	// DGDRef references the DynamoGraphDeployment and the specific service to scale.
 	// +kubebuilder:validation:Required
 	DGDRef DynamoGraphDeploymentServiceRef `json:"dgdRef"`
-
-	// ScalingPolicy defines optional constraints for scaling behavior.
-	// These constraints are enforced by the adapter controller, providing
-	// an additional safety layer beyond HPA's own min/max settings.
-	// +optional
-	ScalingPolicy *ScalingPolicy `json:"scalingPolicy,omitempty"`
 }
 
 // DynamoGraphDeploymentServiceRef identifies a specific service within a DynamoGraphDeployment
@@ -53,33 +47,10 @@ type DynamoGraphDeploymentServiceRef struct {
 	Service string `json:"service"`
 }
 
-// ScalingPolicy defines constraints and behavior for scaling operations
-type ScalingPolicy struct {
-	// MinReplicas is the lower bound for scaling.
-	// The adapter will not scale below this value even if the autoscaler requests it.
-	// +kubebuilder:validation:Minimum=0
-	// +optional
-	MinReplicas *int32 `json:"minReplicas,omitempty"`
-
-	// MaxReplicas is the upper bound for scaling.
-	// The adapter will not scale above this value even if the autoscaler requests it.
-	// +kubebuilder:validation:Minimum=1
-	// +optional
-	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
-
-	// ScaleDownStabilizationSeconds is the time to wait before scaling down
-	// after the last scale operation. This provides additional protection against
-	// rapid scale oscillations beyond what HPA provides.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:default=0
-	// +optional
-	ScaleDownStabilizationSeconds *int32 `json:"scaleDownStabilizationSeconds,omitempty"`
-}
-
 // DynamoGraphDeploymentScalingAdapterStatus defines the observed state of DynamoGraphDeploymentScalingAdapter
 type DynamoGraphDeploymentScalingAdapterStatus struct {
 	// Replicas is the current number of replicas for the target service.
-	// This is synced from the DGD's service replicas.
+	// This is synced from the DGD's service replicas and is required for the scale subresource.
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
 
@@ -91,14 +62,6 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 	// LastScaleTime is the last time the adapter scaled the target service.
 	// +optional
 	LastScaleTime *metav1.Time `json:"lastScaleTime,omitempty"`
-
-	// Conditions represent the latest available observations of the adapter's state.
-	// +optional
-	// +patchMergeKey=type
-	// +patchStrategy=merge
-	// +listType=map
-	// +listMapKey=type
-	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // +kubebuilder:object:root=true
@@ -106,9 +69,7 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:printcolumn:name="DGD",type="string",JSONPath=".spec.dgdRef.name",description="DynamoGraphDeployment name"
 // +kubebuilder:printcolumn:name="SERVICE",type="string",JSONPath=".spec.dgdRef.service",description="Service name"
-// +kubebuilder:printcolumn:name="DESIRED",type="integer",JSONPath=".spec.replicas",description="Desired replicas"
-// +kubebuilder:printcolumn:name="CURRENT",type="integer",JSONPath=".status.replicas",description="Current replicas"
-// +kubebuilder:printcolumn:name="READY",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status",description="Ready status"
+// +kubebuilder:printcolumn:name="REPLICAS",type="integer",JSONPath=".status.replicas",description="Current replicas"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:resource:shortName={dgdsa}
 
@@ -138,63 +99,4 @@ type DynamoGraphDeploymentScalingAdapterList struct {
 
 func init() {
 	SchemeBuilder.Register(&DynamoGraphDeploymentScalingAdapter{}, &DynamoGraphDeploymentScalingAdapterList{})
-}
-
-// Condition types for DynamoGraphDeploymentScalingAdapter
-const (
-	// ConditionTypeAdapterReady indicates the adapter is synced with DGD and functioning correctly
-	ConditionTypeAdapterReady = "Ready"
-)
-
-// Condition reasons for DynamoGraphDeploymentScalingAdapter
-const (
-	// ReasonDGDNotFound indicates the referenced DGD does not exist
-	ReasonDGDNotFound = "DGDNotFound"
-	// ReasonServiceNotFound indicates the referenced service does not exist in the DGD
-	ReasonServiceNotFound = "ServiceNotFound"
-	// ReasonSynced indicates the adapter is successfully synced with the DGD
-	ReasonSynced = "Synced"
-	// ReasonScalingPolicyViolation indicates a scaling request was blocked by policy
-	ReasonScalingPolicyViolation = "ScalingPolicyViolation"
-)
-
-// SetCondition updates or adds a condition to the adapter's status
-func (a *DynamoGraphDeploymentScalingAdapter) SetCondition(condType string, status metav1.ConditionStatus, reason, message string) {
-	now := metav1.Now()
-	condition := metav1.Condition{
-		Type:               condType,
-		Status:             status,
-		LastTransitionTime: now,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: a.Generation,
-	}
-
-	// Update existing condition or append new one
-	for i, c := range a.Status.Conditions {
-		if c.Type == condType {
-			// Only update if status or reason changed
-			if c.Status != status || c.Reason != reason || c.Message != message {
-				a.Status.Conditions[i] = condition
-			}
-			return
-		}
-	}
-	a.Status.Conditions = append(a.Status.Conditions, condition)
-}
-
-// GetCondition returns the condition with the given type, or nil if not found
-func (a *DynamoGraphDeploymentScalingAdapter) GetCondition(condType string) *metav1.Condition {
-	for i := range a.Status.Conditions {
-		if a.Status.Conditions[i].Type == condType {
-			return &a.Status.Conditions[i]
-		}
-	}
-	return nil
-}
-
-// IsReady returns true if the adapter is in Ready state
-func (a *DynamoGraphDeploymentScalingAdapter) IsReady() bool {
-	cond := a.GetCondition(ConditionTypeAdapterReady)
-	return cond != nil && cond.Status == metav1.ConditionTrue
 }

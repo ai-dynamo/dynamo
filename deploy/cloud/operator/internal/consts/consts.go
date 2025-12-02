@@ -7,8 +7,6 @@ import (
 )
 
 const (
-	HPACPUDefaultAverageUtilization = 80
-
 	DefaultUserId = "default"
 	DefaultOrgId  = "default"
 
@@ -54,7 +52,6 @@ const (
 	KubeLabelValueTrue  = "true"
 
 	KubeLabelDynamoComponentPod = "nvidia.com/dynamo-component-pod"
-	KubeLabelServiceName        = "nvidia.com/service-name"
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
