@@ -188,6 +188,10 @@ class Service(BaseModel):
             and len(args) > args.index("--served-model-name") + 1
         ):
             return args[args.index("--served-model-name") + 1]
+        if (
+            "--model-name" in args and len(args) > args.index("--model-name") + 1
+        ):  # mocker use --model-name
+            return args[args.index("--model-name") + 1]
         if "--model" in args and len(args) > args.index("--model") + 1:
             return args[args.index("--model") + 1]
 

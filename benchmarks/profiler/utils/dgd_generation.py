@@ -363,17 +363,32 @@ def _generate_mocker_config_with_planner(
     # Add planner service (reuse the same planner config but with mocker backend)
     mocker_planner_dict = copy.deepcopy(planner_dict)
 
-    # Override --backend to mocker for the planner
-    # Planner args use --key=value format, so we need to find and replace --backend=*
+    # Get the mocker's dynamoNamespace from Frontend service
+    mocker_namespace = (
+        mocker_config.get("spec", {})
+        .get("services", {})
+        .get("Frontend", {})
+        .get("dynamoNamespace", "mocker-disagg")
+    )
+
+    # Update planner's dynamoNamespace to match mocker's namespace
+    mocker_planner_dict["dynamoNamespace"] = mocker_namespace
+
+    # Override --backend to mocker and --namespace to match mocker's dynamoNamespace
+    # Planner args use --key=value format, so we need to find and replace
     planner_main_container = mocker_planner_dict.get("extraPodSpec", {}).get(
         "mainContainer", {}
     )
     planner_args = planner_main_container.get("args", [])
-    planner_args = [
-        "--backend=mocker" if arg.startswith("--backend=") else arg
-        for arg in planner_args
-    ]
-    planner_main_container["args"] = planner_args
+    updated_planner_args = []
+    for arg in planner_args:
+        if arg.startswith("--backend="):
+            updated_planner_args.append("--backend=mocker")
+        elif arg.startswith("--namespace="):
+            updated_planner_args.append(f"--namespace={mocker_namespace}")
+        else:
+            updated_planner_args.append(arg)
+    planner_main_container["args"] = updated_planner_args
 
     mocker_config["spec"]["services"]["Planner"] = mocker_planner_dict
 
