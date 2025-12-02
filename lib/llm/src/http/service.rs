@@ -20,6 +20,7 @@
 
 mod openai;
 
+pub mod busy_threshold;
 pub mod custom_backend_metrics;
 pub mod disconnect;
 pub mod error;
