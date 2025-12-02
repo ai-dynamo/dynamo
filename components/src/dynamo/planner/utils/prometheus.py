@@ -21,6 +21,9 @@ from prometheus_api_client import PrometheusConnect
 from pydantic import BaseModel, ValidationError
 
 from dynamo import prometheus_names
+from dynamo.prometheus_names import (
+    frontend_service as metric_names,  # Note that we are mapping from frontend metric names to VLLM
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -54,20 +57,20 @@ class MetricSource(Enum):
 
 METRIC_SOURCE_MAP = {  # sourced from prometheus_names.py
     MetricSource.VLLM: {
-        prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS: "vllm:time_to_first_token_seconds",  # histogram
-        prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS: "vllm:inter_token_latency_seconds",  # histogram
-        prometheus_names.frontend_service.REQUEST_DURATION_SECONDS: "vllm:e2e_request_latency_seconds",  # histogram - vLLM's e2e latency
-        prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS: "vllm:prompt_tokens_total",  # counter - total prompt tokens
-        prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS: "vllm:generation_tokens_total",  # counter - total generation tokens
-        prometheus_names.frontend_service.REQUESTS_TOTAL: "vllm:request_success_total",  # counter
+        metric_names.TIME_TO_FIRST_TOKEN_SECONDS: "vllm:time_to_first_token_seconds",  # histogram
+        metric_names.INTER_TOKEN_LATENCY_SECONDS: "vllm:inter_token_latency_seconds",  # histogram
+        metric_names.REQUEST_DURATION_SECONDS: "vllm:e2e_request_latency_seconds",  # histogram - vLLM's e2e latency
+        metric_names.INPUT_SEQUENCE_TOKENS: "vllm:prompt_tokens_total",  # counter - total prompt tokens
+        metric_names.OUTPUT_SEQUENCE_TOKENS: "vllm:generation_tokens_total",  # counter - total generation tokens
+        metric_names.REQUESTS_TOTAL: "vllm:request_success_total",  # counter
     },
     MetricSource.FRONTEND: {
-        prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS}",
-        prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS}",
-        prometheus_names.frontend_service.REQUEST_DURATION_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.REQUEST_DURATION_SECONDS}",
-        prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS}",
-        prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS}",
-        prometheus_names.frontend_service.REQUESTS_TOTAL: f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.REQUESTS_TOTAL}",
+        metric_names.TIME_TO_FIRST_TOKEN_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{metric_names.TIME_TO_FIRST_TOKEN_SECONDS}",
+        metric_names.INTER_TOKEN_LATENCY_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{metric_names.INTER_TOKEN_LATENCY_SECONDS}",
+        metric_names.REQUEST_DURATION_SECONDS: f"{prometheus_names.name_prefix.FRONTEND}_{metric_names.REQUEST_DURATION_SECONDS}",
+        metric_names.INPUT_SEQUENCE_TOKENS: f"{prometheus_names.name_prefix.FRONTEND}_{metric_names.INPUT_SEQUENCE_TOKENS}",
+        metric_names.OUTPUT_SEQUENCE_TOKENS: f"{prometheus_names.name_prefix.FRONTEND}_{metric_names.OUTPUT_SEQUENCE_TOKENS}",
+        metric_names.REQUESTS_TOTAL: f"{prometheus_names.name_prefix.FRONTEND}_{metric_names.REQUESTS_TOTAL}",
     },
 }
 
@@ -126,7 +129,7 @@ class PrometheusAPIClient:
         increase(metric_sum[interval])/increase(metric_count[interval])
 
         Args:
-            full_metric_name: Full metric name (e.g., prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS or prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS)
+            full_metric_name: Full metric name (e.g., metric_names.INTER_TOKEN_LATENCY_SECONDS or metric_names.TIME_TO_FIRST_TOKEN_SECONDS)
             interval: Time interval for the query (e.g., '60s')
             operation_name: Human-readable name for error logging
             model_name: Model name to filter by
@@ -204,7 +207,7 @@ class PrometheusAPIClient:
         try:
             full_metric_name = METRIC_SOURCE_MAP[self.metric_source][counter_metric]
             requests_metric = METRIC_SOURCE_MAP[self.metric_source][
-                prometheus_names.frontend_service.REQUESTS_TOTAL
+                metric_names.REQUESTS_TOTAL
             ]
 
             # Query both the counter and request count
@@ -254,7 +257,7 @@ class PrometheusAPIClient:
 
     def get_avg_inter_token_latency(self, interval: str, model_name: str):
         return self._get_average_metric(
-            prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS,
+            metric_names.INTER_TOKEN_LATENCY_SECONDS,
             interval,
             "avg inter token latency",
             model_name,
@@ -262,7 +265,7 @@ class PrometheusAPIClient:
 
     def get_avg_time_to_first_token(self, interval: str, model_name: str):
         return self._get_average_metric(
-            prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS,
+            metric_names.TIME_TO_FIRST_TOKEN_SECONDS,
             interval,
             "avg time to first token",
             model_name,
@@ -270,7 +273,7 @@ class PrometheusAPIClient:
 
     def get_avg_request_duration(self, interval: str, model_name: str):
         return self._get_average_metric(
-            prometheus_names.frontend_service.REQUEST_DURATION_SECONDS,
+            metric_names.REQUEST_DURATION_SECONDS,
             interval,
             "avg request duration",
             model_name,
@@ -285,7 +288,7 @@ class PrometheusAPIClient:
         """
         try:
             requests_total_metric = METRIC_SOURCE_MAP[self.metric_source][
-                prometheus_names.frontend_service.REQUESTS_TOTAL
+                metric_names.REQUESTS_TOTAL
             ]
 
             raw_res = self.prom.custom_query(
@@ -312,13 +315,13 @@ class PrometheusAPIClient:
         if self.metric_source == MetricSource.VLLM:
             # Backend uses prompt_tokens counter (not histogram)
             return self._get_counter_average(
-                prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS,
+                metric_names.INPUT_SEQUENCE_TOKENS,
                 interval,
                 model_name,
                 "input_sequence_tokens",
             )
         return self._get_average_metric(
-            prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS,
+            metric_names.INPUT_SEQUENCE_TOKENS,
             interval,
             "avg input sequence tokens",
             model_name,
@@ -328,13 +331,13 @@ class PrometheusAPIClient:
         if self.metric_source == MetricSource.VLLM:
             # Backend uses generation_tokens counter (not histogram)
             return self._get_counter_average(
-                prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS,
+                metric_names.OUTPUT_SEQUENCE_TOKENS,
                 interval,
                 model_name,
                 "output_sequence_tokens",
             )
         return self._get_average_metric(
-            prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS,
+            metric_names.OUTPUT_SEQUENCE_TOKENS,
             interval,
             "avg output sequence tokens",
             model_name,
