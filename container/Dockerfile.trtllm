@@ -56,6 +56,7 @@ FROM ${PYTORCH_BASE_IMAGE}:${PYTORCH_BASE_IMAGE_TAG} AS pytorch_base
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 
+ARG ARCH_ALT
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 # Install minimal dependencies needed for TensorRT-LLM installation
