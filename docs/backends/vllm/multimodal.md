@@ -22,6 +22,10 @@ Dynamo supports multimodal models with vLLM v1. In general, multimodal models ca
 > [!WARNING]
 > **LLaVA Model Limitation**: Do not use LLaVA models (e.g., `llava-hf/llava-1.5-7b-hf`) with the standard aggregated serving setup, as they contain keywords that Dynamo cannot yet parse. LLaVA models can still be used with the EPD (Encode-Prefill-Decode) setup described below.
 
+> [!IMPORTANT]
+> **Security Requirement**: All multimodal workers require the `--enable-multimodal` flag to be explicitly set at startup. This is a security feature to prevent unintended processing of multimodal data from untrusted sources. Workers will fail at startup if multimodal flags (e.g., `--multimodal-worker`, `--multimodal-processor`) are used without `--enable-multimodal`.
+This flag is analogus to `--enable-mm-embeds` in vllm serve but also extends it to all multimodal content (url, embeddings, b64).
+
 # Multimodal EPD Deployment Examples
 
 This section provides example workflows and reference implementations for deploying a multimodal model using Dynamo and vLLM v1 with EPD(Encode-Prefill-Decode) pipeline.
