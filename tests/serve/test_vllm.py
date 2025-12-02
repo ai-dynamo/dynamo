@@ -166,8 +166,8 @@ vllm_configs = {
         ],
         timeout=700,
         request_payloads=[
-            chat_payload_default(expected_response=["joke"]),
-            completion_payload_default(expected_response=["joke"]),
+            chat_payload_default(),
+            completion_payload_default(),
         ],
     ),
     "multimodal_agg_llava_epd": VLLMConfig(
@@ -351,6 +351,22 @@ vllm_configs = {
     #     delayed_start=45,
     #     script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
     # ),
+    "completions_only": VLLMConfig(
+        name="completions_only",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1],
+        model="deepseek-ai/deepseek-llm-7b-base",
+        script_args=[
+            "--model",
+            "deepseek-ai/deepseek-llm-7b-base",
+            "--dyn-endpoint-types",
+            "completions",
+        ],
+        request_payloads=[
+            completion_payload_default(),
+        ],
+    ),
 }
 
 

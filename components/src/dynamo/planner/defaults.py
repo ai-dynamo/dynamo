@@ -130,10 +130,21 @@ class TrtllmComponentName:
     decode_worker_endpoint = "generate"
 
 
+class MockerComponentName:
+    # Mocker backend for testing/simulation purposes
+    prefill_worker_k8s_name = "prefill"
+    prefill_worker_component_name = "prefill"
+    prefill_worker_endpoint = "generate"
+    decode_worker_k8s_name = "decode"
+    decode_worker_component_name = "backend"
+    decode_worker_endpoint = "generate"
+
+
 WORKER_COMPONENT_NAMES = {
     "vllm": VllmComponentName,
     "sglang": SGLangComponentName,
     "trtllm": TrtllmComponentName,
+    "mocker": MockerComponentName,
 }
 
 
@@ -177,6 +188,10 @@ class Service(BaseModel):
             and len(args) > args.index("--served-model-name") + 1
         ):
             return args[args.index("--served-model-name") + 1]
+        if (
+            "--model-name" in args and len(args) > args.index("--model-name") + 1
+        ):  # mocker use --model-name
+            return args[args.index("--model-name") + 1]
         if "--model" in args and len(args) > args.index("--model") + 1:
             return args[args.index("--model") + 1]
 

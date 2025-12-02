@@ -55,6 +55,9 @@ class Config:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
 
+    # endpoint types to enable
+    dyn_endpoint_types: str = "chat,completions"
+
     # multimodal options
     multimodal_processor: bool = False
     multimodal_encode_worker: bool = False
@@ -134,6 +137,12 @@ def parse_args() -> Config:
         type=str,
         default=None,
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
+    )
+    parser.add_argument(
+        "--dyn-endpoint-types",
+        type=str,
+        default="chat,completions",
+        help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
     )
     parser.add_argument(
         "--multimodal-processor",
@@ -266,6 +275,7 @@ def parse_args() -> Config:
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
+    config.dyn_endpoint_types = args.dyn_endpoint_types
     config.multimodal_processor = args.multimodal_processor
     config.multimodal_encode_worker = args.multimodal_encode_worker
     config.multimodal_worker = args.multimodal_worker

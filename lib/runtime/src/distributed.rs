@@ -111,7 +111,7 @@ impl DistributedRuntime {
                     tracing::error!(%err, "Could not connect to etcd. Pass `--store-kv ..` to use a different backend or start etcd."))?;
                 kv::Manager::etcd(etcd_client)
             }
-            kv::Selector::File(root) => kv::Manager::file(root),
+            kv::Selector::File(root) => kv::Manager::file(runtime.primary_token(), root),
             kv::Selector::Memory => kv::Manager::memory(),
         };
 
