@@ -199,6 +199,11 @@ def setup_vllm_engine(config, stat_logger=None):
 
     engine_args = config.engine_args
 
+    if engine_args.enable_lora:
+        if "VLLM_ALLOW_RUNTIME_LORA_UPDATING" not in os.environ:
+            os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"
+        if "VLLM_LORA_MODULES_LOADING_TIMEOUT" not in os.environ:
+            os.environ["VLLM_LORA_MODULES_LOADING_TIMEOUT"] = "600"
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
         engine_args.create_model_config().get_diff_sampling_param()
@@ -319,6 +324,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
         enable_multimodal=config.enable_multimodal,
+        generate_endpoint=generate_endpoint,
+        config=config,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -426,6 +433,9 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
+    load_lora_endpoint = component.endpoint("load_lora")
+    unload_lora_endpoint = component.endpoint("unload_lora")
+    list_loras_endpoint = component.endpoint("list_loras")
 
     factory = StatLoggerFactory(
         component,
@@ -451,6 +461,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
         enable_multimodal=config.enable_multimodal,
+        generate_endpoint=generate_endpoint,
+        config=config,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -546,6 +558,18 @@ async def init(runtime: DistributedRuntime, config: Config):
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
+                metrics_labels=[("model", config.served_model_name or config.model)],
+            ),
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora,
+                metrics_labels=[("model", config.served_model_name or config.model)],
+            ),
+            unload_lora_endpoint.serve_endpoint(
+                handler.unload_lora,
+                metrics_labels=[("model", config.served_model_name or config.model)],
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras,
                 metrics_labels=[("model", config.served_model_name or config.model)],
             ),
         )
