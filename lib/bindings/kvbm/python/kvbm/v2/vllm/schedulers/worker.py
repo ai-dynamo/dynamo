@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.kv_cache_manager import KVCacheConfig
 
 
 @dataclass
@@ -64,17 +65,14 @@ class SchedulerConnectorWorker:
     - Returns Nova peer info via get_handshake_metadata()
     """
 
-    def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
+    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: KVCacheConfig, **kwargs):
         """Initialize the scheduler connector worker."""
         self.vllm_config = vllm_config
-        self.engine_id = engine_id
+        self.vllm_kv_cache_config = kv_cache_config
+        self.kvbm_override_config = kwargs.get("kvbm_override_config", None)
 
-        # Defer config extraction until register_kv_caches when
-        # num_gpu_blocks and num_cpu_blocks are populated
-        self.kvbm_config = None
-
-        # Build KvbmRuntime with Nova (no etcd discovery)
-        self.runtime = KvbmRuntime.build_worker()
+        # Build KvbmRuntime with Nova
+        self.runtime = KvbmRuntime.build_worker(self.kvbm_override_config)
 
         # Create the Rust ConnectorWorker that handles NIXL registration
         self.connector_worker = ConnectorWorker(self.runtime)
@@ -90,8 +88,8 @@ class SchedulerConnectorWorker:
         self._num_device_blocks: Optional[int] = None
 
         print(
-            f"SchedulerConnectorWorker initialized - engine_id: {engine_id}, "
-            f"Nova instance: {instance_id.hex()[:8]}..."
+            f"SchedulerConnectorWorker initialized with Nova instance: {instance_id.hex()[:8]}...",
+            flush=True,
         )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:

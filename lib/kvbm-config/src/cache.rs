@@ -102,6 +102,23 @@ impl DiskCacheConfig {
     }
 }
 
+/// Top-level cache configuration.
+///
+/// Groups host (G2) and disk (G3) cache configurations together.
+/// Use Figment profiles to configure different cache settings for leader vs worker.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Validate)]
+pub struct CacheConfig {
+    /// Host cache (G2 tier) - pinned CPU memory.
+    #[serde(default)]
+    #[validate(nested)]
+    pub host: HostCacheConfig,
+
+    /// Disk cache (G3 tier) - persistent storage.
+    /// Optional - only configure if disk caching is needed.
+    #[validate(nested)]
+    pub disk: Option<DiskCacheConfig>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

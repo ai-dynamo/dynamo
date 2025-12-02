@@ -7,22 +7,24 @@
 //! Supports role-specific configuration for leader and worker components.
 
 mod cache;
+mod discovery;
 mod nixl;
 mod nova;
 mod rayon;
-mod role;
 mod tokio;
 
-pub use cache::{DiskCacheConfig, HostCacheConfig};
+pub use cache::{CacheConfig, DiskCacheConfig, HostCacheConfig};
+pub use discovery::{
+    DiscoveryConfig, EtcdDiscoveryConfig, FilesystemDiscoveryConfig, P2pDiscoveryConfig,
+};
 pub use nixl::NixlConfig;
-pub use nova::{NovaBackendConfig, NovaConfig, NovaDiscoveryConfig};
+pub use nova::{NovaBackendConfig, NovaConfig};
 pub use rayon::RayonConfig;
-pub use role::{LeaderConfig, WorkerConfig};
 pub use tokio::TokioConfig;
 
 use figment::{
     Figment, Metadata, Profile, Provider,
-    providers::{Env, Format, Serialized, Toml},
+    providers::{Env, Format, Json, Serialized, Toml},
     value::{Dict, Map},
 };
 use serde::{Deserialize, Serialize};
@@ -42,7 +44,11 @@ pub enum ConfigError {
     Other(#[from] anyhow::Error),
 }
 
-/// Top-level KVBM configuration
+/// Top-level KVBM configuration.
+///
+/// Use Figment profiles to configure role-specific settings. For example,
+/// leader and worker can have different `tokio.worker_threads` values by
+/// putting them under `"leader"` and `"worker"` profile keys in JSON.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Validate)]
 pub struct KvbmConfig {
     #[validate(nested)]
@@ -54,14 +60,15 @@ pub struct KvbmConfig {
     #[validate(nested)]
     pub nova: NovaConfig,
 
+    /// NixL configuration. None = NixL disabled.
     #[validate(nested)]
-    pub nixl: NixlConfig,
+    #[serde(default)]
+    pub nixl: Option<NixlConfig>,
 
+    /// Cache configuration (host G2 tier and disk G3 tier).
     #[validate(nested)]
-    pub leader: LeaderConfig,
-
-    #[validate(nested)]
-    pub worker: WorkerConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 impl KvbmConfig {
@@ -99,30 +106,20 @@ impl KvbmConfig {
                 Env::prefixed("KVBM_NOVA_DISCOVERY_")
                     .map(|k| format!("nova.discovery.{}", k.as_str().to_lowercase()).into()),
             )
-            // Leader-specific nova overrides: KVBM_LEADER_NOVA_TCP_ADDR, etc.
-            .merge(
-                Env::prefixed("KVBM_LEADER_NOVA_")
-                    .map(|k| format!("leader.nova.{}", k.as_str().to_lowercase()).into()),
-            )
-            // Worker-specific nova overrides: KVBM_WORKER_NOVA_TCP_ADDR, etc.
-            .merge(
-                Env::prefixed("KVBM_WORKER_NOVA_")
-                    .map(|k| format!("worker.nova.{}", k.as_str().to_lowercase()).into()),
-            )
             // NixL config: KVBM_NIXL_BACKENDS (comma-separated list)
             .merge(
                 Env::prefixed("KVBM_NIXL_")
                     .map(|k| format!("nixl.{}", k.as_str().to_lowercase()).into()),
             )
-            // Host cache config: KVBM_HOST_CACHE_SIZE_GB, KVBM_HOST_CACHE_NUM_BLOCKS
+            // Cache host config: KVBM_CACHE_HOST_SIZE_GB, KVBM_CACHE_HOST_NUM_BLOCKS
             .merge(
-                Env::prefixed("KVBM_HOST_CACHE_")
-                    .map(|k| format!("leader.host_cache.{}", k.as_str().to_lowercase()).into()),
+                Env::prefixed("KVBM_CACHE_HOST_")
+                    .map(|k| format!("cache.host.{}", k.as_str().to_lowercase()).into()),
             )
-            // Disk cache config: KVBM_DISK_CACHE_SIZE_GB, KVBM_DISK_CACHE_NUM_BLOCKS, etc.
+            // Cache disk config: KVBM_CACHE_DISK_SIZE_GB, KVBM_CACHE_DISK_NUM_BLOCKS, etc.
             .merge(
-                Env::prefixed("KVBM_DISK_CACHE_")
-                    .map(|k| format!("leader.disk_cache.{}", k.as_str().to_lowercase()).into()),
+                Env::prefixed("KVBM_CACHE_DISK_")
+                    .map(|k| format!("cache.disk.{}", k.as_str().to_lowercase()).into()),
             )
     }
 
@@ -165,22 +162,98 @@ impl KvbmConfig {
         Self::figment().merge(extra)
     }
 
-    /// Get effective Nova config for leader (with overrides applied).
-    pub fn nova_for_leader(&self) -> NovaConfig {
-        let mut nova = self.nova.clone();
-        if let Some(override_backend) = &self.leader.nova {
-            nova.backend = override_backend.clone();
-        }
-        nova
+    /// Load configuration merging JSON overrides from Python.
+    ///
+    /// JSON has highest priority - overrides env vars, TOML files, and defaults.
+    /// This is the primary entrypoint for vLLM's `kv_connector_extra_config` dict.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let json = r#"{"tokio": {"worker_threads": 8}, "nova": {"backend": {"tcp_port": 9000}}}"#;
+    /// let config = KvbmConfig::from_figment_with_json(json)?;
+    /// ```
+    pub fn from_figment_with_json(json: &str) -> Result<Self, ConfigError> {
+        Self::extract_from(Self::figment().merge(Json::string(json)))
     }
 
-    /// Get effective Nova config for worker (with overrides applied).
-    pub fn nova_for_worker(&self) -> NovaConfig {
-        let mut nova = self.nova.clone();
-        if let Some(override_backend) = &self.worker.nova {
-            nova.backend = override_backend.clone();
-        }
-        nova
+    // ==================== Profile-based Configuration ====================
+    //
+    // Figment profiles allow role-specific configuration. The `profile` key
+    // in TOML/JSON is special - values under it are stored in named profiles
+    // and overlaid when that profile is selected.
+    //
+    // Example JSON:
+    // {
+    //   "tokio": {"worker_threads": 4},           // default profile (all roles)
+    //   "profile": {
+    //     "leader": {"tokio": {"worker_threads": 2}},  // leader-only overlay
+    //     "worker": {"tokio": {"worker_threads": 8}}   // worker-only overlay
+    //   }
+    // }
+    //
+    // When `build_leader()` selects "leader" profile:
+    // - tokio.worker_threads = 2 (from leader profile overlay)
+    //
+    // When `build_worker()` selects "worker" profile:
+    // - tokio.worker_threads = 8 (from worker profile overlay)
+
+    /// Figment with leader profile selected.
+    ///
+    /// This merges `profile.leader.*` values over the defaults.
+    /// If no `profile.leader` section exists, defaults are used.
+    pub fn figment_for_leader() -> Figment {
+        Self::figment().select(Profile::new("leader"))
+    }
+
+    /// Figment with worker profile selected.
+    ///
+    /// This merges `profile.worker.*` values over the defaults.
+    /// If no `profile.worker` section exists, defaults are used.
+    pub fn figment_for_worker() -> Figment {
+        Self::figment().select(Profile::new("worker"))
+    }
+
+    /// Load leader config from env/files with leader profile selected.
+    pub fn from_env_for_leader() -> Result<Self, ConfigError> {
+        Self::extract_from(Self::figment_for_leader())
+    }
+
+    /// Load worker config from env/files with worker profile selected.
+    pub fn from_env_for_worker() -> Result<Self, ConfigError> {
+        Self::extract_from(Self::figment_for_worker())
+    }
+
+    /// Load leader config with JSON overrides and leader profile selected.
+    ///
+    /// JSON top-level keys are treated as profile names when using `.nested()`.
+    /// Keys under `default` apply to all profiles, keys under `leader` only to leader.
+    ///
+    /// Example JSON:
+    /// ```json
+    /// {
+    ///   "leader": {
+    ///     "cache": {"host": {"cache_size_gb": 1.0}},
+    ///     "tokio": {"worker_threads": 2}
+    ///   }
+    /// }
+    /// ```
+    pub fn from_figment_with_json_for_leader(json: &str) -> Result<Self, ConfigError> {
+        Self::extract_from(Self::figment_for_leader().merge(Json::string(json).nested()))
+    }
+
+    /// Load worker config with JSON overrides and worker profile selected.
+    ///
+    /// JSON top-level keys are treated as profile names when using `.nested()`.
+    /// Keys under `default` apply to all profiles, keys under `worker` only to worker.
+    ///
+    /// Example JSON:
+    /// ```json
+    /// {
+    ///   "worker": {"tokio": {"worker_threads": 8}}
+    /// }
+    /// ```
+    pub fn from_figment_with_json_for_worker(json: &str) -> Result<Self, ConfigError> {
+        Self::extract_from(Self::figment_for_worker().merge(Json::string(json).nested()))
     }
 }
 
@@ -206,7 +279,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = KvbmConfig::default();
-        assert!(config.tokio.worker_threads.is_none());
+        // TokioConfig defaults to 1 worker thread
+        assert_eq!(config.tokio.worker_threads, Some(1));
         assert!(config.tokio.max_blocking_threads.is_none());
         assert!(config.rayon.num_threads.is_none());
     }
@@ -224,7 +298,8 @@ mod tests {
             || {
                 let figment = KvbmConfig::figment();
                 let config: KvbmConfig = figment.extract().unwrap();
-                assert!(config.tokio.worker_threads.is_none());
+                // TokioConfig defaults to 1 worker thread
+                assert_eq!(config.tokio.worker_threads, Some(1));
             },
         );
     }
@@ -243,34 +318,6 @@ mod tests {
                 assert_eq!(config.tokio.max_blocking_threads, Some(256));
             },
         );
-    }
-
-    #[test]
-    fn test_nova_for_leader_no_override() {
-        let config = KvbmConfig::default();
-        let leader_nova = config.nova_for_leader();
-        assert_eq!(leader_nova.backend.tcp_port, config.nova.backend.tcp_port);
-    }
-
-    #[test]
-    fn test_nova_for_leader_with_override() {
-        let mut config = KvbmConfig::default();
-        config.leader.nova = Some(NovaBackendConfig {
-            tcp_addr: Some("192.168.1.1".to_string()),
-            tcp_interface: None,
-            tcp_port: 8080,
-        });
-
-        let leader_nova = config.nova_for_leader();
-        assert_eq!(
-            leader_nova.backend.tcp_addr,
-            Some("192.168.1.1".to_string())
-        );
-        assert_eq!(leader_nova.backend.tcp_port, 8080);
-
-        // Worker should still use defaults
-        let worker_nova = config.nova_for_worker();
-        assert!(worker_nova.backend.tcp_addr.is_none());
     }
 
     #[test]
@@ -320,5 +367,156 @@ mod tests {
 
         assert_eq!(extracted.tokio.worker_threads, Some(4));
         assert_eq!(extracted.tokio.max_blocking_threads, Some(128));
+    }
+
+    #[test]
+    fn test_from_figment_with_json() {
+        temp_env::with_vars_unset(
+            vec![
+                "KVBM_CONFIG_PATH",
+                "KVBM_TOKIO_WORKER_THREADS",
+                "KVBM_NOVA_BACKEND_TCP_PORT",
+            ],
+            || {
+                let json =
+                    r#"{"tokio": {"worker_threads": 16}, "nova": {"backend": {"tcp_port": 9090}}}"#;
+                let config = KvbmConfig::from_figment_with_json(json).unwrap();
+
+                assert_eq!(config.tokio.worker_threads, Some(16));
+                assert_eq!(config.nova.backend.tcp_port, 9090);
+            },
+        );
+    }
+
+    #[test]
+    fn test_from_figment_with_json_overrides_env() {
+        // JSON should override env vars (highest priority)
+        temp_env::with_vars(vec![("KVBM_TOKIO_WORKER_THREADS", Some("4"))], || {
+            let json = r#"{"tokio": {"worker_threads": 24}}"#;
+            let config = KvbmConfig::from_figment_with_json(json).unwrap();
+
+            // JSON (24) should override env var (4)
+            assert_eq!(config.tokio.worker_threads, Some(24));
+        });
+    }
+
+    #[test]
+    fn test_from_figment_with_empty_json() {
+        // Empty JSON object should not cause errors and should use env/defaults
+        // We just verify it doesn't fail - the actual values depend on environment
+        let config = KvbmConfig::from_figment_with_json("{}");
+        assert!(config.is_ok(), "Empty JSON should not cause errors");
+    }
+
+    // ==================== Profile Selection Tests ====================
+    //
+    // Figment profiles work with `.nested()` JSON provider - top-level keys
+    // become profile names. Use "default" for values that apply to all profiles.
+
+    #[test]
+    fn test_profile_selection_leader_vs_worker() {
+        // Test that leader and worker profiles get different values
+        // JSON top-level keys are profile names when using .nested()
+        temp_env::with_vars_unset(
+            vec!["KVBM_CONFIG_PATH", "KVBM_TOKIO_WORKER_THREADS"],
+            || {
+                // JSON with nested profiles - top-level keys are profile names
+                let json = r#"{
+                    "default": {"tokio": {"worker_threads": 4}},
+                    "leader": {"tokio": {"worker_threads": 2}},
+                    "worker": {"tokio": {"worker_threads": 8}}
+                }"#;
+
+                // Leader should get 2 threads (from leader profile)
+                let leader_config = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
+                assert_eq!(
+                    leader_config.tokio.worker_threads,
+                    Some(2),
+                    "Leader should get leader profile's tokio.worker_threads"
+                );
+
+                // Worker should get 8 threads (from worker profile)
+                let worker_config = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
+                assert_eq!(
+                    worker_config.tokio.worker_threads,
+                    Some(8),
+                    "Worker should get worker profile's tokio.worker_threads"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_profile_no_override_uses_default() {
+        // When no profile-specific section exists, default profile values are used
+        temp_env::with_vars_unset(
+            vec!["KVBM_CONFIG_PATH", "KVBM_TOKIO_WORKER_THREADS"],
+            || {
+                // JSON with only default profile
+                let json = r#"{"default": {"tokio": {"worker_threads": 4}}}"#;
+
+                // Both leader and worker should get the default (4)
+                let leader_config = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
+                assert_eq!(
+                    leader_config.tokio.worker_threads,
+                    Some(4),
+                    "Leader should use default when no leader profile exists"
+                );
+
+                let worker_config = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
+                assert_eq!(
+                    worker_config.tokio.worker_threads,
+                    Some(4),
+                    "Worker should use default when no worker profile exists"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_profile_with_defaults_and_overlay() {
+        // Test that default profile values apply to all roles, profile-specific overlay on top
+        temp_env::with_vars_unset(
+            vec!["KVBM_CONFIG_PATH", "KVBM_TOKIO_WORKER_THREADS"],
+            || {
+                // cache.host in default applies to all profiles
+                // leader profile adds tokio override
+                let json = r#"{
+                    "default": {"cache": {"host": {"cache_size_gb": 2.0}}},
+                    "leader": {"tokio": {"worker_threads": 2}}
+                }"#;
+
+                // Leader: gets cache.host from default + tokio from leader profile
+                let leader_config = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
+                assert_eq!(leader_config.cache.host.cache_size_gb, Some(2.0));
+                assert_eq!(leader_config.tokio.worker_threads, Some(2));
+
+                // Worker: gets cache.host from default, uses default tokio (not leader's override)
+                let worker_config = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
+                assert_eq!(worker_config.cache.host.cache_size_gb, Some(2.0));
+                // Worker gets default tokio.worker_threads (1), NOT leader's override (2)
+                assert_eq!(
+                    worker_config.tokio.worker_threads,
+                    Some(1),
+                    "Worker should get default tokio, not leader's override"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_from_env_for_leader_and_worker() {
+        // Test from_env_for_leader and from_env_for_worker work without error
+        temp_env::with_vars_unset(
+            vec!["KVBM_CONFIG_PATH", "KVBM_TOKIO_WORKER_THREADS"],
+            || {
+                // Both should succeed with default values
+                let leader_config = KvbmConfig::from_env_for_leader();
+                assert!(leader_config.is_ok(), "from_env_for_leader should succeed");
+
+                let worker_config = KvbmConfig::from_env_for_worker();
+                assert!(worker_config.is_ok(), "from_env_for_worker should succeed");
+            },
+        );
     }
 }

@@ -8,9 +8,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use dynamo_kvbm::v2::integrations::connector::worker::{
-    ConnectorWorkerImpl, ConnectorWorkerInterface,
-};
+use dynamo_kvbm::v2::integrations::connector::worker::{ConnectorWorker, ConnectorWorkerInterface};
 use dynamo_memory::TensorDescriptor;
 
 use crate::to_pyerr;
@@ -18,13 +16,13 @@ use crate::v2::torch::Tensor;
 
 /// Python wrapper for the v2 ConnectorWorker.
 ///
-/// This class wraps the Rust ConnectorWorkerImpl, which handles:
+/// This class wraps the Rust ConnectorWorker, which handles:
 /// - KV cache registration with NIXL for RDMA transfers
 /// - Handshake metadata export
 /// - Graceful shutdown
 #[pyclass(name = "ConnectorWorker")]
 pub struct PyConnectorWorker {
-    inner: ConnectorWorkerImpl,
+    inner: ConnectorWorker,
 }
 
 #[pymethods]
@@ -39,7 +37,7 @@ impl PyConnectorWorker {
     #[new]
     pub fn new(runtime: &crate::v2::runtime::PyKvbmRuntime) -> PyResult<Self> {
         let nova = runtime.nova().map_err(to_pyerr)?;
-        let inner = ConnectorWorkerImpl::new(nova);
+        let inner = ConnectorWorker::new(nova);
         Ok(Self { inner })
     }
 

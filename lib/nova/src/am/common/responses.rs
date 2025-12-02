@@ -54,7 +54,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 use uuid::Uuid;
 
 use super::events::Outcome;
@@ -424,7 +424,7 @@ impl ResponseManagerInner {
         response_id: ResponseId,
         outcome: Result<Option<Bytes>, String>,
     ) -> bool {
-        debug!(
+        trace!(
             response_id = %response_id,
             "ResponseManager.complete_outcome() called - decoding response_id"
         );
@@ -437,7 +437,7 @@ impl ResponseManagerInner {
             }
         };
 
-        debug!(
+        trace!(
             response_id = %response_id,
             worker_id,
             slot_index,
@@ -477,7 +477,7 @@ impl ResponseManagerInner {
 
         let slot = match self.arena.slot(slot_index) {
             Some(slot) => {
-                debug!(
+                trace!(
                     response_id = %response_id,
                     slot_index,
                     "ResponseManager found slot in arena"
@@ -494,7 +494,7 @@ impl ResponseManagerInner {
             }
         };
 
-        debug!(
+        trace!(
             response_id = %response_id,
             slot_index,
             expected_generation,
@@ -503,7 +503,7 @@ impl ResponseManagerInner {
 
         let completed = match outcome {
             Ok(payload) => {
-                debug!(
+                trace!(
                     response_id = %response_id,
                     slot_index,
                     payload_present = payload.is_some(),
@@ -513,7 +513,7 @@ impl ResponseManagerInner {
                 slot.complete_ok(payload, expected_generation)
             }
             Err(err) => {
-                debug!(
+                trace!(
                     response_id = %response_id,
                     slot_index,
                     error = %err,
@@ -632,14 +632,14 @@ impl<T, E> Slot<T, E> {
     }
 
     fn finish(&self, res: Result<T, E>, expected_generation: u64) -> bool {
-        use tracing::debug;
-        debug!("Slot.finish() called - locking state");
+        use tracing::{debug, trace};
+        trace!("Slot.finish() called - locking state");
         let mut guard = self.state.lock();
         let success = guard.complete(res, expected_generation);
         if success {
-            debug!("Slot.finish() - value set, dropping lock");
+            trace!("Slot.finish() - value set, dropping lock");
             drop(guard);
-            debug!("Slot.finish() - waking waiter");
+            trace!("Slot.finish() - waking waiter");
             self.waker.wake();
             debug!("Slot.finish() - waiter woken, returning true");
         } else {

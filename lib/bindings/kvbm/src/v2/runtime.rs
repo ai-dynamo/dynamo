@@ -34,6 +34,10 @@ impl PyKvbmRuntime {
     pub(crate) fn nova(&self) -> anyhow::Result<Arc<dynamo_nova::Nova>> {
         Ok(self.inner.nova().clone())
     }
+
+    pub fn inner(&self) -> KvbmRuntime {
+        self.inner.clone()
+    }
 }
 
 #[pymethods]
@@ -41,7 +45,14 @@ impl PyKvbmRuntime {
     /// Build a KvbmRuntime configured for a worker role.
     ///
     /// This creates a runtime with Nova configured for worker-side operations.
-    /// Configuration is loaded from environment variables (KVBM_* prefix).
+    /// Configuration is loaded from environment variables (KVBM_* prefix) with
+    /// the "worker" profile selected (merges `profile.worker.*` values).
+    ///
+    /// Args:
+    ///     config_json: Optional JSON string with config overrides from Python.
+    ///         JSON can include both default values and profile-specific values:
+    ///         - Top-level keys apply to all profiles
+    ///         - `profile.worker.*` keys are overlaid for worker profile
     ///
     /// Returns:
     ///     KvbmRuntime: The initialized runtime instance.
@@ -49,9 +60,13 @@ impl PyKvbmRuntime {
     /// Raises:
     ///     RuntimeError: If configuration is invalid or runtime construction fails.
     #[staticmethod]
-    fn build_worker() -> PyResult<Self> {
-        // Build config first
-        let config = KvbmConfig::from_env().map_err(to_pyerr)?;
+    #[pyo3(signature = (config_json=None))]
+    fn build_worker(config_json: Option<&str>) -> PyResult<Self> {
+        // Build config with worker profile selected
+        let config = match config_json {
+            Some(json) => KvbmConfig::from_figment_with_json_for_worker(json).map_err(to_pyerr)?,
+            None => KvbmConfig::from_env_for_worker().map_err(to_pyerr)?,
+        };
 
         // Create tokio runtime from config
         let tokio_rt = config.tokio.build_runtime().map_err(to_pyerr)?;
@@ -75,7 +90,15 @@ impl PyKvbmRuntime {
     /// Build a KvbmRuntime configured for a leader/scheduler role.
     ///
     /// This creates a runtime with Nova configured for leader-side operations.
-    /// Configuration is loaded from environment variables (KVBM_* prefix).
+    /// Configuration is loaded from environment variables (KVBM_* prefix) with
+    /// the "leader" profile selected (merges `profile.leader.*` values).
+    ///
+    /// Args:
+    ///     config_json: Optional JSON string with config overrides from Python.
+    ///         JSON can include both default values and profile-specific values:
+    ///         - Top-level keys apply to all profiles
+    ///         - `profile.leader.*` keys are overlaid for leader profile
+    ///         Use this to pass vLLM's `kv_connector_extra_config` dict as JSON.
     ///
     /// Returns:
     ///     KvbmRuntime: The initialized runtime instance.
@@ -83,9 +106,13 @@ impl PyKvbmRuntime {
     /// Raises:
     ///     RuntimeError: If configuration is invalid or runtime construction fails.
     #[staticmethod]
-    fn build_leader() -> PyResult<Self> {
-        // Build config first
-        let config = KvbmConfig::from_env().map_err(to_pyerr)?;
+    #[pyo3(signature = (config_json=None))]
+    fn build_leader(config_json: Option<&str>) -> PyResult<Self> {
+        // Build config with leader profile selected
+        let config = match config_json {
+            Some(json) => KvbmConfig::from_figment_with_json_for_leader(json).map_err(to_pyerr)?,
+            None => KvbmConfig::from_env_for_leader().map_err(to_pyerr)?,
+        };
 
         // Create tokio runtime from config
         let tokio_rt = config.tokio.build_runtime().map_err(to_pyerr)?;

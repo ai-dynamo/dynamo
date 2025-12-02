@@ -180,9 +180,6 @@ pub struct LeaderLayoutConfig {
 
     /// Number of disk blocks for G3 tier (None = no disk tier).
     pub disk_block_count: Option<usize>,
-
-    /// Backend configuration (which NIXL backends to enable and their params).
-    pub backend_config: NixlBackendConfig,
 }
 
 /// Worker's response after configuring additional layouts (G2, G3).

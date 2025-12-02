@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-discovery"
+name = "dynamo-nova-discovery"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

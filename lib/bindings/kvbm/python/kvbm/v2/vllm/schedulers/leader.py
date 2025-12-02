@@ -15,6 +15,7 @@ For Phase 1, the leader:
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, Optional
 
 from kvbm._core import v2 as _v2
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorHandshakeMetadata,
     )
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheConfig
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.request import Request
 
@@ -54,32 +55,33 @@ class SchedulerConnectorLeader:
     - Registers workers as Nova peers and tracks rank→instance_id mapping
     """
 
-    def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, **kwargs):
         """Initialize the scheduler connector leader."""
         print("[KVBM DEBUG] SchedulerConnectorLeader.__init__ START", flush=True)
 
         self.vllm_config = vllm_config
-        self.engine_id = engine_id
+        self.vllm_kv_cache_config = kv_cache_config
+        self.kvbm_override_config = kwargs.get("kvbm_override_config", None)
 
-        # Build KvbmRuntime with Nova (no etcd discovery)
-        self.runtime = KvbmRuntime.build_leader()
+        # JSON config has highest priority (overrides env vars and TOML files)
+        self.runtime = KvbmRuntime.build_leader(self.kvbm_override_config)
 
         # Create leader service for coordination (separate from runtime)
         self.leader = ConnectorLeader(self.runtime)
 
         # Track active slots (request_id -> True)
+        # TODO: SlotManager
         self._slots: dict[str, bool] = {}
 
         instance_id = self.runtime.instance_id()
         print(
-            f"SchedulerConnectorLeader initialized - engine_id: {engine_id}, "
-            f"Nova instance: {instance_id.hex()[:8]}...",
+            f"SchedulerConnectorLeader initialized with Nova instance: {instance_id.hex()[:8]}...",
             flush=True,
         )
 
     def get_num_new_matched_tokens(
         self,
-        request: "Request",
+        request: Request,
         num_computed_tokens: int,
     ) -> tuple[Optional[int], bool]:
         """

@@ -46,7 +46,6 @@ dynamo-nova-backend = { workspace = true, optional = true }
 [features]
 default = ["testing"]
 console = []
-etcd = ["dynamo-kvbm-config/etcd"]
 testing = ["dynamo-nova-backend"]
 
 

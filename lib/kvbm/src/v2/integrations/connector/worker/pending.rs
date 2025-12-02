@@ -22,18 +22,17 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use dynamo_memory::TensorDescriptor;
-use dynamo_nova::Nova;
 
 use crate::{
+    KvbmRuntime,
     logical::LogicalLayoutHandle,
-    physical::{
-        layout::{LayoutConfig, PhysicalLayout},
-        transfer::context::TokioRuntime,
-    },
+    physical::transfer::context::TokioRuntime,
     v2::{
         distributed::worker::{DirectWorker, LeaderLayoutConfig, WorkerLayoutResponse},
-        integrations::vllm::layout::determine_kv_layout,
-        physical::{TransferManager, layout::PhysicalLayoutBuilder},
+        physical::{
+            TransferManager,
+            layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder},
+        },
     },
 };
 
@@ -62,6 +61,12 @@ pub struct PendingWorkerState {
 
     /// GPU info for logging.
     pub gpu_info: GpuInfo,
+
+    /// Layout configuration determined from tensor shapes.
+    pub layout_config: LayoutConfig,
+
+    /// Block dimension (first or second dimension).
+    pub block_dim: BlockDimension,
 }
 
 impl PendingWorkerState {
@@ -74,6 +79,8 @@ impl PendingWorkerState {
     /// * `num_device_blocks` - Number of device blocks from vLLM's cache config
     /// * `page_size` - Block/page size for the KV cache
     /// * `dtype_width_bytes` - Data type width in bytes
+    /// * `layout_config` - Layout configuration determined from tensor shapes
+    /// * `block_dim` - Block dimension (first or second dimension)
     ///
     /// # Errors
     /// - If tensors is empty
@@ -84,6 +91,8 @@ impl PendingWorkerState {
         num_device_blocks: usize,
         page_size: usize,
         dtype_width_bytes: usize,
+        layout_config: LayoutConfig,
+        block_dim: BlockDimension,
     ) -> Result<Self> {
         use anyhow::{bail, ensure};
         use dynamo_memory::TensorDescriptorExt;
@@ -114,6 +123,8 @@ impl PendingWorkerState {
             num_device_blocks,
             page_size,
             dtype_width_bytes,
+            ?layout_config,
+            ?block_dim,
             "Created PendingWorkerState - NIXL registration deferred"
         );
 
@@ -124,6 +135,8 @@ impl PendingWorkerState {
             page_size,
             dtype_width_bytes,
             gpu_info,
+            layout_config,
+            block_dim,
         })
     }
 
@@ -143,44 +156,41 @@ impl PendingWorkerState {
     ///
     /// # Returns
     /// Tuple of (DirectWorker, WorkerLayoutResponse)
+    #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?runtime.nova.instance_id()))]
     pub fn complete_initialization(
         self,
-        nova: &Arc<Nova>,
+        runtime: &KvbmRuntime,
         config: LeaderLayoutConfig,
     ) -> Result<(Arc<DirectWorker>, WorkerLayoutResponse)> {
         tracing::info!("Starting complete_initialization");
 
         let mut created_layouts = vec![];
 
+        let nixl_agent = runtime
+            .nixl_agent
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("NIXL agent not found"))?;
+
         // 1. Build TransferManager and NixlAgent
         tracing::info!("Building TransferManager with NIXL backend");
         let transfer_manager = TransferManager::builder()
-            .event_system(nova.events().local().clone())
+            .event_system(runtime.nova.events().local().clone())
             .cuda_device_id(self.cuda_device_id)
-            .tokio_runtime(TokioRuntime::Handle(nova.runtime().clone()))
-            .nixl_backend_config(config.backend_config.clone())
+            .tokio_runtime(TokioRuntime::Handle(runtime.nova.runtime().clone()))
+            .nixl_agent(nixl_agent.clone())
             .build()?;
 
-        let nixl_agent = transfer_manager.nixl_agent().clone();
-
-        // 2. Determine layout from tensor shapes
-        let (layout_config, block_dim) = determine_kv_layout(
-            self.num_device_blocks,
-            self.page_size,
-            self.dtype_width_bytes,
-            &self.tensors,
-        )?;
-
+        // 2. Use pre-computed layout configuration
         tracing::debug!(
-            ?layout_config,
-            ?block_dim,
-            "Determined KV layout configuration"
+            ?self.layout_config,
+            ?self.block_dim,
+            "Using pre-computed KV layout configuration"
         );
 
         // 3. Build PhysicalLayout with NIXL registration
         let physical_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
-            .with_config(layout_config.clone())
-            .layer_separate(block_dim)
+            .with_config(self.layout_config.clone())
+            .layer_separate(self.block_dim)
             .with_external_device_regions(self.tensors)?
             .build()?;
 
@@ -206,7 +216,7 @@ impl PendingWorkerState {
             "Creating G2/G3 layouts via configure_additional_layouts()"
         );
 
-        let mut host_layout = layout_config.clone();
+        let mut host_layout = self.layout_config.clone();
         host_layout.num_blocks = config.host_block_count;
         let host_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
             .with_config(host_layout)
@@ -220,14 +230,14 @@ impl PendingWorkerState {
 
         // todo: we need to get a path from the the config and create a unique file based on the nova instance_id
         if let Some(disk_blocks) = config.disk_block_count {
-            let mut disk_layout = layout_config.clone();
+            let mut disk_layout = self.layout_config.clone();
             disk_layout.num_blocks = disk_blocks;
             let disk_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                 .with_config(disk_layout)
                 .fully_contiguous()
                 .allocate_disk(Some(PathBuf::from(format!(
                     "/tmp/kvbm_g3_{}.bin",
-                    nova.instance_id()
+                    runtime.nova.instance_id()
                 ))))
                 .build()?;
 

@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 /// Tokio runtime configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct TokioConfig {
     /// Number of async worker threads.
     /// If None, uses the number of logical CPUs.
-    #[validate(range(min = 1))]
+    #[validate(range(min = 1, max = default_max_cpus()))]
     pub worker_threads: Option<usize>,
 
     /// Maximum number of blocking threads.
@@ -37,6 +37,21 @@ impl TokioConfig {
     }
 }
 
+impl Default for TokioConfig {
+    fn default() -> Self {
+        Self {
+            worker_threads: Some(1),
+            max_blocking_threads: None,
+        }
+    }
+}
+
+fn default_max_cpus() -> usize {
+    std::thread::available_parallelism()
+        .unwrap_or_else(|_| std::num::NonZeroUsize::new(4).expect("4 is non-zero"))
+        .get()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,7 +59,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = TokioConfig::default();
-        assert!(config.worker_threads.is_none());
+        // Default uses 1 worker thread to minimize resource usage
+        assert_eq!(config.worker_threads, Some(1));
         assert!(config.max_blocking_threads.is_none());
     }
 

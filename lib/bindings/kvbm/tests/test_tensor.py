@@ -87,11 +87,15 @@ class TestTensorCudaOnly:
 
         assert tensor.shape == [16, 8, 4]
         # Stride should reflect the transposed layout
-        assert tensor.stride == [1, 16, 128]  # [1, 16, 128] for [16, 8, 4] from [4, 8, 16]
+        assert tensor.stride == [
+            1,
+            16,
+            128,
+        ]  # [1, 16, 128] for [16, 8, 4] from [4, 8, 16]
 
     @pytest.mark.skipif(
         not torch.cuda.is_available() or torch.cuda.device_count() < 2,
-        reason="Multiple CUDA devices required"
+        reason="Multiple CUDA devices required",
     )
     def test_different_cuda_device(self):
         """Tensor on a different CUDA device should work."""

@@ -2683,52 +2683,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-discovery"
-version = "0.7.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.8.4",
- "blake2",
- "bytes",
- "clap 4.5.52",
- "dashmap 6.1.0",
- "derive_builder",
- "dynamo-identity",
- "dynamo-nova-backend",
- "etcd-client",
- "figment",
- "fs4",
- "futures",
- "futures-util",
- "hyper 1.8.1",
- "libp2p",
- "libp2p-identity",
- "libp2p-kad",
- "libp2p-mdns",
- "libp2p-swarm",
- "notify 8.2.0",
- "parking_lot",
- "reqwest 0.12.24",
- "serde",
- "serde_json",
- "tempfile",
- "testcontainers",
- "thiserror 2.0.17",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic 0.14.2",
- "tower 0.5.2",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid 1.18.1",
- "validator",
- "xxhash-rust",
-]
-
-[[package]]
 name = "dynamo-engine-mistralrs"
 version = "0.7.0"
 dependencies = [
@@ -2806,10 +2760,10 @@ name = "dynamo-kvbm-config"
 version = "0.7.0"
 dependencies = [
  "anyhow",
- "dynamo-discovery",
  "dynamo-memory",
  "dynamo-nova",
  "dynamo-nova-backend",
+ "dynamo-nova-discovery",
  "figment",
  "nix 0.30.1",
  "rayon",
@@ -2964,9 +2918,9 @@ dependencies = [
  "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
- "dynamo-discovery",
  "dynamo-identity",
  "dynamo-nova-backend",
+ "dynamo-nova-discovery",
  "either",
  "flume",
  "futures",
@@ -3025,6 +2979,52 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid 1.18.1",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-nova-discovery"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.4",
+ "blake2",
+ "bytes",
+ "clap 4.5.52",
+ "dashmap 6.1.0",
+ "derive_builder",
+ "dynamo-identity",
+ "dynamo-nova-backend",
+ "etcd-client",
+ "figment",
+ "fs4",
+ "futures",
+ "futures-util",
+ "hyper 1.8.1",
+ "libp2p",
+ "libp2p-identity",
+ "libp2p-kad",
+ "libp2p-mdns",
+ "libp2p-swarm",
+ "notify 8.2.0",
+ "parking_lot",
+ "reqwest 0.12.24",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "testcontainers",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.14.2",
+ "tower 0.5.2",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid 1.18.1",
+ "validator",
  "xxhash-rust",
 ]
 

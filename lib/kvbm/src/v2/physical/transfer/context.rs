@@ -123,21 +123,8 @@ impl TransferConfigBuilder {
             .nixl_agent_name
             .unwrap_or_else(|| format!("worker-{}", worker_id));
 
-        // Create wrapped NIXL agent with configured backends
-        let backend_names: Vec<&str> = config
-            .nixl_backend_config
-            .backends()
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
-
-        let nixl_agent = if backend_names.is_empty() {
-            // No backends configured - create agent without backends
-            NixlAgent::new(&agent_name)?
-        } else {
-            // Create agent with requested backends (strict - all must succeed)
-            NixlAgent::with_backends(&agent_name, &backend_names)?
-        };
+        let nixl_agent =
+            NixlAgent::from_nixl_backend_config(&agent_name, config.nixl_backend_config)?;
 
         let cuda_context = CudaContext::new(config.cuda_device_id)?;
         let context = TransferContext::new(

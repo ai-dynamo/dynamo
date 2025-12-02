@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dynamo_kvbm_config::KvbmConfig;
-use dynamo_kvbm_config::NovaConfig;
 use dynamo_memory::nixl::NixlAgent;
 use dynamo_nova::Nova;
 use tokio::runtime::{Handle, Runtime};
@@ -52,8 +51,8 @@ impl RuntimeHandle {
 pub struct KvbmRuntimeBuilder {
     config: KvbmConfig,
     runtime: Option<RuntimeHandle>,
-    nixl_agent: Option<NixlAgent>,
     nova: Option<Arc<Nova>>,
+    nixl_agent: Option<NixlAgent>,
 }
 
 impl KvbmRuntimeBuilder {
@@ -62,14 +61,22 @@ impl KvbmRuntimeBuilder {
         Self {
             config,
             runtime: None,
-            nixl_agent: None,
             nova: None,
+            nixl_agent: None,
         }
     }
 
     /// Create builder from environment.
     pub fn from_env() -> Result<Self, dynamo_kvbm_config::ConfigError> {
         Ok(Self::new(KvbmConfig::from_env()?))
+    }
+
+    /// Create builder from JSON config string (merged with env/files).
+    ///
+    /// JSON has highest priority - overrides env vars, TOML files, and defaults.
+    /// This is the primary entrypoint for vLLM's `kv_connector_extra_config` dict.
+    pub fn from_json(json: &str) -> Result<Self, dynamo_kvbm_config::ConfigError> {
+        Ok(Self::new(KvbmConfig::from_figment_with_json(json)?))
     }
 
     /// Use an existing tokio Runtime (takes ownership via Arc).
@@ -84,52 +91,69 @@ impl KvbmRuntimeBuilder {
         self
     }
 
-    /// Use an existing NixlAgent.
-    pub fn with_nixl_agent(mut self, agent: NixlAgent) -> Self {
-        self.nixl_agent = Some(agent);
-        self
-    }
-
     /// Use an existing Nova instance.
     pub fn with_nova(mut self, nova: Arc<Nova>) -> Self {
         self.nova = Some(nova);
         self
     }
 
+    /// Use an existing NixlAgent instance.
+    pub fn with_nixl_agent(mut self, agent: NixlAgent) -> Self {
+        self.nixl_agent = Some(agent);
+        self
+    }
+
     /// Build runtime for leader role.
     ///
-    /// Uses `config.nova_for_leader()` for Nova configuration.
+    /// Uses the `nova` config from the KvbmConfig. Role-specific Nova settings
+    /// should be provided via Figment profiles (e.g., `profile.leader.nova.*`).
     pub async fn build_leader(self) -> Result<super::KvbmRuntime> {
-        self.build_internal(|config| config.nova_for_leader()).await
+        self.build_internal().await
     }
 
     /// Build runtime for worker role.
     ///
-    /// Uses `config.nova_for_worker()` for Nova configuration.
+    /// Uses the `nova` config from the KvbmConfig. Role-specific Nova settings
+    /// should be provided via Figment profiles (e.g., `profile.worker.nova.*`).
     pub async fn build_worker(self) -> Result<super::KvbmRuntime> {
-        self.build_internal(|config| config.nova_for_worker()).await
+        self.build_internal().await
     }
 
-    async fn build_internal<F>(self, nova_config_fn: F) -> Result<super::KvbmRuntime>
-    where
-        F: FnOnce(&KvbmConfig) -> NovaConfig,
-    {
-        // Tokio runtime - use provided or build from config
+    async fn build_internal(self) -> Result<super::KvbmRuntime> {
+        // 1. Tokio runtime - use provided or build from config
         let runtime = match self.runtime {
             Some(rt) => rt,
             None => RuntimeHandle::Owned(Arc::new(self.config.tokio.build_runtime()?)),
         };
 
-        // Nova - use provided or build from config (role-specific)
+        // 2. Nova - use provided or build from config (BEFORE NixL)
         let nova = match self.nova {
             Some(nova) => nova,
-            None => nova_config_fn(&self.config).build_nova().await?,
+            None => self.config.nova.build_nova().await?,
+        };
+
+        // 3. NixL - use provided or build from config (AFTER Nova)
+        //    Only build if config.nixl is Some (NixL enabled)
+        let nixl_agent = match self.nixl_agent {
+            Some(agent) => Some(agent),
+            None => match &self.config.nixl {
+                Some(nixl_config) => {
+                    let agent_name = format!("nixl-{}", nova.instance_id());
+                    let backend_config = nixl_config.clone().into();
+                    Some(NixlAgent::from_nixl_backend_config(
+                        &agent_name,
+                        backend_config,
+                    )?)
+                }
+                None => None, // NixL disabled
+            },
         };
 
         Ok(super::KvbmRuntime {
             config: self.config,
             runtime,
             nova,
+            nixl_agent,
         })
     }
 }

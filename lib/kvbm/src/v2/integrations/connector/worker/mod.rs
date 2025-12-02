@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod client;
 mod pending;
 
+use bytes::Bytes;
+pub use client::ConnectorWorkerClient;
 pub use pending::PendingWorkerState;
 
 use anyhow::{Result, bail};
-use bytes::Bytes;
 use dynamo_memory::TensorDescriptor;
 use dynamo_nova::Nova;
 use dynamo_nova::am::NovaHandler;
@@ -14,9 +16,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::KvbmRuntime;
 use crate::v2::distributed::worker::{
     DirectWorker, LeaderLayoutConfig, NovaWorkerService, WorkerLayoutResponse,
 };
+use crate::v2::integrations::vllm::layout::determine_kv_layout;
+
+pub const ONBOARD_COMPLETE_HANDLER: &str = "kvbm.connector.worker.onboard_complete";
+pub const OFFLOAD_COMPLETE_HANDLER: &str = "kvbm.connector.worker.offload_complete";
+pub const GET_LAYOUT_CONFIG_HANDLER: &str = "kvbm.connector.worker.get_layout_config";
+pub const INITIALIZE_HANDLER: &str = "kvbm.connector.worker.initialize";
 
 pub trait ConnectorWorkerInterface: Send + Sync {
     /// Register KV cache tensors (deferred mode - caches state for later).
@@ -38,12 +47,6 @@ pub trait ConnectorWorkerInterface: Send + Sync {
 
     /// Get and drain all finished request IDs.
     fn get_finished(&self) -> (HashSet<String>, HashSet<String>);
-
-    fn mark_onboarding_complete(&self, request_id: String);
-    fn mark_offloading_complete(&self, request_id: String);
-
-    /// Export handshake metadata (Nova peer address).
-    fn handshake_metadata(&self) -> Result<Bytes>;
 }
 
 /// Tracks completed operations for worker-side reporting.
@@ -107,7 +110,7 @@ impl GpuInfo {
 
 /// Shared state for the connector worker, wrapped in Arc for handler sharing.
 struct SharedWorkerState {
-    nova: Arc<Nova>,
+    runtime: KvbmRuntime,
     pending_state: Mutex<Option<PendingWorkerState>>,
     service: OnceLock<NovaWorkerService>,
     gpu_info: OnceLock<GpuInfo>,
@@ -120,27 +123,30 @@ struct SharedWorkerState {
 /// Uses deferred initialization by default:
 /// - `register_kv_caches` only caches tensor state
 /// - Leader calls `configure_layouts` RPC to complete initialization
-pub struct ConnectorWorkerImpl {
+pub struct ConnectorWorker {
     state: Arc<SharedWorkerState>,
 }
 
-impl ConnectorWorkerImpl {
-    /// Create a new ConnectorWorkerImpl with deferred initialization.
+impl ConnectorWorker {
+    /// Create a new ConnectorWorker with deferred initialization.
     ///
     /// Registers the `kvbm.connector.configure_layouts` handler immediately
     /// so the leader can trigger initialization via RPC.
-    pub fn new(nova: Arc<Nova>) -> Self {
+    pub fn new(runtime: KvbmRuntime) -> Self {
         let state = Arc::new(SharedWorkerState {
-            nova: nova.clone(),
+            runtime,
             pending_state: Mutex::new(None),
             service: OnceLock::new(),
             gpu_info: OnceLock::new(),
             finished_state: FinishedState::new(),
         });
 
+        let nova = state.runtime.nova.clone();
+
         // Register handlers
         Self::register_initialize_handler(&nova, Arc::clone(&state));
         Self::register_completion_handlers(&nova, Arc::clone(&state));
+        Self::register_get_layout_config_handler(&nova, Arc::clone(&state));
 
         Self { state }
     }
@@ -150,21 +156,25 @@ impl ConnectorWorkerImpl {
         self.state.service.get().map(|s| s.worker())
     }
 
+    #[cfg(test)]
+    pub(crate) fn runtime(&self) -> &KvbmRuntime {
+        &self.state.runtime
+    }
+
     /// Register the configure_layouts handler for leader-driven initialization.
     ///
     /// This handler is called by the leader after collecting handshake metadata.
     /// It completes NIXL registration and creates G1/G2/G3 layouts.
     fn register_initialize_handler(nova: &Arc<Nova>, state: Arc<SharedWorkerState>) {
-        let handler =
-            NovaHandler::typed_unary_async("kvbm.connector.worker.initialize", move |ctx| {
-                let state = Arc::clone(&state);
+        let handler = NovaHandler::typed_unary_async(INITIALIZE_HANDLER, move |ctx| {
+            let state = Arc::clone(&state);
 
-                async move {
-                    let config: LeaderLayoutConfig = ctx.input;
-                    state.initialize(config)
-                }
-            })
-            .build();
+            async move {
+                let config: LeaderLayoutConfig = ctx.input;
+                state.initialize(config)
+            }
+        })
+        .build();
 
         if let Err(e) = nova.register_handler(handler) {
             tracing::error!("Failed to register configure_layouts handler: {}", e);
@@ -173,16 +183,19 @@ impl ConnectorWorkerImpl {
 
     /// Register completion handlers for leader notifications.
     fn register_completion_handlers(nova: &Arc<Nova>, state: Arc<SharedWorkerState>) {
-        // Handler: "kvbm.connector.onboard_complete"
+        // Handler: "kvbm.connector.worker.onboard_complete"
         let onboard_state = Arc::clone(&state);
         let onboard_handler =
-            NovaHandler::unary_handler("kvbm.connector.onboard_complete", move |ctx| {
-                let msg: OnboardCompleteMessage = serde_json::from_slice(&ctx.payload)?;
-                tracing::debug!(request_id = %msg.request_id, "Worker received onboard complete");
-                onboard_state
-                    .finished_state
-                    .mark_onboarding_complete(msg.request_id);
-                Ok(None)
+            NovaHandler::typed_unary_async(ONBOARD_COMPLETE_HANDLER, move |ctx| {
+                let state = Arc::clone(&onboard_state);
+                async move {
+                    let msg: OnboardCompleteMessage = ctx.input;
+                    tracing::debug!(request_id = %msg.request_id, "Worker received onboard complete");
+                    state
+                        .finished_state
+                        .mark_onboarding_complete(msg.request_id);
+                    Ok(())
+                }
             })
             .build();
 
@@ -190,16 +203,19 @@ impl ConnectorWorkerImpl {
             tracing::error!("Failed to register onboard_complete handler: {}", e);
         }
 
-        // Handler: "kvbm.connector.offload_complete"
+        // Handler: "kvbm.connector.worker.offload_complete"
         let offload_state = state;
         let offload_handler =
-            NovaHandler::unary_handler("kvbm.connector.offload_complete", move |ctx| {
-                let msg: OffloadCompleteMessage = serde_json::from_slice(&ctx.payload)?;
-                tracing::debug!(request_id = %msg.request_id, "Worker received offload complete");
-                offload_state
-                    .finished_state
-                    .mark_offloading_complete(msg.request_id);
-                Ok(None)
+            NovaHandler::typed_unary_async(OFFLOAD_COMPLETE_HANDLER, move |ctx| {
+                let state = Arc::clone(&offload_state);
+                async move {
+                    let msg: OffloadCompleteMessage = ctx.input;
+                    tracing::debug!(request_id = %msg.request_id, "Worker received offload complete");
+                    state
+                        .finished_state
+                        .mark_offloading_complete(msg.request_id);
+                    Ok(())
+                }
             })
             .build();
 
@@ -207,20 +223,31 @@ impl ConnectorWorkerImpl {
             tracing::error!("Failed to register offload_complete handler: {}", e);
         }
     }
-}
 
-impl ConnectorWorkerInterface for ConnectorWorkerImpl {
-    fn handshake_metadata(&self) -> Result<Bytes> {
-        // If service is initialized, export full metadata including NIXL registration
-        if let Some(service) = self.state.service.get() {
-            let metadata = service.worker().export_metadata()?;
-            Ok(metadata.as_bytes().clone())
-        } else {
-            // Fallback: just Nova peer address (before NIXL registration)
-            Ok(self.state.nova.peer_info().worker_address().to_bytes())
+    fn register_get_layout_config_handler(nova: &Arc<Nova>, state: Arc<SharedWorkerState>) {
+        let handler = NovaHandler::unary_handler_async(GET_LAYOUT_CONFIG_HANDLER, move |_ctx| {
+            let state = Arc::clone(&state);
+            async move {
+                let guard = state.pending_state.lock().unwrap();
+                match guard.as_ref() {
+                    Some(pending) => {
+                        let config = pending.layout_config.clone();
+                        Ok(Some(Bytes::from(serde_json::to_vec(&config)?)))
+                    }
+                    None => bail!("No pending state - call register_kv_caches first"),
+                }
+            }
+        })
+        .build();
+
+        if let Err(e) = nova.register_handler(handler) {
+            tracing::error!("Failed to register get_layout_config handler: {}", e);
         }
     }
+}
 
+impl ConnectorWorkerInterface for ConnectorWorker {
+    #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?self.state.runtime.nova.instance_id()))]
     fn register_kv_caches(
         &self,
         tensors: Vec<Arc<dyn TensorDescriptor>>,
@@ -236,9 +263,25 @@ impl ConnectorWorkerInterface for ConnectorWorkerImpl {
             bail!("KV caches already pending registration");
         }
 
+        // Determine layout from tensor shapes
+        let (layout_config, block_dim) =
+            determine_kv_layout(num_device_blocks, page_size, dtype_width_bytes, &tensors)?;
+
+        tracing::debug!(
+            ?layout_config,
+            ?block_dim,
+            "Determined KV layout configuration"
+        );
+
         // Create pending state (validates tensors internally)
-        let pending =
-            PendingWorkerState::new(tensors, num_device_blocks, page_size, dtype_width_bytes)?;
+        let pending = PendingWorkerState::new(
+            tensors,
+            num_device_blocks,
+            page_size,
+            dtype_width_bytes,
+            layout_config,
+            block_dim,
+        )?;
 
         // Store GPU info for logging
         let _ = self.state.gpu_info.set(pending.gpu_info.clone());
@@ -270,18 +313,6 @@ impl ConnectorWorkerInterface for ConnectorWorkerImpl {
     fn get_finished(&self) -> (HashSet<String>, HashSet<String>) {
         self.state.finished_state.take_finished()
     }
-
-    fn mark_onboarding_complete(&self, request_id: String) {
-        self.state
-            .finished_state
-            .mark_onboarding_complete(request_id);
-    }
-
-    fn mark_offloading_complete(&self, request_id: String) {
-        self.state
-            .finished_state
-            .mark_offloading_complete(request_id);
-    }
 }
 
 impl SharedWorkerState {
@@ -305,10 +336,10 @@ impl SharedWorkerState {
         );
 
         // Complete initialization
-        let (worker, response) = pending.complete_initialization(&self.nova, config)?;
+        let (worker, response) = pending.complete_initialization(&self.runtime, config)?;
 
         // Build NovaWorkerService
-        let service = NovaWorkerService::new(self.nova.clone(), worker)?;
+        let service = NovaWorkerService::new(self.runtime.nova.clone(), worker)?;
 
         self.service
             .set(service)

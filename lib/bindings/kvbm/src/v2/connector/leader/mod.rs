@@ -10,10 +10,8 @@ use pyo3::prelude::*;
 
 use dynamo_kvbm::InstanceId;
 use dynamo_kvbm::integrations::connector::leader::ConnectorLeader;
-use dynamo_nova::Nova;
 
 use dynamo_nova_backend::{PeerInfo, WorkerAddress};
-use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::to_pyerr;
@@ -44,8 +42,8 @@ impl PyConnectorLeader {
     ///     RuntimeError: If the runtime doesn't have a Nova instance
     #[new]
     pub fn new(runtime: &PyKvbmRuntime) -> PyResult<Self> {
-        let nova = runtime.nova().map_err(to_pyerr)?;
-        let leader = ConnectorLeader::new(nova);
+        let runtime = runtime.inner();
+        let leader = ConnectorLeader::new(runtime);
         Ok(Self { inner: leader })
     }
 

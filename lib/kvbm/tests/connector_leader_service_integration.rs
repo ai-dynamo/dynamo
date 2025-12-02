@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_nova::am::{Nova, NovaHandler};
-use dynamo_nova_backend::{tcp::TcpTransportBuilder, Transport};
+use dynamo_nova_backend::{Transport, tcp::TcpTransportBuilder};
 use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
 
@@ -61,14 +61,12 @@ async fn test_rpc_works_with_wait_for_handler() {
     );
 
     // Register handler on worker (simulates ConnectorWorkerImpl::new)
-    let handler = NovaHandler::typed_unary::<TestConfig, TestResponse, _>(
-        "test.configure",
-        |ctx| {
+    let handler =
+        NovaHandler::typed_unary::<TestConfig, TestResponse, _>("test.configure", |ctx| {
             println!("Handler received config: value={}", ctx.input.value);
             Ok(TestResponse { success: true })
-        },
-    )
-    .build();
+        })
+        .build();
     worker.register_handler(handler).expect("Register handler");
     println!("Handler registered on worker");
 
@@ -121,13 +119,11 @@ async fn test_rpc_may_fail_without_wait_for_handler() {
     let worker = create_nova_tcp().await.expect("Create worker Nova");
 
     // Register handler on worker
-    let handler = NovaHandler::typed_unary::<TestConfig, TestResponse, _>(
-        "test.configure",
-        |_ctx| {
+    let handler =
+        NovaHandler::typed_unary::<TestConfig, TestResponse, _>("test.configure", |_ctx| {
             Ok(TestResponse { success: true })
-        },
-    )
-    .build();
+        })
+        .build();
     worker.register_handler(handler).expect("Register handler");
 
     // Register peers (bidirectional, as Python does)

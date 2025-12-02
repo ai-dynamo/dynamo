@@ -27,8 +27,8 @@
 
 use anyhow::Result;
 
-use crate::physical::transfer::context::TransferCompleteNotification;
 use crate::BlockId;
+use crate::physical::transfer::context::TransferCompleteNotification;
 
 /// Coordinates transfer execution across workers.
 ///

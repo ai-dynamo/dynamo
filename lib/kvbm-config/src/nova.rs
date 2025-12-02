@@ -9,14 +9,17 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
+use crate::discovery::DiscoveryConfig;
+
 /// Nova configuration combining backend and discovery settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Validate)]
 pub struct NovaConfig {
     #[validate(nested)]
     pub backend: NovaBackendConfig,
 
-    #[validate(nested)]
-    pub discovery: NovaDiscoveryConfig,
+    /// Discovery configuration. None = discovery disabled.
+    #[serde(default)]
+    pub discovery: Option<DiscoveryConfig>,
 }
 
 impl NovaConfig {
@@ -24,14 +27,12 @@ impl NovaConfig {
     ///
     /// This creates:
     /// 1. A TCP transport bound to the configured address
-    /// 2. An etcd discovery backend (if cluster_id is set)
+    /// 2. A discovery backend based on the configured type (if any)
     /// 3. A Nova instance combining both
-    #[cfg(feature = "etcd")]
     pub async fn build_nova(&self) -> Result<std::sync::Arc<dynamo_nova::Nova>> {
         use std::sync::Arc;
         use std::time::Duration;
 
-        use dynamo_discovery::systems::EtcdConfigBuilder;
         use dynamo_nova::Nova;
         use dynamo_nova_backend::tcp::TcpTransportBuilder;
 
@@ -45,24 +46,57 @@ impl NovaConfig {
 
         tracing::info!("Built TCP transport bound to {}", bind_addr);
 
-        // 2. Build etcd discovery (if cluster_id is configured)
+        // 2. Build discovery backend based on configuration
         let mut builder = Nova::builder().add_transport(tcp_transport);
 
-        if !self.discovery.cluster_id.is_empty() {
-            let discovery_system = EtcdConfigBuilder::default()
-                .cluster_id(&self.discovery.cluster_id)
-                .endpoints(self.discovery.etcd_endpoints.clone())
-                .ttl(Duration::from_secs(self.discovery.etcd_ttl_secs))
-                .build()
-                .await
-                .context("Failed to build etcd discovery system")?;
+        if let Some(discovery_config) = &self.discovery {
+            match discovery_config {
+                DiscoveryConfig::Etcd(cfg) => {
+                    use dynamo_nova_discovery::systems::EtcdConfigBuilder;
 
-            if let Some(peer_discovery) = discovery_system.peer_discovery() {
-                builder = builder.add_discovery_backend(peer_discovery);
-                tracing::info!(
-                    "Built etcd discovery with cluster_id: {}",
-                    self.discovery.cluster_id
-                );
+                    let discovery_system = EtcdConfigBuilder::default()
+                        .cluster_id(&cfg.cluster_id)
+                        .endpoints(cfg.endpoints.clone())
+                        .ttl(Duration::from_secs(cfg.ttl_secs))
+                        .operation_timeout(Duration::from_secs(cfg.operation_timeout_secs))
+                        .max_retries(cfg.max_retries)
+                        .build()
+                        .await
+                        .context("Failed to build etcd discovery system")?;
+
+                    if let Some(peer_discovery) = discovery_system.peer_discovery() {
+                        builder = builder.add_discovery_backend(peer_discovery);
+                        tracing::info!("Built etcd discovery with cluster_id: {}", cfg.cluster_id);
+                    }
+                }
+                DiscoveryConfig::P2p(cfg) => {
+                    use dynamo_nova_discovery::systems::P2pConfigBuilder;
+
+                    let discovery_system = P2pConfigBuilder::default()
+                        .cluster_id(&cfg.cluster_id)
+                        .listen_port(cfg.listen_port)
+                        .bootstrap_peers(cfg.bootstrap_peers.clone())
+                        .replication_factor(cfg.replication_factor)
+                        .enable_mdns(cfg.enable_mdns)
+                        .record_ttl_secs(cfg.record_ttl_secs)
+                        .build()
+                        .await
+                        .context("Failed to build P2P discovery system")?;
+
+                    if let Some(peer_discovery) = discovery_system.peer_discovery() {
+                        builder = builder.add_discovery_backend(peer_discovery);
+                        tracing::info!("Built P2P discovery with cluster_id: {}", cfg.cluster_id);
+                    }
+                }
+                DiscoveryConfig::Filesystem(cfg) => {
+                    use dynamo_nova_discovery::systems::FilesystemPeerDiscovery;
+
+                    let peer_discovery = FilesystemPeerDiscovery::new(&cfg.path)
+                        .context("Failed to build filesystem discovery")?;
+
+                    builder = builder.add_discovery_backend(Arc::new(peer_discovery));
+                    tracing::info!("Built filesystem discovery from: {:?}", cfg.path);
+                }
             }
         }
 
@@ -106,44 +140,6 @@ impl NovaBackendConfig {
             (None, None) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         };
         Ok(SocketAddr::new(ip, self.tcp_port))
-    }
-}
-
-/// Nova discovery (etcd) configuration.
-///
-/// Discovery is optional - if `cluster_id` is empty, discovery is disabled.
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct NovaDiscoveryConfig {
-    /// Cluster identifier for discovery.
-    /// Empty string means discovery is disabled.
-    #[serde(default)]
-    pub cluster_id: String,
-
-    /// etcd endpoints.
-    #[serde(default = "default_etcd_endpoints")]
-    pub etcd_endpoints: Vec<String>,
-
-    /// etcd lease TTL in seconds (default: 60, range: 10-600).
-    /// Only used when discovery is enabled (cluster_id is non-empty).
-    #[serde(default = "default_etcd_ttl")]
-    pub etcd_ttl_secs: u64,
-}
-
-fn default_etcd_endpoints() -> Vec<String> {
-    vec!["http://localhost:2379".to_string()]
-}
-
-fn default_etcd_ttl() -> u64 {
-    60
-}
-
-impl Default for NovaDiscoveryConfig {
-    fn default() -> Self {
-        Self {
-            cluster_id: String::new(),
-            etcd_endpoints: default_etcd_endpoints(),
-            etcd_ttl_secs: default_etcd_ttl(),
-        }
     }
 }
 
@@ -218,13 +214,5 @@ mod tests {
                 .to_string()
                 .contains("mutually exclusive")
         );
-    }
-
-    #[test]
-    fn test_default_discovery_config() {
-        let config = NovaDiscoveryConfig::default();
-        assert!(config.cluster_id.is_empty());
-        assert_eq!(config.etcd_endpoints, vec!["http://localhost:2379"]);
-        assert_eq!(config.etcd_ttl_secs, 60);
     }
 }

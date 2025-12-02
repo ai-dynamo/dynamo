@@ -10,10 +10,12 @@ no-op responses, used for scheduler integration testing without KV transfer.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional
-
+import json
 import torch
+
+from typing import TYPE_CHECKING, Any, Optional
 from typing_extensions import override
+
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -62,12 +64,6 @@ class DynamoConnector(KVConnectorBase_V1):
         role: KVConnectorRole,
         kv_cache_config: Optional[KVCacheConfig] = None,
     ):
-        import sys
-
-        print(
-            f"[KVBM DEBUG] DynamoConnector.__init__ called with role={role}", flush=True
-        )
-        sys.stdout.flush()
 
         super().__init__(
             vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
@@ -75,26 +71,25 @@ class DynamoConnector(KVConnectorBase_V1):
 
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
-        self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
 
-        print(
-            f"[KVBM DEBUG] engine_id={self.engine_id}, creating {'SCHEDULER' if role == KVConnectorRole.SCHEDULER else 'WORKER'} connector...",
-            flush=True,
-        )
-        sys.stdout.flush()
+        # Get extra config from vLLM's KVTransferConfig (if available)
+        # This dict gets serialized to JSON and merged with env/file config in Rust
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", {}) if kv_transfer_config else {}
+
+        # Serialize to JSON and pass to Rust (empty dict = use defaults)
+        kvbm_override_config = json.dumps(extra_config) if extra_config else None
 
         if role == KVConnectorRole.SCHEDULER:
             self._scheduler = SchedulerConnectorLeader(
-                vllm_config=vllm_config, engine_id=self.engine_id
+                vllm_config=vllm_config, kv_cache_config=kv_cache_config, kvbm_override_config=kvbm_override_config
             )
             self._worker = None
-            print("[KVBM DEBUG] DynamoConnector SCHEDULER init complete", flush=True)
         elif role == KVConnectorRole.WORKER:
             self._worker = SchedulerConnectorWorker(
-                vllm_config=vllm_config, engine_id=self.engine_id
+                vllm_config=vllm_config, kv_cache_config=kv_cache_config, kvbm_override_config=kvbm_override_config
             )
             self._scheduler = None
-            print("[KVBM DEBUG] DynamoConnector WORKER init complete", flush=True)
         else:
             raise ValueError(
                 f"Invalid KVConnectorRole: {role}. Must be SCHEDULER or WORKER."

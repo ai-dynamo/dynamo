@@ -58,7 +58,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 dynamo-identity = { path = "lib/identity", version = "0.7.0" }
 dynamo-nova = { path = "lib/nova", version = "0.7.0" }
 dynamo-nova-backend = { path = "lib/nova-backend", version = "0.7.0" }
-dynamo-discovery = { path = "lib/nova-discovery", version = "0.7.0" }
+dynamo-nova-discovery = { path = "lib/nova-discovery", version = "0.7.0" }
 dynamo-kvbm = { path = "lib/kvbm", version = "0.7.0" }
 dynamo-kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.7.0" }
 dynamo-memory = { path = "lib/memory", version = "0.7.0" }

@@ -6,6 +6,7 @@
 //! Configures which NixL backends (UCX, GDS, etc.) are enabled for RDMA transfers,
 //! along with optional parameters for each backend.
 
+use dynamo_memory::nixl::NixlBackendConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use validator::Validate;
@@ -53,6 +54,7 @@ pub struct NixlConfig {
 fn default_backends() -> HashMap<String, HashMap<String, String>> {
     let mut backends = HashMap::new();
     backends.insert("UCX".to_string(), HashMap::new());
+    backends.insert("POSIX".to_string(), HashMap::new());
     backends
 }
 
@@ -65,11 +67,23 @@ impl Default for NixlConfig {
 }
 
 impl NixlConfig {
-    /// Create a new config with no backends enabled.
-    pub fn new() -> Self {
+    pub fn new(backends: HashMap<String, HashMap<String, String>>) -> Self {
+        Self { backends }
+    }
+
+    pub fn empty() -> Self {
         Self {
             backends: HashMap::new(),
         }
+    }
+
+    pub fn from_nixl_backend_config(config: NixlBackendConfig) -> Self {
+        let backends: HashMap<String, HashMap<String, String>> = config
+            .iter()
+            .map(|(backend, params)| (backend.to_string(), params.clone()))
+            .collect();
+
+        Self { backends }
     }
 
     /// Add a backend with default parameters.
@@ -116,6 +130,12 @@ impl NixlConfig {
     }
 }
 
+impl From<NixlConfig> for NixlBackendConfig {
+    fn from(config: NixlConfig) -> Self {
+        NixlBackendConfig::new(config.backends)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,19 +148,20 @@ mod tests {
     }
 
     #[test]
-    fn test_new_empty() {
-        let config = NixlConfig::new();
-        assert!(!config.has_backend("UCX"));
-        assert!(config.backends.is_empty());
+    fn test_new_default() {
+        let config = NixlConfig::default();
+        assert!(config.has_backend("UCX"));
+        assert!(config.has_backend("POSIX"));
+        assert!(!config.enabled_backends().is_empty());
     }
 
     #[test]
     fn test_with_backend() {
-        let config = NixlConfig::new().with_backend("ucx").with_backend("gds");
+        let config = NixlConfig::empty().with_backend("ucx").with_backend("gds");
 
         assert!(config.has_backend("UCX"));
         assert!(config.has_backend("GDS"));
-        assert!(!config.has_backend("OTHER"));
+        assert!(!config.has_backend("POSIX"));
 
         // Keys are stored uppercase
         assert!(config.backends.contains_key("UCX"));
@@ -153,7 +174,7 @@ mod tests {
         params.insert("threads".to_string(), "4".to_string());
         params.insert("buffer_size".to_string(), "1048576".to_string());
 
-        let config = NixlConfig::new()
+        let config = NixlConfig::empty()
             .with_backend("UCX")
             .with_backend_params("GDS", params);
 
@@ -169,7 +190,7 @@ mod tests {
 
     #[test]
     fn test_lookup_normalizes_to_uppercase() {
-        let config = NixlConfig::new().with_backend("ucx");
+        let config = NixlConfig::empty().with_backend("ucx");
 
         // All lookups normalize to uppercase
         assert!(config.has_backend("ucx"));
@@ -182,7 +203,7 @@ mod tests {
 
     #[test]
     fn test_enabled_backends() {
-        let config = NixlConfig::new().with_backend("ucx").with_backend("gds");
+        let config = NixlConfig::empty().with_backend("ucx").with_backend("gds");
 
         let backends = config.enabled_backends();
         assert_eq!(backends.len(), 2);
@@ -195,7 +216,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("key".to_string(), "value".to_string());
 
-        let config = NixlConfig::new()
+        let config = NixlConfig::empty()
             .with_backend("UCX")
             .with_backend_params("GDS", params);
 
@@ -208,7 +229,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("threads".to_string(), "4".to_string());
 
-        let config = NixlConfig::new()
+        let config = NixlConfig::empty()
             .with_backend("UCX")
             .with_backend_params("GDS", params);
 

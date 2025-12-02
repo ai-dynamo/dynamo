@@ -11,6 +11,8 @@ use anyhow::Result;
 use nixl_sys::Agent;
 use std::collections::HashSet;
 
+use crate::nixl::NixlBackendConfig;
+
 /// A NIXL agent wrapper that tracks which backends were successfully initialized.
 ///
 /// This wrapper provides:
@@ -38,6 +40,14 @@ impl NixlAgent {
             agent,
             available_backends: HashSet::new(),
         })
+    }
+
+    pub fn from_nixl_backend_config(name: &str, config: NixlBackendConfig) -> Result<Self> {
+        let mut agent = Self::new(name)?;
+        for backend in config.backends() {
+            agent.add_backend(&backend)?;
+        }
+        Ok(agent)
     }
 
     /// Add a backend to the agent.

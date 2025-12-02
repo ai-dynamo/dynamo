@@ -57,6 +57,7 @@ pub struct KvbmRuntime {
     pub(crate) config: KvbmConfig,
     pub(crate) runtime: RuntimeHandle,
     pub(crate) nova: Arc<Nova>,
+    pub(crate) nixl_agent: Option<NixlAgent>,
 }
 
 impl KvbmRuntime {
@@ -85,9 +86,20 @@ impl KvbmRuntime {
         self.runtime.handle()
     }
 
+    /// Get the tokio runtime handle (convenience alias for handle()).
+    pub fn tokio(&self) -> Handle {
+        self.handle()
+    }
+
     /// Get Nova.
     pub fn nova(&self) -> &Arc<Nova> {
         &self.nova
+    }
+
+    /// Get NixlAgent for RDMA/UCX transfers.
+    /// Returns None if NixL is disabled in config.
+    pub fn nixl_agent(&self) -> Option<&NixlAgent> {
+        self.nixl_agent.as_ref()
     }
 
     /// Get LocalEventSystem from Nova.

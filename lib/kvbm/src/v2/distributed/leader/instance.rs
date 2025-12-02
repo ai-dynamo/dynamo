@@ -69,10 +69,10 @@ pub struct InstanceLeader {
     nova: Arc<Nova>,
 
     /// G2 (host memory) block manager (wrapped in Arc since BlockManager doesn't implement Clone).
-    g2_manager: Arc<BlockManager<G2>>,
+    pub(crate) g2_manager: Arc<BlockManager<G2>>,
 
     /// Optional G3 (disk) block manager
-    g3_manager: Option<Arc<BlockManager<G3>>>,
+    pub(crate) g3_manager: Option<Arc<BlockManager<G3>>>,
 
     /// Workers for executing transfers (at least 1 required).
     /// Multiple workers enable parallel transfers and redundancy.
@@ -236,6 +236,16 @@ struct SessionState {
 }
 
 impl InstanceLeader {
+    /// Get a reference to the G2 BlockManager.
+    pub fn g2_manager(&self) -> &Arc<BlockManager<G2>> {
+        &self.g2_manager
+    }
+
+    /// Get a reference to the optional G3 BlockManager.
+    pub fn g3_manager(&self) -> Option<&Arc<BlockManager<G3>>> {
+        self.g3_manager.as_ref()
+    }
+
     pub fn builder() -> InstanceLeaderBuilder {
         InstanceLeaderBuilder::default()
     }

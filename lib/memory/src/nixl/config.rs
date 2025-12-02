@@ -4,11 +4,11 @@
 //! NIXL backend configuration with Figment support.
 //!
 //! This module provides configuration extraction for NIXL backends from
-//! environment variables with the pattern: `DYN_KVBM_NIXL_BACKEND_<backend>_<key>=<value>`
+//! environment variables with the pattern: `DYN_KVBM_NIXL_BACKEND_<backend>=<value>`
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use dynamo_config::parse_bool;
 
@@ -20,20 +20,38 @@ use dynamo_config::parse_bool;
 /// - Valid values: true/false, 1/0, on/off, yes/no (case-insensitive)
 /// - Invalid values (e.g., "maybe", "random") will cause an error
 /// - Custom params (e.g., `DYN_KVBM_NIXL_BACKEND_UCX_PARAM1=value`) will cause an error
+///
+/// # Data Structure
+///
+/// Uses a single HashMap where:
+/// - Key presence = backend is enabled
+/// - Value (inner HashMap) = backend-specific parameters (empty = defaults)
+///
+/// # TOML Example
+///
+/// ```toml
+/// [backends.UCX]
+/// # UCX with default params (empty map)
+///
+/// [backends.GDS]
+/// threads = "4"
+/// buffer_size = "1048576"
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NixlBackendConfig {
-    /// Set of enabled backends (just backend names, no custom params yet)
-    backends: HashSet<String>,
-    params: HashMap<String, HashMap<String, String>>,
+    /// Map of backend name (uppercase) -> optional parameters.
+    ///
+    /// If a backend is present in the map, it's enabled.
+    /// The inner HashMap contains optional override parameters.
+    /// An empty inner map means use default parameters.
+    #[serde(default)]
+    backends: HashMap<String, HashMap<String, String>>,
 }
 
 impl NixlBackendConfig {
-    /// Create a new empty configuration.
-    pub fn new(
-        backends: HashSet<String>,
-        params: HashMap<String, HashMap<String, String>>,
-    ) -> Self {
-        Self { backends, params }
+    /// Create a new empty configuration (no backends enabled).
+    pub fn new(backends: HashMap<String, HashMap<String, String>>) -> Self {
+        Self { backends }
     }
 
     /// Create configuration from environment variables.
@@ -45,7 +63,7 @@ impl NixlBackendConfig {
     /// - Custom parameters are detected (not yet supported)
     /// - Invalid boolean values are provided (must be truthy or falsey)
     pub fn from_env() -> Result<Self> {
-        let mut backends = HashSet::new();
+        let mut backends = HashMap::new();
 
         // Extract all environment variables that match our pattern
         for (key, value) in std::env::vars() {
@@ -64,7 +82,7 @@ impl NixlBackendConfig {
                 let backend_name = remainder.to_uppercase();
                 match parse_bool(&value) {
                     Ok(true) => {
-                        backends.insert(backend_name);
+                        backends.insert(backend_name, HashMap::new());
                     }
                     Ok(false) => {
                         // Explicitly disabled, don't add to backends
@@ -75,45 +93,58 @@ impl NixlBackendConfig {
             }
         }
 
-        // Default to UCX if no backends specified
-        if backends.is_empty() {
-            backends.insert("UCX".to_string());
-        }
-
-        Ok(Self {
-            backends,
-            params: HashMap::new(),
-        })
+        Ok(Self { backends })
     }
 
-    /// Add a backend to the configuration.
-    ///
-    /// Backend names will be converted to uppercase for consistency.
+    /// Add a backend with default parameters.
+    /// Backend name is normalized to uppercase.
     pub fn with_backend(mut self, backend: impl Into<String>) -> Self {
-        self.backends.insert(backend.into().to_uppercase());
+        self.backends
+            .insert(backend.into().to_uppercase(), HashMap::new());
         self
     }
 
-    /// Get the set of enabled backends.
-    pub fn backends(&self) -> &HashSet<String> {
-        &self.backends
+    /// Add a backend with custom parameters.
+    /// Backend name is normalized to uppercase.
+    pub fn with_backend_params(
+        mut self,
+        backend: impl Into<String>,
+        params: HashMap<String, String>,
+    ) -> Self {
+        self.backends.insert(backend.into().to_uppercase(), params);
+        self
     }
 
+    /// Get the list of enabled backend names (uppercase).
+    pub fn backends(&self) -> Vec<String> {
+        self.backends.keys().cloned().collect()
+    }
+
+    /// Get parameters for a specific backend.
+    /// Backend name is normalized to uppercase for lookup.
+    ///
+    /// Returns None if the backend is not enabled.
     pub fn backend_params(&self, backend: &str) -> Option<&HashMap<String, String>> {
-        self.params.get(backend)
+        self.backends.get(&backend.to_uppercase())
     }
 
     /// Check if a specific backend is enabled.
     pub fn has_backend(&self, backend: &str) -> bool {
-        self.backends.contains(&backend.to_uppercase())
+        self.backends.contains_key(&backend.to_uppercase())
     }
 
     /// Merge another configuration into this one.
     ///
     /// Backends from the other configuration will be added to this one.
+    /// If both have the same backend, params from `other` take precedence.
     pub fn merge(mut self, other: NixlBackendConfig) -> Self {
         self.backends.extend(other.backends);
         self
+    }
+
+    /// Iterate over all enabled backends and their parameters.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &HashMap<String, String>)> {
+        self.backends.iter()
     }
 }
 
@@ -124,7 +155,13 @@ mod tests {
     #[test]
     fn test_new_config_is_empty() {
         let config = NixlBackendConfig::default();
-        assert!(config.backends().is_empty());
+        assert_eq!(config.backends().len(), 0);
+    }
+
+    #[test]
+    fn test_default_has_ucx() {
+        let config = NixlBackendConfig::default();
+        assert!(config.backends().len() == 0); // default() is empty, from_env() has UCX default
     }
 
     #[test]
@@ -138,6 +175,26 @@ mod tests {
         assert!(config.has_backend("gds_mt"));
         assert!(config.has_backend("GDS_MT"));
         assert!(!config.has_backend("other"));
+    }
+
+    #[test]
+    fn test_with_backend_params() {
+        let mut params = HashMap::new();
+        params.insert("threads".to_string(), "4".to_string());
+        params.insert("buffer_size".to_string(), "1048576".to_string());
+
+        let config = NixlBackendConfig::default()
+            .with_backend("UCX")
+            .with_backend_params("GDS", params);
+
+        // UCX should have empty params
+        let ucx_params = config.backend_params("UCX").unwrap();
+        assert!(ucx_params.is_empty());
+
+        // GDS should have custom params
+        let gds_params = config.backend_params("GDS").unwrap();
+        assert_eq!(gds_params.get("threads"), Some(&"4".to_string()));
+        assert_eq!(gds_params.get("buffer_size"), Some(&"1048576".to_string()));
     }
 
     #[test]
@@ -164,6 +221,19 @@ mod tests {
         assert!(config.has_backend("gds_mt"));
         assert!(config.has_backend("OTHER"));
         assert!(config.has_backend("other"));
+    }
+
+    #[test]
+    fn test_iter() {
+        let mut params = HashMap::new();
+        params.insert("key".to_string(), "value".to_string());
+
+        let config = NixlBackendConfig::default()
+            .with_backend("UCX")
+            .with_backend_params("GDS", params);
+
+        let items: Vec<_> = config.iter().collect();
+        assert_eq!(items.len(), 2);
     }
 
     // Note: Testing from_env() would require setting environment variables,
