@@ -1096,29 +1096,32 @@ def lora_name_to_id(lora_name: str) -> int:
     ...
 
 async def register_model(
+    model_input: ModelInput,
+    model_type: ModelType,
     endpoint: Endpoint,
     model_name: str,
-    model_type: Optional[ModelType] = None,
-    model_input: Optional[ModelInput] = None,
     user_data: Optional[Dict[str, Any]] = None,
     runtime_config: Optional[ModelRuntimeConfig] = None,
 ) -> None:
     """
-    Register a model endpoint without requiring local files or HuggingFace downloads.
+    Register a tensor-based model endpoint without requiring local files or HuggingFace downloads.
 
-    This is designed for TensorBased models where the backend handles all preprocessing.
+    This is designed for custom backends that handle all preprocessing themselves.
     Unlike `register_llm`, this function does not download any files from HuggingFace.
 
+    This function only supports Tensor input (not Text or Tokens). For LLM models
+    that require tokenizers and config files, use `register_llm` instead.
+
     Args:
+        model_input: The input type (must be ModelInput.Tensor)
+        model_type: The model type (e.g., ModelType.TensorBased)
         endpoint: The endpoint to register the model on
         model_name: The display name for the model
-        model_type: The model type (defaults to ModelType.TensorBased)
-        model_input: The input type (defaults to ModelInput.Tensor)
         user_data: Optional user data to attach to the model card
         runtime_config: Optional runtime configuration
 
     Example:
-        await register_model(endpoint, "my-custom-model")
+        await register_model(ModelInput.Tensor, ModelType.TensorBased, endpoint, "my-custom-model")
     """
     ...
 

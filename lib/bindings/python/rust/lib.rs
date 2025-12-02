@@ -257,6 +257,13 @@ fn register_llm<'p>(
     lora_name: Option<&str>,
     base_model_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
+    // Tensor input is not supported by register_llm - use register_model instead
+    if matches!(model_input, ModelInput::Tensor) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "ModelInput::Tensor is not supported by register_llm. Use register_model() for tensor-based custom backends.",
+        ));
+    }
+
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill {
         if !matches!(model_input, ModelInput::Tokens) {
@@ -274,7 +281,7 @@ fn register_llm<'p>(
     let model_input = match model_input {
         ModelInput::Text => llm_rs::model_type::ModelInput::Text,
         ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,
-        ModelInput::Tensor => llm_rs::model_type::ModelInput::Tensor,
+        ModelInput::Tensor => unreachable!(), // Validated above
     };
 
     let model_type_obj = model_type.inner;
@@ -410,38 +417,40 @@ fn fetch_llm<'p>(py: Python<'p>, remote_name: &str) -> PyResult<Bound<'p, PyAny>
     })
 }
 
-/// Register a model endpoint without requiring local files or HuggingFace downloads.
-/// This is designed for TensorBased models where the backend handles all preprocessing.
+/// Register a tensor-based model endpoint without requiring local files or HuggingFace downloads.
+/// This is designed for custom backends that handle all preprocessing themselves.
 ///
 /// Unlike `register_llm`, this function does not download any files from HuggingFace.
 /// It creates a minimal ModelDeploymentCard with just the model name and registers it
 /// with the discovery system.
 ///
+/// This function only supports Tensor input (not Text or Tokens). For LLM models
+/// that require tokenizers and config files, use `register_llm` instead.
+///
 /// Example:
 /// ```python
-/// await register_model(endpoint, "my-custom-model")
+/// await register_model(ModelInput.Tensor, ModelType.TensorBased, endpoint, "my-custom-model")
 /// ```
 #[pyfunction]
-#[pyo3(signature = (endpoint, model_name, model_type=None, model_input=None, user_data=None, runtime_config=None))]
-#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (model_input, model_type, endpoint, model_name, user_data=None, runtime_config=None))]
 fn register_model<'p>(
     py: Python<'p>,
+    model_input: ModelInput,
+    model_type: ModelType,
     endpoint: Endpoint,
     model_name: &str,
-    model_type: Option<ModelType>,
-    model_input: Option<ModelInput>,
     user_data: Option<&Bound<'p, PyDict>>,
     runtime_config: Option<ModelRuntimeConfig>,
 ) -> PyResult<Bound<'p, PyAny>> {
-    let model_type_inner = model_type
-        .map(|m| m.inner)
-        .unwrap_or(llm_rs::model_type::ModelType::TensorBased);
+    // Only Tensor input is supported - Text and Tokens require register_llm
+    if !matches!(model_input, ModelInput::Tensor) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "register_model only supports ModelInput::Tensor. Use register_llm() for Text or Tokens input.",
+        ));
+    }
 
-    let model_input_inner = match model_input.unwrap_or(ModelInput::Tensor) {
-        ModelInput::Text => llm_rs::model_type::ModelInput::Text,
-        ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,
-        ModelInput::Tensor => llm_rs::model_type::ModelInput::Tensor,
-    };
+    let model_input_inner = llm_rs::model_type::ModelInput::Tensor;
+    let model_type_inner = model_type.inner;
 
     let model_name_owned = model_name.to_string();
 
