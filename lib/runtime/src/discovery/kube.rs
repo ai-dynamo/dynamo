@@ -20,8 +20,10 @@ use kube::Client as KubeClient;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{OnceCell, RwLock};
+use tokio::task::JoinHandle;
 
 /// Kubernetes-based discovery client
+#[derive(Clone)]
 pub struct KubeDiscoveryClient {
     instance_id: u64,
     metadata: Arc<RwLock<DiscoveryMetadata>>,
@@ -31,9 +33,16 @@ pub struct KubeDiscoveryClient {
     daemon_state: Arc<OnceCell<Arc<DaemonHandles>>>,
 }
 
-#[derive(Debug)]
 struct DaemonHandles {
     metadata_watch: tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>,
+    #[allow(dead_code)]
+    daemon_handle: JoinHandle<()>,
+}
+
+impl DaemonHandles {
+    fn receiver(&self) -> tokio::sync::watch::Receiver<Arc<MetadataSnapshot>> {
+        self.metadata_watch.clone()
+    }
 }
 
 impl KubeDiscoveryClient {
@@ -69,24 +78,41 @@ impl KubeDiscoveryClient {
             daemon_state: Arc::new(OnceCell::new()),
         })
     }
-}
 
-impl Clone for KubeDiscoveryClient {
-    fn clone(&self) -> Self {
-        Self {
-            instance_id: self.instance_id,
-            metadata: self.metadata.clone(),
-            kube_client: self.kube_client.clone(),
-            pod_info: self.pod_info.clone(),
-            cancel_token: self.cancel_token.clone(),
-            daemon_state: self.daemon_state.clone(),
-        }
-    }
-}
+    async fn metadata_watch(&self) -> Result<tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>> {
+        let handles = self
+            .daemon_state
+            .get_or_try_init(|| {
+                let instance_id = self.instance_id;
+                let kube_client = self.kube_client.clone();
+                let pod_info = self.pod_info.clone();
+                let cancel_token = self.cancel_token.clone();
 
-impl DaemonHandles {
-    fn receiver(&self) -> tokio::sync::watch::Receiver<Arc<MetadataSnapshot>> {
-        self.metadata_watch.clone()
+                async move {
+                    let (watch_tx, watch_rx) =
+                        tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
+                    let daemon = DiscoveryDaemon::new(kube_client, pod_info, cancel_token)?;
+
+                    let daemon_handle = tokio::spawn(async move {
+                        if let Err(e) = daemon.run(watch_tx).await {
+                            tracing::error!("Discovery daemon failed: {}", e);
+                        }
+                    });
+
+                    tracing::info!(
+                        "Discovery daemon started lazily for instance_id={:x}",
+                        instance_id
+                    );
+
+                    Ok::<Arc<DaemonHandles>, anyhow::Error>(Arc::new(DaemonHandles {
+                        metadata_watch: watch_rx,
+                        daemon_handle,
+                    }))
+                }
+            })
+            .await?;
+
+        Ok(handles.receiver())
     }
 }
 
@@ -160,9 +186,27 @@ impl Discovery for KubeDiscoveryClient {
         tracing::debug!("KubeDiscoveryClient::list called with query={:?}", query);
 
         // Ensure the daemon is running before accessing the snapshot
-        let metadata_watch = self.metadata_watch().await?;
+        let mut metadata_watch = self.metadata_watch().await?;
 
-        // Get current snapshot (may be empty if daemon hasn't fetched yet)
+        // Check if we need to wait for initial snapshot (avoid holding borrow across await)
+        let needs_wait = {
+            let snapshot = metadata_watch.borrow();
+            snapshot.sequence == 0 && snapshot.instances.is_empty()
+        };
+
+        // Wait for daemon to fetch at least one snapshot if this is the initial empty state
+        if needs_wait {
+            tracing::debug!("Waiting for initial discovery snapshot...");
+            // Wait for first update with a timeout
+            tokio::time::timeout(std::time::Duration::from_secs(10), metadata_watch.changed())
+                .await
+                .map_err(|_| anyhow::anyhow!("Timeout waiting for initial discovery snapshot"))?
+                .map_err(|_| {
+                    anyhow::anyhow!("Discovery daemon stopped before providing snapshot")
+                })?;
+        }
+
+        // Get current snapshot
         let snapshot = metadata_watch.borrow().clone();
 
         tracing::debug!(
@@ -327,40 +371,5 @@ impl Discovery for KubeDiscoveryClient {
         // Convert receiver to stream
         let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx);
         Ok(Box::pin(stream))
-    }
-}
-
-impl KubeDiscoveryClient {
-    async fn metadata_watch(&self) -> Result<tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>> {
-        let instance_id = self.instance_id;
-        let kube_client = self.kube_client.clone();
-        let pod_info = self.pod_info.clone();
-        let cancel_token = self.cancel_token.clone();
-
-        let handles = self
-            .daemon_state
-            .get_or_try_init(|| async move {
-                let (watch_tx, watch_rx) =
-                    tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
-                let daemon = DiscoveryDaemon::new(kube_client, pod_info, cancel_token)?;
-
-                tokio::spawn(async move {
-                    if let Err(e) = daemon.run(watch_tx).await {
-                        tracing::error!("Discovery daemon failed: {}", e);
-                    }
-                });
-
-                tracing::info!(
-                    "Discovery daemon started lazily for instance_id={:x}",
-                    instance_id
-                );
-
-                Ok::<Arc<DaemonHandles>, anyhow::Error>(Arc::new(DaemonHandles {
-                    metadata_watch: watch_rx,
-                }))
-            })
-            .await?;
-
-        Ok(handles.receiver())
     }
 }
