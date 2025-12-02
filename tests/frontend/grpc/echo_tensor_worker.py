@@ -9,7 +9,7 @@
 import tritonclient.grpc.model_config_pb2 as mc
 import uvloop
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
@@ -53,14 +53,11 @@ async def echo_tensor_worker(runtime: DistributedRuntime):
     )
     assert model_config == retrieved_model_config
 
-    # [gluo FIXME] register_llm will attempt to load a LLM model,
-    # which is not well-defined for Tensor yet. Currently provide
-    # a valid model name to pass the registration.
-    await register_llm(
+    # Use register_model for tensor-based backends
+    await register_model(
         ModelInput.Tensor,
         ModelType.TensorBased,
         endpoint,
-        "Qwen/Qwen3-0.6B",
         "echo",
         runtime_config=runtime_config,
     )
