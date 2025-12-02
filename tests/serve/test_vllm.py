@@ -43,7 +43,7 @@ vllm_configs = {
         name="aggregated",
         directory=vllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[pytest.mark.gpu_1],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
