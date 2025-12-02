@@ -1968,7 +1968,9 @@ mod test_exponential_backoff {
 mod test_integration_publisher {
     use super::*;
     use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
-    use dynamo_runtime::distributed_test_utils::create_test_drt_async;
+    use dynamo_runtime::distributed_test_utils::{
+        create_test_drt_async, create_test_shared_drt_async,
+    };
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::traits::events::EventSubscriber;
     use futures::StreamExt;
@@ -2188,8 +2190,8 @@ mod test_integration_publisher {
 
         // Make both runtimes point at the same file-backed storage backend so worker
         // registrations and heartbeats remain visible to every DRT instance.
-        let distributed1 = create_shared_drt(&shared_store_path).await?;
-        let distributed2 = create_shared_drt(&shared_store_path).await?;
+        let distributed1 = create_test_shared_drt_async(&shared_store_path).await;
+        let distributed2 = create_test_shared_drt_async(&shared_store_path).await;
         let component1 = distributed1
             .namespace("test_e2e_router")?
             .component(MOCKER_COMPONENT)?;
@@ -2236,7 +2238,7 @@ mod test_integration_publisher {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // === SETUP: Build KvPushRouter ===
-        let router_distributed = create_shared_drt(&shared_store_path).await?;
+        let router_distributed = create_test_shared_drt_async(&shared_store_path).await;
         let router_namespace = router_distributed.namespace("test_e2e_router")?;
         let backend_component = router_namespace.component(MOCKER_COMPONENT)?;
         let backend_endpoint = backend_component.endpoint("generate");
@@ -2302,6 +2304,7 @@ mod test_integration_publisher {
 
         // ===== TEST PART 2: QUERY WORKER-LOCAL KVINDEXERS DIRECTLY =====
         // TODO: This could be refactored as router function (e.g. router.refresh_from_worker(worker_id))
+        // (which should also update the global kvIndexer with the buffer from the local kvIndexer)
         let query_client = WorkerQueryClient::new(router_namespace.clone());
         let mut best_worker_info: Option<(u64, usize)> = None;
 
@@ -2351,32 +2354,5 @@ mod test_integration_publisher {
         router_distributed.shutdown();
 
         Ok(())
-    }
-
-    /// Helper that creates a DistributedRuntime pointing at the shared
-    /// file-backed KV store plus ephemeral NATS transport so that every test
-    /// runtime observes the same registration state.
-    /// NOTE: This is used for integration testing to get around the fact that
-    /// create_test_drt_async is hardcoded to spin up a memory-backed discovery store
-    /// which means we can't share discovery state across runtimes.
-    async fn create_shared_drt(
-        store_path: &std::path::Path,
-    ) -> anyhow::Result<dynamo_runtime::distributed::DistributedRuntime> {
-        use dynamo_runtime::{
-            DistributedRuntime, Runtime,
-            distributed::{DistributedConfig, RequestPlaneMode},
-            storage::kv,
-            transports::nats,
-        };
-
-        let runtime = Runtime::from_current()?;
-        let config = DistributedConfig {
-            store_backend: kv::Selector::File(store_path.to_path_buf()),
-            nats_config: Some(nats::ClientOptions::default()),
-            request_plane: RequestPlaneMode::Nats,
-        };
-        DistributedRuntime::new(runtime, config)
-            .await
-            .map_err(Into::into)
     }
 }
