@@ -188,7 +188,9 @@ impl Discovery for KubeDiscoveryClient {
         // Ensure the daemon is running before accessing the snapshot
         let mut metadata_watch = self.metadata_watch().await?;
 
-        // Check if we need to wait for initial snapshot. Given the lazy start we do not want to return empty snapshot until we give some time to workers to register.
+        // Check if we need to wait for initial snapshot.
+        // With lazy daemon start, the first call to list() triggers the daemon which needs time
+        // to poll other pods and aggregate their metadata before we have meaningful results.
         let needs_wait = {
             let snapshot = metadata_watch.borrow();
             snapshot.sequence == 0 && snapshot.instances.is_empty()
