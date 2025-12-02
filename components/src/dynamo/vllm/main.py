@@ -9,14 +9,12 @@ import tempfile
 from typing import Optional
 
 import uvloop
-from prometheus_client import REGISTRY
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
-from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -35,29 +33,13 @@ from dynamo.vllm.multimodal_handlers import (
     ProcessorHandler,
 )
 
-from .args import ENABLE_LMCACHE, Config, overwrite_args, parse_args
+from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
 from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-def setup_lmcache_environment():
-    """Setup LMCache environment variables for KV cache offloading"""
-    # LMCache configuration for matching logic
-    lmcache_config = {
-        "LMCACHE_CHUNK_SIZE": "256",  # Token chunk size
-        "LMCACHE_LOCAL_CPU": "True",  # Enable CPU memory backend
-        "LMCACHE_MAX_LOCAL_CPU_SIZE": "20",  # CPU memory limit in GB
-    }
-
-    # Set environment variables
-    for key, value in lmcache_config.items():
-        if key not in os.environ:  # Only set if not already configured
-            os.environ[key] = value
-            logger.info(f"Set LMCache environment variable: {key}={value}")
 
 
 async def graceful_shutdown(runtime):
@@ -193,8 +175,11 @@ def setup_kv_event_publisher(
 
 
 def setup_vllm_engine(config, stat_logger=None):
-    # Set PROMETHEUS_MULTIPROC_DIR before setup to avoid vLLM v0.11.0 bug
-    # vllm/v1/metrics/prometheus.py:79 passes TemporaryDirectory object instead of .name
+    # Existing vLLM v0.11.0 bug: vllm/v1/metrics/prometheus.py:79 passes TemporaryDirectory object instead of
+    # the .name string, causing a false error message when vLLM exits. Therefore, always set
+    # PROMETHEUS_MULTIPROC_DIR first, and we'll do the path cleanup.
+
+    # This vLLM bug causes a false error message when vLLM exits.
     prometheus_temp_dir = None
     if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
         prometheus_temp_dir = tempfile.TemporaryDirectory(prefix="vllm_prometheus_")
@@ -203,7 +188,7 @@ def setup_vllm_engine(config, stat_logger=None):
             f"Created PROMETHEUS_MULTIPROC_DIR at: {os.environ['PROMETHEUS_MULTIPROC_DIR']}"
         )
 
-    setup_multiprocess_prometheus()
+    setup_multiprocess_prometheus()  # call vLLM's library's function to setup multiprocess prometheus
     logger.debug(
         f"Prometheus multiproc dir set to: {os.environ.get('PROMETHEUS_MULTIPROC_DIR')}"
     )
@@ -213,13 +198,11 @@ def setup_vllm_engine(config, stat_logger=None):
 
     engine_args = config.engine_args
 
-    # KV transfer config is now handled by args.py based on ENABLE_LMCACHE env var
-    if ENABLE_LMCACHE:
-        setup_lmcache_environment()
-        logger.info("LMCache enabled for VllmWorker")
-    else:
-        logger.debug("LMCache is disabled")
-
+    if engine_args.enable_lora:
+        if "VLLM_ALLOW_RUNTIME_LORA_UPDATING" not in os.environ:
+            os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"
+        if "VLLM_LORA_MODULES_LOADING_TIMEOUT" not in os.environ:
+            os.environ["VLLM_LORA_MODULES_LOADING_TIMEOUT"] = "600"
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
         engine_args.create_model_config().get_diff_sampling_param()
@@ -257,12 +240,8 @@ def setup_vllm_engine(config, stat_logger=None):
         disable_log_requests=engine_args.disable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
-    if ENABLE_LMCACHE:
-        logger.info(
-            f"VllmWorker for {config.served_model_name} has been initialized with LMCache"
-        )
-    else:
-        logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
+
+    logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 
     return engine_client, vllm_config, default_sampling_params, prometheus_temp_dir
 
@@ -343,6 +322,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         engine_client,
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
+        enable_multimodal=config.enable_multimodal,
+        generate_endpoint=generate_endpoint,
+        config=config,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -374,8 +356,29 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         handler.kv_publishers = kv_publishers
 
     if config.engine_args.disable_log_stats is False:
+        # vLLM v1 registers its metrics with 'vllm:' prefix
+        from prometheus_client import REGISTRY, multiprocess
+
+        from dynamo.common.utils.prometheus import register_engine_metrics_callback
+
+        # Option 1: Try adding MultiProcessCollector to the global REGISTRY
+        # This would make REGISTRY collect from both its registered metrics AND multiprocess files
+        if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+            try:
+                # Add MultiProcessCollector to global REGISTRY
+                # This makes REGISTRY collect from .db files in addition to its own metrics
+                multiprocess.MultiProcessCollector(REGISTRY)
+                logger.info("Added MultiProcessCollector to global REGISTRY")
+            except ValueError as e:
+                # Might already be registered or directory issues
+                logger.warning(f"Could not add MultiProcessCollector to REGISTRY: {e}")
+
+        # Register callback with the global REGISTRY
+        # Now it should collect both its own metrics AND multiprocess metrics
         register_engine_metrics_callback(
-            endpoint=generate_endpoint, registry=REGISTRY, metric_prefix_filter="vllm:"
+            endpoint=generate_endpoint,
+            registry=REGISTRY,
+            metric_prefix_filters=["vllm:", "lmcache:"],
         )
 
     # Register prefill model with ModelType.Prefill
@@ -429,6 +432,9 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
+    load_lora_endpoint = component.endpoint("load_lora")
+    unload_lora_endpoint = component.endpoint("unload_lora")
+    list_loras_endpoint = component.endpoint("list_loras")
 
     factory = StatLoggerFactory(
         component,
@@ -453,6 +459,9 @@ async def init(runtime: DistributedRuntime, config: Config):
         engine_client,
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
+        enable_multimodal=config.enable_multimodal,
+        generate_endpoint=generate_endpoint,
+        config=config,
     )
     handler.add_temp_dir(prometheus_temp_dir)
 
@@ -484,8 +493,29 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.kv_publishers = kv_publishers
 
     if config.engine_args.disable_log_stats is False:
+        # vLLM v1 registers its metrics with 'vllm:' prefix
+        from prometheus_client import REGISTRY, multiprocess
+
+        from dynamo.common.utils.prometheus import register_engine_metrics_callback
+
+        # Option 1: Try adding MultiProcessCollector to the global REGISTRY
+        # This would make REGISTRY collect from both its registered metrics AND multiprocess files
+        if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+            try:
+                # Add MultiProcessCollector to global REGISTRY
+                # This makes REGISTRY collect from .db files in addition to its own metrics
+                multiprocess.MultiProcessCollector(REGISTRY)
+                logger.info("Added MultiProcessCollector to global REGISTRY")
+            except ValueError as e:
+                # Might already be registered or directory issues
+                logger.warning(f"Could not add MultiProcessCollector to REGISTRY: {e}")
+
+        # Register callback with the global REGISTRY
+        # Now it should collect both its own metrics AND multiprocess metrics
         register_engine_metrics_callback(
-            endpoint=generate_endpoint, registry=REGISTRY, metric_prefix_filter="vllm:"
+            endpoint=generate_endpoint,
+            registry=REGISTRY,
+            metric_prefix_filters=["vllm:", "lmcache:"],
         )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
@@ -514,6 +544,18 @@ async def init(runtime: DistributedRuntime, config: Config):
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
+                metrics_labels=[("model", config.served_model_name or config.model)],
+            ),
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora,
+                metrics_labels=[("model", config.served_model_name or config.model)],
+            ),
+            unload_lora_endpoint.serve_endpoint(
+                handler.unload_lora,
+                metrics_labels=[("model", config.served_model_name or config.model)],
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras,
                 metrics_labels=[("model", config.served_model_name or config.model)],
             ),
         )

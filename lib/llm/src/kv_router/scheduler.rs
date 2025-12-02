@@ -19,7 +19,7 @@ use super::RouterConfigOverride;
 use super::WorkerSelector;
 use super::indexer::OverlapScores;
 use super::protocols::{DpRank, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
-use super::sequence::ActiveSequencesMultiWorker;
+use super::sequence::{ActiveSequencesMultiWorker, SequenceError};
 
 use crate::tokens::SequenceHash;
 
@@ -263,9 +263,7 @@ impl KvScheduler {
                             )
                             .await
                         {
-                            tracing::warn!(
-                                "Failed to add request {request_id} to local slot tracker: {e:?}"
-                            );
+                            tracing::warn!("Failed to add request {request_id}: {e}");
                         }
                     }
                     Err(KvSchedulerError::NoEndpoints) => {
@@ -332,20 +330,19 @@ impl KvScheduler {
         isl: usize,
         overlap: u32,
         worker: WorkerWithDpRank,
-    ) {
-        let _ = self
-            .slots
+    ) -> Result<(), SequenceError> {
+        self.slots
             .add_request(request_id, token_sequence, isl, overlap, worker)
-            .await;
+            .await
     }
 
-    pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<()> {
+    pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots
             .mark_prefill_completed(&request_id.to_string())
             .await
     }
 
-    pub async fn free(&self, request_id: &str) -> Result<()> {
+    pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await
     }
 

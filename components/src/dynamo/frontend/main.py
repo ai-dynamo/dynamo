@@ -131,7 +131,25 @@ def parse_args():
         action="store_false",
         dest="use_kv_events",
         default=os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
-        help="KV Router: Disable KV events. When set, uses ApproxKvRouter for predicting block creation/deletion based only on incoming requests at a timer. By default, KV events are enabled.",
+        help="KV Router: Disable KV events. When set, the router predicts cache state based on routing decisions with TTL-based expiration and pruning, rather than receiving events from workers. By default, KV events are enabled.",
+    )
+    parser.add_argument(
+        "--router-ttl",
+        type=float,
+        default=float(os.environ.get("DYN_ROUTER_TTL", "120.0")),
+        help="KV Router: Time-to-live in seconds for blocks when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_TTL env var (default: 120.0).",
+    )
+    parser.add_argument(
+        "--router-max-tree-size",
+        type=int,
+        default=int(os.environ.get("DYN_ROUTER_MAX_TREE_SIZE", str(2**10))),
+        help="KV Router: Maximum tree size before pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1024).",
+    )
+    parser.add_argument(
+        "--router-prune-target-ratio",
+        type=float,
+        default=float(os.environ.get("DYN_ROUTER_PRUNE_TARGET_RATIO", "0.8")),
+        help="KV Router: Target size ratio after pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_PRUNE_TARGET_RATIO env var (default: 0.8).",
     )
     parser.add_argument(
         "--namespace",
@@ -282,6 +300,9 @@ async def async_main():
             router_snapshot_threshold=flags.router_snapshot_threshold,
             router_reset_states=flags.router_reset_states,
             router_track_active_blocks=flags.router_track_active_blocks,
+            router_ttl_secs=flags.router_ttl,
+            router_max_tree_size=flags.router_max_tree_size,
+            router_prune_target_ratio=flags.router_prune_target_ratio,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random

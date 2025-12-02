@@ -14,8 +14,9 @@ use crate::{
     component::{Endpoint, Instance, TransportType, service::EndpointStatsHandler},
     distributed::RequestPlaneMode,
     pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint},
-    storage::key_value_store,
+    protocols::EndpointId,
     traits::DistributedRuntimeProvider,
+    transports::nats,
 };
 
 #[derive(Educe, Builder, Dissolve)]
@@ -62,9 +63,25 @@ impl EndpointConfigBuilder {
         self._stats_handler(Some(Box::new(handler)))
     }
 
+    /// Register an async engine in the local endpoint registry for direct in-process calls
+    pub fn register_local_engine(
+        self,
+        engine: crate::local_endpoint_registry::LocalAsyncEngine,
+    ) -> Result<Self> {
+        if let Some(endpoint) = &self.endpoint {
+            let registry = endpoint.drt().local_endpoint_registry();
+            registry.register(endpoint.name.clone(), engine);
+            tracing::debug!(
+                "Registered engine for endpoint '{}' in local registry",
+                endpoint.name
+            );
+        }
+        Ok(self)
+    }
+
     pub async fn start(self) -> Result<()> {
         let (
-            mut endpoint,
+            endpoint,
             handler,
             stats_handler,
             metrics_labels,
@@ -72,11 +89,9 @@ impl EndpointConfigBuilder {
             health_check_payload,
         ) = self.build_internal()?.dissolve();
         let connection_id = endpoint.drt().connection_id();
+        let endpoint_id = endpoint.id();
 
-        tracing::debug!(
-            "Starting endpoint: {}",
-            endpoint.etcd_path_with_lease_id(connection_id)
-        );
+        tracing::debug!("Starting endpoint: {endpoint_id}");
 
         let service_name = endpoint.component.service_name();
 
@@ -86,19 +101,6 @@ impl EndpointConfigBuilder {
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
 
-        // Determine request plane mode
-        let request_plane_mode = endpoint.drt().request_plane();
-        if request_plane_mode.is_nats() {
-            // We only need the service if we want NATS metrics.
-            // TODO: This is called for every endpoint of a component. Ideally we only call it once
-            // on the component.
-            endpoint.component.add_stats_service().await?;
-        }
-        tracing::info!(
-            "Endpoint starting with request plane mode: {:?}",
-            request_plane_mode
-        );
-
         // Insert the stats handler. depends on NATS.
         if let Some(stats_handler) = stats_handler {
             let registry = endpoint.drt().component_registry().inner.lock().await;
@@ -107,47 +109,46 @@ impl EndpointConfigBuilder {
                 .get(&service_name)
                 .cloned()
                 .expect("no stats handler registry; this is unexpected");
-            handler_map
-                .lock()
-                .insert(endpoint.subject_to(connection_id), stats_handler);
+            // There is something wrong with the stats handler map I think.
+            // Here the connection_id is included, but in component/service.rs add_stats_service it uses service_name,
+            // no connection id so it's per-endpoint not per-instance. Doesn't match.
+            // To not block current refactor I am keeping previous behavior, but I think needs
+            // investigation.
+            handler_map.lock().insert(
+                nats::instance_subject(&endpoint_id, connection_id),
+                stats_handler,
+            );
         }
 
         // This creates a child token of the runtime's endpoint_shutdown_token. That token is
         // cancelled first as part of graceful shutdown. See Runtime::shutdown.
         let endpoint_shutdown_token = endpoint.drt().child_token();
 
-        // Extract all values needed from endpoint before any spawns
-        let namespace_name = endpoint.component.namespace.name.clone();
-        let component_name = endpoint.component.name.clone();
-        let endpoint_name = endpoint.name.clone();
         let system_health = endpoint.drt().system_health();
-        let subject = endpoint.subject_to(connection_id);
+
+        let request_plane_mode = endpoint.drt().request_plane();
+        tracing::info!("Endpoint starting with request plane mode: {request_plane_mode}",);
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
             // Build transport based on request plane mode
-            let transport = build_transport_type(
-                request_plane_mode,
-                &endpoint_name,
-                &subject,
-                TransportContext::HealthCheck,
-            );
+            let transport = build_transport_type(request_plane_mode, &endpoint_id, connection_id);
 
             let instance = Instance {
-                component: component_name.clone(),
-                endpoint: endpoint_name.clone(),
-                namespace: namespace_name.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+                namespace: endpoint_id.namespace.clone(),
                 instance_id: connection_id,
                 transport,
             };
-            tracing::debug!(endpoint_name = %endpoint_name, "Registering endpoint health check target");
+            tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
             let guard = system_health.lock();
             guard.register_health_check_target(
-                &endpoint_name,
+                &endpoint.name,
                 instance,
                 health_check_payload.clone(),
             );
-            if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint_name) {
+            if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint.name) {
                 handler.set_endpoint_health_check_notifier(notifier)?;
             }
         }
@@ -172,9 +173,9 @@ impl EndpointConfigBuilder {
         };
 
         // Create clones for the async closure
-        let namespace_name_for_task = namespace_name.clone();
-        let component_name_for_task = component_name.clone();
-        let endpoint_name_for_task = endpoint_name.clone();
+        let namespace_name_for_task = endpoint_id.namespace.clone();
+        let component_name_for_task = endpoint_id.component.clone();
+        let endpoint_name_for_task = endpoint_id.name.clone();
 
         // Get the unified request plane server (works for all transport types)
         let server = endpoint.drt().request_plane_server().await?;
@@ -237,24 +238,18 @@ impl EndpointConfigBuilder {
         let discovery = endpoint.drt().discovery();
 
         // Build transport for discovery service based on request plane mode
-        let transport = build_transport_type(
-            request_plane_mode,
-            &endpoint_name,
-            &subject,
-            TransportContext::Discovery,
-        );
+        let transport = build_transport_type(request_plane_mode, &endpoint_id, connection_id);
 
         let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
-            namespace: namespace_name.clone(),
-            component: component_name.clone(),
-            endpoint: endpoint_name.clone(),
+            namespace: endpoint_id.namespace.clone(),
+            component: endpoint_id.component.clone(),
+            endpoint: endpoint_id.name.clone(),
             transport,
         };
 
         if let Err(e) = discovery.register(discovery_spec).await {
             tracing::error!(
-                component_name,
-                endpoint_name,
+                %endpoint_id,
                 error = %e,
                 "Unable to register service for discovery"
             );
@@ -270,31 +265,21 @@ impl EndpointConfigBuilder {
     }
 }
 
-/// Context for building transport type - determines port and formatting differences
-enum TransportContext {
-    /// For health check targets
-    HealthCheck,
-    /// For discovery service registration
-    Discovery,
-}
-
-/// Build transport type based on request plane mode and context
+/// Build transport type based on request plane mode
 ///
-/// This unified function handles both health check and discovery transport building,
-/// with context-specific differences:
-/// - HTTP: Both use the same port (default 8888, configurable via DYN_HTTP_RPC_PORT)
-/// - TCP: Health check omits endpoint suffix, discovery includes it for routing
-/// - NATS: Identical for both contexts
-fn build_transport_type(
+/// This function handles both health check and discovery transport building.
+/// All transport modes use consistent addressing:
+/// - HTTP: Uses full URL path including endpoint name (e.g., http://host:port/v1/rpc/endpoint_name)
+/// - TCP: Includes endpoint name for routing (e.g., host:port/endpoint_name)
+/// - NATS: Uses subject-based addressing (unique per endpoint)
+pub fn build_transport_type(
     mode: RequestPlaneMode,
-    endpoint_name: &str,
-    subject: &str,
-    context: TransportContext,
+    endpoint_id: &EndpointId,
+    connection_id: u64,
 ) -> TransportType {
     match mode {
         RequestPlaneMode::Http => {
             let http_host = crate::utils::get_http_rpc_host_from_env();
-            // Both health check and discovery use the same port (8888) where the HTTP server binds
             let http_port = std::env::var("DYN_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
@@ -303,8 +288,8 @@ fn build_transport_type(
                 std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
 
             let http_endpoint = format!(
-                "http://{}:{}{}/{}",
-                http_host, http_port, rpc_root, endpoint_name
+                "http://{http_host}:{http_port}{rpc_root}/{}",
+                endpoint_id.name
             );
 
             TransportType::Http(http_endpoint)
@@ -316,19 +301,14 @@ fn build_transport_type(
                 .and_then(|p| p.parse::<u16>().ok())
                 .unwrap_or(9999);
 
-            let tcp_endpoint = match context {
-                TransportContext::HealthCheck => {
-                    // Health check uses simple host:port format
-                    format!("{}:{}", tcp_host, tcp_port)
-                }
-                TransportContext::Discovery => {
-                    // Discovery includes endpoint name for routing
-                    format!("{}:{}/{}", tcp_host, tcp_port, endpoint_name)
-                }
-            };
+            // Include endpoint name for proper TCP routing
+            // TCP client parses this format and adds x-endpoint-path header for server-side routing
+            let tcp_endpoint = format!("{}:{}/{}", tcp_host, tcp_port, endpoint_id.name);
 
             TransportType::Tcp(tcp_endpoint)
         }
-        RequestPlaneMode::Nats => TransportType::Nats(subject.to_string()),
+        RequestPlaneMode::Nats => {
+            TransportType::Nats(nats::instance_subject(endpoint_id, connection_id))
+        }
     }
 }

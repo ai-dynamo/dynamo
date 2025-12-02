@@ -45,7 +45,7 @@ pub async fn run(
             .await?;
             grpc_service
         }
-        EngineConfig::StaticFull { engine, model, .. } => {
+        EngineConfig::InProcessText { engine, model, .. } => {
             let grpc_service = grpc_service_builder.build()?;
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = grpc_service.model_manager();
@@ -54,7 +54,7 @@ pub async fn run(
             manager.add_chat_completions_model(model.service_name(), checksum, engine)?;
             grpc_service
         }
-        EngineConfig::StaticCore {
+        EngineConfig::InProcessTokens {
             engine: inner_engine,
             model,
             ..
@@ -81,9 +81,18 @@ pub async fn run(
             grpc_service
         }
     };
-    grpc_service
-        .run(distributed_runtime.primary_token())
-        .await?;
+
+    // Run both HTTP (for metrics) and gRPC servers concurrently
+    let http_service = grpc_service.http_service().clone();
+    let shutdown_token = distributed_runtime.primary_token();
+
+    // Wait for both servers to complete, propagating the first error if any occurs
+    // Both tasks should run indefinitely until cancelled by the shutdown token
+    tokio::try_join!(
+        grpc_service.run(shutdown_token.clone()),
+        http_service.run(shutdown_token)
+    )?;
+
     distributed_runtime.shutdown(); // Cancel primary token
     Ok(())
 }
