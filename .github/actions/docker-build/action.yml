@@ -62,6 +62,8 @@ runs:
       uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
       with:
         driver: docker
+        # Enable BuildKit for enhanced metadata
+        buildkitd-flags: --debug
     - name: Login to ECR
       shell: bash
       env:
@@ -88,6 +90,8 @@ runs:
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_JOB: ${{ github.job }}
       run: |
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
@@ -97,10 +101,16 @@ runs:
         fi
 
         BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        echo "🕐 Build started at: ${BUILD_START_TIME}"
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
 
         echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+        # Create build logs directory
+        mkdir -p build-logs
+        BUILD_LOG_FILE="build-logs/build-${{ inputs.framework }}-$(echo '${{ inputs.platform }}' | sed 's/linux\///').log"
+        echo "BUILD_LOG_FILE=${BUILD_LOG_FILE}" >> $GITHUB_ENV
+        echo "📝 Build log will be saved to: ${BUILD_LOG_FILE}"
+
         # Collect optional overrides provided by the workflow
         EXTRA_ARGS=""
         if [ -n "${{ inputs.base_image_tag }}" ]; then
@@ -116,6 +126,7 @@ runs:
           EXTRA_ARGS+=" --build-arg TORCH_BACKEND=${{ inputs.torch_backend }}"
         fi
 
+        # Execute build and capture output (show on console AND save to file)
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --vllm-max-jobs 10 \
@@ -123,17 +134,20 @@ runs:
           --platform ${{ inputs.platform }} \
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
-          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS
+          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
+
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        echo "🕐 Build ended at: ${BUILD_END_TIME}"
         echo "BUILD_END_TIME=${BUILD_END_TIME}" >> $GITHUB_ENV
+
+        # Exit with the build's exit code
+        exit ${BUILD_EXIT_CODE}
 
     - name: Capture Build Metrics
       id: metrics
       shell: bash
       run: |
-        echo "📊 Capturing build metrics for ${{ inputs.framework }}..."
 
         # Create metrics directory
         mkdir -p build-metrics
@@ -162,21 +176,17 @@ runs:
           echo "⚠️  No image tag available"
         fi
 
-        echo "📊 Final metrics captured"
-
-        # Create consolidated metrics JSON file
-        echo "🔍 Debug: inputs.platform = '${{ inputs.platform }}'"
         PLATFORM_ARCH=$(echo "${{ inputs.platform }}" | sed 's/linux\///')
-        echo "🔍 Debug: PLATFORM_ARCH = '${PLATFORM_ARCH}'"
+        echo "  Architecture: ${PLATFORM_ARCH}"
         echo "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV
         JOB_KEY="${{ inputs.framework }}-${PLATFORM_ARCH}"
-        echo "🔍 Debug: JOB_KEY = '${JOB_KEY}'"
+        echo "  Job Key: ${JOB_KEY}"
 
         # Create job-specific metrics file
         mkdir -p build-metrics
         METRICS_FILE="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${{ github.run_id }}-${{ job.check_run_id }}.json"
 
-        # Create the job metrics file directly
+        # Create the job metrics file
         cat > "$METRICS_FILE" << EOF
         {
           "framework": "${{ inputs.framework }}",
@@ -190,15 +200,103 @@ runs:
         }
         EOF
 
-        echo "📁 Created build metrics file for ${JOB_KEY}:"
         cat "$METRICS_FILE"
 
-        # Metrics captured and saved to JSON file
+    - name: Generate Comprehensive Build Metrics
+      id: comprehensive-metrics
+      if: always()
+      shell: bash
+      run: |
+        echo "=========================================="
+        echo "📊 GENERATING COMPREHENSIVE BUILD METRICS"
+        echo "=========================================="
 
-    # Upload job-specific build metrics as artifact
-    - name: Upload Build Metrics
+        # Create metrics directory
+        mkdir -p build-metrics
+
+        PLATFORM_ARCH="${{ env.PLATFORM_ARCH }}"
+        WORKFLOW_ID="${{ github.run_id }}"
+        JOB_ID="${{ job.check_run_id }}"
+        FRAMEWORK_LOWER=$(echo "${{ inputs.framework }}" | tr '[:upper:]' '[:lower:]')
+
+        # Make parser executable
+        chmod +x .github/scripts/parse_buildkit_output.py
+
+        # Check for build logs and build stage arguments dynamically
+        BASE_BUILD_LOG="build-logs/base-image-build.log"
+        FRAMEWORK_BUILD_LOG="build-logs/framework-${FRAMEWORK_LOWER}-build.log"
+
+        # Path to container metadata created in previous step
+        CONTAINER_METADATA="build-metrics/metrics-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
+
+        # Output single comprehensive JSON with all build stages
+        COMPREHENSIVE_JSON="build-metrics/build-${{ inputs.framework }}-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"
+
+        echo "🚀 Parsing BuildKit outputs and merging with container metrics..."
+
+        # Build stage arguments dynamically based on which logs exist
+        STAGE_ARGS=()
+
+        if [ -f "$BASE_BUILD_LOG" ]; then
+          echo "  ✓ Found base image log: ${BASE_BUILD_LOG}"
+          STAGE_ARGS+=("base:${BASE_BUILD_LOG}")
+        else
+          echo "  ℹ️  No base image log found"
+        fi
+
+        if [ -f "$FRAMEWORK_BUILD_LOG" ]; then
+          echo "  ✓ Found framework log: ${FRAMEWORK_BUILD_LOG}"
+          STAGE_ARGS+=("runtime:${FRAMEWORK_BUILD_LOG}")
+        else
+          echo "  ℹ️  No framework log found"
+        fi
+
+        # Check for any additional stage logs (e.g., build-logs/stage3-*.log)
+        for extra_log in build-logs/stage*.log; do
+          if [ -f "$extra_log" ]; then
+            stage_name=$(basename "$extra_log" .log)
+            echo "  ✓ Found additional stage log: ${extra_log} (${stage_name})"
+            STAGE_ARGS+=("${stage_name}:${extra_log}")
+          fi
+        done
+
+        echo "Container Metadata: ${CONTAINER_METADATA}"
+        echo "Output: ${COMPREHENSIVE_JSON}"
+        echo ""
+
+        # Run parser with all discovered stages
+        # Usage: parse_buildkit_output.py <output_json> <stage1_name:log_file> [stage2_name:log_file] ... [--metadata=<file>]
+        set +e
+        python3 .github/scripts/parse_buildkit_output.py \
+          "$COMPREHENSIVE_JSON" \
+          "${STAGE_ARGS[@]}" \
+          "--metadata=${CONTAINER_METADATA}"
+        PARSER_EXIT_CODE=$?
+        set -e
+
+        echo ""
+        echo "📊 Parser exit code: ${PARSER_EXIT_CODE}"
+
+        if [ ${PARSER_EXIT_CODE} -eq 0 ] && [ -f "$COMPREHENSIVE_JSON" ]; then
+          echo "✅ Comprehensive build metrics generated successfully"
+          echo "📄 Output file: ${COMPREHENSIVE_JSON}"
+          echo ""
+          echo "=========================================="
+          echo "📋 FULL JSON OUTPUT (for debugging)"
+          echo "=========================================="
+          cat "$COMPREHENSIVE_JSON"
+          echo ""
+          echo "=========================================="
+        else
+          echo "⚠️  Metrics generation had issues but continuing..."
+        fi
+
+    # Upload comprehensive build metrics as artifact
+    - name: Upload Comprehensive Build Metrics
       uses: actions/upload-artifact@v4
+      if: always()
       with:
         name: build-metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: build-metrics/metrics-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
+        path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
         retention-days: 7
+

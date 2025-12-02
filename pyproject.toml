@@ -65,6 +65,11 @@ sglang = [
     "sglang==0.5.4.post3",
 ]
 
+[project.entry-points.pytest11]
+vllm_tests = "dynamo.vllm.tests.conftest"
+trtllm_tests = "dynamo.trtllm.tests.conftest"
+sglang_tests = "dynamo.sglang.tests.conftest"
+
 [dependency-groups]
 docs = [
     # Core Sphinx
@@ -185,9 +190,11 @@ filterwarnings = [
 asyncio_mode = "auto"
 markers = [
     "pre_merge: marks tests to run before merging",
+    "post_merge: marks tests to run after merge",
     "parallel: marks tests that can run in parallel with pytest-xdist",
     "nightly: marks tests to run nightly",
     "weekly: marks tests to run weekly",
+    "gpu_0: marks tests that don't require GPU",
     "gpu_1: marks tests to run on GPU",
     "gpu_2: marks tests to run on 2GPUs",
     "gpu_4: marks tests to run on 4GPUs",
@@ -196,13 +203,15 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "stress: marks tests as stress tests",
+    "performance: marks tests as performance tests",
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
-    "trtllm_marker: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
     "multimodal: marks tests as multimodal (image/video) tests",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
+    "router: marks tests for router component",
+    "planner: marks tests for planner component",
     "kvbm: marks tests for KV behavior and model determinism",
     "kvbm_v2: marks tests using KVBM V2",
     "model: model id used by a test or parameter",
