@@ -109,8 +109,8 @@ RUN if [ -f ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/__editable_
     find ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages -name "__editable__.deep_ep*.pth" -exec sed -i 's|/vllm-workspace|/opt/vllm|g' {} \; && \
     # Fix DeepEP finder modules (these contain the actual hardcoded MAPPING paths)
     find ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages -name "__editable___deep_ep*_finder.py" -exec sed -i "s|'/vllm-workspace|'/opt/vllm|g" {} \; && \
-    # Also check for any other .pth files that might reference /vllm-workspace
-    find ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages -name "*.pth" -exec sed -i 's|/vllm-workspace|/opt/vllm|g' {} \;
+    # Fix vLLM finder module paths (CRITICAL - without this vLLM won't be found)
+    find ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages -name "__editable___vllm*_finder.py" -exec sed -i "s|'/vllm-workspace|'/opt/vllm|g" {} \; && \
 
 # Set LD_LIBRARY_PATH for all components
 ENV LD_LIBRARY_PATH=\
