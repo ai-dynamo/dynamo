@@ -326,8 +326,7 @@ fn register_llm<'p>(
         // For TensorBased models, skip HuggingFace downloads and register directly
         if is_tensor_based {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
-            let mut card =
-                llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
+            let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             card.model_type = model_type_obj;
             card.model_input = model_input;
             card.user_data = user_data_json;
