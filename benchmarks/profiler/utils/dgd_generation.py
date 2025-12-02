@@ -16,7 +16,7 @@
 import copy
 import json
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import yaml
@@ -261,6 +261,7 @@ def generate_dgd_config_with_planner(
     )
 
     # Return multi-doc YAML (ConfigMap + DGD) when ConfigMap is created; else DGD only
+    dgd_config: list[dict[str, Any]] | dict[str, Any]
     if config_map_obj is not None:
         dgd_config = [config_map_obj, config_dict]
     else:
