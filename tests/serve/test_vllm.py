@@ -135,7 +135,7 @@ vllm_configs = {
         name="agg-router",
         directory=vllm_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(
@@ -154,7 +154,7 @@ vllm_configs = {
         name="disaggregated",
         directory=vllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
@@ -169,6 +169,7 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.vllm,
             pytest.mark.h100,
+            pytest.mark.nightly,
         ],
         model="deepseek-ai/DeepSeek-V2-Lite",
         script_args=[
@@ -191,7 +192,7 @@ vllm_configs = {
         name="multimodal_agg_llava_epd",
         directory=vllm_dir,
         script_name="agg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
         request_payloads=[
@@ -217,7 +218,7 @@ vllm_configs = {
         name="multimodal_agg_qwen_epd",
         directory=vllm_dir,
         script_name="agg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
@@ -244,7 +245,7 @@ vllm_configs = {
         name="multimodal_agg_qwen",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         delayed_start=0,
@@ -308,7 +309,7 @@ vllm_configs = {
         name="multimodal_video_agg",
         directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
         script_name="video_agg.sh",
-        marks=[pytest.mark.gpu_2],
+        marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
         delayed_start=0,
         script_args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
@@ -449,6 +450,7 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
+@pytest.mark.nightly
 def test_serve_deployment(
     vllm_config_test, request, runtime_services, predownload_models, image_server
 ):
