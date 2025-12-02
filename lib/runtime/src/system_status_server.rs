@@ -10,7 +10,6 @@ use crate::config::environment_names::runtime::canary as env_canary;
 use crate::config::environment_names::runtime::system as env_system;
 use crate::logging::make_request_span;
 use crate::metrics::MetricsHierarchy;
-use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
 use axum::{
     Router,
@@ -606,26 +605,17 @@ mod integration_tests {
             let response = drt.metrics().prometheus_expfmt().unwrap();
             println!("Full metrics response:\n{}", response);
 
-            // Filter out NATS client metrics for comparison
-            let filtered_response: String = response
-                .lines()
-                .filter(|line| {
-                    !line.contains(nats_client::PREFIX) && !line.contains(nats_service::PREFIX)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-
             // Check that uptime_seconds metric is present with correct namespace
             assert!(
-                filtered_response.contains("# HELP dynamo_component_uptime_seconds"),
+                response.contains("# HELP dynamo_component_uptime_seconds"),
                 "Should contain uptime_seconds help text"
             );
             assert!(
-                filtered_response.contains("# TYPE dynamo_component_uptime_seconds gauge"),
+                response.contains("# TYPE dynamo_component_uptime_seconds gauge"),
                 "Should contain uptime_seconds type"
             );
             assert!(
-                filtered_response.contains("dynamo_component_uptime_seconds"),
+                response.contains("dynamo_component_uptime_seconds"),
                 "Should contain uptime_seconds metric with correct namespace"
             );
         })
@@ -918,7 +908,6 @@ mod integration_tests {
                 // Start the service and endpoint with a health check payload
                 // This will automatically register the endpoint for health monitoring
                 tokio::spawn(async move {
-                    component.add_stats_service().await.unwrap();
                     let _ = component.endpoint(ENDPOINT_NAME)
                         .endpoint_builder()
                         .handler(ingress)

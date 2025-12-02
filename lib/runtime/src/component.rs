@@ -43,7 +43,6 @@ use super::{DistributedRuntime, Runtime, traits::*, transports::nats::Slug, util
 
 use crate::pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint};
 use crate::protocols::EndpointId;
-use crate::service::ComponentNatsServerPrometheusMetrics;
 use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
@@ -52,7 +51,6 @@ use derive_builder::Builder;
 use derive_getters::Getters;
 use educe::Educe;
 use serde::{Deserialize, Serialize};
-use service::EndpointStatsHandler;
 use std::{collections::HashMap, hash::Hash, sync::Arc};
 use validator::{Validate, ValidationError};
 
@@ -62,7 +60,6 @@ mod component;
 mod endpoint;
 mod namespace;
 mod registry;
-pub mod service;
 
 pub use client::Client;
 pub use endpoint::build_transport_type;
@@ -79,8 +76,6 @@ pub enum TransportType {
 #[derive(Default)]
 pub struct RegistryInner {
     pub(crate) services: HashMap<String, Service>,
-    pub(crate) stats_handlers:
-        HashMap<String, Arc<parking_lot::Mutex<HashMap<String, EndpointStatsHandler>>>>,
 }
 
 #[derive(Clone)]
@@ -279,11 +274,6 @@ impl ComponentBuilder {
 
     pub fn build(self) -> Result<Component, anyhow::Error> {
         let component = self.build_internal()?;
-        // If this component is using NATS, gather it's metrics
-        let drt = component.drt();
-        if drt.request_plane().is_nats() {
-            drt.start_stats_service(component.clone());
-        }
         Ok(component)
     }
 }
