@@ -385,6 +385,15 @@ impl ModelDeploymentCard {
             return Ok(());
         }
 
+        // For TensorBased models, config files are not used - they handle everything in the backend
+        if self.model_type.supports_tensor() {
+            tracing::debug!(
+                display_name = %self.display_name,
+                "Skipping config download for TensorBased model"
+            );
+            return Ok(());
+        }
+
         let ignore_weights = true;
         let local_path = crate::hub::from_hf(&self.display_name, ignore_weights).await?;
 

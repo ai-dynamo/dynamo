@@ -1095,6 +1095,33 @@ def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
 
+async def register_model(
+    endpoint: Endpoint,
+    model_name: str,
+    model_type: Optional[ModelType] = None,
+    model_input: Optional[ModelInput] = None,
+    user_data: Optional[Dict[str, Any]] = None,
+    runtime_config: Optional[ModelRuntimeConfig] = None,
+) -> None:
+    """
+    Register a model endpoint without requiring local files or HuggingFace downloads.
+
+    This is designed for TensorBased models where the backend handles all preprocessing.
+    Unlike `register_llm`, this function does not download any files from HuggingFace.
+
+    Args:
+        endpoint: The endpoint to register the model on
+        model_name: The display name for the model
+        model_type: The model type (defaults to ModelType.TensorBased)
+        model_input: The input type (defaults to ModelInput.Tensor)
+        user_data: Optional user data to attach to the model card
+        runtime_config: Optional runtime configuration
+
+    Example:
+        await register_model(endpoint, "my-custom-model")
+    """
+    ...
+
 async def fetch_llm(remote_name: str) -> str:
     """
     Download a model from Hugging Face, returning it's local path.

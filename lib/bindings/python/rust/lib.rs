@@ -141,6 +141,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(register_model, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_llm, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
@@ -406,6 +407,76 @@ fn fetch_llm<'p>(py: Python<'p>, remote_name: &str) -> PyResult<Bound<'p, PyAny>
     let repo = remote_name.to_string();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         LocalModel::fetch(&repo, false).await.map_err(to_pyerr)
+    })
+}
+
+/// Register a model endpoint without requiring local files or HuggingFace downloads.
+/// This is designed for TensorBased models where the backend handles all preprocessing.
+///
+/// Unlike `register_llm`, this function does not download any files from HuggingFace.
+/// It creates a minimal ModelDeploymentCard with just the model name and registers it
+/// with the discovery system.
+///
+/// Example:
+/// ```python
+/// await register_model(endpoint, "my-custom-model")
+/// ```
+#[pyfunction]
+#[pyo3(signature = (endpoint, model_name, model_type=None, model_input=None, user_data=None, runtime_config=None))]
+#[allow(clippy::too_many_arguments)]
+fn register_model<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    model_name: &str,
+    model_type: Option<ModelType>,
+    model_input: Option<ModelInput>,
+    user_data: Option<&Bound<'p, PyDict>>,
+    runtime_config: Option<ModelRuntimeConfig>,
+) -> PyResult<Bound<'p, PyAny>> {
+    let model_type_inner = model_type
+        .map(|m| m.inner)
+        .unwrap_or(llm_rs::model_type::ModelType::TensorBased);
+
+    let model_input_inner = match model_input.unwrap_or(ModelInput::Tensor) {
+        ModelInput::Text => llm_rs::model_type::ModelInput::Text,
+        ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,
+        ModelInput::Tensor => llm_rs::model_type::ModelInput::Tensor,
+    };
+
+    let model_name_owned = model_name.to_string();
+
+    let user_data_json = user_data
+        .map(|dict| pythonize::depythonize(dict))
+        .transpose()
+        .map_err(|err| {
+            PyErr::new::<PyException, _>(format!("Failed to convert user_data: {}", err))
+        })?;
+
+    let runtime_config_inner = runtime_config.map(|c| c.inner);
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        // Create a minimal ModelDeploymentCard - no file downloads needed
+        let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name_owned);
+        card.model_type = model_type_inner;
+        card.model_input = model_input_inner;
+        card.user_data = user_data_json;
+
+        if let Some(cfg) = runtime_config_inner {
+            card.runtime_config = cfg;
+        }
+
+        // Register the Model Deployment Card via discovery interface
+        let discovery = endpoint.inner.drt().discovery();
+        let spec = rs::discovery::DiscoverySpec::from_model(
+            endpoint.inner.component().namespace().name().to_string(),
+            endpoint.inner.component().name().to_string(),
+            endpoint.inner.name().to_string(),
+            &card,
+        )
+        .map_err(to_pyerr)?;
+        discovery.register(spec).await.map_err(to_pyerr)?;
+
+        Ok(())
     })
 }
 
