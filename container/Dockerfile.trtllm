@@ -200,9 +200,6 @@ ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 # workaround for pickle lib issue
 ENV OMPI_MCA_coll_ucc_enable=0
 
-ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
 # Install Python, build-essential and python3-dev as apt dependencies
 RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         ARCH_FOR_GPG=${ARCH_ALT}; \
@@ -382,6 +379,11 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 USER dynamo
+
+# Set DYNAMO_COMMIT_SHA late to avoid cache invalidation
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
