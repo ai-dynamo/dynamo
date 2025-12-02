@@ -79,7 +79,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 "top_k": sampling_opts.get("top_k"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
             }
-            # Filter out None values
             sampling_params = {
                 k: v for k, v in sampling_params.items() if v is not None
             }

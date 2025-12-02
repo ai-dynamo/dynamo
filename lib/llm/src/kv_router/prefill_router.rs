@@ -43,11 +43,25 @@ pub enum PrefillError {
 }
 
 /// The inner router used by PrefillRouter
+#[derive(Clone)]
 enum InnerPrefillRouter {
     /// KV-aware routing using KvPushRouter
     KvRouter(Arc<KvPushRouter>),
     /// Simple routing (RoundRobin, Random, Direct)
     SimpleRouter(Arc<PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>>),
+}
+
+impl InnerPrefillRouter {
+    /// Execute prefill generation through the underlying router
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        match self {
+            InnerPrefillRouter::KvRouter(router) => router.generate(request).await,
+            InnerPrefillRouter::SimpleRouter(router) => router.generate(request).await,
+        }
+    }
 }
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
@@ -186,7 +200,7 @@ impl PrefillRouter {
     async fn build_bootstrap_info(
         &self,
         req: &PreprocessedRequest,
-    ) -> Option<(u64, BootstrapInfo)> {
+    ) -> Option<(u64, u32, BootstrapInfo)> {
         let prefill_router = self.prefill_router.get()?;
 
         // Only works with KvRouter
@@ -196,7 +210,7 @@ impl PrefillRouter {
         };
 
         // Query best worker without routing
-        let (worker_id, _dp_rank) = match kv_router
+        let (worker_id, dp_rank) = match kv_router
             .chooser
             .find_best_match(None, &req.token_ids, None, false)
             .await
@@ -214,6 +228,7 @@ impl PrefillRouter {
 
         tracing::info!(
             worker_id = worker_id,
+            dp_rank = dp_rank,
             bootstrap_host = %host,
             bootstrap_port = port,
             bootstrap_room = bootstrap_room,
@@ -222,6 +237,7 @@ impl PrefillRouter {
 
         Some((
             worker_id,
+            dp_rank,
             BootstrapInfo {
                 bootstrap_host: host,
                 bootstrap_port: port,
@@ -231,26 +247,13 @@ impl PrefillRouter {
     }
 
     /// Spawn prefill as a background task
-    fn spawn_prefill_task(
-        &self,
-        prefill_request: SingleIn<PreprocessedRequest>,
-    ) {
-        let Some(prefill_router) = self.prefill_router.get() else {
+    fn spawn_prefill_task(&self, prefill_request: SingleIn<PreprocessedRequest>) {
+        let Some(router) = self.prefill_router.get().cloned() else {
             return;
         };
 
-        let router_clone = match prefill_router {
-            InnerPrefillRouter::KvRouter(r) => InnerPrefillRouter::KvRouter(r.clone()),
-            InnerPrefillRouter::SimpleRouter(r) => InnerPrefillRouter::SimpleRouter(r.clone()),
-        };
-
         tokio::spawn(async move {
-            let result = match &router_clone {
-                InnerPrefillRouter::KvRouter(router) => router.generate(prefill_request).await,
-                InnerPrefillRouter::SimpleRouter(router) => router.generate(prefill_request).await,
-            };
-
-            match result {
+            match router.generate(prefill_request).await {
                 Ok(mut stream) => {
                     // Consume the stream to completion
                     while let Some(output) = stream.next().await {
@@ -273,21 +276,14 @@ impl PrefillRouter {
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
         // Get the prefill router, error if not activated
-        let Some(prefill_router) = self.prefill_router.get() else {
+        let Some(router) = self.prefill_router.get() else {
             return Err(PrefillError::NotActivated);
         };
 
-        // Call the appropriate router based on the type
-        let mut prefill_response = match prefill_router {
-            InnerPrefillRouter::KvRouter(router) => router
-                .generate(request)
-                .await
-                .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
-            InnerPrefillRouter::SimpleRouter(router) => router
-                .generate(request)
-                .await
-                .map_err(|e| PrefillError::PrefillError(e.to_string()))?,
-        };
+        let mut prefill_response = router
+            .generate(request)
+            .await
+            .map_err(|e| PrefillError::PrefillError(e.to_string()))?;
 
         let Some(first_output) = prefill_response.next().await else {
             return Err(PrefillError::PrefillError(
@@ -382,13 +378,14 @@ impl
         prefill_req.stop_conditions.max_tokens = Some(1);
 
         // Try build_bootstrap_info optimization
-        let prefill_result = if let Some((worker_id, bootstrap_info)) =
+        let prefill_result = if let Some((worker_id, dp_rank, bootstrap_info)) =
             self.build_bootstrap_info(&prefill_req).await
         {
             let bootstrap_room = bootstrap_info.bootstrap_room;
 
             // Prepare request with bootstrap_room and force routing to specific worker
             prefill_req.backend_instance_id = Some(worker_id);
+            prefill_req.dp_rank = Some(dp_rank);
             let extra_args = prefill_req.extra_args.get_or_insert_with(|| serde_json::json!({}));
             if let Some(obj) = extra_args.as_object_mut() {
                 obj.insert("bootstrap_room".to_string(), serde_json::json!(bootstrap_room));

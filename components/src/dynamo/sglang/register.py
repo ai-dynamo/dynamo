@@ -3,10 +3,12 @@
 
 import asyncio
 import logging
+import socket
 from typing import Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Endpoint
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
@@ -76,10 +78,6 @@ def _get_bootstrap_info_for_config(
     Returns:
         Tuple of (bootstrap_host, bootstrap_port), or (None, None) if not available.
     """
-    import socket
-
-    from sglang.srt.utils import get_local_ip_auto
-
     try:
         inner_tm = engine.tokenizer_manager
         bootstrap_port = getattr(
@@ -125,7 +123,7 @@ async def _get_runtime_config(
     if bootstrap_host and bootstrap_port:
         runtime_config.set_disaggregated_endpoint(bootstrap_host, bootstrap_port)
         logging.info(
-            f"[OPTIMIZATION] Publishing disaggregated endpoint to discovery: "
+            f"Publishing disaggregated endpoint to discovery: "
             f"{bootstrap_host}:{bootstrap_port}"
         )
     # In SGLang, these are server_args, not scheduler_info (unlike vLLM)

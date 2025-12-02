@@ -10,9 +10,11 @@ import sglang as sgl
 
 from dynamo._core import Client, Component, Context
 from dynamo.sglang.args import Config, DisaggregationMode
-from dynamo.sglang.protocol import DisaggPreprocessedRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+
+# Timeout for decode engine to receive first response when waiting for KV cache transfer
+DECODE_KV_TRANSFER_TIMEOUT_SECONDS = 60.0
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -119,59 +121,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Check if bootstrap_info is in the request
             bootstrap_info = request.get("bootstrap_info")
 
-            if bootstrap_info:
-                # Use pre-computed bootstrap_info
-                logging.debug(
-                    f"Using pre-computed bootstrap_info: "
-                    f"host={bootstrap_info['bootstrap_host']}, "
-                    f"port={bootstrap_info['bootstrap_port']}, "
-                    f"room={bootstrap_info['bootstrap_room']}"
+            if not bootstrap_info:
+                raise RuntimeError(
+                    "bootstrap_info is required for disaggregated decode but was not provided."
                 )
-            else:
-                # Fall back to requesting bootstrap_info from prefill worker
-                logging.debug(
-                    "No pre-computed bootstrap_info, requesting from prefill worker"
-                )
-                if (
-                    self.prefill_router_client is not None
-                    and self.prefill_router_client.instance_ids()
-                ):
-                    token_ids = request["token_ids"]
-                    stream = await self.prefill_router_client.generate(token_ids)
-                    result = await anext(stream)
-                    (
-                        worker_id,
-                        overlap,
-                    ) = result.data()  # Returns tuple (worker_id, overlap_amount)
-                    logging.info(
-                        f"Best prefill worker ID: {worker_id}, overlap: {overlap}"
-                    )
 
-                    prefill_stream = await self.prefill_client.direct(
-                        DisaggPreprocessedRequest(
-                            request=request,
-                            sampling_params=sampling_params,
-                        ).model_dump(),
-                        worker_id,
-                    )
-                else:
-                    prefill_stream = await self.prefill_client.generate(
-                        DisaggPreprocessedRequest(
-                            request=request,
-                            sampling_params=sampling_params,
-                        ).model_dump(),
-                        context=context,
-                    )
-
-                bootstrap_info = None
-                async for info in prefill_stream:
-                    data = info.data()
-                    if data and "disaggregated_params" in data:
-                        bootstrap_info = data["disaggregated_params"]
-                    break
-
-                if not bootstrap_info:
-                    raise RuntimeError("No bootstrap info received from prefill worker")
+            logging.debug(
+                f"Using bootstrap_info: "
+                f"host={bootstrap_info['bootstrap_host']}, "
+                f"port={bootstrap_info['bootstrap_port']}, "
+                f"room={bootstrap_info['bootstrap_room']}"
+            )
 
             decode = await self.engine.async_generate(
                 **input_param,
@@ -182,11 +142,28 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_room=bootstrap_info["bootstrap_room"],
             )
 
+            # Wait for first token with timeout
+            decode_iter = decode.__aiter__()
+            try:
+                first_res = await asyncio.wait_for(
+                    decode_iter.__anext__(), timeout=DECODE_KV_TRANSFER_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    f"Decode timed out after {DECODE_KV_TRANSFER_TIMEOUT_SECONDS}s waiting for first token. "
+                )
+
+            # Create stream starting with first result
+            async def decode_stream() -> AsyncGenerator[Dict[str, Any], None]:
+                yield first_res
+                async for res in decode_iter:
+                    yield res
+
             if self.skip_tokenizer_init:
-                async for out in self._process_token_stream(decode, context):
+                async for out in self._process_token_stream(decode_stream(), context):
                     yield out
             else:
-                async for out in self._process_text_stream(decode, context):
+                async for out in self._process_text_stream(decode_stream(), context):
                     yield out
         else:
             agg = await self.engine.async_generate(
