@@ -7,6 +7,9 @@
 //! multi-instance scenarios like bidirectional transfers.
 
 #[cfg(test)]
+mod find_blocks;
+
+#[cfg(test)]
 mod tests {
     use crate::v2::physical::transfer::FillPattern;
     use crate::v2::testing::connector::{ConnectorTestConfig, TestConnectorCluster};

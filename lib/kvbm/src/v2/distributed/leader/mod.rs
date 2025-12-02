@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod accessor;
 mod instance;
 mod nova;
 pub mod session;
 mod state;
 
+pub use accessor::{BlockAccessor, PolicyContext, TieredBlock};
 pub use instance::InstanceLeader;
 pub use nova::NovaLeaderService;
 pub use session::{
@@ -367,24 +369,20 @@ impl SessionHandle {
 
     /// Trigger G3→G2 staging on all instances (Hold → Prepare).
     ///
-    /// Only valid when in Hold mode.
+    /// The server validates that the session is in Hold mode before processing.
+    /// After this completes, the session transitions to Prepare mode internally.
     pub async fn prepare(&self) -> Result<()> {
-        if self.mode != StagingMode::Hold {
-            anyhow::bail!("prepare() only valid in Hold mode");
-        }
         self.control_tx
             .send(SessionControl::Prepare)
             .await
             .map_err(|_| anyhow::anyhow!("session task has exited"))
     }
 
-    /// Trigger RDMA pull from remote G2→local G2 (Prepare → Full).
+    /// Trigger RDMA pull from remote G2→local G2 (Prepare → Complete).
     ///
-    /// Only valid when in Prepare mode after G3→G2 staging is complete.
+    /// The server validates that the session is in Prepare mode before processing.
+    /// After this completes, the session transitions to Complete status.
     pub async fn pull(&self) -> Result<()> {
-        if self.mode != StagingMode::Prepare {
-            anyhow::bail!("pull() only valid in Prepare mode");
-        }
         self.control_tx
             .send(SessionControl::Pull)
             .await

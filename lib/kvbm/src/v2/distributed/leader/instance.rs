@@ -38,6 +38,7 @@ use super::{
     SessionHandle as LegacySessionHandle,
     SessionId,
     StagingMode,
+    accessor::{BlockAccessor, PolicyContext},
     nova::{ExportMetadataCallback, NovaLeaderService},
     session::{
         BlockHolder,
@@ -102,8 +103,8 @@ pub struct InstanceLeader {
     /// Map of session states for holding blocks alive (RAII).
     session_states: Arc<DashMap<SessionId, SessionState>>,
 
-    /// List of remote leader instance IDs.
-    remote_leaders: Vec<InstanceId>,
+    /// List of remote leader instance IDs (mutable for post-construction configuration).
+    remote_leaders: Arc<std::sync::RwLock<Vec<InstanceId>>>,
 
     /// Message transport for session communication.
     transport: Arc<MessageTransport>,
@@ -261,7 +262,9 @@ impl InstanceLeaderBuilder {
             cached_worker_metadata: self.cached_worker_metadata,
             sessions: self.sessions.unwrap_or_else(|| Arc::new(DashMap::new())),
             session_states: Arc::new(DashMap::new()),
-            remote_leaders: self.remote_leaders.unwrap_or_default(),
+            remote_leaders: Arc::new(std::sync::RwLock::new(
+                self.remote_leaders.unwrap_or_default(),
+            )),
             transport,
             controllable_sessions: Arc::new(DashMap::new()),
             remote_sessions: Arc::new(DashMap::new()),
@@ -304,6 +307,30 @@ impl InstanceLeader {
     /// Get a reference to the optional G3 BlockManager.
     pub fn g3_manager(&self) -> Option<&Arc<BlockManager<G3>>> {
         self.g3_manager.as_ref()
+    }
+
+    /// Add a remote leader to the search list.
+    ///
+    /// Remote leaders are queried during `find_matches_with_options` when
+    /// `search_remote == true`. This method allows adding remote leaders
+    /// after construction (e.g., when instance IDs are only known after
+    /// cluster setup).
+    pub fn add_remote_leader(&self, instance_id: InstanceId) {
+        let mut remote_leaders = self.remote_leaders.write().unwrap();
+        if !remote_leaders.contains(&instance_id) {
+            remote_leaders.push(instance_id);
+        }
+    }
+
+    /// Set all remote leaders at once.
+    pub fn set_remote_leaders(&self, instance_ids: Vec<InstanceId>) {
+        let mut remote_leaders = self.remote_leaders.write().unwrap();
+        *remote_leaders = instance_ids;
+    }
+
+    /// Get the list of remote leader instance IDs.
+    pub fn remote_leaders(&self) -> Vec<InstanceId> {
+        self.remote_leaders.read().unwrap().clone()
     }
 
     /// Scan for all blocks matching any of the given sequence hashes.
@@ -366,6 +393,73 @@ impl InstanceLeader {
             g3_blocks,
             sorted_matches,
         }
+    }
+
+    /// Scan blocks using a custom policy that controls iteration and yields results.
+    ///
+    /// This provides maximum flexibility for implementing custom scanning strategies.
+    /// The policy receives access to a `BlockAccessor` for acquiring blocks and a
+    /// `PolicyContext` for yielding results incrementally.
+    ///
+    /// # Arguments
+    /// * `hashes` - Sequence hashes to scan
+    /// * `touch` - Whether to update frequency tracking on block access
+    /// * `policy` - Function that implements the scanning strategy
+    ///
+    /// # Design
+    ///
+    /// The accessor does NOT hold locks between calls. Each `.find()` call is
+    /// independent. This enables:
+    /// - Custom iteration patterns (sorted, BTree scan, binary search, etc.)
+    /// - Yielding results incrementally (e.g., contiguous subsequences)
+    /// - Future parallel execution (accessor is Send + Sync)
+    ///
+    /// # Example: Simple linear scan
+    /// ```ignore
+    /// let blocks = leader.scan_with_policy(&hashes, true, |hashes, ctx| {
+    ///     for hash in hashes {
+    ///         if let Some(block) = ctx.accessor().find(*hash) {
+    ///             ctx.yield_item(block);
+    ///         }
+    ///     }
+    /// });
+    /// ```
+    ///
+    /// # Example: Find contiguous subsequences
+    /// ```ignore
+    /// let runs: Vec<Vec<TieredBlock>> = leader.scan_with_policy(&hashes, true, |hashes, ctx| {
+    ///     let mut run = Vec::new();
+    ///     let mut last_pos: Option<u64> = None;
+    ///
+    ///     for hash in hashes.iter().sorted_by_key(|h| h.position()) {
+    ///         if let Some(block) = ctx.accessor().find(*hash) {
+    ///             let pos = block.position();
+    ///             if last_pos.map_or(true, |p| pos == p + 1) {
+    ///                 run.push(block);
+    ///             } else {
+    ///                 if !run.is_empty() { ctx.yield_item(std::mem::take(&mut run)); }
+    ///                 run.push(block);
+    ///             }
+    ///             last_pos = Some(pos);
+    ///         } else if !run.is_empty() {
+    ///             ctx.yield_item(std::mem::take(&mut run));
+    ///             last_pos = None;
+    ///         }
+    ///     }
+    ///     if !run.is_empty() { ctx.yield_item(run); }
+    /// });
+    /// ```
+    pub fn scan_with_policy<F, T>(&self, hashes: &[SequenceHash], touch: bool, policy: F) -> Vec<T>
+    where
+        F: FnOnce(&[SequenceHash], &mut PolicyContext<T>),
+    {
+        let accessor = BlockAccessor::new(self, touch);
+        let mut ctx = PolicyContext {
+            accessor,
+            results: Vec::new(),
+        };
+        policy(hashes, &mut ctx);
+        ctx.results
     }
 
     pub fn builder() -> InstanceLeaderBuilder {
@@ -1068,7 +1162,10 @@ impl Leader for InstanceLeader {
         options: FindMatchesOptions,
     ) -> Result<FindMatchesResult> {
         // Search G2 (host memory) for matches
-        let g2_matches = self.g2_manager.match_blocks(sequence_hashes);
+        // Use scan_matches instead of match_blocks to find all matching blocks
+        // without stopping on first miss (supports partial sequence matching)
+        let g2_matches_map = self.g2_manager.scan_matches(sequence_hashes, true);
+        let g2_matches: Vec<_> = g2_matches_map.into_values().collect();
 
         // Search G3 (disk) for remaining hashes if G3 is available
         let remaining_hashes: Vec<_> = sequence_hashes
@@ -1078,7 +1175,10 @@ impl Leader for InstanceLeader {
             .collect();
 
         let g3_matches = if let Some(ref g3_manager) = self.g3_manager {
-            g3_manager.match_blocks(&remaining_hashes)
+            // Use scan_matches instead of match_blocks to find all matching blocks
+            // without stopping on first miss (supports partial sequence matching)
+            let g3_matches_map = g3_manager.scan_matches(&remaining_hashes, true);
+            g3_matches_map.into_values().collect()
         } else {
             Vec::new()
         };
@@ -1164,7 +1264,7 @@ impl Leader for InstanceLeader {
             }),
         );
 
-        let remote_leaders = self.remote_leaders.clone();
+        let remote_leaders = self.remote_leaders.read().unwrap().clone();
         let sequence_hashes = sequence_hashes.to_vec();
 
         tokio::spawn(async move {

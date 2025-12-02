@@ -695,6 +695,53 @@ impl TestConnectorInstance {
         Ok((block_ids, seq_hashes))
     }
 
+    /// Populate G3 manager with token blocks and return their details.
+    ///
+    /// This is a convenience method that:
+    /// 1. Creates a token sequence
+    /// 2. Populates the InstanceLeader's G3 BlockManager
+    /// 3. Returns the allocated BlockIds and SequenceHashes
+    ///
+    /// # Requirements
+    /// - G3 manager must be configured via `ConnectorTestConfig::leader_disk_blocks(n)`
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = ConnectorTestConfig::new().leader_disk_blocks(32);
+    /// let instance = TestConnectorInstance::builder()
+    ///     .test_config(config)
+    ///     .build()
+    ///     .await?;
+    /// instance.register_all_workers()?;
+    /// instance.initialize().await?;
+    ///
+    /// let (block_ids, hashes) = instance.populate_g3_blocks(8, 4, 0)?;
+    /// assert_eq!(block_ids.len(), 8);
+    /// ```
+    pub fn populate_g3_blocks(
+        &self,
+        num_blocks: usize,
+        block_size: usize,
+        start_token: u32,
+    ) -> Result<(Vec<BlockId>, Vec<SequenceHash>)> {
+        let instance_leader = self.instance_leader()?;
+
+        let g3_manager = instance_leader
+            .g3_manager()
+            .ok_or_else(|| anyhow!("G3 manager not configured - use leader_disk_blocks()"))?;
+
+        let token_sequence =
+            token_blocks::create_token_sequence(num_blocks, block_size, start_token);
+        let seq_hashes =
+            managers::populate_manager_with_blocks(g3_manager, token_sequence.blocks())?;
+
+        // Get the block IDs that were allocated
+        let matched = g3_manager.match_blocks(&seq_hashes);
+        let block_ids: Vec<BlockId> = matched.into_iter().map(|b| b.block_id()).collect();
+
+        Ok((block_ids, seq_hashes))
+    }
+
     /// Fill blocks on all workers with a layer-specific pattern.
     ///
     /// Each layer gets a different fill byte: layer 0 = 0xA0, layer 1 = 0xA1, etc.
@@ -766,6 +813,27 @@ impl TestConnectorInstance {
     /// Get the Nova instance ID for this instance.
     pub fn instance_id(&self) -> InstanceId {
         self.leader_nova.instance_id()
+    }
+
+    /// Get the tokio runtime handle from this instance's leader.
+    ///
+    /// This is useful for sync tests that need to execute async operations
+    /// using `handle.block_on()`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// #[test]  // Note: regular #[test], not #[tokio::test]
+    /// fn test_async_ops_in_sync_context() {
+    ///     let cluster = TestConnectorCluster::create()?;
+    ///     let handle = cluster.instances()[0].tokio_handle();
+    ///
+    ///     handle.block_on(async {
+    ///         // async operations here
+    ///     });
+    /// }
+    /// ```
+    pub fn tokio_handle(&self) -> tokio::runtime::Handle {
+        self.leader.runtime.handle()
     }
 
     /// Fill G2 blocks with a pattern across all workers.

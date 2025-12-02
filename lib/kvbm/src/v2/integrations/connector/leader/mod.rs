@@ -299,6 +299,7 @@ impl ConnectorLeader {
 
         let leader = InstanceLeader::builder()
             .nova(self.runtime.nova.clone())
+            .registry(registry)
             .with_g2_manager(Some(g2_manager))
             .with_g3_manager(g3_manager)
             .workers(

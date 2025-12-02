@@ -604,6 +604,431 @@ mod tests {
     }
 
     // =========================================================================
+    // scan_with_policy Tests
+    // =========================================================================
+
+    /// Test simple linear scan policy.
+    ///
+    /// This tests the basic usage of scan_with_policy where the policy
+    /// iterates through all hashes and yields each found block.
+    #[tokio::test]
+    async fn test_scan_with_policy_linear_scan() {
+        use crate::v2::distributed::leader::TieredBlock;
+
+        let pair = create_instance_leader_pair(50, 4)
+            .await
+            .expect("Should create pair");
+
+        // Populate with blocks
+        let (_, hashes) =
+            populate_leader_with_blocks(&pair.leader_a, 10, 4, 0).expect("Should populate");
+
+        // Simple linear scan policy: find all blocks
+        let blocks: Vec<TieredBlock> =
+            pair.leader_a
+                .leader
+                .scan_with_policy(&hashes, true, |hashes, ctx| {
+                    for hash in hashes {
+                        if let Some(block) = ctx.accessor().find(*hash) {
+                            ctx.yield_item(block);
+                        }
+                    }
+                });
+
+        // Should find all 10 blocks
+        assert_eq!(blocks.len(), 10);
+
+        // Verify all are G2 blocks (since we populated G2)
+        for block in &blocks {
+            assert!(block.is_g2());
+        }
+
+        // Verify positions are sequential (0-9)
+        for (i, block) in blocks.iter().enumerate() {
+            assert_eq!(block.position(), i as u64);
+        }
+    }
+
+    /// Test scan_with_policy with partial matches.
+    ///
+    /// Tests that the policy correctly handles cases where some hashes
+    /// are not found in the manager.
+    #[tokio::test]
+    async fn test_scan_with_policy_partial_matches() {
+        use crate::v2::distributed::leader::TieredBlock;
+
+        let pair = create_instance_leader_pair(50, 4)
+            .await
+            .expect("Should create pair");
+
+        // Populate with blocks at positions 0-4
+        let (_, hashes) =
+            populate_leader_with_blocks(&pair.leader_a, 5, 4, 0).expect("Should populate");
+
+        // Create some hashes that won't be found
+        let token_seq = token_blocks::create_token_sequence(3, 4, 1000);
+        let nonexistent_hashes = token_blocks::generate_sequence_hashes(&token_seq);
+
+        // Mix found and not-found hashes
+        let mixed_hashes: Vec<_> = hashes
+            .iter()
+            .take(2)
+            .chain(nonexistent_hashes.iter().take(2))
+            .chain(hashes.iter().skip(2))
+            .copied()
+            .collect();
+
+        // Linear scan should only find the existing blocks
+        let blocks: Vec<TieredBlock> =
+            pair.leader_a
+                .leader
+                .scan_with_policy(&mixed_hashes, true, |hashes, ctx| {
+                    for hash in hashes {
+                        if let Some(block) = ctx.accessor().find(*hash) {
+                            ctx.yield_item(block);
+                        }
+                    }
+                });
+
+        // Should find only the 5 blocks that exist
+        assert_eq!(blocks.len(), 5);
+    }
+
+    /// Test contiguous subsequence discovery policy with a single contiguous sequence.
+    ///
+    /// This tests that the policy correctly identifies a fully contiguous sequence
+    /// as a single run.
+    #[tokio::test]
+    async fn test_scan_with_policy_contiguous_single_run() {
+        use crate::v2::distributed::leader::TieredBlock;
+
+        let pair = create_instance_leader_pair(100, 4)
+            .await
+            .expect("Should create pair");
+
+        // Create a single contiguous sequence (all positions are consecutive)
+        let (_, hashes) =
+            populate_leader_with_blocks(&pair.leader_a, 10, 4, 0).expect("Should populate");
+
+        // Contiguous subsequence discovery policy
+        let runs: Vec<Vec<TieredBlock>> =
+            pair.leader_a
+                .leader
+                .scan_with_policy(&hashes, true, |hashes, ctx| {
+                    let mut sorted_hashes = hashes.to_vec();
+                    sorted_hashes.sort_by_key(|h| h.position());
+
+                    let mut current_run = Vec::new();
+                    let mut last_pos: Option<u64> = None;
+
+                    for hash in &sorted_hashes {
+                        if let Some(block) = ctx.accessor().find(*hash) {
+                            let pos = block.position();
+                            let is_contiguous = last_pos.map_or(true, |p| pos == p + 1);
+
+                            if is_contiguous {
+                                current_run.push(block);
+                            } else {
+                                if !current_run.is_empty() {
+                                    ctx.yield_item(std::mem::take(&mut current_run));
+                                }
+                                current_run.push(block);
+                            }
+                            last_pos = Some(pos);
+                        } else if !current_run.is_empty() {
+                            ctx.yield_item(std::mem::take(&mut current_run));
+                            last_pos = None;
+                        }
+                    }
+                    if !current_run.is_empty() {
+                        ctx.yield_item(current_run);
+                    }
+                });
+
+        // Should find exactly 1 contiguous run containing all 10 blocks
+        assert_eq!(runs.len(), 1, "Expected single contiguous run");
+        assert_eq!(runs[0].len(), 10, "Run should contain all 10 blocks");
+
+        // Verify positions are consecutive 0-9
+        for (i, block) in runs[0].iter().enumerate() {
+            assert_eq!(block.position(), i as u64);
+        }
+    }
+
+    /// Test contiguous subsequence discovery policy with gaps.
+    ///
+    /// This tests that when some blocks are missing from the search,
+    /// the policy correctly identifies separate runs.
+    #[tokio::test]
+    async fn test_scan_with_policy_contiguous_with_gaps() {
+        use crate::v2::distributed::leader::TieredBlock;
+
+        let pair = create_instance_leader_pair(100, 4)
+            .await
+            .expect("Should create pair");
+
+        // Create a contiguous sequence of 10 blocks (positions 0-9)
+        let (_, all_hashes) =
+            populate_leader_with_blocks(&pair.leader_a, 10, 4, 0).expect("Should populate");
+
+        // Query only for blocks 0-2, 5-6, 8-9 (skipping 3-4 and 7)
+        // This should create 3 runs: [0,1,2], [5,6], [8,9]
+        let query_hashes: Vec<_> = all_hashes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| matches!(*i, 0..=2 | 5..=6 | 8..=9))
+            .map(|(_, h)| *h)
+            .collect();
+
+        // Contiguous subsequence discovery policy
+        let runs: Vec<Vec<TieredBlock>> =
+            pair.leader_a
+                .leader
+                .scan_with_policy(&query_hashes, true, |hashes, ctx| {
+                    let mut sorted_hashes = hashes.to_vec();
+                    sorted_hashes.sort_by_key(|h| h.position());
+
+                    let mut current_run = Vec::new();
+                    let mut last_pos: Option<u64> = None;
+
+                    for hash in &sorted_hashes {
+                        if let Some(block) = ctx.accessor().find(*hash) {
+                            let pos = block.position();
+                            let is_contiguous = last_pos.map_or(true, |p| pos == p + 1);
+
+                            if is_contiguous {
+                                current_run.push(block);
+                            } else {
+                                if !current_run.is_empty() {
+                                    ctx.yield_item(std::mem::take(&mut current_run));
+                                }
+                                current_run.push(block);
+                            }
+                            last_pos = Some(pos);
+                        } else if !current_run.is_empty() {
+                            ctx.yield_item(std::mem::take(&mut current_run));
+                            last_pos = None;
+                        }
+                    }
+                    if !current_run.is_empty() {
+                        ctx.yield_item(current_run);
+                    }
+                });
+
+        // Should find 3 runs
+        assert_eq!(runs.len(), 3, "Expected 3 contiguous runs");
+
+        // First run: positions 0, 1, 2
+        assert_eq!(runs[0].len(), 3);
+        assert_eq!(runs[0][0].position(), 0);
+        assert_eq!(runs[0][1].position(), 1);
+        assert_eq!(runs[0][2].position(), 2);
+
+        // Second run: positions 5, 6
+        assert_eq!(runs[1].len(), 2);
+        assert_eq!(runs[1][0].position(), 5);
+        assert_eq!(runs[1][1].position(), 6);
+
+        // Third run: positions 8, 9
+        assert_eq!(runs[2].len(), 2);
+        assert_eq!(runs[2][0].position(), 8);
+        assert_eq!(runs[2][1].position(), 9);
+    }
+
+    /// Test scan_with_policy with tiered G2/G3 blocks.
+    ///
+    /// This tests the precedence behavior where G2 blocks are returned
+    /// preferentially over G3 blocks when both exist.
+    ///
+    /// Setup:
+    /// - 4 blocks total (positions 0, 1, 2, 3)
+    /// - All 4 blocks are in G3
+    /// - Even blocks (0, 2) are ALSO in G2
+    ///
+    /// Expected result:
+    /// - Blocks 0, 2 should come from G2 (precedence)
+    /// - Blocks 1, 3 should come from G3
+    #[tokio::test]
+    async fn test_scan_with_policy_tiered_g2_g3() {
+        use crate::v2::distributed::leader::TieredBlock;
+
+        let pair = create_instance_leader_pair(50, 4)
+            .await
+            .expect("Should create pair");
+
+        // Create 4 token blocks
+        let token_sequence = token_blocks::create_token_sequence(4, 4, 0);
+        let all_token_blocks = token_sequence.blocks();
+
+        // Populate G3 with ALL 4 blocks
+        let g3_manager = pair
+            .leader_a
+            .g3_manager
+            .as_ref()
+            .expect("G3 manager should exist");
+        let g3_hashes =
+            managers::populate_manager_with_blocks(g3_manager, all_token_blocks).expect("G3 pop");
+
+        // Populate G2 with only EVEN blocks (positions 0, 2)
+        let even_token_blocks: Vec<_> = all_token_blocks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 0)
+            .map(|(_, b)| b.clone())
+            .collect();
+        let _g2_hashes =
+            managers::populate_manager_with_blocks(&pair.leader_a.g2_manager, &even_token_blocks)
+                .expect("G2 pop");
+
+        // The hashes from G3 are for all blocks; G2 hashes are for even blocks only
+        // We'll query using the G3 hashes (which cover all 4 blocks)
+        // Note: The actual sequence hashes should match between G2 and G3 for the same token content
+
+        // Simple linear scan to get all blocks
+        let blocks: Vec<TieredBlock> =
+            pair.leader_a
+                .leader
+                .scan_with_policy(&g3_hashes, true, |hashes, ctx| {
+                    for hash in hashes {
+                        if let Some(block) = ctx.accessor().find(*hash) {
+                            ctx.yield_item(block);
+                        }
+                    }
+                });
+
+        // Should find all 4 blocks
+        assert_eq!(blocks.len(), 4, "Should find all 4 blocks");
+
+        // Count G2 vs G3 blocks
+        let g2_count = blocks.iter().filter(|b| b.is_g2()).count();
+        let g3_count = blocks.iter().filter(|b| b.is_g3()).count();
+
+        // Even positions (0, 2) should be G2, odd positions (1, 3) should be G3
+        assert_eq!(g2_count, 2, "Should have 2 G2 blocks (even positions)");
+        assert_eq!(g3_count, 2, "Should have 2 G3 blocks (odd positions)");
+
+        // Verify the specific tier for each position
+        // Blocks are returned in the order we queried (g3_hashes order = 0, 1, 2, 3)
+        assert!(blocks[0].is_g2(), "Block at position 0 should be G2 (even)");
+        assert!(blocks[1].is_g3(), "Block at position 1 should be G3 (odd)");
+        assert!(blocks[2].is_g2(), "Block at position 2 should be G2 (even)");
+        assert!(blocks[3].is_g3(), "Block at position 3 should be G3 (odd)");
+
+        // Verify positions are correct
+        for (i, block) in blocks.iter().enumerate() {
+            assert_eq!(
+                block.position(),
+                i as u64,
+                "Block {} should be at position {}",
+                i,
+                i
+            );
+        }
+    }
+
+    /// Test scan_with_policy with empty input.
+    #[tokio::test]
+    async fn test_scan_with_policy_empty_hashes() {
+        use crate::v2::distributed::leader::TieredBlock;
+
+        let pair = create_instance_leader_pair(50, 4)
+            .await
+            .expect("Should create pair");
+
+        let empty_hashes: Vec<crate::v2::logical::pools::SequenceHash> = vec![];
+
+        let blocks: Vec<TieredBlock> =
+            pair.leader_a
+                .leader
+                .scan_with_policy(&empty_hashes, true, |hashes, ctx| {
+                    for hash in hashes {
+                        if let Some(block) = ctx.accessor().find(*hash) {
+                            ctx.yield_item(block);
+                        }
+                    }
+                });
+
+        assert!(blocks.is_empty());
+    }
+
+    /// Test scan_with_policy with yield_items (batch yield).
+    #[tokio::test]
+    async fn test_scan_with_policy_yield_items() {
+        use crate::v2::distributed::leader::TieredBlock;
+
+        let pair = create_instance_leader_pair(50, 4)
+            .await
+            .expect("Should create pair");
+
+        // Populate with blocks
+        let (_, hashes) =
+            populate_leader_with_blocks(&pair.leader_a, 10, 4, 0).expect("Should populate");
+
+        // Policy that uses yield_items to batch results
+        let blocks: Vec<TieredBlock> =
+            pair.leader_a
+                .leader
+                .scan_with_policy(&hashes, true, |hashes, ctx| {
+                    let found: Vec<TieredBlock> = hashes
+                        .iter()
+                        .filter_map(|hash| ctx.accessor().find(*hash))
+                        .collect();
+                    ctx.yield_items(found);
+                });
+
+        assert_eq!(blocks.len(), 10);
+    }
+
+    /// Test scan_with_policy touch parameter.
+    ///
+    /// Verifies that the touch parameter is correctly passed to the accessor
+    /// and affects frequency tracking behavior.
+    #[tokio::test]
+    async fn test_scan_with_policy_touch_parameter() {
+        use crate::v2::distributed::leader::TieredBlock;
+
+        let pair = create_instance_leader_pair(50, 4)
+            .await
+            .expect("Should create pair");
+
+        let (_, hashes) =
+            populate_leader_with_blocks(&pair.leader_a, 5, 4, 0).expect("Should populate");
+
+        // Scan with touch=false
+        let blocks_no_touch: Vec<TieredBlock> =
+            pair.leader_a
+                .leader
+                .scan_with_policy(&hashes, false, |hashes, ctx| {
+                    // Verify accessor has correct touch setting
+                    assert!(!ctx.accessor().touch());
+                    for hash in hashes {
+                        if let Some(block) = ctx.accessor().find(*hash) {
+                            ctx.yield_item(block);
+                        }
+                    }
+                });
+
+        // Drop blocks so they return to the pool
+        drop(blocks_no_touch);
+
+        // Scan with touch=true
+        let blocks_with_touch: Vec<TieredBlock> =
+            pair.leader_a
+                .leader
+                .scan_with_policy(&hashes, true, |hashes, ctx| {
+                    // Verify accessor has correct touch setting
+                    assert!(ctx.accessor().touch());
+                    for hash in hashes {
+                        if let Some(block) = ctx.accessor().find(*hash) {
+                            ctx.yield_item(block);
+                        }
+                    }
+                });
+
+        assert_eq!(blocks_with_touch.len(), 5);
+    }
+
+    // =========================================================================
     // RDMA Transfer Tests (require UCX and CUDA)
     // =========================================================================
 

@@ -79,7 +79,10 @@ impl ResponderSession {
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<()> {
         // Phase 1: Immediate G2 search
-        let g2_matches = self.g2_manager.match_blocks(&sequence_hashes);
+        // Use scan_matches instead of match_blocks to find all matching blocks
+        // without stopping on first miss (supports partial sequence matching)
+        let g2_matches_map = self.g2_manager.scan_matches(&sequence_hashes, true);
+        let g2_matches: Vec<_> = g2_matches_map.into_values().collect();
 
         // Hold the G2 blocks using BlockHolder (RAII semantics)
         self.held_g2_blocks = BlockHolder::new(g2_matches);
@@ -119,7 +122,10 @@ impl ResponderSession {
         if !remaining_hashes.is_empty()
             && let Some(ref g3_manager) = self.g3_manager
         {
-            let g3_matches = g3_manager.match_blocks(&remaining_hashes);
+            // Use scan_matches instead of match_blocks to find all matching blocks
+            // without stopping on first miss (supports partial sequence matching)
+            let g3_matches_map = g3_manager.scan_matches(&remaining_hashes, true);
+            let g3_matches: Vec<_> = g3_matches_map.into_values().collect();
 
             if !g3_matches.is_empty() {
                 // Hold the G3 blocks using BlockHolder
