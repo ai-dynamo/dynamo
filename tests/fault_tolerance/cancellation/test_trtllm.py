@@ -83,7 +83,9 @@ class DynamoWorkerProcess(ManagedProcess):
         ]
         if mode != "prefill_and_decode":
             with open("test_request_cancellation_trtllm_config.yaml", "w") as f:
-                f.write("cache_transceiver_config:\n  backend: DEFAULT\n")
+                f.write(
+                    "cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer: 16384\n"
+                )
                 f.write("disable_overlap_scheduler: true\n")
             command += [
                 "--extra-engine-args",
@@ -428,10 +430,6 @@ def test_request_cancellation_trtllm_prefill_cancel(
 
 
 @pytest.mark.timeout(350)  # 3x average
-@pytest.mark.xfail(
-    reason="May fail due to unknown reason with TRT-LLM or backend implementation",
-    strict=False,
-)
 def test_request_cancellation_trtllm_kv_transfer_cancel(
     request, runtime_services_dynamic_ports, predownload_models
 ):
