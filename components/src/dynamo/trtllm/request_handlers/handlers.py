@@ -59,6 +59,10 @@ class EncodeHandler(HandlerBase):
 
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
+        # Initialize to None by default to avoid AttributeError if multimodal_processor is not set
+        self.model_dir = None
+        self.model_type = None
+        self.tokenizer = None
         if self.multimodal_processor:
             self.model_dir = self.multimodal_processor.model_dir
             self.model_type = self.multimodal_processor.model_type
