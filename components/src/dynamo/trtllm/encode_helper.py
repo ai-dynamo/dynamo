@@ -263,9 +263,7 @@ class EncodeHelper:
                 await readable_op.wait_for_completion()
                 logging.debug("EncodeHelper completed readable operation.")
         elif image_urls and text_prompt:
-            logging.info(
-                "========== ENCODE WORKER: Full EPD - Using MultimodalEncoder =========="
-            )
+            # Use trtllm MultimodalEncoder to generate embeddings
             inputs = default_multimodal_input_loader(
                 tokenizer=tokenizer,
                 model_dir=model_dir,
@@ -292,7 +290,7 @@ class EncodeHelper:
                 hasattr(ep_disaggregated_params, "multimodal_embedding_handles")
                 and ep_disaggregated_params.multimodal_embedding_handles
             ):
-                logging.info(
+                logging.debug(
                     f"ENCODE WORKER: Generated {len(ep_disaggregated_params.multimodal_embedding_handles)} embedding handle(s)"
                 )
             else:
@@ -317,10 +315,7 @@ class EncodeHelper:
                     prompt_token_ids = tokenizer.encode(
                         processed_prompt, add_special_tokens=False
                     )
-                    logging.info(
-                        f"ENCODE WORKER: Tokenized processed_prompt (length={len(prompt_token_ids)})"
-                    )
-            logging.info(
+            logging.debug(
                 f"ENCODE WORKER: Extracted processed_prompt: {processed_prompt}"
             )
             yield {
