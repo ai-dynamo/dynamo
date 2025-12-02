@@ -82,7 +82,7 @@ class PrometheusAPIClient:
     Client for querying Dynamo metrics from Prometheus.
 
     Supports querying both frontend and backend metrics:
-    - Frontend metrics: dynamo_frontend_* (from Dynamo HTTP frontend)
+    - Frontend metrics: {prometheus_names.name_prefix.FRONTEND}_* (from Dynamo HTTP frontend)
     - Backend metrics: vllm:* (from vLLM engine workers)
 
     Usage:
@@ -94,7 +94,7 @@ class PrometheusAPIClient:
         # Query backend worker metrics
         backend_client = PrometheusAPIClient(url="http://prometheus:9090",
                                             dynamo_namespace="my-deployment",
-                                            metric_source="backend")
+                                            metric_source=MetricSource.VLLM)
         ttft = backend_client.get_avg_time_to_first_token("60s", "llama-3-8b")
     """
 
@@ -110,14 +110,8 @@ class PrometheusAPIClient:
         Args:
             url: Prometheus server URL
             dynamo_namespace: Dynamo namespace to filter metrics
-            metric_source: Either "frontend" or "backend".
-                          "frontend" queries dynamo_frontend_* metrics
-                          "backend" queries vllm:* metrics from workers
+            metric_source: Either MetricSource.FRONTEND or MetricSource.VLLM.
         """
-        if metric_source not in ["frontend", "backend"]:
-            raise ValueError(
-                f"metric_source must be 'frontend' or 'backend', got: {metric_source}"
-            )
 
         self.prom = PrometheusConnect(url=url, disable_ssl=True)
         self.dynamo_namespace = dynamo_namespace
@@ -132,7 +126,7 @@ class PrometheusAPIClient:
         increase(metric_sum[interval])/increase(metric_count[interval])
 
         Args:
-            full_metric_name: Full metric name (e.g., 'dynamo_frontend_inter_token_latency_seconds' or 'time_to_first_token_seconds')
+            full_metric_name: Full metric name (e.g., prometheus_names.frontend_service.INTER_TOKEN_LATENCY_SECONDS or prometheus_names.frontend_service.TIME_TO_FIRST_TOKEN_SECONDS)
             interval: Time interval for the query (e.g., '60s')
             operation_name: Human-readable name for error logging
             model_name: Model name to filter by
@@ -165,21 +159,8 @@ class PrometheusAPIClient:
             total_count = 0.0
 
             for container in sum_containers:
-                # Determine which label to use for model filtering
-                if self.metric_source == "frontend":
-                    # Frontend uses 'model' label and lowercases model names
-                    model_match = (
-                        container.metric.model
-                        and container.metric.model.lower() == model_name.lower()
-                    )
-                else:  # backend
-                    # Backend (vLLM) uses 'model_name' label - check both for compatibility
-                    backend_model = getattr(
-                        container.metric, "model_name", container.metric.model
-                    )
-                    model_match = (
-                        backend_model and backend_model.lower() == model_name.lower()
-                    )
+                model_value = getattr(container.metric, self.model_attr, None)
+                model_match = model_value and model_value.lower() == model_name.lower()
                 namespace_match = (
                     container.metric.dynamo_namespace == self.dynamo_namespace
                 )
@@ -189,21 +170,8 @@ class PrometheusAPIClient:
                     total_sum += container.value[1]
 
             for container in count_containers:
-                # Determine which label to use for model filtering
-                if self.metric_source == "frontend":
-                    # Frontend uses 'model' label and lowercases model names
-                    model_match = (
-                        container.metric.model
-                        and container.metric.model.lower() == model_name.lower()
-                    )
-                else:  # backend
-                    # Backend (vLLM) uses 'model_name' label - check both for compatibility
-                    backend_model = getattr(
-                        container.metric, "model_name", container.metric.model
-                    )
-                    model_match = (
-                        backend_model and backend_model.lower() == model_name.lower()
-                    )
+                model_value = getattr(container.metric, self.model_attr, None)
+                model_match = model_value and model_value.lower() == model_name.lower()
                 namespace_match = (
                     container.metric.dynamo_namespace == self.dynamo_namespace
                 )
@@ -260,18 +228,14 @@ class PrometheusAPIClient:
             total_requests = 0.0
 
             for container in counter_containers:
-                backend_model = getattr(
-                    container.metric, "model_name", container.metric.model
-                )
-                if backend_model and backend_model.lower() == model_name.lower():
+                model_value = getattr(container.metric, self.model_attr, None)
+                if model_value and model_value.lower() == model_name.lower():
                     if container.metric.dynamo_namespace == self.dynamo_namespace:
                         total_counter += container.value[1]
 
             for container in requests_containers:
-                backend_model = getattr(
-                    container.metric, "model_name", container.metric.model
-                )
-                if backend_model and backend_model.lower() == model_name.lower():
+                model_value = getattr(container.metric, self.model_attr, None)
+                if model_value and model_value.lower() == model_name.lower():
                     if container.metric.dynamo_namespace == self.dynamo_namespace:
                         total_requests += container.value[1]
 
@@ -330,21 +294,8 @@ class PrometheusAPIClient:
             metrics_containers = parse_frontend_metric_containers(raw_res)
             total_count = 0.0
             for container in metrics_containers:
-                # Determine which label to use for model filtering
-                if self.metric_source == "frontend":
-                    # Frontend uses 'model' label and lowercases model names
-                    model_match = (
-                        container.metric.model
-                        and container.metric.model.lower() == model_name.lower()
-                    )
-                else:  # backend
-                    # Backend (vLLM) uses 'model_name' label - check both for compatibility
-                    backend_model = getattr(
-                        container.metric, "model_name", container.metric.model
-                    )
-                    model_match = (
-                        backend_model and backend_model.lower() == model_name.lower()
-                    )
+                model_value = getattr(container.metric, self.model_attr, None)
+                model_match = model_value and model_value.lower() == model_name.lower()
                 namespace_match = (
                     container.metric.dynamo_namespace == self.dynamo_namespace
                 )
@@ -358,7 +309,7 @@ class PrometheusAPIClient:
             return 0
 
     def get_avg_input_sequence_tokens(self, interval: str, model_name: str):
-        if self.metric_source == "backend":
+        if self.metric_source == MetricSource.VLLM:
             # Backend uses prompt_tokens counter (not histogram)
             return self._get_counter_average(
                 prometheus_names.frontend_service.INPUT_SEQUENCE_TOKENS,
@@ -374,7 +325,7 @@ class PrometheusAPIClient:
         )
 
     def get_avg_output_sequence_tokens(self, interval: str, model_name: str):
-        if self.metric_source == "backend":
+        if self.metric_source == MetricSource.VLLM:
             # Backend uses generation_tokens counter (not histogram)
             return self._get_counter_average(
                 prometheus_names.frontend_service.OUTPUT_SEQUENCE_TOKENS,
