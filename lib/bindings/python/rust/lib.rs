@@ -325,7 +325,7 @@ fn register_llm<'p>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // For TensorBased models, skip HuggingFace downloads and register directly
         if is_tensor_based {
-            let model_name = model_name.unwrap_or_else(|| inner_path.clone());
+            let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card =
                 llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             card.model_type = model_type_obj;
