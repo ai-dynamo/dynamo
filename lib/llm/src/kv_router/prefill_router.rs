@@ -220,7 +220,10 @@ impl PrefillRouter {
         };
 
         // Look up bootstrap endpoint from discovery
-        let endpoint = kv_router.chooser.get_disaggregated_endpoint(worker_id).await?;
+        let endpoint = kv_router
+            .chooser
+            .get_disaggregated_endpoint(worker_id)
+            .await?;
         let host = endpoint.bootstrap_host?;
         let port = endpoint.bootstrap_port?;
 
@@ -386,9 +389,14 @@ impl
             // Prepare request with bootstrap_room and force routing to specific worker
             prefill_req.backend_instance_id = Some(worker_id);
             prefill_req.dp_rank = Some(dp_rank);
-            let extra_args = prefill_req.extra_args.get_or_insert_with(|| serde_json::json!({}));
+            let extra_args = prefill_req
+                .extra_args
+                .get_or_insert_with(|| serde_json::json!({}));
             if let Some(obj) = extra_args.as_object_mut() {
-                obj.insert("bootstrap_room".to_string(), serde_json::json!(bootstrap_room));
+                obj.insert(
+                    "bootstrap_room".to_string(),
+                    serde_json::json!(bootstrap_room),
+                );
             }
 
             let prefill_context = Context::with_id(prefill_req, request_id.clone());

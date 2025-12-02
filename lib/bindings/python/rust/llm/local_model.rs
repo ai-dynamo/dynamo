@@ -117,6 +117,7 @@ impl ModelRuntimeConfig {
         self.inner.get_engine_specific(key).map_err(to_pyerr)
     }
 
+    #[pyo3(signature = (bootstrap_host=None, bootstrap_port=None))]
     fn set_disaggregated_endpoint(
         &mut self,
         bootstrap_host: Option<String>,
