@@ -556,22 +556,22 @@ jobs:
           # - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and kvbm" }
           - { framework: vllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "router and not slow" }
           - { framework: vllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "planner and not slow" }
-          - { framework: vllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "kvbm and not slow" }
+          - { framework: vllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: " (kvbm or kvbm_v2) and not slow" }
           - { framework: vllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "router and not slow" }
           - { framework: vllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "planner and not slow" }
           - { framework: vllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "kvbm and not slow" }
           - { framework: trtllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "router and not slow" }
           - { framework: trtllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "planner and not slow" }
-          - { framework: trtllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "kvbm and not slow" }
+          - { framework: trtllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: " (kvbm or kvbm_v2) and not slow" }
           - { framework: trtllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "router and not slow" }
           - { framework: trtllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "planner and not slow" }
-          - { framework: trtllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "kvbm and not slow" }
+          - { framework: trtllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: " (kvbm or kvbm_v2) and not slow" }
           - { framework: sglang, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "router and not slow" }
           - { framework: sglang, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "planner and not slow" }
-          - { framework: sglang, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: "kvbm and not slow" }
+          - { framework: sglang, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 90, marks: " (kvbm or kvbm_v2) and not slow" }
           - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "router and not slow" }
           - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "planner and not slow" }
-          - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "kvbm and not slow" }
+          - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: " (kvbm or kvbm_v2) and not slow" }
 
     steps:
       - uses: actions/checkout@v4
