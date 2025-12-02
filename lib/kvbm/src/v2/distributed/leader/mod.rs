@@ -73,15 +73,69 @@ pub struct FindMatchesOptions {
     pub staging_mode: StagingMode,
 }
 
-/// Result of a find_matches operation, provides access to session status and blocks.
-pub struct FindMatchesResult {
+/// Result of a find_matches operation.
+///
+/// This enum has two variants:
+/// - `Ready`: Immediate result when no async work is needed (local search with Hold mode)
+/// - `AsyncSession`: When staging or remote search is required
+pub enum FindMatchesResult {
+    /// Immediate result - blocks are held in place without staging.
+    ///
+    /// Returned when `search_remote == false` AND `staging_mode == Hold`.
+    /// Blocks remain in their original tiers (G2 or G3) on the local instance.
+    Ready(ReadyResult),
+
+    /// Async session for staging and/or remote search.
+    ///
+    /// Returned when:
+    /// - `search_remote == true` (remote searching enabled)
+    /// - OR `staging_mode` is `Prepare` or `Full` (local/remote staging)
+    AsyncSession(AsyncSessionResult),
+}
+
+/// Immediate result containing matched blocks held directly.
+///
+/// No session is created - blocks are owned directly by this struct (RAII).
+/// Dropping this struct will release the block references.
+pub struct ReadyResult {
+    /// G2 blocks held directly via RAII
+    blocks: Vec<ImmutableBlock<G2>>,
+}
+
+impl ReadyResult {
+    /// Create a new ready result with G2 blocks.
+    pub fn new(blocks: Vec<ImmutableBlock<G2>>) -> Self {
+        Self { blocks }
+    }
+
+    /// Number of G2 blocks held.
+    pub fn g2_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Take ownership of the G2 blocks.
+    ///
+    /// After calling this, the ReadyResult will be empty.
+    pub fn take_g2_blocks(&mut self) -> Vec<ImmutableBlock<G2>> {
+        std::mem::take(&mut self.blocks)
+    }
+
+    /// Get a reference to the G2 blocks.
+    pub fn blocks(&self) -> &[ImmutableBlock<G2>] {
+        &self.blocks
+    }
+}
+
+/// Async session result for staging and/or remote search operations.
+pub struct AsyncSessionResult {
     session_id: SessionId,
     status_rx: watch::Receiver<OnboardingStatus>,
     blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
     session_handle: Option<SessionHandle>,
 }
 
-impl FindMatchesResult {
+impl AsyncSessionResult {
+    /// Create a new async session result.
     pub fn new(
         session_id: SessionId,
         status_rx: watch::Receiver<OnboardingStatus>,
@@ -142,6 +196,72 @@ impl FindMatchesResult {
             .map_err(|e| anyhow::anyhow!("failed to wait for completion: {e}"))?;
 
         Ok(())
+    }
+}
+
+impl FindMatchesResult {
+    /// Check if this is a ready (immediate) result.
+    pub fn is_ready(&self) -> bool {
+        matches!(self, FindMatchesResult::Ready(_))
+    }
+
+    /// Check if this is an async session result.
+    pub fn is_async(&self) -> bool {
+        matches!(self, FindMatchesResult::AsyncSession(_))
+    }
+
+    /// Get the ready result, if this is a Ready variant.
+    pub fn as_ready(&self) -> Option<&ReadyResult> {
+        match self {
+            FindMatchesResult::Ready(r) => Some(r),
+            FindMatchesResult::AsyncSession(_) => None,
+        }
+    }
+
+    /// Get the ready result mutably, if this is a Ready variant.
+    pub fn as_ready_mut(&mut self) -> Option<&mut ReadyResult> {
+        match self {
+            FindMatchesResult::Ready(r) => Some(r),
+            FindMatchesResult::AsyncSession(_) => None,
+        }
+    }
+
+    /// Get the async session result, if this is an AsyncSession variant.
+    pub fn as_async(&self) -> Option<&AsyncSessionResult> {
+        match self {
+            FindMatchesResult::Ready(_) => None,
+            FindMatchesResult::AsyncSession(a) => Some(a),
+        }
+    }
+
+    /// Get the async session result mutably, if this is an AsyncSession variant.
+    pub fn as_async_mut(&mut self) -> Option<&mut AsyncSessionResult> {
+        match self {
+            FindMatchesResult::Ready(_) => None,
+            FindMatchesResult::AsyncSession(a) => Some(a),
+        }
+    }
+
+    /// Get the number of G2 blocks available or matched.
+    ///
+    /// For Ready: returns the count of blocks held.
+    /// For AsyncSession: returns the count if blocks are available, 0 otherwise.
+    pub fn g2_count(&self) -> usize {
+        match self {
+            FindMatchesResult::Ready(r) => r.g2_count(),
+            FindMatchesResult::AsyncSession(a) => a.get_blocks_count().unwrap_or(0),
+        }
+    }
+
+    /// Take ownership of G2 blocks if available.
+    ///
+    /// For Ready: always succeeds, returns the blocks.
+    /// For AsyncSession: returns Some if blocks are available and lock succeeds.
+    pub fn take_g2_blocks(&mut self) -> Option<Vec<ImmutableBlock<G2>>> {
+        match self {
+            FindMatchesResult::Ready(r) => Some(r.take_g2_blocks()),
+            FindMatchesResult::AsyncSession(a) => a.blocks.try_lock().ok()?.take(),
+        }
     }
 }
 

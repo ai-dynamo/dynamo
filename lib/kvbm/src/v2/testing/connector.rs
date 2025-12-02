@@ -4,14 +4,14 @@
 //! Testing utilities for connector components.
 //!
 //! This module provides reusable test infrastructure for:
-//! - ConnectorInstance: 1 leader + N workers test environment
+//! - TestConnectorInstance: 1 leader + N workers test environment
 //! - ConnectorTestConfig: Role-specific configuration with dual API (builder + JSON)
 //! - TestConnectorWorker: Enhanced worker wrapper with test-friendly accessors
 //! - Mock KV cache tensors for testing without GPU allocation
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_kvbm_config::{KvbmConfig, NixlConfig};
-use dynamo_memory::nixl::{NixlAgent, NixlDescriptor};
+use dynamo_memory::nixl::NixlDescriptor;
 use dynamo_memory::{MemoryDescriptor, StorageKind, TensorDescriptor};
 use dynamo_nova::Nova;
 use dynamo_nova_backend::WorkerAddress;
@@ -22,14 +22,14 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::physical::layout::{BlockDimension, PhysicalLayout};
+use crate::v2::BlockId;
 use crate::v2::distributed::leader::InstanceLeader;
-use crate::v2::distributed::worker::Worker;
 use crate::v2::integrations::connector::leader::ConnectorLeader;
 use crate::v2::integrations::connector::worker::{ConnectorWorker, ConnectorWorkerInterface};
 use crate::v2::logical::pools::SequenceHash;
 use crate::v2::physical::layout::LayoutConfig;
 use crate::v2::physical::transfer::{BlockChecksum, FillPattern};
-use crate::v2::{BlockId, G2, G3};
 use crate::{InstanceId, KvbmRuntime};
 
 use super::{managers, nova, physical, token_blocks};
@@ -500,7 +500,7 @@ impl TestConnectorWorker {
 }
 
 // ============================================================================
-// ConnectorInstance - Container for 1 leader + N workers
+// TestConnectorInstance - Container for 1 leader + N workers
 // ============================================================================
 
 /// A single instance: 1 leader + N workers.
@@ -511,7 +511,7 @@ impl TestConnectorWorker {
 ///
 /// # Example - Single worker setup
 /// ```rust,ignore
-/// let instance = ConnectorInstance::single_worker().await?;
+/// let instance = TestConnectorInstance::single_worker().await?;
 /// instance.register_all_workers()?;
 /// instance.initialize()?;
 /// assert!(instance.workers[0].is_initialized());
@@ -522,13 +522,13 @@ impl TestConnectorWorker {
 /// let config = ConnectorTestConfig::new()
 ///     .with_leader_host_cache_gb(1.0);
 ///
-/// let instance = ConnectorInstance::builder()
+/// let instance = TestConnectorInstance::builder()
 ///     .num_workers(2)
 ///     .test_config(config)
 ///     .build()
 ///     .await?;
 /// ```
-pub struct ConnectorInstance {
+pub struct TestConnectorInstance {
     /// The ConnectorLeader for this instance (wrapped in Arc for spawn_blocking).
     pub leader: Arc<ConnectorLeader>,
     /// Workers in this instance (typically 1 per GPU in real deployments).
@@ -537,7 +537,7 @@ pub struct ConnectorInstance {
     pub leader_nova: Arc<Nova>,
 }
 
-impl ConnectorInstance {
+impl TestConnectorInstance {
     /// Quick creation of single-worker instance with defaults.
     ///
     /// Uses default configuration (NixL disabled for testing).
@@ -552,8 +552,68 @@ impl ConnectorInstance {
     }
 
     /// Builder for custom configuration.
-    pub fn builder() -> ConnectorInstanceBuilder {
-        ConnectorInstanceBuilder::default()
+    pub fn builder() -> TestConnectorInstanceBuilder {
+        TestConnectorInstanceBuilder::default()
+    }
+
+    // =========================================================================
+    // Sync factory methods - for non-tokio tests
+    // =========================================================================
+
+    /// Create a single-worker instance synchronously (auto-initialized).
+    ///
+    /// This method creates its own tokio runtime internally and does not
+    /// require `#[tokio::test]`. Workers are automatically registered and
+    /// initialized.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// #[test]  // Note: regular #[test], not #[tokio::test]
+    /// fn test_connector() {
+    ///     let instance = TestConnectorInstance::create()
+    ///         .expect("Should create");
+    ///     assert!(instance.workers[0].is_initialized());
+    /// }
+    /// ```
+    pub fn create() -> Result<Self> {
+        Self::create_with_config(ConnectorTestConfig::new(), 1)
+    }
+
+    /// Create an instance with N workers synchronously (auto-initialized).
+    pub fn create_n_workers(n: usize) -> Result<Self> {
+        Self::create_with_config(ConnectorTestConfig::new(), n)
+    }
+
+    /// Create an instance with custom configuration synchronously.
+    ///
+    /// This method:
+    /// 1. Creates a tokio runtime from the leader config
+    /// 2. Builds all components using `block_on`
+    /// 3. Auto-registers all workers with the leader
+    /// 4. Auto-initializes via leader-driven deferred init
+    ///
+    /// The tokio runtime is shared across all KvbmRuntimes via Arc.
+    pub fn create_with_config(config: ConnectorTestConfig, num_workers: usize) -> Result<Self> {
+        // Create tokio runtime from leader config
+        let leader_config = config.build_leader_config()?;
+        let tokio_rt = Arc::new(leader_config.tokio.build_runtime()?);
+        let handle = tokio_rt.handle().clone();
+
+        // Build instance inside runtime, passing shared runtime to builder
+        let instance = handle.block_on(async {
+            Self::builder()
+                .num_workers(num_workers)
+                .test_config(config)
+                .with_shared_runtime(tokio_rt)
+                .build()
+                .await
+        })?;
+
+        // Auto-register and initialize
+        instance.register_all_workers()?;
+        handle.block_on(instance.initialize())?;
+
+        Ok(instance)
     }
 
     /// Register all workers with the leader.
@@ -584,107 +644,8 @@ impl ConnectorInstance {
     /// This is an async method that internally uses spawn_blocking since
     /// the leader's initialize_workers uses block_on internally.
     pub async fn initialize(&self) -> Result<()> {
-        let leader = Arc::clone(&self.leader);
-
-        // Use spawn_blocking since initialize_workers uses block_on internally
-        tokio::task::spawn_blocking(move || leader.initialize_workers())
-            .await
-            .map_err(|e| anyhow!("Task panicked: {}", e))??;
-
-        // After workers are initialized, create the InstanceLeader
-        self.create_instance_leader()?;
-
-        Ok(())
-    }
-
-    /// Create and set the InstanceLeader after workers are initialized.
-    ///
-    /// This builds the InstanceLeader with:
-    /// - G2 and G3 BlockManagers using the leader's computed block counts
-    /// - Worker references extracted from the initialized ConnectorWorkers
-    /// - Nova instance for distributed communication
-    fn create_instance_leader(&self) -> Result<()> {
-        // Get the leader's config
-        let config = self.leader.runtime.config();
-
-        // Get layout config from first worker's TransferManager
-        let first_worker = self
-            .workers
-            .first()
-            .ok_or_else(|| anyhow!("No workers found"))?;
-
-        let direct_worker = first_worker
-            .worker
-            .worker()
-            .ok_or_else(|| anyhow!("Worker not initialized"))?;
-
-        let g2_handle = direct_worker
-            .g2_handle()
-            .ok_or_else(|| anyhow!("Worker G2 handle not set"))?;
-
-        let layout_config = direct_worker
-            .transfer_manager()
-            .get_layout_config(g2_handle)?;
-
-        // Compute block counts
-        let bytes_per_block = layout_config.required_bytes() / layout_config.num_blocks;
-        let host_block_count = config
-            .cache
-            .host
-            .compute_num_blocks(bytes_per_block)
-            .unwrap_or(0);
-        let disk_block_count = config
-            .cache
-            .disk
-            .as_ref()
-            .and_then(|dc| dc.compute_num_blocks(bytes_per_block));
-
-        // Create G2 and G3 BlockManagers
-        let g2_manager = Arc::new(managers::create_test_manager::<G2>(
-            host_block_count,
-            layout_config.page_size,
-        ));
-
-        let g3_manager = disk_block_count.map(|count| {
-            Arc::new(managers::create_test_manager::<G3>(
-                count,
-                layout_config.page_size,
-            ))
-        });
-
-        // Extract Worker trait objects from ConnectorWorkers
-        let workers: Vec<Arc<dyn Worker>> = self
-            .workers
-            .iter()
-            .filter_map(|w| w.worker.worker().map(|dw| dw.clone() as Arc<dyn Worker>))
-            .collect();
-
-        if workers.is_empty() {
-            return Err(anyhow!("No initialized workers found"));
-        }
-
-        // Build InstanceLeader
-        let instance_leader = InstanceLeader::builder()
-            .nova(self.leader_nova.clone())
-            .g2_manager(g2_manager)
-            .g3_manager(g3_manager.unwrap_or_else(|| {
-                // Create empty G3 manager if disk not configured
-                Arc::new(managers::create_test_manager::<G3>(
-                    0,
-                    layout_config.page_size,
-                ))
-            }))
-            .workers(workers)
-            .remote_leaders(vec![]) // No remote leaders in single instance
-            .build()?;
-
-        // Register handlers
-        instance_leader.register_handlers()?;
-
-        // Set on leader
-        self.leader.set_instance_leader(instance_leader)?;
-
-        Ok(())
+        // Call the async version of initialize_workers
+        self.leader.initialize_async().await
     }
 
     /// Access the InstanceLeader (available after initialize()).
@@ -705,7 +666,7 @@ impl ConnectorInstance {
     ///
     /// # Example
     /// ```ignore
-    /// let instance = ConnectorInstance::single_worker().await?;
+    /// let instance = TestConnectorInstance::single_worker().await?;
     /// instance.register_all_workers()?;
     /// instance.initialize().await?;
     ///
@@ -741,7 +702,7 @@ impl ConnectorInstance {
     ///
     /// # Example
     /// ```ignore
-    /// let instance = ConnectorInstance::single_worker().await?;
+    /// let instance = TestConnectorInstance::single_worker().await?;
     /// instance.register_all_workers()?;
     /// instance.initialize().await?;
     ///
@@ -801,20 +762,283 @@ impl ConnectorInstance {
         }
         Ok(())
     }
+
+    /// Get the Nova instance ID for this instance.
+    pub fn instance_id(&self) -> InstanceId {
+        self.leader_nova.instance_id()
+    }
+
+    /// Fill G2 blocks with a pattern across all workers.
+    ///
+    /// # Arguments
+    /// * `block_ids` - Block IDs to fill
+    /// * `pattern` - Fill pattern to use
+    pub fn fill_g2_blocks(&self, block_ids: &[BlockId], pattern: FillPattern) -> Result<()> {
+        for worker in &self.workers {
+            worker.fill_g2_blocks(block_ids, pattern)?;
+        }
+        Ok(())
+    }
+
+    /// Compute G2 checksums across all workers.
+    ///
+    /// Returns a vector of hashmaps, one per worker.
+    ///
+    /// # Arguments
+    /// * `block_ids` - Block IDs to compute checksums for
+    pub fn compute_g2_checksums(
+        &self,
+        block_ids: &[BlockId],
+    ) -> Result<Vec<std::collections::HashMap<BlockId, BlockChecksum>>> {
+        self.workers
+            .iter()
+            .map(|worker| worker.compute_g2_checksums(block_ids))
+            .collect()
+    }
 }
 
 // ============================================================================
-// ConnectorInstanceBuilder - Fluent builder
+// TestConnectorCluster - Multi-instance cluster for E2E tests
 // ============================================================================
 
-/// Builder for creating ConnectorInstance with custom configuration.
-pub struct ConnectorInstanceBuilder {
+/// A cluster of homogeneous TestConnectorInstance objects for multi-instance E2E testing.
+///
+/// All instances share the same:
+/// - Number of workers per instance
+/// - LayoutConfig
+/// - Cache configuration
+///
+/// Nova instances are cross-registered to enable inter-instance communication.
+pub struct TestConnectorCluster {
+    pub instances: Vec<TestConnectorInstance>,
+}
+
+impl TestConnectorCluster {
+    pub fn builder() -> TestConnectorClusterBuilder {
+        TestConnectorClusterBuilder::default()
+    }
+
+    /// Get instances as a slice.
+    pub fn instances(&self) -> &[TestConnectorInstance] {
+        &self.instances
+    }
+
+    // =========================================================================
+    // Sync factory methods - for non-tokio tests
+    // =========================================================================
+
+    /// Create a 2-instance cluster with 1 worker each synchronously.
+    ///
+    /// This method creates its own tokio runtime internally and does not
+    /// require `#[tokio::test]`. All instances are fully initialized.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// #[test]  // Note: regular #[test], not #[tokio::test]
+    /// fn test_cluster() {
+    ///     let cluster = TestConnectorCluster::create()
+    ///         .expect("Should create cluster");
+    ///     assert_eq!(cluster.instances().len(), 2);
+    /// }
+    /// ```
+    pub fn create() -> Result<Self> {
+        Self::create_with_config(ConnectorTestConfig::new(), 2, 1)
+    }
+
+    /// Create a cluster with custom sizing synchronously.
+    pub fn create_sized(num_instances: usize, workers_per_instance: usize) -> Result<Self> {
+        Self::create_with_config(
+            ConnectorTestConfig::new(),
+            num_instances,
+            workers_per_instance,
+        )
+    }
+
+    /// Create a cluster with full configuration control synchronously.
+    ///
+    /// This method:
+    /// 1. Creates a tokio runtime from the leader config
+    /// 2. Builds all instances using `block_on`
+    /// 3. Cross-registers all Nova instances
+    /// 4. Auto-registers all workers with their leaders
+    /// 5. Auto-initializes all instances concurrently
+    ///
+    /// The tokio runtime is shared across all KvbmRuntimes via Arc.
+    pub fn create_with_config(
+        config: ConnectorTestConfig,
+        num_instances: usize,
+        workers_per_instance: usize,
+    ) -> Result<Self> {
+        // Create tokio runtime from leader config
+        let leader_config = config.build_leader_config()?;
+        let tokio_rt = Arc::new(leader_config.tokio.build_runtime()?);
+        let handle = tokio_rt.handle().clone();
+
+        // Build cluster inside runtime, passing shared runtime to builder
+        handle.block_on(async {
+            Self::builder()
+                .num_instances(num_instances)
+                .workers_per_instance(workers_per_instance)
+                .test_config(config)
+                .with_shared_runtime(tokio_rt)
+                .build()
+                .await
+        })
+    }
+}
+
+/// Builder for TestConnectorCluster.
+#[derive(Default)]
+pub struct TestConnectorClusterBuilder {
+    num_instances: usize,
+    workers_per_instance: usize,
+    layout_config: Option<LayoutConfig>,
+    test_config: ConnectorTestConfig,
+    /// Optional shared runtime for sync factory methods.
+    shared_runtime: Option<Arc<tokio::runtime::Runtime>>,
+}
+
+impl TestConnectorClusterBuilder {
+    /// Set the number of instances in the cluster (default: 2).
+    pub fn num_instances(mut self, count: usize) -> Self {
+        self.num_instances = count;
+        self
+    }
+
+    /// Set the number of workers per instance (default: 1).
+    pub fn workers_per_instance(mut self, count: usize) -> Self {
+        self.workers_per_instance = count;
+        self
+    }
+
+    /// Set custom layout configuration.
+    pub fn layout_config(mut self, config: LayoutConfig) -> Self {
+        self.layout_config = Some(config);
+        self
+    }
+
+    /// Set custom test configuration.
+    pub fn test_config(mut self, config: ConnectorTestConfig) -> Self {
+        self.test_config = config;
+        self
+    }
+
+    /// Use a shared tokio runtime (for sync factory methods).
+    ///
+    /// When set, all instances and their KvbmRuntimes will share
+    /// ownership of this runtime via Arc.
+    #[must_use]
+    pub fn with_shared_runtime(mut self, runtime: Arc<tokio::runtime::Runtime>) -> Self {
+        self.shared_runtime = Some(runtime);
+        self
+    }
+
+    /// Build the cluster with cross-registered Nova instances.
+    pub async fn build(self) -> Result<TestConnectorCluster> {
+        let num_instances = if self.num_instances == 0 {
+            2
+        } else {
+            self.num_instances
+        };
+        let workers_per_instance = if self.workers_per_instance == 0 {
+            1
+        } else {
+            self.workers_per_instance
+        };
+
+        // Use provided layout config or default
+        let layout_config = self.layout_config.unwrap_or_else(|| {
+            LayoutConfig::builder()
+                .num_blocks(10)
+                .num_layers(4)
+                .outer_dim(2)
+                .page_size(16)
+                .inner_dim(128)
+                .dtype_width_bytes(2)
+                .build()
+                .expect("Default layout config should build")
+        });
+
+        // Create all instances
+        let mut instances = Vec::with_capacity(num_instances);
+        for _ in 0..num_instances {
+            let mut builder = TestConnectorInstance::builder()
+                .num_workers(workers_per_instance)
+                .layout_config(layout_config.clone())
+                .test_config(self.test_config.clone());
+            if let Some(rt) = &self.shared_runtime {
+                builder = builder.with_shared_runtime(rt.clone());
+            }
+            let instance = builder.build().await?;
+            instances.push(instance);
+        }
+
+        // Cross-register all Nova instances
+        for i in 0..instances.len() {
+            for j in 0..instances.len() {
+                if i != j {
+                    let peer_info = instances[j].leader_nova.peer_info();
+                    instances[i]
+                        .leader_nova
+                        .register_peer(peer_info)
+                        .with_context(|| {
+                            format!("Failed to register peer {} with instance {}", j, i)
+                        })?;
+                }
+            }
+        }
+
+        // Give Nova time to establish connections
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Register all workers with their leaders first (non-blocking)
+        for (idx, instance) in instances.iter().enumerate() {
+            instance
+                .register_all_workers()
+                .with_context(|| format!("Failed to register workers for instance {}", idx))?;
+        }
+
+        // Initialize all instances concurrently to avoid deadlocks
+        // Collect futures for concurrent execution
+        let mut init_futures = Vec::new();
+        for (idx, instance) in instances.iter().enumerate() {
+            init_futures.push(async move {
+                instance
+                    .initialize()
+                    .await
+                    .with_context(|| format!("Failed to initialize instance {}", idx))
+            });
+        }
+
+        // Execute all initializations concurrently
+        let results = futures::future::join_all(init_futures).await;
+
+        // Check for errors
+        for result in results {
+            result?;
+        }
+
+        // Give time for async handler registration to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        Ok(TestConnectorCluster { instances })
+    }
+}
+
+// ============================================================================
+// TestConnectorInstanceBuilder - Fluent builder
+// ============================================================================
+
+/// Builder for creating TestConnectorInstance with custom configuration.
+pub struct TestConnectorInstanceBuilder {
     num_workers: usize,
     layout_config: LayoutConfig,
     test_config: ConnectorTestConfig,
+    /// Optional shared runtime for sync factory methods.
+    shared_runtime: Option<Arc<tokio::runtime::Runtime>>,
 }
 
-impl Default for ConnectorInstanceBuilder {
+impl Default for TestConnectorInstanceBuilder {
     fn default() -> Self {
         Self {
             num_workers: 1,
@@ -828,11 +1052,12 @@ impl Default for ConnectorInstanceBuilder {
                 .build()
                 .expect("Default LayoutConfig should be valid"),
             test_config: ConnectorTestConfig::default(),
+            shared_runtime: None,
         }
     }
 }
 
-impl ConnectorInstanceBuilder {
+impl TestConnectorInstanceBuilder {
     /// Set the number of workers in this instance.
     #[must_use]
     pub fn num_workers(mut self, n: usize) -> Self {
@@ -854,14 +1079,25 @@ impl ConnectorInstanceBuilder {
         self
     }
 
-    /// Build the ConnectorInstance.
+    /// Use a shared tokio runtime (for sync factory methods).
     ///
-    /// This creates:
-    /// 1. Nova mesh with leader + workers
-    /// 2. Leader runtime with leader profile config
-    /// 3. Worker runtimes with worker profile config
-    /// 4. Workers pre-registered with mock KV caches
-    pub async fn build(self) -> Result<ConnectorInstance> {
+    /// When set, all KvbmRuntimes created by this builder will share
+    /// ownership of this runtime via Arc.
+    #[must_use]
+    pub fn with_shared_runtime(mut self, runtime: Arc<tokio::runtime::Runtime>) -> Self {
+        self.shared_runtime = Some(runtime);
+        self
+    }
+
+    /// Build the TestConnectorInstance.
+    ///
+    /// This creates components in the correct order:
+    /// 1. Nova mesh with leader + workers (cross-registered)
+    /// 2. Worker runtimes with worker profile config (KV caches registered)
+    /// 3. Leader runtime with leader profile config
+    ///
+    /// Workers are built first so they can respond to leader's initialization RPCs.
+    pub async fn build(self) -> Result<TestConnectorInstance> {
         // 1. Create Nova instances
         let leader_nova = nova::create_nova_instance_tcp().await?;
 
@@ -879,38 +1115,54 @@ impl ConnectorInstanceBuilder {
         // Give time for peer registration
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // 3. Build leader runtime with profile config
-        let leader_config = self.test_config.build_leader_config()?;
-        let leader_runtime = KvbmRuntime::builder(leader_config)
-            .with_nova(leader_nova.clone())
-            .build_leader()
-            .await?;
-
-        let leader = Arc::new(ConnectorLeader::new(leader_runtime));
-
-        // 4. Build worker runtimes with profile config
+        // 3. Build WORKER runtimes FIRST (so they can respond to leader RPCs)
         let worker_config = self.test_config.build_worker_config()?;
         let mut workers = Vec::with_capacity(self.num_workers);
 
         for (rank, worker_nova) in worker_novas.into_iter().enumerate() {
-            let nixl_agent = NixlAgent::new(&format!("worker-{}", rank))
-                .context("Failed to create NixL agent")?;
-
-            let worker_runtime = KvbmRuntime::builder(worker_config.clone())
-                .with_nova(worker_nova.clone())
-                .with_nixl_agent(nixl_agent)
-                .build_worker()
-                .await?;
+            let worker_runtime = {
+                let mut builder =
+                    KvbmRuntime::builder(worker_config.clone()).with_nova(worker_nova.clone());
+                if let Some(rt) = &self.shared_runtime {
+                    builder = builder.with_runtime(rt.clone());
+                }
+                builder.build_worker().await?
+            };
 
             let worker_peer_info = worker_nova.peer_info();
             let instance_id = worker_peer_info.instance_id;
             let worker_address = worker_peer_info.worker_address;
 
+            // Get nixl_agent before moving worker_runtime
+            let nixl_agent = worker_runtime.nixl_agent().unwrap().clone();
+
+            // Create PhysicalLayout with real GPU memory allocation
+            let layout = Arc::new(
+                PhysicalLayout::builder(nixl_agent)
+                    .with_config(self.layout_config.clone())
+                    .layer_separate(BlockDimension::BlockIsFirstDim)
+                    .allocate_device(0)
+                    .build()?,
+            );
+
             let connector_worker = ConnectorWorker::new(worker_runtime);
 
-            // Pre-register mock KV caches
-            let tensors =
-                create_mock_kv_tensors_from_config(&self.layout_config, StorageKind::Device(0));
+            // Create mock tensors that hold references to the layout to keep memory alive
+            let element_size = self.layout_config.dtype_width_bytes;
+            let tensors: Vec<Arc<dyn TensorDescriptor>> = layout
+                .layout()
+                .memory_regions()
+                .iter()
+                .map(|r| {
+                    MockTensor::from_memory_region(
+                        r.addr(),
+                        r.size(),
+                        element_size,
+                        r.storage_kind(),
+                        layout.clone(),
+                    )
+                })
+                .collect();
 
             connector_worker
                 .register_kv_caches(
@@ -929,7 +1181,22 @@ impl ConnectorInstanceBuilder {
             });
         }
 
-        Ok(ConnectorInstance {
+        // Give time for worker handlers to register
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // 4. Build LEADER runtime AFTER workers
+        let leader_config = self.test_config.build_leader_config()?;
+        let leader_runtime = {
+            let mut builder = KvbmRuntime::builder(leader_config).with_nova(leader_nova.clone());
+            if let Some(rt) = &self.shared_runtime {
+                builder = builder.with_runtime(rt.clone());
+            }
+            builder.build_leader().await?
+        };
+
+        let leader = Arc::new(ConnectorLeader::new(leader_runtime));
+
+        Ok(TestConnectorInstance {
             leader,
             workers,
             leader_nova,
@@ -943,8 +1210,9 @@ impl ConnectorInstanceBuilder {
 
 /// Mock tensor for testing connector functionality.
 ///
-/// This provides a simple implementation of TensorDescriptor for unit tests
-/// without requiring actual GPU memory allocation.
+/// This provides a simple implementation of TensorDescriptor that can wrap
+/// real GPU memory from a PhysicalLayout or use mock addresses for testing.
+/// When wrapping real memory, it holds an Arc<PhysicalLayout> to keep the memory alive.
 #[derive(Debug)]
 pub struct MockTensor {
     addr: usize,
@@ -953,10 +1221,12 @@ pub struct MockTensor {
     stride: Vec<usize>,
     element_size: usize,
     storage_kind: StorageKind,
+    /// Optional PhysicalLayout to keep real GPU memory alive
+    _layout: Option<Arc<PhysicalLayout>>,
 }
 
 impl MockTensor {
-    /// Create a new mock tensor with the given parameters.
+    /// Create a new mock tensor with the given parameters (no real memory).
     ///
     /// # Arguments
     /// * `addr` - Mock memory address
@@ -986,6 +1256,53 @@ impl MockTensor {
             stride,
             element_size,
             storage_kind,
+            _layout: None,
+        })
+    }
+
+    /// Create a mock tensor from a real memory region, keeping the layout alive.
+    ///
+    /// This method wraps real GPU memory from a PhysicalLayout and holds an Arc
+    /// to the layout to ensure the memory remains valid.
+    ///
+    /// # Arguments
+    /// * `addr` - Real memory address
+    /// * `size` - Total size in bytes
+    /// * `element_size` - Size of each element in bytes
+    /// * `storage_kind` - Storage location
+    /// * `layout` - PhysicalLayout that owns the memory (will be kept alive)
+    pub fn from_memory_region(
+        addr: usize,
+        size: usize,
+        element_size: usize,
+        storage_kind: StorageKind,
+        layout: Arc<PhysicalLayout>,
+    ) -> Arc<dyn TensorDescriptor> {
+        // Extract shape from the layout configuration
+        // For layer-separate layouts with BlockIsFirstDim, each memory region is one layer
+        // with shape: [num_blocks, outer_dim, page_size, inner_dim]
+        let config = layout.layout().config();
+        let shape = vec![
+            config.num_blocks,
+            config.outer_dim,
+            config.page_size,
+            config.inner_dim,
+        ];
+
+        // Calculate contiguous stride (row-major)
+        let mut stride = vec![1; shape.len()];
+        for i in (0..shape.len().saturating_sub(1)).rev() {
+            stride[i] = stride[i + 1] * shape[i + 1];
+        }
+
+        Arc::new(Self {
+            addr,
+            size,
+            shape,
+            stride,
+            element_size,
+            storage_kind,
+            _layout: Some(layout),
         })
     }
 }
@@ -1026,50 +1343,6 @@ impl TensorDescriptor for MockTensor {
     }
 }
 
-/// Create a vector of mock KV cache tensors from a LayoutConfig.
-///
-/// Creates tensors that match the provided LayoutConfig exactly:
-/// - Shape: [num_blocks, outer_dim, page_size, inner_dim]
-/// - One tensor per layer
-/// - Contiguous strides
-/// - Blocks are in the first dimension (BlockIsFirstDim)
-///
-/// This ensures the generated tensors will produce the same LayoutConfig
-/// when passed through `determine_kv_layout()`.
-///
-/// # Arguments
-/// * `config` - The layout configuration to match
-/// * `storage_kind` - Storage location (typically Device(0) for GPU)
-///
-/// # Returns
-/// A vector of `config.num_layers` mock tensors, each with shape
-/// `[num_blocks, outer_dim, page_size, inner_dim]`
-pub fn create_mock_kv_tensors_from_config(
-    config: &LayoutConfig,
-    storage_kind: StorageKind,
-) -> Vec<Arc<dyn TensorDescriptor>> {
-    // Tensor shape matches LayoutConfig with blocks in first dimension
-    let shape = vec![
-        config.num_blocks,
-        config.outer_dim,
-        config.page_size,
-        config.inner_dim,
-    ];
-
-    (0..config.num_layers)
-        .map(|layer_idx| {
-            // Use different base addresses for each layer to simulate separate allocations
-            let base_addr = 0x10000000 + (layer_idx * 0x1000000);
-            MockTensor::create(
-                base_addr,
-                shape.clone(),
-                config.dtype_width_bytes,
-                storage_kind,
-            )
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use tracing_subscriber::EnvFilter;
@@ -1086,8 +1359,24 @@ mod tests {
             .with_test_writer()
             .try_init();
 
-        // Simple one-liner setup
-        let instance = ConnectorInstance::single_worker()
+        // Configure with proper host cache blocks
+        let config = ConnectorTestConfig::new().with_leader_host_num_blocks(128);
+
+        let layout = LayoutConfig::builder()
+            .num_blocks(10)
+            .num_layers(4)
+            .outer_dim(2)
+            .page_size(16)
+            .inner_dim(128)
+            .dtype_width_bytes(2)
+            .build()
+            .expect("Should build valid LayoutConfig");
+
+        let instance = TestConnectorInstance::builder()
+            .num_workers(1)
+            .layout_config(layout)
+            .test_config(config)
+            .build()
             .await
             .expect("Should create single-worker instance");
 
@@ -1104,30 +1393,10 @@ mod tests {
             .expect("Should register workers");
 
         // Leader-driven initialization
-        let init_result = instance.initialize().await;
-
-        // Worker-side initialization may fail if G2/G3 creation requires proper NIXL backend,
-        // but the leader-side logic (fetch, validate, compute, send) will have executed.
-        match init_result {
-            Ok(_) => {
-                println!("Leader successfully initialized workers");
-                assert!(
-                    instance.workers[0].is_initialized(),
-                    "Worker should be initialized after successful init"
-                );
-            }
-            Err(e) => {
-                let error_msg = e.to_string();
-                // If it failed at worker initialization (not at fetch/validate), that's acceptable
-                if error_msg.contains("Failed to initialize worker") {
-                    println!(
-                        "Leader completed fetch/validate/compute/send (worker init failed as expected in test environment)"
-                    );
-                } else {
-                    panic!("Unexpected error during leader initialization: {}", e);
-                }
-            }
-        }
+        instance
+            .initialize()
+            .await
+            .expect("failed to initialize workers");
 
         // Drop instance in spawn_blocking to avoid runtime-in-runtime panic
         tokio::task::spawn_blocking(move || drop(instance))
@@ -1155,7 +1424,7 @@ mod tests {
             .build()
             .expect("Should build valid LayoutConfig");
 
-        let instance = ConnectorInstance::builder()
+        let instance = TestConnectorInstance::builder()
             .num_workers(2)
             .layout_config(layout)
             .test_config(config)
@@ -1171,29 +1440,17 @@ mod tests {
             .expect("Should register all workers");
 
         // Initialize via leader
-        let init_result = instance.initialize().await;
+        instance
+            .initialize()
+            .await
+            .expect("failed to initialize workers");
 
-        match init_result {
-            Ok(_) => {
-                println!("Leader successfully initialized all workers");
-                for (i, worker) in instance.workers.iter().enumerate() {
-                    assert!(
-                        worker.is_initialized(),
-                        "Worker {} should be initialized",
-                        i
-                    );
-                }
-            }
-            Err(e) => {
-                let error_msg = e.to_string();
-                if error_msg.contains("Failed to initialize worker") {
-                    println!(
-                        "Leader completed coordination (worker init failed as expected in test environment)"
-                    );
-                } else {
-                    panic!("Unexpected error during multi-worker initialization: {}", e);
-                }
-            }
+        for (i, worker) in instance.workers.iter().enumerate() {
+            assert!(
+                worker.is_initialized(),
+                "Worker {} should be initialized",
+                i
+            );
         }
 
         // Drop instance in spawn_blocking to avoid runtime-in-runtime panic
@@ -1370,5 +1627,58 @@ mod tests {
         assert_eq!(worker.tokio.worker_threads, Some(2));
         // Worker still gets NIXL defaults
         assert!(worker.nixl.is_some());
+    }
+
+    // =========================================================================
+    // Sync factory tests - regular #[test], not #[tokio::test]
+    // =========================================================================
+
+    #[test]
+    fn test_sync_single_worker_creation() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new("warn,dynamo_nova=error,dynamo_kvbm=debug")),
+            )
+            .with_test_writer()
+            .try_init();
+
+        // Configure with proper host cache blocks
+        let config = ConnectorTestConfig::new().with_leader_host_num_blocks(128);
+
+        let instance = TestConnectorInstance::create_with_config(config, 1)
+            .expect("Should create single-worker instance synchronously");
+
+        assert_eq!(instance.workers.len(), 1);
+        assert!(
+            instance.workers[0].is_initialized(),
+            "Worker should be initialized by sync factory"
+        );
+    }
+
+    #[test]
+    fn test_sync_cluster_creation() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new("warn,dynamo_nova=error,dynamo_kvbm=debug")),
+            )
+            .with_test_writer()
+            .try_init();
+
+        // Configure with proper host cache blocks
+        let config = ConnectorTestConfig::new().with_leader_host_num_blocks(128);
+
+        let cluster = TestConnectorCluster::create_with_config(config, 2, 1)
+            .expect("Should create 2-instance cluster synchronously");
+
+        assert_eq!(cluster.instances().len(), 2);
+        for (i, instance) in cluster.instances().iter().enumerate() {
+            assert!(
+                instance.workers[0].is_initialized(),
+                "Instance {} worker should be initialized",
+                i
+            );
+        }
     }
 }

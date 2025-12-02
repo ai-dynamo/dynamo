@@ -31,6 +31,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::Result;
+use derive_builder::Builder;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -53,6 +54,8 @@ use crate::v2::{G2, InstanceId, SequenceHash};
 ///
 /// The session runs in a background task and can be controlled via
 /// [`EndpointSessionHandle`].
+#[derive(Builder)]
+#[builder(pattern = "owned")]
 pub struct EndpointSession {
     /// Session endpoint for state machine and messaging.
     endpoint: SessionEndpoint,
@@ -91,41 +94,30 @@ pub enum EndpointSessionCommand {
 }
 
 impl EndpointSession {
-    /// Create a new endpoint session.
-    ///
-    /// # Arguments
-    /// * `session_id` - Unique session identifier
-    /// * `instance_id` - This instance's ID
-    /// * `blocks` - G2 blocks to expose for RDMA pull
-    /// * `layout_handles` - Layout handles for each block
-    /// * `sequence_hashes` - Sequence hashes for each block
-    /// * `transport` - Message transport for sending messages
-    /// * `msg_rx` - Channel for receiving SessionMessage from remote
-    /// * `cmd_rx` - Channel for receiving local commands
-    // todo: remove clippy warning and convert to builder pattern
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    /// Create a builder for EndpointSession.
+    pub fn builder() -> EndpointSessionBuilder {
+        EndpointSessionBuilder::default()
+    }
+}
+
+impl EndpointSessionBuilder {
+    pub fn endpoint_from_parts(
+        self,
         session_id: SessionId,
         instance_id: InstanceId,
-        blocks: BlockHolder<G2>,
-        layout_handles: Vec<LayoutHandle>,
-        sequence_hashes: Vec<SequenceHash>,
         transport: Arc<MessageTransport>,
         msg_rx: mpsc::Receiver<SessionMessage>,
-        cmd_rx: mpsc::Receiver<EndpointSessionCommand>,
     ) -> Self {
-        // Create endpoint in Controllee state (waiting for controller to attach)
-        let endpoint = SessionEndpoint::new(session_id, instance_id, transport, msg_rx);
-
-        Self {
-            endpoint,
-            g2_blocks: blocks,
-            layout_handles,
-            sequence_hashes,
-            cmd_rx,
-        }
+        self.endpoint(SessionEndpoint::new(
+            session_id,
+            instance_id,
+            transport,
+            msg_rx,
+        ))
     }
+}
 
+impl EndpointSession {
     /// Run the session message loop.
     ///
     /// This processes incoming messages and local commands until the session
@@ -461,16 +453,14 @@ pub fn create_endpoint_session(
 ) -> (EndpointSession, EndpointSessionHandle) {
     let (cmd_tx, cmd_rx) = mpsc::channel(16);
 
-    let session = EndpointSession::new(
-        session_id,
-        instance_id,
-        blocks,
-        layout_handles,
-        sequence_hashes,
-        transport,
-        msg_rx,
-        cmd_rx,
-    );
+    let session = EndpointSession::builder()
+        .endpoint_from_parts(session_id, instance_id, transport, msg_rx)
+        .g2_blocks(blocks)
+        .layout_handles(layout_handles)
+        .sequence_hashes(sequence_hashes)
+        .cmd_rx(cmd_rx)
+        .build()
+        .expect("failed to build endpoint session");
 
     let handle = EndpointSessionHandle::new(session_id, instance_id, cmd_tx);
 

@@ -234,6 +234,7 @@ impl WorkerTransfers for ReplicatedWorker {
 }
 
 /// Helper to await all import metadata responses and signal completion via an event.
+/// Helper to await all import metadata responses and signal completion via an event.
 async fn await_import_responses(responses: Vec<ImportMetadataResponse>, event: LocalEvent) {
     let results: Vec<Result<Vec<LayoutHandle>>> =
         futures::future::join_all(responses.into_iter().map(|r| r.into_future())).await;

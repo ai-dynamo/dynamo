@@ -40,6 +40,24 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for HashMapBackend<T> {
         matches
     }
 
+    fn scan_matches(
+        &mut self,
+        hashes: &[SequenceHash],
+        _touch: bool,
+    ) -> Vec<(SequenceHash, Block<T, Registered>)> {
+        let mut matches = Vec::new();
+
+        for hash in hashes {
+            if let Some(block) = self.blocks.remove(hash) {
+                let _ = self.reuse_policy.remove(block.block_id());
+                matches.push((*hash, block));
+            }
+            // Unlike find_matches: NO break on miss - continue scanning
+        }
+
+        matches
+    }
+
     fn allocate(&mut self, count: usize) -> Vec<Block<T, Registered>> {
         let mut allocated = Vec::with_capacity(count);
 

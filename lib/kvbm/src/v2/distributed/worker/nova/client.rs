@@ -2,10 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use std::sync::OnceLock;
 
+#[derive(Clone)]
 pub struct NovaWorkerClient {
     nova: Arc<Nova>,
     remote: InstanceId,
+    g1_handle: Arc<OnceLock<LayoutHandle>>,
+    g2_handle: Arc<OnceLock<LayoutHandle>>,
+    g3_handle: Arc<OnceLock<LayoutHandle>>,
 }
 
 impl WorkerTransfers for NovaWorkerClient {
@@ -98,8 +103,9 @@ impl WorkerTransfers for NovaWorkerClient {
 
         self.nova.tracker().spawn_on(
             async move {
+                // Use unary instead of am_sync for explicit response handling
                 let result = nova
-                    .am_sync("kvbm.worker.remote_onboard")?
+                    .unary("kvbm.worker.remote_onboard")?
                     .raw_payload(bytes)
                     .instance(remote_instance)
                     .send()
@@ -147,8 +153,9 @@ impl WorkerTransfers for NovaWorkerClient {
 
         self.nova.tracker().spawn_on(
             async move {
+                // Use unary instead of am_sync for explicit response handling
                 let result = nova
-                    .am_sync("kvbm.worker.remote_offload")?
+                    .unary("kvbm.worker.remote_offload")?
                     .raw_payload(bytes)
                     .instance(remote_instance)
                     .send()
@@ -203,43 +210,98 @@ impl WorkerTransfers for NovaWorkerClient {
 }
 
 impl Worker for NovaWorkerClient {
+    fn g1_handle(&self) -> Option<LayoutHandle> {
+        self.g1_handle.get().copied()
+    }
+
     fn g2_handle(&self) -> Option<LayoutHandle> {
-        // NovaWorkerClient is a remote worker proxy - it doesn't have direct
-        // access to layout handles. For RDMA transfers, the actual layout info
-        // comes through metadata exchange, not through this method.
-        None
+        self.g2_handle.get().copied()
+    }
+
+    fn g3_handle(&self) -> Option<LayoutHandle> {
+        self.g3_handle.get().copied()
     }
 
     fn export_metadata(&self) -> Result<SerializedLayoutResponse> {
-        let instance = self.remote;
-
-        let awaiter = self
+        // Use unary (not typed_unary) to avoid JSON serialization of bincode data
+        let unary_result = self
             .nova
-            .typed_unary::<SerializedLayout>("kvbm.worker.export_metadata")?
-            .instance(instance)
+            .unary("kvbm.worker.export_metadata")?
+            .instance(self.remote)
             .send();
 
-        Ok(SerializedLayoutResponse::from_awaiter(awaiter))
+        // Wrap UnaryResult to convert Bytes to SerializedLayout
+        let future = async move {
+            let bytes = unary_result.await?;
+            Ok(SerializedLayout::from_bytes(bytes))
+        };
+
+        Ok(SerializedLayoutResponse::from_boxed(Box::pin(future)))
     }
 
     fn import_metadata(&self, metadata: SerializedLayout) -> Result<ImportMetadataResponse> {
-        let instance = self.remote;
-
-        let awaiter = self
+        // Use raw_payload to avoid JSON serialization of bincode data
+        let unary_result = self
             .nova
-            .typed_unary::<Vec<LayoutHandle>>("kvbm.worker.import_metadata")?
-            .payload(metadata)?
-            .instance(instance)
+            .unary("kvbm.worker.import_metadata")?
+            .raw_payload(metadata.as_bytes().clone())
+            .instance(self.remote)
             .send();
 
-        Ok(ImportMetadataResponse::from_awaiter(awaiter))
+        // Response is JSON-serialized Vec<LayoutHandle>
+        let future = async move {
+            let bytes = unary_result.await?;
+            serde_json::from_slice(&bytes).map_err(|e| {
+                anyhow::anyhow!("Failed to deserialize import_metadata response: {}", e)
+            })
+        };
+
+        Ok(ImportMetadataResponse::from_boxed(Box::pin(future)))
     }
 }
 
 impl NovaWorkerClient {
     /// Create a new NovaWorkerClient for communicating with a remote worker.
     pub fn new(nova: Arc<Nova>, remote: InstanceId) -> Self {
-        Self { nova, remote }
+        Self {
+            nova,
+            remote,
+            g1_handle: Arc::new(OnceLock::new()),
+            g2_handle: Arc::new(OnceLock::new()),
+            g3_handle: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// Configure layout handles from serialized metadata.
+    ///
+    /// Call this after worker initialization when handles are known from WorkerLayoutResponse.
+    /// This allows the NovaWorkerClient to provide layout handles like DirectWorker does.
+    ///
+    /// # Arguments
+    /// * `metadata` - SerializedLayout from WorkerLayoutResponse.metadata
+    ///
+    /// # Example
+    /// ```ignore
+    /// let response: WorkerLayoutResponse = worker.initialize(config).await?;
+    /// worker_client.configure_layout_handles(&response.metadata)?;
+    /// ```
+    pub fn configure_layout_handles(&self, metadata: &SerializedLayout) -> Result<()> {
+        let unpacked = metadata.unpack()?;
+        for desc in &unpacked.layouts {
+            match desc.logical_type {
+                LogicalLayoutHandle::G1 => {
+                    self.g1_handle.set(desc.handle).ok();
+                }
+                LogicalLayoutHandle::G2 => {
+                    self.g2_handle.set(desc.handle).ok();
+                }
+                LogicalLayoutHandle::G3 => {
+                    self.g3_handle.set(desc.handle).ok();
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Get the layout configuration from the remote worker.

@@ -15,6 +15,10 @@ use crate::{
 
 use super::token_blocks;
 
+pub fn create_test_registry() -> BlockRegistry {
+    BlockRegistry::with_frequency_tracker(FrequencyTrackingCapacity::Medium.create_tracker())
+}
+
 /// Create a basic BlockManager for testing with standard configuration.
 ///
 /// Uses:
@@ -34,10 +38,8 @@ use super::token_blocks;
 pub fn create_test_manager<T: BlockMetadata>(
     block_count: usize,
     block_size: usize,
+    registry: BlockRegistry,
 ) -> BlockManager<T> {
-    let registry =
-        BlockRegistry::with_frequency_tracker(FrequencyTrackingCapacity::Medium.create_tracker());
-
     BlockManager::<T>::builder()
         .block_count(block_count)
         .block_size(block_size)
@@ -113,8 +115,9 @@ pub fn create_and_populate_manager<T: BlockMetadata>(
     block_count: usize,
     block_size: usize,
     start_token: u32,
+    registry: BlockRegistry,
 ) -> Result<(BlockManager<T>, Vec<SequenceHash>)> {
-    let manager = create_test_manager(block_count, block_size);
+    let manager = create_test_manager(block_count, block_size, registry);
 
     let token_sequence = token_blocks::create_token_sequence(block_count, block_size, start_token);
     let seq_hashes = populate_manager_with_blocks(&manager, token_sequence.blocks())?;
@@ -131,7 +134,8 @@ mod tests {
 
     #[test]
     fn test_create_test_manager() {
-        let manager = create_test_manager::<TestMetadata>(100, 16);
+        let registry = create_test_registry();
+        let manager = create_test_manager::<TestMetadata>(100, 16, registry);
         assert_eq!(manager.total_blocks(), 100);
         assert_eq!(manager.block_size(), 16);
         assert_eq!(manager.available_blocks(), 100);
@@ -139,7 +143,8 @@ mod tests {
 
     #[test]
     fn test_populate_manager_with_blocks() {
-        let manager = create_test_manager::<TestMetadata>(50, 4);
+        let registry = create_test_registry();
+        let manager = create_test_manager::<TestMetadata>(50, 4, registry);
         let token_seq = token_blocks::create_token_sequence(10, 4, 0);
 
         let seq_hashes =
@@ -152,8 +157,9 @@ mod tests {
 
     #[test]
     fn test_create_and_populate_manager() {
-        let (manager, hashes) =
-            create_and_populate_manager::<TestMetadata>(32, 4, 100).expect("Should create");
+        let registry = create_test_registry();
+        let (manager, hashes) = create_and_populate_manager::<TestMetadata>(32, 4, 100, registry)
+            .expect("Should create");
 
         assert_eq!(hashes.len(), 32);
         assert_eq!(manager.total_blocks(), 32);

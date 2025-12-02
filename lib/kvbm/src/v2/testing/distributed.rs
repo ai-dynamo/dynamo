@@ -82,15 +82,35 @@ pub async fn create_instance_leader_pair(
     let nova::NovaPair { nova_a, nova_b } = nova::create_nova_pair_tcp().await?;
 
     // Create G2 managers
-    let g2_manager_a = Arc::new(managers::create_test_manager::<G2>(block_count, block_size));
-    let g3_manager_a = Arc::new(managers::create_test_manager::<G3>(block_count, block_size));
+    let registry_a = managers::create_test_registry();
+    let registry_b = managers::create_test_registry();
 
-    let g2_manager_b = Arc::new(managers::create_test_manager::<G2>(block_count, block_size));
-    let g3_manager_b = Arc::new(managers::create_test_manager::<G3>(block_count, block_size));
+    let g2_manager_a = Arc::new(managers::create_test_manager::<G2>(
+        block_count,
+        block_size,
+        registry_a.clone(),
+    ));
+    let g3_manager_a = Arc::new(managers::create_test_manager::<G3>(
+        block_count,
+        block_size,
+        registry_a.clone(),
+    ));
+
+    let g2_manager_b = Arc::new(managers::create_test_manager::<G2>(
+        block_count,
+        block_size,
+        registry_b.clone(),
+    ));
+    let g3_manager_b = Arc::new(managers::create_test_manager::<G3>(
+        block_count,
+        block_size,
+        registry_b.clone(),
+    ));
 
     // Build InstanceLeader A
     let leader_a = InstanceLeader::builder()
         .nova(nova_a.clone())
+        .registry(registry_a.clone())
         .g2_manager(g2_manager_a.clone())
         .g3_manager(g3_manager_a.clone())
         .workers(vec![]) // No workers for now (no transfers)
@@ -103,6 +123,7 @@ pub async fn create_instance_leader_pair(
     // Build InstanceLeader B
     let leader_b = InstanceLeader::builder()
         .nova(nova_b.clone())
+        .registry(registry_b.clone())
         .g2_manager(g2_manager_b.clone())
         .g3_manager(g3_manager_b.clone())
         .workers(vec![]) // No workers for now
@@ -432,8 +453,17 @@ pub async fn create_instance_leader_with_workers(
     agent_name_prefix: &str,
 ) -> Result<TestInstanceLeaderWithWorkers> {
     // Create G2 and G3 managers
-    let g2_manager = Arc::new(managers::create_test_manager::<G2>(block_count, block_size));
-    let g3_manager = Arc::new(managers::create_test_manager::<G3>(block_count, block_size));
+    let registry = managers::create_test_registry();
+    let g2_manager = Arc::new(managers::create_test_manager::<G2>(
+        block_count,
+        block_size,
+        registry.clone(),
+    ));
+    let g3_manager = Arc::new(managers::create_test_manager::<G3>(
+        block_count,
+        block_size,
+        registry.clone(),
+    ));
 
     // Create DirectWorkers
     let workers = create_direct_workers(num_workers, layout_config, storage, agent_name_prefix)?;
@@ -447,6 +477,7 @@ pub async fn create_instance_leader_with_workers(
     // Build InstanceLeader
     let leader = InstanceLeader::builder()
         .nova(nova.clone())
+        .registry(registry.clone())
         .g2_manager(g2_manager.clone())
         .g3_manager(g3_manager.clone())
         .workers(worker_refs)

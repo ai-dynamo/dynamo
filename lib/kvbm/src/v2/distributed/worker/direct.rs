@@ -454,8 +454,16 @@ impl WorkerTransfers for DirectWorker {
 }
 
 impl Worker for DirectWorker {
+    fn g1_handle(&self) -> Option<LayoutHandle> {
+        self.g1_handle.get().copied()
+    }
+
     fn g2_handle(&self) -> Option<LayoutHandle> {
         self.g2_handle.get().copied()
+    }
+
+    fn g3_handle(&self) -> Option<LayoutHandle> {
+        self.g3_handle.get().copied()
     }
 
     fn export_metadata(&self) -> Result<SerializedLayoutResponse> {

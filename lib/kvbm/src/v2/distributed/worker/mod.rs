@@ -28,8 +28,11 @@ pub use crate::{
 
 pub use nova::{NovaWorkerClient, NovaWorkerService, NovaWorkerServiceBuilder};
 
-pub type SerializedResponseAwaiter = dynamo_nova::am::TypedUnaryResult<SerializedLayout>;
-pub type ImportMetadataResponseAwaiter = dynamo_nova::am::TypedUnaryResult<Vec<LayoutHandle>>;
+/// Boxed future for serialized layout responses - allows both typed_unary and raw unary results
+pub type SerializedResponseAwaiter = Pin<Box<dyn Future<Output = Result<SerializedLayout>> + Send>>;
+/// Boxed future for import metadata responses
+pub type ImportMetadataResponseAwaiter =
+    Pin<Box<dyn Future<Output = Result<Vec<LayoutHandle>>> + Send>>;
 
 pub struct SerializedLayoutResponse {
     awaiter: Either<Ready<Result<SerializedLayout>>, SerializedResponseAwaiter>,
@@ -42,9 +45,9 @@ impl SerializedLayoutResponse {
         }
     }
 
-    pub fn from_awaiter(awaiter: impl Into<SerializedResponseAwaiter>) -> Self {
+    pub fn from_boxed(awaiter: SerializedResponseAwaiter) -> Self {
         Self {
-            awaiter: Either::Right(awaiter.into()),
+            awaiter: Either::Right(awaiter),
         }
     }
 
@@ -73,7 +76,7 @@ impl ImportMetadataResponse {
         }
     }
 
-    pub fn from_awaiter(awaiter: ImportMetadataResponseAwaiter) -> Self {
+    pub fn from_boxed(awaiter: ImportMetadataResponseAwaiter) -> Self {
         Self {
             awaiter: Either::Right(awaiter),
         }
@@ -306,10 +309,20 @@ pub trait WorkerTransfers: Send + Sync {
 }
 
 pub trait Worker: WorkerTransfers + Send + Sync {
+    /// Get the G1 layout handle for this worker (if configured).
+    ///
+    /// Returns None if no G1 layout has been registered with this worker.
+    fn g1_handle(&self) -> Option<LayoutHandle>;
+
     /// Get the G2 layout handle for this worker (if configured).
     ///
     /// Returns None if no G2 layout has been registered with this worker.
     fn g2_handle(&self) -> Option<LayoutHandle>;
+
+    /// Get the G3 layout handle for this worker (if configured).
+    ///
+    /// Returns None if no G3 layout has been registered with this worker.
+    fn g3_handle(&self) -> Option<LayoutHandle>;
 
     /// Export the local metadata for this worker.
     ///

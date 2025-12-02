@@ -61,6 +61,29 @@ impl<T: BlockMetadata> ActivePool<T> {
         matches
     }
 
+    /// Scan for blocks in the active pool (doesn't stop on miss).
+    ///
+    /// Unlike `find_matches`, this continues scanning even when a hash is not found.
+    /// Returns all found blocks with their corresponding sequence hashes.
+    #[inline]
+    pub fn scan_matches(
+        &self,
+        hashes: &[SequenceHash],
+    ) -> Vec<(SequenceHash, Arc<dyn RegisteredBlock<T>>)> {
+        hashes
+            .iter()
+            .filter_map(|hash| {
+                self.block_registry
+                    .match_sequence_hash(*hash, false)
+                    .and_then(|handle| {
+                        handle
+                            .try_get_block::<T>(self.return_fn.clone())
+                            .map(|block| (*hash, block))
+                    })
+            })
+            .collect()
+    }
+
     /// Find a single block by sequence hash.
     ///
     /// Returns the block if found and active, None otherwise.

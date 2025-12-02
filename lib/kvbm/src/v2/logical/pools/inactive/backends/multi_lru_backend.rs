@@ -102,6 +102,29 @@ impl<T: BlockMetadata> InactivePoolBackend<T> for MultiLruBackend<T> {
         matches
     }
 
+    fn scan_matches(
+        &mut self,
+        hashes: &[SequenceHash],
+        touch: bool,
+    ) -> Vec<(SequenceHash, Block<T, Registered>)> {
+        let mut matches = Vec::new();
+
+        for hash in hashes {
+            for pool in &mut self.priority_pools {
+                if let Some(block) = pool.pop(hash) {
+                    if touch {
+                        self.frequency_tracker.touch(hash.as_u128());
+                    }
+                    matches.push((*hash, block));
+                    break; // Found in this pool, move to next hash
+                }
+            }
+            // Unlike find_matches: NO break on miss - continue scanning
+        }
+
+        matches
+    }
+
     fn allocate(&mut self, count: usize) -> Vec<Block<T, Registered>> {
         let mut allocated = Vec::with_capacity(count);
 

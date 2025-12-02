@@ -3,7 +3,6 @@
 
 //! Transfer options for configuring block and layer transfers.
 
-
 use super::BounceBuffer;
 use derive_builder::Builder;
 use std::ops::Range;

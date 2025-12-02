@@ -57,7 +57,7 @@ async fn test_two_leaders_hold_mode_and_session_cleanup() -> Result<()> {
         sequence_hashes.len()
     );
 
-    let result = pair.leader_b.leader.find_matches_with_options(
+    let mut result = pair.leader_b.leader.find_matches_with_options(
         &sequence_hashes,
         FindMatchesOptions {
             search_remote: true,
@@ -65,15 +65,15 @@ async fn test_two_leaders_hold_mode_and_session_cleanup() -> Result<()> {
         },
     )?;
 
-    println!(
-        "Leader B initiated search, session_id: {}",
-        result.session_id()
-    );
+    // With remote search enabled, should get AsyncSession variant
+    let async_result = result
+        .as_async_mut()
+        .expect("Should get AsyncSession with remote search enabled");
 
     // Step 4: Wait for Holding status with timeout
     timeout(Duration::from_secs(5), async {
         loop {
-            match result.status() {
+            match async_result.status() {
                 OnboardingStatus::Holding {
                     local_g2,
                     local_g3,
@@ -111,7 +111,7 @@ async fn test_two_leaders_hold_mode_and_session_cleanup() -> Result<()> {
     println!("✓ Leader B successfully holding blocks from A");
 
     // Step 5: Verify session exists and blocks are held
-    let session_id = result.session_id();
+    let _session_id = async_result.session_id();
 
     // Verify A's blocks are being held (should be 0 available if held by session)
     // Note: Current implementation may vary depending on how blocks are held
@@ -124,7 +124,7 @@ async fn test_two_leaders_hold_mode_and_session_cleanup() -> Result<()> {
     // Step 6: Close session via cancel
     println!("Closing session on leader B...");
 
-    if let Some(handle) = result.session_handle() {
+    if let Some(handle) = async_result.session_handle() {
         handle.cancel().await?;
         println!("✓ Session cancelled");
     } else {

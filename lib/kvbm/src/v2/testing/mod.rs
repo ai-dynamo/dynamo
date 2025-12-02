@@ -10,9 +10,11 @@
 //! - Distributed leader test scenarios
 //! - Physical layout and transfer testing
 //! - Connector worker and client testing
+//! - End-to-end multi-instance tests
 
 pub mod connector;
 pub mod distributed;
+pub mod e2e;
 pub mod managers;
 pub mod nova;
 pub mod physical;

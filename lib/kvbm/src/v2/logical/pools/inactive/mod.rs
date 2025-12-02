@@ -23,7 +23,17 @@ use super::{
 
 /// Backend trait for InactivePool storage strategies.
 pub(crate) trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
+    /// Find blocks matching the given hashes in order, stopping on first miss.
     fn find_matches(&mut self, hashes: &[SequenceHash], touch: bool) -> Vec<Block<T, Registered>>;
+
+    /// Scan for blocks matching any of the given hashes (full scan, doesn't stop on miss).
+    /// Unlike find_matches, continues scanning even when a hash is not found.
+    /// Acquires/removes found blocks from pool (caller owns until dropped).
+    fn scan_matches(
+        &mut self,
+        hashes: &[SequenceHash],
+        touch: bool,
+    ) -> Vec<(SequenceHash, Block<T, Registered>)>;
 
     fn allocate(&mut self, count: usize) -> Vec<Block<T, Registered>>;
 
@@ -85,7 +95,8 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
         }
     }
 
-    /// Find blocks by sequence hashes and return them as RegisteredBlock guards
+    /// Find blocks by sequence hashes and return them as RegisteredBlock guards.
+    /// Stops on first miss.
     pub fn find_blocks(
         &self,
         hashes: &[SequenceHash],
@@ -97,6 +108,28 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
         matched_blocks
             .into_iter()
             .map(|block| PrimaryBlock::new(Arc::new(block), self.return_fn.clone()).register())
+            .collect()
+    }
+
+    /// Scan for all blocks matching the given hashes (doesn't stop on miss).
+    /// Acquires/removes found blocks from pool - caller owns until dropped.
+    /// Returns RAII guards (PrimaryBlocks) for found blocks.
+    pub fn scan_blocks(
+        &self,
+        hashes: &[SequenceHash],
+        touch: bool,
+    ) -> Vec<(SequenceHash, Arc<dyn RegisteredBlock<T>>)> {
+        let mut inner = self.inner.write();
+        let found = inner.backend.scan_matches(hashes, touch);
+
+        found
+            .into_iter()
+            .map(|(hash, block)| {
+                // Same pattern as find_blocks: PrimaryBlock::new(...).register()
+                let registered =
+                    PrimaryBlock::new(Arc::new(block), self.return_fn.clone()).register();
+                (hash, registered)
+            })
             .collect()
     }
 

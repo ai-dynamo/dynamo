@@ -94,11 +94,11 @@ impl NovaWorkerService {
     fn register_remote_onboard_handler(&self) -> Result<()> {
         let worker = self.worker.clone();
 
-        let handler = NovaHandler::am_handler_async("kvbm.worker.remote_onboard", move |ctx| {
+        // Use unary_handler_async for explicit response (works with unary client)
+        let handler = NovaHandler::unary_handler_async("kvbm.worker.remote_onboard", move |ctx| {
             let worker = worker.clone();
 
             async move {
-                // Deserialize the message
                 let message: RemoteOnboardMessage = serde_json::from_slice(&ctx.payload)?;
 
                 // Convert options and resolve bounce buffer if present
@@ -115,10 +115,9 @@ impl NovaWorkerService {
                     options,
                 )?;
 
-                // Await the transfer completion
                 notification.await?;
 
-                Ok(())
+                Ok(Some(Bytes::new()))
             }
         })
         .build();
@@ -130,11 +129,11 @@ impl NovaWorkerService {
     fn register_remote_offload_handler(&self) -> Result<()> {
         let worker = self.worker.clone();
 
-        let handler = NovaHandler::am_handler_async("kvbm.worker.remote_offload", move |ctx| {
+        // Use unary_handler_async for explicit response (works with unary client)
+        let handler = NovaHandler::unary_handler_async("kvbm.worker.remote_offload", move |ctx| {
             let worker = worker.clone();
 
             async move {
-                // Deserialize the message
                 let message: RemoteOffloadMessage = serde_json::from_slice(&ctx.payload)?;
 
                 // Convert options and resolve bounce buffer if present
@@ -151,10 +150,9 @@ impl NovaWorkerService {
                     options,
                 )?;
 
-                // Await the transfer completion
                 notification.await?;
 
-                Ok(())
+                Ok(Some(Bytes::new()))
             }
         })
         .build();
@@ -189,43 +187,4 @@ impl NovaWorkerService {
         self.nova.register_handler(handler)?;
         Ok(())
     }
-
-    // /// Handler: "kvbm.worker.get_layout_config"
-    // ///
-    // /// Returns the current G1 layout config for validation by the leader.
-    // /// The leader gathers this from all workers and validates they match.
-    // fn register_get_layout_config_handler(&self) -> Result<()> {
-    //     let worker = self.worker.clone();
-
-    //     let handler = NovaHandler::unary_handler("kvbm.worker.get_layout_config", move |_ctx| {
-    //         let config = worker.export_layout_config()?;
-    //         Ok(Some(Bytes::from(serde_json::to_vec(&config)?)))
-    //     })
-    //     .build();
-
-    //     self.nova.register_handler(handler)?;
-    //     Ok(())
-    // }
-
-    // /// Handler: "kvbm.worker.configure_layouts"
-    // ///
-    // /// Creates G2/G3 layouts based on leader-provided configuration.
-    // /// Called during Phase 3 coordination after the leader validates layout configs.
-    // fn register_configure_layouts_handler(&self) -> Result<()> {
-    //     let worker = self.worker.clone();
-
-    //     let handler = NovaHandler::typed_unary_async("kvbm.worker.configure_layouts", move |ctx| {
-    //         let worker = worker.clone();
-
-    //         async move {
-    //             let config: LeaderLayoutConfig = ctx.input;
-    //             let response = worker.configure_additional_layouts(config)?;
-    //             Ok(response)
-    //         }
-    //     })
-    //     .build();
-
-    //     self.nova.register_handler(handler)?;
-    //     Ok(())
-    // }
 }

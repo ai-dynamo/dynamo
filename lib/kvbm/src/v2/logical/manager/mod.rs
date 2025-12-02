@@ -3,6 +3,7 @@
 
 //! Block Manager v2
 
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -186,6 +187,7 @@ impl<T: BlockMetadata> BlockManager<T> {
         ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
     }
 
+    /// Match blocks does a linear search through the [SequenceHash] array, stopping on the first miss.
     pub fn match_blocks(&self, seq_hash: &[SequenceHash]) -> Vec<ImmutableBlock<T>> {
         // First try to match against active blocks
         let mut matched: Vec<ImmutableBlock<T>> = Vec::with_capacity(seq_hash.len());
@@ -208,6 +210,44 @@ impl<T: BlockMetadata> BlockManager<T> {
         }
 
         matched
+    }
+
+    /// Scan for all blocks matching any of the given hashes.
+    /// Unlike `match_blocks`, this does NOT stop on first miss.
+    /// Returns a HashMap of found sequence hashes to immutable blocks.
+    ///
+    /// # Arguments
+    /// * `seq_hashes` - Sequence hashes to scan for
+    /// * `touch` - Whether to update frequency tracking (for MultiLRU)
+    pub fn scan_matches(
+        &self,
+        seq_hashes: &[SequenceHash],
+        touch: bool,
+    ) -> HashMap<SequenceHash, ImmutableBlock<T>> {
+        let mut result = HashMap::new();
+
+        // 1. Check active pool for all hashes (read-only, no touch needed)
+        let active_found = self.active_pool.scan_matches(seq_hashes);
+        for (hash, block) in active_found {
+            result.insert(hash, ImmutableBlock::new(block, self.upgrade_fn.clone()));
+        }
+
+        // 2. Build remaining hashes set
+        let remaining: Vec<SequenceHash> = seq_hashes
+            .iter()
+            .filter(|h| !result.contains_key(h))
+            .copied()
+            .collect();
+
+        // 3. Scan inactive pool for remaining (acquires blocks, may touch)
+        if !remaining.is_empty() {
+            let inactive_found = self.inactive_pool.scan_blocks(&remaining, touch);
+            for (hash, block) in inactive_found {
+                result.insert(hash, ImmutableBlock::new(block, self.upgrade_fn.clone()));
+            }
+        }
+
+        result
     }
 
     pub fn total_blocks(&self) -> usize {

@@ -44,10 +44,7 @@ impl ConnectorMetadataBuilder {
         rank: u32,
         event: impl Into<String>,
     ) {
-        let entry = self
-            .forward_events
-            .entry(request_id.into())
-            .or_default();
+        let entry = self.forward_events.entry(request_id.into()).or_default();
         entry.insert(rank, event.into());
     }
 

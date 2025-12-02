@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use dashmap::DashMap;
 use dynamo_nova::{am::Nova, events::LocalEventSystem};
@@ -10,7 +12,10 @@ use uuid::Uuid;
 use std::sync::Arc;
 
 use crate::{
-    logical::{blocks::ImmutableBlock, manager::BlockManager},
+    logical::{
+        blocks::{BlockRegistry, ImmutableBlock},
+        manager::BlockManager,
+    },
     physical::transfer::{TransferCompleteNotification, TransferOptions},
     v2::{
         BlockId, G2, G3, InstanceId, SequenceHash, distributed::worker::RemoteDescriptor,
@@ -23,10 +28,12 @@ use crate::v2::physical::manager::{LayoutHandle, SerializedLayout};
 use super::{
     super::parallelism::{ParallelWorker, ReplicatedWorker},
     super::worker::Worker,
+    AsyncSessionResult,
     FindMatchesOptions,
     FindMatchesResult,
     Leader,
     OnboardingStatus,
+    ReadyResult,
     // Legacy SessionHandle for deferred operations
     SessionHandle as LegacySessionHandle,
     SessionId,
@@ -68,6 +75,10 @@ pub struct InstanceLeader {
     /// Nova instance for distributed communication.
     nova: Arc<Nova>,
 
+    /// Block registry for deduplication.
+    #[allow(dead_code)]
+    pub(crate) registry: BlockRegistry,
+
     /// G2 (host memory) block manager (wrapped in Arc since BlockManager doesn't implement Clone).
     pub(crate) g2_manager: Arc<BlockManager<G2>>,
 
@@ -84,6 +95,9 @@ pub struct InstanceLeader {
 
     /// Map of active sessions (session_id -> message channel).
     sessions: Arc<DashMap<SessionId, OnboardSessionTx>>,
+
+    /// Cached worker metadata (avoids querying workers repeatedly).
+    cached_worker_metadata: Option<Vec<SerializedLayout>>,
 
     /// Map of session states for holding blocks alive (RAII).
     session_states: Arc<DashMap<SessionId, SessionState>>,
@@ -117,11 +131,13 @@ pub struct InstanceLeader {
 #[derive(Default)]
 pub struct InstanceLeaderBuilder {
     nova: Option<Arc<Nova>>,
+    registry: Option<BlockRegistry>,
     g2_manager: Option<Arc<BlockManager<G2>>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
     workers: Vec<Arc<dyn Worker>>,
     sessions: Option<Arc<DashMap<SessionId, OnboardSessionTx>>>,
     remote_leaders: Option<Vec<InstanceId>>,
+    cached_worker_metadata: Option<Vec<SerializedLayout>>,
 }
 
 impl InstanceLeaderBuilder {
@@ -145,6 +161,21 @@ impl InstanceLeaderBuilder {
 
     pub fn nova(mut self, nova: Arc<Nova>) -> Self {
         self.nova = Some(nova);
+        self
+    }
+
+    pub fn registry(mut self, registry: BlockRegistry) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    pub fn with_g2_manager(mut self, manager: Option<BlockManager<G2>>) -> Self {
+        self.g2_manager = manager.map(Arc::new);
+        self
+    }
+
+    pub fn with_g3_manager(mut self, manager: Option<BlockManager<G3>>) -> Self {
+        self.g3_manager = manager.map(Arc::new);
         self
     }
 
@@ -172,6 +203,15 @@ impl InstanceLeaderBuilder {
 
     pub fn remote_leaders(mut self, leaders: Vec<InstanceId>) -> Self {
         self.remote_leaders = Some(leaders);
+        self
+    }
+
+    /// Cache worker metadata upfront to avoid querying workers later.
+    ///
+    /// This is useful when workers have already exported metadata during initialization
+    /// (e.g., in the connector pattern where workers return metadata in their init response).
+    pub fn with_cached_worker_metadata(mut self, metadata: Vec<SerializedLayout>) -> Self {
+        self.cached_worker_metadata = Some(metadata);
         self
     }
 
@@ -209,12 +249,16 @@ impl InstanceLeaderBuilder {
 
         Ok(InstanceLeader {
             nova,
+            registry: self
+                .registry
+                .ok_or_else(|| anyhow::anyhow!("block registry required"))?,
             g2_manager: self
                 .g2_manager
                 .ok_or_else(|| anyhow::anyhow!("g2_manager required"))?,
             g3_manager: self.g3_manager,
             workers: self.workers,
             parallel_worker,
+            cached_worker_metadata: self.cached_worker_metadata,
             sessions: self.sessions.unwrap_or_else(|| Arc::new(DashMap::new())),
             session_states: Arc::new(DashMap::new()),
             remote_leaders: self.remote_leaders.unwrap_or_default(),
@@ -235,6 +279,22 @@ struct SessionState {
     status_tx: watch::Sender<OnboardingStatus>,
 }
 
+/// Result of scanning for blocks across tiers.
+///
+/// Unlike `FindMatchesResult`, this scans all given hashes without stopping on first miss.
+/// Returns blocks found in each tier along with their sorted positions.
+pub struct ScanBlocksResult {
+    /// Blocks found in G2 (host memory).
+    pub g2_blocks: HashMap<SequenceHash, ImmutableBlock<G2>>,
+
+    /// Blocks found in G3 (disk).
+    pub g3_blocks: HashMap<SequenceHash, ImmutableBlock<G3>>,
+
+    /// All found blocks sorted by position (lowest to highest).
+    /// Each entry indicates which tier (G2/G3) the block was found in.
+    pub sorted_matches: Vec<(SequenceHash, LogicalLayoutHandle)>,
+}
+
 impl InstanceLeader {
     /// Get a reference to the G2 BlockManager.
     pub fn g2_manager(&self) -> &Arc<BlockManager<G2>> {
@@ -244,6 +304,68 @@ impl InstanceLeader {
     /// Get a reference to the optional G3 BlockManager.
     pub fn g3_manager(&self) -> Option<&Arc<BlockManager<G3>>> {
         self.g3_manager.as_ref()
+    }
+
+    /// Scan for all blocks matching any of the given sequence hashes.
+    ///
+    /// Unlike `find_matches`, this:
+    /// - Does NOT stop on first miss
+    /// - Returns blocks from both G2 and G3 tiers separately
+    /// - Acquires blocks from pools (caller owns until dropped via RAII)
+    /// - Returns `sorted_matches` ordered by `SequenceHash::position()`
+    ///
+    /// # Arguments
+    /// * `sequence_hashes` - Hashes to scan for
+    /// * `touch` - Whether to update frequency tracking (for MultiLRU eviction policy)
+    ///
+    /// # Algorithm
+    /// 1. Scan G2 manager for candidates
+    /// 2. Scan G3 manager for remaining candidates
+    /// 3. Build sorted_matches from both, sorted by position (lowest to highest)
+    pub fn scan_blocks(&self, sequence_hashes: &[SequenceHash], touch: bool) -> ScanBlocksResult {
+        // Step 1: Scan G2 for all candidates
+        let g2_blocks = self.g2_manager.scan_matches(sequence_hashes, touch);
+
+        // Step 2: Find remaining hashes not in G2
+        let remaining: Vec<SequenceHash> = sequence_hashes
+            .iter()
+            .filter(|h| !g2_blocks.contains_key(h))
+            .copied()
+            .collect();
+
+        // Step 3: Scan G3 for remaining (if G3 exists)
+        let g3_blocks = if let Some(ref g3_manager) = self.g3_manager {
+            if !remaining.is_empty() {
+                g3_manager.scan_matches(&remaining, touch)
+            } else {
+                HashMap::new()
+            }
+        } else {
+            HashMap::new()
+        };
+
+        // Step 4: Build sorted_matches from both tiers
+        let mut sorted_matches: Vec<(SequenceHash, LogicalLayoutHandle)> =
+            Vec::with_capacity(g2_blocks.len() + g3_blocks.len());
+
+        // Add G2 matches
+        for hash in g2_blocks.keys() {
+            sorted_matches.push((*hash, LogicalLayoutHandle::G2));
+        }
+
+        // Add G3 matches
+        for hash in g3_blocks.keys() {
+            sorted_matches.push((*hash, LogicalLayoutHandle::G3));
+        }
+
+        // Sort by SequenceHash position (lowest to highest)
+        sorted_matches.sort_by_key(|(hash, _)| hash.position());
+
+        ScanBlocksResult {
+            g2_blocks,
+            g3_blocks,
+            sorted_matches,
+        }
     }
 
     pub fn builder() -> InstanceLeaderBuilder {
@@ -294,23 +416,31 @@ impl InstanceLeader {
             }
         };
 
-        // Create export_metadata callback if we have workers
-        let export_metadata_callback: Option<ExportMetadataCallback> = if !self.workers.is_empty() {
-            let workers = self.workers.clone();
-            Some(Arc::new(move || {
-                let workers = workers.clone();
-                Box::pin(async move {
-                    let mut metadata = Vec::with_capacity(workers.len());
-                    for worker in &workers {
-                        let serialized = worker.export_metadata()?.await?;
-                        metadata.push(serialized);
-                    }
-                    Ok(metadata)
-                })
-            }))
-        } else {
-            None
-        };
+        // Create export_metadata callback if we have workers or cached metadata
+        let export_metadata_callback: Option<ExportMetadataCallback> =
+            if !self.workers.is_empty() || self.cached_worker_metadata.is_some() {
+                let workers = self.workers.clone();
+                let cached_metadata = self.cached_worker_metadata.clone();
+                Some(Arc::new(move || {
+                    let workers = workers.clone();
+                    let cached_metadata = cached_metadata.clone();
+                    Box::pin(async move {
+                        // Return cached metadata if available
+                        if let Some(cached) = cached_metadata {
+                            return Ok(cached);
+                        }
+                        // Otherwise, query workers
+                        let mut metadata = Vec::with_capacity(workers.len());
+                        for worker in &workers {
+                            let serialized = worker.export_metadata()?.await?;
+                            metadata.push(serialized);
+                        }
+                        Ok(metadata)
+                    })
+                }))
+            } else {
+                None
+            };
 
         let mut service = NovaLeaderService::new(self.nova.clone(), self.sessions.clone())
             .with_spawn_responder(spawn_responder)
@@ -638,9 +768,20 @@ impl InstanceLeader {
         // Local search
         let g2_matches = self.g2_manager.match_blocks(sequence_hashes);
 
-        // Collect layout handles from matched blocks
-        let layout_handles: Vec<LayoutHandle> =
+        // Collect layout handles from workers
+        // Note: For single-worker setups, all blocks use the same handle
+        // For multi-worker (SPMD), each block gets the handle from its assigned worker
+        let worker_g2_handles: Vec<LayoutHandle> =
             self.workers.iter().filter_map(|w| w.g2_handle()).collect();
+
+        // Assign layout handle to each matched block
+        // For now, use the first worker's handle for all blocks (single-worker assumption)
+        // TODO: For SPMD, map blocks to worker handles based on block assignment
+        let layout_handle = worker_g2_handles
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("No G2 layout handle available from workers"))?;
+        let layout_handles: Vec<LayoutHandle> = vec![layout_handle; g2_matches.len()];
 
         // Get sequence hashes from matched blocks
         let matched_hashes: Vec<SequenceHash> =
@@ -803,6 +944,12 @@ impl InstanceLeader {
     /// # Returns
     /// Vector of serialized layouts, one per worker
     pub async fn export_worker_metadata(&self) -> Result<Vec<SerializedLayout>> {
+        // Return cached metadata if available
+        if let Some(cached) = &self.cached_worker_metadata {
+            return Ok(cached.clone());
+        }
+
+        // Otherwise, query workers
         let mut metadata = Vec::with_capacity(self.workers.len());
 
         for worker in &self.workers {
@@ -920,58 +1067,69 @@ impl Leader for InstanceLeader {
         sequence_hashes: &[SequenceHash],
         options: FindMatchesOptions,
     ) -> Result<FindMatchesResult> {
+        // Search G2 (host memory) for matches
+        let g2_matches = self.g2_manager.match_blocks(sequence_hashes);
+
+        // Search G3 (disk) for remaining hashes if G3 is available
+        let remaining_hashes: Vec<_> = sequence_hashes
+            .iter()
+            .filter(|h| !g2_matches.iter().any(|b| b.sequence_hash() == **h))
+            .copied()
+            .collect();
+
+        let g3_matches = if let Some(ref g3_manager) = self.g3_manager {
+            g3_manager.match_blocks(&remaining_hashes)
+        } else {
+            Vec::new()
+        };
+
+        // Determine if we can return immediately (Ready) or need async session
+        // Ready: no remote search AND no G3 blocks (nothing to stage)
+        let is_ready = !options.search_remote && g3_matches.is_empty();
+
+        if is_ready {
+            // No session needed - blocks owned directly by ReadyResult (RAII)
+            return Ok(FindMatchesResult::Ready(ReadyResult::new(g2_matches)));
+        }
+
+        // AsyncSession path: G3 blocks found or remote search enabled
         let session_id = SessionId::from(Uuid::new_v4());
+        let local_g2_count = g2_matches.len();
+        let local_g3_count = g3_matches.len();
+
+        // AsyncSession: staging locally and/or remote searching
         let (status_tx, status_rx) = watch::channel(OnboardingStatus::Searching);
         let all_g2_blocks = Arc::new(Mutex::new(None));
 
-        // Phase 1: Local search only
+        // Store session state to keep blocks alive
+        let state = SessionState {
+            session_id,
+            g2_blocks: g2_matches,
+            g3_blocks: g3_matches,
+            status_tx: status_tx.clone(),
+        };
+        self.store_session_state(state);
+
+        // If no remote search, handle local-only staging
         if !options.search_remote {
-            // Search G2 (host memory) for matches
-            let g2_matches = self.g2_manager.match_blocks(sequence_hashes);
-            let matched_count = g2_matches.len();
-
-            // Search G3 (disk) for remaining hashes if G3 is available
-            let remaining_hashes: Vec<_> = sequence_hashes
-                .iter()
-                .filter(|h| !g2_matches.iter().any(|b| b.sequence_hash() == **h))
-                .copied()
-                .collect();
-
-            let g3_matches = if let Some(ref g3_manager) = self.g3_manager {
-                g3_manager.match_blocks(&remaining_hashes)
-            } else {
-                Vec::new()
-            };
-
-            let total_matched = matched_count + g3_matches.len();
-
-            // todo: what are the conditions where we might early exit here without the need for a session?
-
-            // Update status to Complete
+            // Local-only staging (Prepare or Full mode)
+            // TODO: Implement local G3→G2 staging
+            let total_matched = local_g2_count + local_g3_count;
             status_tx
                 .send(OnboardingStatus::Complete {
                     matched: total_matched,
                 })
                 .ok();
 
-            // Store session state to keep blocks alive
-            let state = SessionState {
-                session_id,
-                g2_blocks: g2_matches,
-                g3_blocks: g3_matches,
-                status_tx,
-            };
-            self.store_session_state(state);
-
-            return Ok(FindMatchesResult::new(
+            return Ok(FindMatchesResult::AsyncSession(AsyncSessionResult::new(
                 session_id,
                 status_rx,
                 all_g2_blocks,
-                None, // No session handle for local-only search
-            ));
+                None, // No session handle for local-only staging (yet)
+            )));
         }
 
-        // Phase 2: Remote search
+        // Remote search path
         let (tx, rx) = mpsc::channel(100);
         self.sessions.insert(session_id, tx);
 
@@ -1019,11 +1177,11 @@ impl Leader for InstanceLeader {
             }
         });
 
-        Ok(FindMatchesResult::new(
+        Ok(FindMatchesResult::AsyncSession(AsyncSessionResult::new(
             session_id,
             status_rx,
             all_g2_blocks,
             session_handle,
-        ))
+        )))
     }
 }
