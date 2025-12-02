@@ -116,7 +116,7 @@ class CUDAFaultInjector:
         """
         try:
             k8s_custom = client.CustomObjectsApi()
-            
+
             # Get the DynamoGraphDeployment
             dgd = k8s_custom.get_namespaced_custom_object(
                 group="nvidia.com",
@@ -141,7 +141,7 @@ class CUDAFaultInjector:
 
             return False
 
-        except Exception as e:
+        except Exception:
             # If we can't read the deployment, assume it's not deployed
             return False
 
@@ -163,7 +163,7 @@ class CUDAFaultInjector:
         - CUDA_XID_TYPE environment variable
         - CUDA_FAULT_INJECTION_ENABLED (0 in passthrough mode, 1 otherwise)
         - Node affinity (if target_node specified)
-        
+
         Args:
             passthrough_mode: If True, set CUDA_FAULT_INJECTION_ENABLED=0
                             (library loaded but faults disabled for baseline)
@@ -410,9 +410,6 @@ class CUDAFaultInjector:
         if not pods:
             return False
 
-        from kubernetes.stream import stream as k8s_stream
-        
-        k8s_core = client.CoreV1Api()
         toggle_value = "1" if enable else "0"
         action = "Enabling" if enable else "Disabling"
 
@@ -420,38 +417,63 @@ class CUDAFaultInjector:
 
         success_count = 0
         failed_pods = []
-        
+
         for pod in pods:
             pod_name = pod.metadata.name
-            
+
             try:
                 # Get the main container name from pod spec
-                container_name = pod.spec.containers[0].name if pod.spec.containers else None
+                container_name = (
+                    pod.spec.containers[0].name if pod.spec.containers else None
+                )
                 if not container_name:
                     failed_pods.append((pod_name, "No container found"))
                     continue
-                
+
                 # Write toggle file to hostPath (persists across pod restarts on same node)
                 # This simulates persistent hardware failure!
-                exec_command = ['sh', '-c', f'mkdir -p /host-fault && echo "{toggle_value}" > /host-fault/cuda_fault_enabled && cat /host-fault/cuda_fault_enabled']
-                
+                exec_command = [
+                    "sh",
+                    "-c",
+                    f'mkdir -p /host-fault && echo "{toggle_value}" > /host-fault/cuda_fault_enabled && cat /host-fault/cuda_fault_enabled',
+                ]
+
                 result = subprocess.run(
-                    ['kubectl', 'exec', '-n', namespace, pod_name, '-c', container_name, '--'] + exec_command,
+                    [
+                        "kubectl",
+                        "exec",
+                        "-n",
+                        namespace,
+                        pod_name,
+                        "-c",
+                        container_name,
+                        "--",
+                    ]
+                    + exec_command,
                     capture_output=True,
                     text=True,
-                    timeout=10
+                    timeout=10,
                 )
-                
+
                 if result.returncode == 0:
                     actual_value = result.stdout.strip()
                     if actual_value == toggle_value:
-                        print(f"    ✓ Toggle={toggle_value} in {pod_name}/{container_name}")
+                        print(
+                            f"    ✓ Toggle={toggle_value} in {pod_name}/{container_name}"
+                        )
                         success_count += 1
                     else:
-                        failed_pods.append((pod_name, f"Verify failed: expected '{toggle_value}', got '{actual_value}'"))
+                        failed_pods.append(
+                            (
+                                pod_name,
+                                f"Verify failed: expected '{toggle_value}', got '{actual_value}'",
+                            )
+                        )
                 else:
-                    failed_pods.append((pod_name, f"Exec failed: {result.stderr.strip()}"))
-                        
+                    failed_pods.append(
+                        (pod_name, f"Exec failed: {result.stderr.strip()}")
+                    )
+
             except Exception as e:
                 failed_pods.append((pod_name, str(e)))
                 continue
@@ -460,7 +482,7 @@ class CUDAFaultInjector:
             print(f"    ⚠ Failed to toggle {len(failed_pods)} pods:")
             for pod_name, error in failed_pods:
                 print(f"       - {pod_name}: {error}")
-        
+
         print(f"    → Result: {success_count}/{len(pods)} pods toggled successfully")
         return success_count > 0
 
@@ -478,79 +500,101 @@ class CUDAFaultInjector:
             True if disable succeeded
         """
         return self.enable_cuda_faults_via_toggle(pods, namespace, enable=False)
-    
-    def cleanup_node_fault_markers(self, pods: List[client.V1Pod], namespace: str) -> bool:
+
+    def cleanup_node_fault_markers(
+        self, pods: List[client.V1Pod], namespace: str
+    ) -> bool:
         """
         Remove persistent fault marker files from node hostPath.
         This cleans up /host-fault/cuda_fault_enabled to prevent future tests from failing.
-        
+
         Args:
             pods: List of pods (to access nodes)
             namespace: Kubernetes namespace
-            
+
         Returns:
             True if cleanup succeeded
         """
         if not pods:
             return True
-        
-        print(f"    [->] Cleaning persistent fault markers from nodes...")
-        
+
+        print("    [->] Cleaning persistent fault markers from nodes...")
+
         success_count = 0
         nodes_cleaned = set()
-        
+
         for pod in pods:
             pod_name = pod.metadata.name
             node_name = pod.spec.node_name
-            
+
             # Skip if we already cleaned this node
             if node_name in nodes_cleaned:
                 continue
-            
+
             try:
-                container_name = pod.spec.containers[0].name if pod.spec.containers else None
+                container_name = (
+                    pod.spec.containers[0].name if pod.spec.containers else None
+                )
                 if not container_name:
                     continue
-                
+
                 # Remove the persistent marker file from hostPath
-                exec_command = ['sh', '-c', 'rm -f /host-fault/cuda_fault_enabled 2>/dev/null; echo "ok"']
-                
+                exec_command = [
+                    "sh",
+                    "-c",
+                    'rm -f /host-fault/cuda_fault_enabled 2>/dev/null; echo "ok"',
+                ]
+
                 result = subprocess.run(
-                    ['kubectl', 'exec', '-n', namespace, pod_name, '-c', container_name, '--'] + exec_command,
+                    [
+                        "kubectl",
+                        "exec",
+                        "-n",
+                        namespace,
+                        pod_name,
+                        "-c",
+                        container_name,
+                        "--",
+                    ]
+                    + exec_command,
                     capture_output=True,
                     text=True,
-                    timeout=10
+                    timeout=10,
                 )
-                
+
                 if result.returncode == 0:
                     print(f"    ✓ Cleaned fault marker on node {node_name}")
                     nodes_cleaned.add(node_name)
                     success_count += 1
-                        
-            except Exception as e:
+
+            except Exception:
                 continue
 
         return success_count > 0
 
     def verify_env_var_set(
-        self, deployment_name: str, namespace: str, expected_value: str, max_wait: int = 30
+        self,
+        deployment_name: str,
+        namespace: str,
+        expected_value: str,
+        max_wait: int = 30,
     ) -> bool:
         """
         Verify that CUDA_FAULT_INJECTION_ENABLED env var is set to expected value.
         Polls until the value matches or timeout.
-        
+
         Args:
             deployment_name: Name of the DynamoGraphDeployment
             namespace: Kubernetes namespace
             expected_value: Expected value ("0" or "1")
             max_wait: Maximum seconds to wait
-            
+
         Returns:
             True if verified
         """
         k8s_custom = client.CustomObjectsApi()
         start_time = time.time()
-        
+
         while time.time() - start_time < max_wait:
             try:
                 dgd = k8s_custom.get_namespaced_custom_object(
@@ -560,13 +604,17 @@ class CUDAFaultInjector:
                     plural="dynamographdeployments",
                     name=deployment_name,
                 )
-                
+
                 # Check both worker services
                 for service_name in ["VllmDecodeWorker", "VllmPrefillWorker"]:
                     if service_name in dgd["spec"]["services"]:
                         service = dgd["spec"]["services"][service_name]
-                        env_vars = service.get("extraPodSpec", {}).get("mainContainer", {}).get("env", [])
-                        
+                        env_vars = (
+                            service.get("extraPodSpec", {})
+                            .get("mainContainer", {})
+                            .get("env", [])
+                        )
+
                         for env_var in env_vars:
                             if env_var.get("name") == "CUDA_FAULT_INJECTION_ENABLED":
                                 if env_var.get("value") != expected_value:
@@ -578,12 +626,12 @@ class CUDAFaultInjector:
                 else:
                     # All services verified
                     return True
-                    
+
             except Exception:
                 time.sleep(1)
-        
+
         return False
-    
+
     def trigger_pod_restart(self, pods: List[client.V1Pod], namespace: str):
         """
         Delete pods to trigger restart with new env vars.

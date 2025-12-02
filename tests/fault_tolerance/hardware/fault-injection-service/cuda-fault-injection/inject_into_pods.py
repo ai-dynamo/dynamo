@@ -200,7 +200,7 @@ def _patch_service_for_injection(
         service["extraPodSpec"]["volumes"].append(
             {"name": "cuda-fault-lib", "emptyDir": {}}
         )
-        
+
         # Add hostPath volume for persistent fault marker (survives pod restarts on same node)
         # This simulates persistent hardware failure!
         service["extraPodSpec"]["volumes"].append(
@@ -208,8 +208,8 @@ def _patch_service_for_injection(
                 "name": "node-fault-marker",
                 "hostPath": {
                     "path": "/var/lib/cuda-fault-test",
-                    "type": "DirectoryOrCreate"
-                }
+                    "type": "DirectoryOrCreate",
+                },
             }
         )
 
@@ -267,7 +267,7 @@ def _patch_service_for_injection(
                 "readOnly": True,
             }
         )
-        
+
         # Add mount for persistent fault marker (hostPath)
         service["extraPodSpec"]["mainContainer"]["volumeMounts"].append(
             {
@@ -309,7 +309,8 @@ def _patch_service_for_injection(
             service["extraPodSpec"]["volumes"] = [
                 v
                 for v in service["extraPodSpec"]["volumes"]
-                if v.get("name") not in ["cuda-fault-lib", "cuda-fault-lib-source", "node-fault-marker"]
+                if v.get("name")
+                not in ["cuda-fault-lib", "cuda-fault-lib-source", "node-fault-marker"]
             ]
 
         if "volumeMounts" in service["extraPodSpec"].get("mainContainer", {}):
@@ -414,7 +415,10 @@ def patch_deployment_env(
                 fault_enabled_value = "0" if passthrough_mode else "1"
                 new_envs = [
                     {"name": "LD_PRELOAD", "value": lib_path},
-                    {"name": "CUDA_FAULT_INJECTION_ENABLED", "value": fault_enabled_value},
+                    {
+                        "name": "CUDA_FAULT_INJECTION_ENABLED",
+                        "value": fault_enabled_value,
+                    },
                     {"name": "CUDA_XID_TYPE", "value": str(xid_type)},
                 ]
 
@@ -434,7 +438,7 @@ def patch_deployment_env(
                     spec["updateStrategy"] = {}
                 if "rollingUpdate" not in spec["updateStrategy"]:
                     spec["updateStrategy"]["rollingUpdate"] = {}
-                
+
                 # Allow all pods to be unavailable during update
                 spec["updateStrategy"]["rollingUpdate"]["maxUnavailable"] = "100%"
                 # Don't create surge pods
@@ -445,10 +449,7 @@ def patch_deployment_env(
                 # Restore default update strategy when disabling
                 if "updateStrategy" in spec:
                     spec["updateStrategy"] = {
-                        "rollingUpdate": {
-                            "maxUnavailable": "25%",
-                            "maxSurge": "25%"
-                        }
+                        "rollingUpdate": {"maxUnavailable": "25%", "maxSurge": "25%"}
                     }
                     print("    → Restored default update strategy (maxUnavailable=25%)")
 
@@ -517,15 +518,17 @@ def patch_deployment_env(
             print(f"    Services patched: {', '.join(patched_services)}")
             if use_configmap and enable:
                 print(f"    Library mounted at: {lib_path}")
-            
+
             # Force restart all worker pods when enabling to apply changes immediately
             if enable:
-                print("    → Force-deleting all worker pods to apply changes immediately...")
+                print(
+                    "    → Force-deleting all worker pods to apply changes immediately..."
+                )
                 core_api = client.CoreV1Api()
                 try:
                     worker_pods = core_api.list_namespaced_pod(
                         namespace=namespace,
-                        label_selector=f"nvidia.com/dynamo-graph-deployment-name={deployment_name},nvidia.com/dynamo-component-type=worker"
+                        label_selector=f"nvidia.com/dynamo-graph-deployment-name={deployment_name},nvidia.com/dynamo-component-type=worker",
                     )
                     deleted_count = 0
                     for pod in worker_pods.items:
@@ -533,16 +536,20 @@ def patch_deployment_env(
                             core_api.delete_namespaced_pod(
                                 name=pod.metadata.name,
                                 namespace=namespace,
-                                grace_period_seconds=0
+                                grace_period_seconds=0,
                             )
                             deleted_count += 1
                         except Exception as e:
-                            print(f"      ⚠ Could not delete pod {pod.metadata.name}: {e}")
-                    print(f"    ✓ Deleted {deleted_count} pod(s) - they will restart with CUDA library")
+                            print(
+                                f"      ⚠ Could not delete pod {pod.metadata.name}: {e}"
+                            )
+                    print(
+                        f"    ✓ Deleted {deleted_count} pod(s) - they will restart with CUDA library"
+                    )
                 except Exception as e:
                     print(f"      ⚠ Could not list/delete pods: {e}")
                     print("         Pods will eventually restart, but may take longer")
-            
+
             return True
 
         except ApiException as e:

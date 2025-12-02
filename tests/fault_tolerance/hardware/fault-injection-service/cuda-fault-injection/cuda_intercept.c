@@ -64,7 +64,7 @@ static void
 get_fault_config(int* inject, int* xid_type, cudaError_t* error_code)
 {
   static int initialized = 0;
-  static int env_inject = 0;  // From environment variable
+  static int env_inject = 0;   // From environment variable
   static int cached_xid = 79;  // Default to XID 79
   static cudaError_t cached_error = cudaErrorNoDevice;
 
@@ -86,8 +86,7 @@ get_fault_config(int* inject, int* xid_type, cudaError_t* error_code)
         if (xid_mappings[i].xid == cached_xid) {
           cached_error = xid_mappings[i].cuda_error;
           fprintf(
-              stderr, "[CUDA FAULT INJECTION] Library loaded - XID %d (%s)\n", cached_xid,
-              xid_mappings[i].description);
+              stderr, "[CUDA FAULT INJECTION] Library loaded - XID %d (%s)\n", cached_xid, xid_mappings[i].description);
           found = 1;
           break;
         }
@@ -107,7 +106,7 @@ get_fault_config(int* inject, int* xid_type, cudaError_t* error_code)
   // Use hostPath (/host-fault) so fault persists across pod restarts on same node
   // Pod reschedules to different node → no file there → automatic recovery!
   int runtime_inject = env_inject;  // Default to env var
-  
+
   // Check hostPath first (persistent across restarts on same node)
   FILE* toggle_file = fopen("/host-fault/cuda_fault_enabled", "r");
   if (toggle_file) {
