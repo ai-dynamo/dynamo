@@ -11,10 +11,18 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Parse command line arguments
+# Default values
+MODEL="Qwen/Qwen3-0.6B"
 ENABLE_OTEL=false
+
+# Parse command line arguments
+EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --model-path)
+            MODEL="$2"
+            shift 2
+            ;;
         --enable-otel)
             ENABLE_OTEL=true
             shift
@@ -22,16 +30,17 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
+            echo "  --model-path <name>  Specify model (default: $MODEL)"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
             echo "  -h, --help           Show this help message"
             echo ""
+            echo "Additional SGLang/Dynamo flags can be passed and will be forwarded"
             echo "Note: System metrics are enabled by default on port 8081 (worker)"
             exit 0
             ;;
         *)
-            echo "Unknown option: $1"
-            echo "Use --help for usage information"
-            exit 1
+            EXTRA_ARGS+=("$1")
+            shift
             ;;
     esac
 done
@@ -52,10 +61,11 @@ DYNAMO_PID=$!
 # run worker with metrics enabled
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m dynamo.sglang \
-  --model-path Qwen/Qwen3-0.6B \
-  --served-model-name Qwen/Qwen3-0.6B \
+  --model-path "$MODEL" \
+  --served-model-name "$MODEL" \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
   --skip-tokenizer-init \
-  --enable-metrics
+  --enable-metrics \
+  "${EXTRA_ARGS[@]}"
