@@ -2160,13 +2160,9 @@ mod test_integration_publisher {
     }
 
     /// Integration test: KvPushRouter end-to-end routing with mock engines.
-    ///
-    /// Validates that KvPushRouter::generate can route requests across two workers by leveraging
-    /// the existing KV routing infrastructure (JetStream, KvIndexer, schedulers).
     #[tokio::test]
-    #[ignore] // Requires NATS/etcd. Run with: cargo test --package dynamo-llm --lib --features integration test_e2e_router -- --ignored --nocapture
-    async fn test_distributed_kvindexer_e2e_single() -> anyhow::Result<()> {
-        use dynamo_runtime::protocols::annotated::Annotated;
+    #[ignore] // Requires NATS/etcd. Run with: cargo test --package dynamo-llm --lib --features integration test_distributed_kvindexer_e2e -- --ignored --nocapture
+    async fn test_distributed_kvindexer_e2e() -> anyhow::Result<()> {
         use crate::kv_router::scheduler::DefaultWorkerSelector;
         use crate::kv_router::{
             KvPushRouter, KvRouter, KvRouterConfig, worker_query::WorkerQueryClient,
@@ -2179,149 +2175,7 @@ mod test_integration_publisher {
             llm_backend::{LLMEngineOutput, PreprocessedRequest},
         };
         use dynamo_runtime::pipeline::{Context, PushRouter, RouterMode, network::Ingress};
-
-        const BLOCK_SIZE: u32 = 4;
-        const NUM_REQUESTS: usize = 4;
-
-        dynamo_runtime::logging::init();
-
-        // === SETUP: Distributed runtime and namespace ===
-        let distributed = create_test_drt_async().await;
-        let namespace = distributed.namespace("test_e2e_router")?;
-        let component = namespace.component(MOCKER_COMPONENT)?;
-
-        // === SETUP: Start mocker workers  ===
-        let mocker_args = MockEngineArgs::builder()
-            .block_size(BLOCK_SIZE as usize)
-            .dp_size(1) // single worker test
-            .worker_type(WorkerType::Aggregated)
-            .speedup_ratio(50.0)
-            .enable_prefix_caching(true)
-            .build()?;
-
-        let engine = Arc::new(MockVllmEngine::new(mocker_args));
-        engine.start(component.clone()).await?;
-        tracing::info!("MockVllmEngine started");
-
-        // Attach engine to endpoint and launch server
-        let ingress = Ingress::for_engine(engine.clone())?;
-        let endpoint_component = component.clone();
-        let server_handle = tokio::spawn(async move {
-            if let Err(e) = endpoint_component
-                .endpoint("generate")
-                .endpoint_builder()
-                .handler(ingress)
-                .start()
-                .await
-            {
-                tracing::error!("Generate endpoint failed: {e}");
-            }
-        });
-        tracing::info!("Generate endpoint server launched");
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        // === SETUP: Build KvPushRouter ===
-        let endpoint = component.endpoint("generate");
-        let client = endpoint.client().await?;
-        let kv_router_config = KvRouterConfig::default();
-        let selector = Box::new(DefaultWorkerSelector::new(Some(kv_router_config)));
-        let consumer_id = format!("test-router-{}", distributed.connection_id());
-
-        let kv_router: Arc<KvRouter> = Arc::new(
-            KvRouter::new(
-                endpoint,
-                client.clone(),
-                BLOCK_SIZE,
-                Some(selector),
-                Some(kv_router_config),
-                consumer_id,
-            )
-            .await?,
-        );
-
-        let push_router =
-            PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
-                client,
-                RouterMode::KV,
-                None,
-                None,
-            )
-            .await?;
-
-        let kv_push_router = KvPushRouter::new(push_router, kv_router.clone());
-
-        // === STEP: Send routed requests ===
-        let create_request = |tokens: Vec<u32>| {
-            PreprocessedRequest::builder()
-                .model("mock".to_string())
-                .token_ids(tokens)
-                .stop_conditions(StopConditions {
-                    max_tokens: Some(10),
-                    ..Default::default()
-                })
-                .sampling_options(SamplingOptions::default())
-                .output_options(OutputOptions::default())
-                .eos_token_ids(vec![])
-                .build()
-                .unwrap()
-        };
-
-        for i in 0..NUM_REQUESTS {
-            tracing::info!("Sending routed request {}", i + 1);
-            let tokens = vec![1, 2, 3, 4, 5, i as u32];
-            let request = create_request(tokens);
-
-            let response_stream = kv_push_router.generate(Context::new(request)).await?;
-            let responses: Vec<Annotated<LLMEngineOutput>> = response_stream.collect().await;
-            assert!(
-                !responses.is_empty(),
-                "Request {} should produce at least one response",
-                i + 1
-            );
-        }
-
-        tracing::info!("KvPushRouter generate() succeeded for {NUM_REQUESTS} requests");
-
-        // === STEP: Query worker's local KV indexer via WorkerQueryClient ===
-        let worker_id = component.drt().connection_id();
-        let query_client = WorkerQueryClient::new(namespace.clone());
-        let response = query_client.query_worker(worker_id).await?;
-        tracing::info!(
-            worker_id,
-            events = response.events.len(),
-            "Queried worker's LocalKvIndexer"
-        );
-
-        assert_eq!(response.worker_id, worker_id);
-        assert!(
-            !response.events.is_empty(),
-            "Worker query should return buffered KV events"
-        );
-
-        // Cleanup
-        server_handle.abort();
-        distributed.shutdown();
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[ignore] // Requires NATS/etcd. Run with: cargo test --package dynamo-llm --lib --features integration test_e2e_router -- --ignored --nocapture
-    async fn test_distributed_kvindexer_e2e_two() -> anyhow::Result<()> {
         use dynamo_runtime::protocols::annotated::Annotated;
-        use crate::kv_router::scheduler::DefaultWorkerSelector;
-        use crate::kv_router::{
-            KvPushRouter, KvRouter, KvRouterConfig, worker_query::WorkerQueryClient,
-        };
-        use crate::mocker::engine::MOCKER_COMPONENT;
-        use crate::mocker::engine::MockVllmEngine;
-        use crate::mocker::protocols::{MockEngineArgs, WorkerType};
-        use crate::protocols::common::{
-            OutputOptions, SamplingOptions, StopConditions,
-            llm_backend::{LLMEngineOutput, PreprocessedRequest},
-        };
-        use dynamo_runtime::pipeline::{Context, PushRouter, RouterMode, network::Ingress};
 
         const BLOCK_SIZE: u32 = 4;
         const NUM_REQUESTS: usize = 4;
@@ -2332,6 +2186,8 @@ mod test_integration_publisher {
         let shared_store_dir = tempfile::tempdir()?;
         let shared_store_path = shared_store_dir.path().to_path_buf();
 
+        // Make both runtimes point at the same file-backed storage backend so worker
+        // registrations and heartbeats remain visible to every DRT instance.
         let distributed1 = create_shared_drt(&shared_store_path).await?;
         let distributed2 = create_shared_drt(&shared_store_path).await?;
         let component1 = distributed1
@@ -2412,7 +2268,7 @@ mod test_integration_publisher {
 
         let kv_push_router = KvPushRouter::new(push_router, kv_router.clone());
 
-        // === STEP: Send routed requests ===
+        // ===== TEST PART 1: ROUTE & SEND REQUESTS TO WORKERS (ROUTER -> WORKER) =====
         let create_request = |tokens: Vec<u32>| {
             PreprocessedRequest::builder()
                 .model("mock".to_string())
@@ -2440,16 +2296,16 @@ mod test_integration_publisher {
                 "Request {} should produce at least one response",
                 i + 1
             );
-
-            // wait_for_cached_blocks(&kv_router, &tokens, Duration::from_secs(5)).await?;
         }
 
         tracing::info!("KvPushRouter generate() succeeded for {NUM_REQUESTS} requests");
 
-        // === STEP: Query worker local KV indexers via WorkerQueryClient ===
+        // ===== TEST PART 2: QUERY WORKER-LOCAL KVINDEXERS DIRECTLY =====
+        // TODO: This could be refactored as router function (e.g. router.refresh_from_worker(worker_id))
         let query_client = WorkerQueryClient::new(router_namespace.clone());
         let mut best_worker_info: Option<(u64, usize)> = None;
 
+        // Exactly one worker should have been routed requests. Find that worker
         for &worker_id in &worker_ids {
             let response = query_client.query_worker(worker_id).await?;
             assert_eq!(response.worker_id, worker_id);
@@ -2466,6 +2322,7 @@ mod test_integration_publisher {
             }
         }
 
+        // Verify that only one worker has KV events in buffer
         let (best_worker_id, best_worker_event_count) =
             best_worker_info.expect("At least one worker should have buffered KV events");
 
@@ -2485,7 +2342,7 @@ mod test_integration_publisher {
             );
         }
 
-        // Cleanup
+        // === Cleanup ===
         for handle in server_handles {
             handle.abort();
         }
@@ -2496,6 +2353,12 @@ mod test_integration_publisher {
         Ok(())
     }
 
+    /// Helper that creates a DistributedRuntime pointing at the shared
+    /// file-backed KV store plus ephemeral NATS transport so that every test
+    /// runtime observes the same registration state.
+    /// NOTE: This is used for integration testing to get around the fact that
+    /// create_test_drt_async is hardcoded to spin up a memory-backed discovery store
+    /// which means we can't share discovery state across runtimes.
     async fn create_shared_drt(
         store_path: &std::path::Path,
     ) -> anyhow::Result<dynamo_runtime::distributed::DistributedRuntime> {

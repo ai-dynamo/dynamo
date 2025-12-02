@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::{Context, Result};
 use dynamo_runtime::component::Namespace;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
