@@ -179,7 +179,6 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dgdscalingadapters
   - dynamocomponentdeployments
   - dynamographdeploymentrequests
   - dynamographdeployments
