@@ -182,11 +182,10 @@ impl BlockRegistry {
         *weak = Arc::downgrade(&inner);
         let handle = BlockRegistrationHandle { inner };
 
-        if let Some(event_manager) = &self.event_manager {
-            if let Err(e) = event_manager.on_block_registered(&handle) {
+        if let Some(event_manager) = &self.event_manager
+            && let Err(e) = event_manager.on_block_registered(&handle) {
                 tracing::warn!("Failed to register block with event manager: {}", e);
             }
-        }
         self.touch(seq_hash);
 
         handle
@@ -359,15 +358,14 @@ struct BlockRegistrationHandleInner {
 impl Drop for BlockRegistrationHandleInner {
     #[inline]
     fn drop(&mut self) {
-        if let Some(registry) = self.registry.upgrade() {
-            if registry
+        if let Some(registry) = self.registry.upgrade()
+            && registry
                 .prefix(&self.seq_hash)
                 .remove(&self.seq_hash)
                 .is_none()
             {
                 tracing::warn!("Failed to remove block from registry: {:?}", self.seq_hash);
             }
-        }
     }
 }
 

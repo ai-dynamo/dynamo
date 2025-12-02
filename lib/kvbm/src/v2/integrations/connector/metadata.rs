@@ -47,7 +47,7 @@ impl ConnectorMetadataBuilder {
         let entry = self
             .forward_events
             .entry(request_id.into())
-            .or_insert_with(BTreeMap::new);
+            .or_default();
         entry.insert(rank, event.into());
     }
 

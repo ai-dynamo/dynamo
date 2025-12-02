@@ -9,18 +9,17 @@ use super::{Block, BlockError, BlockId, BlockMetadata, CompleteBlock, state::Res
 
 use dynamo_tokens::TokenBlock;
 
+pub type MutableBlockReturnFn<T> = Arc<dyn Fn(Block<T, Reset>) + Send + Sync>;
+
 /// RAII guard for [`Block<T, Reset>`] that automatically returns to ResetPool on drop
 pub struct MutableBlock<T: BlockMetadata> {
     block: Option<Block<T, Reset>>,
-    return_fn: Arc<dyn Fn(Block<T, Reset>) + Send + Sync>,
+    return_fn: MutableBlockReturnFn<T>,
 }
 
 impl<T: BlockMetadata> MutableBlock<T> {
     /// Create a new MutableBlock in Reset state
-    pub(crate) fn new(
-        block: Block<T, Reset>,
-        return_fn: Arc<dyn Fn(Block<T, Reset>) + Send + Sync>,
-    ) -> Self {
+    pub(crate) fn new(block: Block<T, Reset>, return_fn: MutableBlockReturnFn<T>) -> Self {
         Self {
             block: Some(block),
             return_fn,
@@ -60,9 +59,7 @@ impl<T: BlockMetadata> MutableBlock<T> {
         }
     }
 
-    pub(crate) fn into_parts(
-        mut self,
-    ) -> (Block<T, Reset>, Arc<dyn Fn(Block<T, Reset>) + Send + Sync>) {
+    pub(crate) fn into_parts(mut self) -> (Block<T, Reset>, MutableBlockReturnFn<T>) {
         let block = self.block.take().expect("MutableBlock missing block");
         (block, self.return_fn.clone())
     }

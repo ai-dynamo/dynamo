@@ -147,15 +147,14 @@ pub async fn process_nixl_notification_events(
 
                 // Remove completed transfers and signal completion
                 for uuid in completed {
-                    if let Some(transfer) = outstanding.remove(&uuid) {
-                        if let Err(e) = system.trigger(transfer.event_handle) {
+                    if let Some(transfer) = outstanding.remove(&uuid)
+                        && let Err(e) = system.trigger(transfer.event_handle) {
                             error!(
                                 uuid = %uuid,
                                 error = %e,
                                 "Failed to trigger completion event"
                             );
                         }
-                    }
                 }
             }
         }

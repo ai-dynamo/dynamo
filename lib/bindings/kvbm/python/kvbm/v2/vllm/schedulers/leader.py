@@ -15,7 +15,6 @@ For Phase 1, the leader:
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any, Optional
 
 from kvbm._core import v2 as _v2
@@ -55,7 +54,9 @@ class SchedulerConnectorLeader:
     - Registers workers as Nova peers and tracks rank→instance_id mapping
     """
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, **kwargs):
+    def __init__(
+        self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, **kwargs
+    ):
         """Initialize the scheduler connector leader."""
         print("[KVBM DEBUG] SchedulerConnectorLeader.__init__ START", flush=True)
 

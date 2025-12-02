@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::physical::TransferManager;
-use crate::physical::{manager::SerializedLayout, transfer::context::TransferConfigBuilder};
+use crate::physical::manager::SerializedLayout;
 
 use super::{
-    Arc, DirectWorker, LeaderLayoutConfig, LocalTransferMessage, RemoteOffloadMessage,
-    RemoteOnboardMessage, Result, TransferOptions, WorkerTransfers,
+    Arc, DirectWorker, LocalTransferMessage, RemoteOffloadMessage, RemoteOnboardMessage, Result,
+    TransferOptions, WorkerTransfers,
 };
 
 use bytes::Bytes;

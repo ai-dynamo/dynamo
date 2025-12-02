@@ -42,7 +42,7 @@ pub trait Leader: Send + Sync {
 }
 
 /// Staging mode for matched blocks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum StagingMode {
     /// Hold blocks in their current tiers (G2 and G3) without staging.
     /// Session stays alive for future operations.
@@ -57,13 +57,8 @@ pub enum StagingMode {
 
     /// Full staging: G3→G2 everywhere, then RDMA pull remote G2→local G2.
     /// Session completes after all blocks are in local G2.
+    #[default]
     Full,
-}
-
-impl Default for StagingMode {
-    fn default() -> Self {
-        StagingMode::Full
-    }
 }
 
 /// Options for find_matches operation.
@@ -285,6 +280,7 @@ impl SessionHandle {
     }
 
     /// Shutdown session (used internally).
+    #[expect(dead_code)]
     pub(crate) async fn shutdown(&self) -> Result<()> {
         self.control_tx
             .send(SessionControl::Shutdown)

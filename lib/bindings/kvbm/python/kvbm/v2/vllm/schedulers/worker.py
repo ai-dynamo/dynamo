@@ -65,7 +65,9 @@ class SchedulerConnectorWorker:
     - Returns Nova peer info via get_handshake_metadata()
     """
 
-    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: KVCacheConfig, **kwargs):
+    def __init__(
+        self, vllm_config: "VllmConfig", kv_cache_config: KVCacheConfig, **kwargs
+    ):
         """Initialize the scheduler connector worker."""
         self.vllm_config = vllm_config
         self.vllm_kv_cache_config = kv_cache_config

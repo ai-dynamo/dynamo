@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
 use crate::physical::{
-    layout::{LayoutConfig, PhysicalLayout},
     manager::{SerializedLayout, TransferManager},
     transfer::{BounceBuffer, TransferOptions, context::TransferCompleteNotification},
 };
@@ -373,6 +372,7 @@ impl WorkerTransfers for DirectWorker {
         }
     }
 
+    #[expect(unused_variables)]
     fn execute_remote_offload(
         &self,
         src: LogicalLayoutHandle,

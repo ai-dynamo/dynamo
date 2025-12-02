@@ -102,6 +102,8 @@ impl EndpointSession {
     /// * `transport` - Message transport for sending messages
     /// * `msg_rx` - Channel for receiving SessionMessage from remote
     /// * `cmd_rx` - Channel for receiving local commands
+    // todo: remove clippy warning and convert to builder pattern
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: SessionId,
         instance_id: InstanceId,
@@ -526,7 +528,7 @@ mod tests {
         let session_id = SessionId::new_v4();
         let instance_id = InstanceId::new_v4();
         let transport = create_test_transport();
-        let (msg_tx, msg_rx) = mpsc::channel(16);
+        let (_msg_tx, msg_rx) = mpsc::channel(16);
 
         let blocks = BlockHolder::empty();
         let layout_handles = vec![];

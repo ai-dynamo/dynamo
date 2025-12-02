@@ -8,7 +8,7 @@
 pub mod config;
 pub mod layout;
 
-pub mod connector;
+// pub mod connector;
 // pub mod scheduler;
 
 pub use config::{KvbmVllmConfig, VllmAttentionConfig, VllmParallelConfig};

@@ -157,6 +157,7 @@ impl ConnectorWorker {
     }
 
     #[cfg(test)]
+    #[expect(dead_code)]
     pub(crate) fn runtime(&self) -> &KvbmRuntime {
         &self.state.runtime
     }

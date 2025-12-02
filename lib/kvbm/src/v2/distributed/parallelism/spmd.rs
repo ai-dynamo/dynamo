@@ -86,7 +86,7 @@ impl WorkerTransfers for ReplicatedWorker {
             .map(|worker| {
                 worker.execute_remote_onboard(
                     src.clone(),
-                    dst.clone(),
+                    dst,
                     dst_block_ids.clone(),
                     options.clone(),
                 )
@@ -108,7 +108,7 @@ impl WorkerTransfers for ReplicatedWorker {
             .iter()
             .map(|worker| {
                 worker.execute_remote_offload(
-                    src.clone(),
+                    src,
                     dst.clone(),
                     src_block_ids.clone(),
                     options.clone(),

@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 use crate::physical::{
     layout::LayoutConfig,
     transfer::{
-        PhysicalLayout, TransferManager, TransferOptions,
+        PhysicalLayout, TransferManager,
         executor::{TransferOptionsInternal, execute_transfer},
     },
 };

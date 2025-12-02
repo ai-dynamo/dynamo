@@ -21,7 +21,7 @@ use dynamo_memory::{
 use crate::{
     physical::layout::InnerShape,
     v2::{
-        integrations::{AttentionConfig, ParallelConfig, vllm::KvbmVllmConfig},
+        integrations::{AttentionConfig, vllm::KvbmVllmConfig},
         physical::layout::{
             BlockDimension, LayerSeparateLayout, Layout, LayoutConfig, validate_tensor_shapes,
             validate_tensor_strides,
@@ -124,7 +124,7 @@ impl SchedulerWorker {
         let inner_dim_product: usize = shape[2..].iter().product();
 
         // Validate that page_size divides evenly into the product
-        if inner_dim_product % page_size != 0 {
+        if !inner_dim_product.is_multiple_of(page_size) {
             bail!(
                 "Page size {} doesn't divide evenly into inner dimensions (product: {})",
                 page_size,

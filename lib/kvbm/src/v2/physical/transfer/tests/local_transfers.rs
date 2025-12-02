@@ -9,8 +9,8 @@
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
 
 use super::*;
+use crate::physical::transfer::TransferCapabilities;
 use crate::physical::transfer::executor::TransferOptionsInternal;
-use crate::physical::transfer::{BounceBuffer, TransferCapabilities, TransferOptions};
 use crate::v2::physical::transfer::executor::execute_transfer;
 use anyhow::Result;
 use rstest::rstest;
@@ -90,12 +90,7 @@ async fn test_p2p(
     )]
     dst_kind: StorageKind,
 ) -> Result<()> {
-    use crate::{
-        physical::transfer::{
-            BounceBufferInternal, BounceBufferLayout, executor::TransferOptionsInternal,
-        },
-        v2::physical::transfer::TransferOptions,
-    };
+    use crate::physical::transfer::{BounceBufferInternal, executor::TransferOptionsInternal};
 
     let agent = build_agent_for_kinds(src_kind, dst_kind)?;
 

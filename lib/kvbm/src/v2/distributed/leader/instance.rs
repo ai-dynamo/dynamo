@@ -135,11 +135,11 @@ impl InstanceLeaderBuilder {
     /// ```ignore
     /// let runtime = KvbmRuntime::from_env_leader().await?;
     /// let leader = InstanceLeaderBuilder::default()
-    ///     .from_runtime(&runtime)
+    ///     .with_runtime(&runtime)
     ///     .g2_manager(g2_manager)
     ///     .build()?;
     /// ```
-    pub fn from_runtime(self, runtime: &crate::v2::KvbmRuntime) -> Self {
+    pub fn with_runtime(self, runtime: &crate::v2::KvbmRuntime) -> Self {
         self.nova(runtime.nova().clone())
     }
 
@@ -199,7 +199,7 @@ impl InstanceLeaderBuilder {
         // Create parallel worker if workers are provided
         let parallel_worker: Option<Arc<dyn ParallelWorker>> = if !self.workers.is_empty() {
             Some(Arc::new(ReplicatedWorker::new(
-                self.workers.iter().cloned().collect(),
+                self.workers.to_vec(),
                 events.clone(),
                 runtime.clone(),
             )))
@@ -535,11 +535,13 @@ impl InstanceLeader {
     }
 
     /// Get the controllable sessions map (for Nova handler registration).
+    #[expect(dead_code)]
     pub(crate) fn controllable_sessions(&self) -> Arc<DashMap<SessionId, RemoteSessionTx>> {
         self.controllable_sessions.clone()
     }
 
     /// Get the remote sessions map (for Nova handler registration).
+    #[expect(dead_code)]
     pub(crate) fn remote_sessions(&self) -> Arc<DashMap<SessionId, RemoteSessionTx>> {
         self.remote_sessions.clone()
     }
@@ -766,6 +768,7 @@ impl InstanceLeader {
     }
 
     /// Get the session sessions map (for Nova handler registration).
+    #[expect(dead_code)]
     pub(crate) fn session_sessions(&self) -> Arc<DashMap<SessionId, SessionMessageTx>> {
         self.session_sessions.clone()
     }
@@ -861,7 +864,7 @@ impl InstanceLeader {
     /// TODO: Implement proper notification aggregation using LocalEventSystem::merge_events
     /// or create a composite notification that triggers when all workers complete.
     /// Current implementation uses first worker only.
-    #[allow(dead_code)]
+    #[allow(dead_code, unused_variables)]
     fn execute_local_transfer(
         &self,
         src: LogicalLayoutHandle,
@@ -880,7 +883,7 @@ impl InstanceLeader {
     ///
     /// TODO: Implement proper notification aggregation.
     /// Current implementation uses first worker only.
-    #[allow(dead_code)]
+    #[allow(dead_code, unused_variables)]
     fn execute_remote_onboard(
         &self,
         src: RemoteDescriptor,
@@ -897,7 +900,7 @@ impl InstanceLeader {
     ///
     /// TODO: Implement proper notification aggregation.
     /// Current implementation uses first worker only.
-    #[allow(dead_code)]
+    #[allow(dead_code, unused_variables)]
     fn execute_remote_offload(
         &self,
         src: LogicalLayoutHandle,

@@ -161,14 +161,13 @@ impl NovaLeaderService {
                 );
 
                 // If this is a CreateSession and no session exists, spawn responder
-                if matches!(message, OnboardMessage::CreateSession { .. }) {
-                    if !sessions.contains_key(&session_id) {
+                if matches!(message, OnboardMessage::CreateSession { .. })
+                    && !sessions.contains_key(&session_id) {
                         eprintln!("[HANDLER] Spawning new ResponderSession for {}", session_id);
                         if let Some(ref spawner) = spawn_responder {
                             spawner(message.clone()).ok(); // Best-effort spawn
                         }
                     }
-                }
 
                 // Dispatch to session channel (will create if needed by spawner above)
                 eprintln!("[HANDLER] Dispatching message to session {}", session_id);

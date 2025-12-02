@@ -9,10 +9,10 @@ mod nixl;
 
 use super::strategy::select_strategy;
 use super::validation::validate_block_transfer;
-use super::{PhysicalLayout, TransferContext, TransferOptions, TransferPlan, TransferStrategy};
+use super::{PhysicalLayout, TransferContext, TransferPlan, TransferStrategy};
+use crate::BlockId;
 use crate::physical::transfer::BounceBufferInternal;
 use crate::v2::physical::transfer::{StorageKind, context::TransferCompleteNotification};
-use crate::{BlockId, SequenceHash};
 use anyhow::Result;
 use std::ops::Range;
 use std::sync::Arc;
@@ -57,6 +57,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub use nixl::NixlTransferBuilder;
 
 #[derive(Default)]
+#[expect(dead_code)]
 pub(crate) struct TransferOptionsInternal {
     layer_range: Option<Range<usize>>,
     nixl_write_notification: Option<u64>,

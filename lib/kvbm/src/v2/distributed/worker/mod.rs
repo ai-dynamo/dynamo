@@ -9,7 +9,6 @@ pub use coordinated::CoordinatedWorker;
 pub use direct::DirectWorker;
 
 use anyhow::Result;
-use dynamo_memory::nixl::NixlBackendConfig;
 use dynamo_nova::events::LocalEventWaiter;
 use futures::future::{Either, Ready, ready};
 use serde::{Deserialize, Serialize};
