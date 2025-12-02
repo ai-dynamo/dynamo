@@ -335,6 +335,7 @@ mod tests {
                 endpoint: format!("ep{}", i),
                 instance_id: i,
                 card_json: serde_json::json!({"model": "test"}),
+                model_suffix: None,
             };
             metadata.register_model_card(instance).unwrap();
         }
