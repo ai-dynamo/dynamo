@@ -65,8 +65,8 @@ impl LoRADownloader {
         anyhow::bail!("LoRA {} not found in any source", lora_uri)
     }
 
-    /// Convert URI to cache key
+    /// Convert URI to cache key (delegates to LoRACache for consistency)
     fn uri_to_cache_key(&self, uri: &str) -> String {
-        uri.replace("://", "_").replace(['/', '\\'], "_")
+        LoRACache::uri_to_cache_key(uri)
     }
 }
