@@ -294,7 +294,7 @@ ENV HOME=/home/dynamo
 ENV DYNAMO_HOME=/workspace
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugin
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
 # Copy libgomp.so from framework image
 COPY --from=framework /usr/local/tensorrt /usr/local/tensorrt
@@ -319,13 +319,13 @@ $NIXL_PLUGIN_DIR:\
 /opt/hpcx/ompi/lib:\
 /usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13/:\
 $TENSORRT_LIB_DIR:\
+/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:\
+/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt/lib:\
 $LD_LIBRARY_PATH
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 COPY --chown=dynamo: benchmarks/ /workspace/benchmarks/
-ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
-ENV LD_LIBRARY_PATH=/opt/dynamo/venv/lib/python3.12/site-packages/torch/lib:/opt/dynamo/venv/lib/python3.12/site-packages/torch_tensorrt/lib:${TENSORRT_LIB_DIR}:${LD_LIBRARY_PATH}
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
 ARG ENABLE_KVBM
