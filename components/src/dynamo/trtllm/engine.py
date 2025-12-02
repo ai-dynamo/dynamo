@@ -51,7 +51,7 @@ class TensorRTLLMEngine:
                 self._llm = MultimodalEncoder(
                     model=model,
                     max_batch_size=max_batch_size,
-                )                
+                )
             else:
                 self._llm = self._llm_cls(**self.engine_args)
 
@@ -106,7 +106,9 @@ class TensorRTLLMEngine:
 
 
 @asynccontextmanager
-async def get_llm_engine(engine_args, disaggregation_mode: DisaggregationMode) -> AsyncGenerator[TensorRTLLMEngine, None]:
+async def get_llm_engine(
+    engine_args, disaggregation_mode: DisaggregationMode
+) -> AsyncGenerator[TensorRTLLMEngine, None]:
     engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
     try:
         await engine.initialize()

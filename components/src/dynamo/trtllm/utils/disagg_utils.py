@@ -46,7 +46,7 @@ class DisaggregatedParamsCodec:
             multimodal_embedding_handles=getattr(
                 disaggregated_params, "multimodal_embedding_handles", None
             ),
-            multimodal_hashes=getattr(disaggregated_params, "multimodal_hashes", None),            
+            multimodal_hashes=getattr(disaggregated_params, "multimodal_hashes", None),
         )
 
     @staticmethod
@@ -73,5 +73,5 @@ class DisaggregatedParamsCodec:
             draft_tokens=disaggregated_params.draft_tokens,
             # E-P Disaggregated Params (for full EPD flow)
             multimodal_embedding_handles=mm_handles,
-            multimodal_hashes=mm_hashes,            
+            multimodal_hashes=mm_hashes,
         )
