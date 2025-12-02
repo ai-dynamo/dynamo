@@ -14,6 +14,7 @@ use crate::block_manager::v2::physical::transfer::{
     StorageKind, context::TransferCompleteNotification,
 };
 use anyhow::Result;
+use smallvec::SmallVec;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,8 +37,8 @@ pub use nixl::NixlTransferBuilder;
 pub fn execute_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[SmallVec<[usize; 1]>],
+    dst_block_ids: &[SmallVec<[usize; 1]>],
     options: TransferOptions,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
@@ -80,8 +81,8 @@ pub fn execute_transfer(
 fn execute_direct_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[SmallVec<[usize; 1]>],
+    dst_block_ids: &[SmallVec<[usize; 1]>],
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
     ctx: &TransferContext,
@@ -107,11 +108,16 @@ fn execute_direct_transfer(
         | TransferStrategy::NixlWrite
         | TransferStrategy::NixlReadFlipped
         | TransferStrategy::NixlWriteFlipped => {
+            anyhow::ensure!(src_block_ids[0].len() == 1, "Source NIXL is fragmented");
+            anyhow::ensure!(dst_block_ids[0].len() == 1, "Target NIXL is fragmented");
+            let src_block_ids: Vec<_> = src_block_ids.iter().map(|x| x[0]).collect();
+            let dst_block_ids: Vec<_> = dst_block_ids.iter().map(|x| x[0]).collect();
+
             let mut builder = NixlTransferBuilder::new()
                 .src(src)
                 .dst(dst)
-                .src_blocks(src_block_ids)
-                .dst_blocks(dst_block_ids)
+                .src_blocks(&src_block_ids)
+                .dst_blocks(&dst_block_ids)
                 .strategy(strategy);
 
             if let Some(range) = layer_range {
@@ -133,9 +139,9 @@ async fn execute_two_hop_transfer_chunk(
     src: &PhysicalLayout,
     bounce_layout: &PhysicalLayout,
     dst: &PhysicalLayout,
-    src_block_ids: &[usize],
-    bounce_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[SmallVec<[usize; 1]>],
+    bounce_block_ids: &[SmallVec<[usize; 1]>],
+    dst_block_ids: &[SmallVec<[usize; 1]>],
     first_strategy: TransferStrategy,
     second_strategy: TransferStrategy,
     layer_range: &Option<Range<usize>>,
@@ -172,8 +178,8 @@ async fn execute_two_hop_transfer_chunk(
 struct TwoHopTransferParams<'a> {
     src: &'a PhysicalLayout,
     dst: &'a PhysicalLayout,
-    src_block_ids: &'a [usize],
-    dst_block_ids: &'a [usize],
+    src_block_ids: &'a [SmallVec<[usize; 1]>],
+    dst_block_ids: &'a [SmallVec<[usize; 1]>],
     first_strategy: TransferStrategy,
     bounce_location: StorageKind,
     second_strategy: TransferStrategy,
@@ -232,12 +238,16 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
             {
                 let bounce_block_ids_to_use =
                     &bounce_buffer_spec.block_ids()[..src_block_ids.len()];
+                let bounce_block_ids_to_use: Vec<_> = bounce_block_ids_to_use
+                    .iter()
+                    .map(|x| SmallVec::from([*x]))
+                    .collect();
                 if let Err(e) = execute_two_hop_transfer_chunk(
                     &src_clone,
                     bounce_buffer_spec.layout(),
                     &dst_clone,
                     src_block_ids,
-                    bounce_block_ids_to_use,
+                    &bounce_block_ids_to_use,
                     dst_block_ids,
                     first_strategy,
                     second_strategy,
@@ -253,12 +263,16 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
             tx.send(Ok(())).unwrap();
         } else {
             let bounce_block_ids_to_use = &bounce_buffer_spec.block_ids()[..src_block_ids.len()];
+            let bounce_block_ids_to_use: Vec<_> = bounce_block_ids_to_use
+                .iter()
+                .map(|x| SmallVec::from([*x]))
+                .collect();
             let result = execute_two_hop_transfer_chunk(
                 &src_clone,
                 bounce_buffer_spec.layout(),
                 &dst_clone,
                 src_block_ids.as_slice(),
-                bounce_block_ids_to_use,
+                &bounce_block_ids_to_use,
                 dst_block_ids.as_slice(),
                 first_strategy,
                 second_strategy,

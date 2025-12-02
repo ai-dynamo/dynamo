@@ -73,6 +73,9 @@ pub struct KvConnectorWorker {
 
     /// cuda events created by the python side
     layer_events: Vec<u64>,
+
+    /// Ratio between offload block size and engine block size
+    offload_block_size_ratio: usize,
 }
 
 impl KvConnectorWorker {
@@ -111,6 +114,7 @@ impl KvConnectorWorker {
             layers_complete: 0,
             kv_cache_layers: Vec::new(),
             layer_events: Vec::new(),
+            offload_block_size_ratio: 32, // Default value
         })
     }
 }
@@ -196,7 +200,8 @@ impl Worker for KvConnectorWorker {
         let config = KvbmWorkerConfig::builder()
             .cancel_token(get_current_cancel_token())
             .num_device_blocks(num_device_blocks)
-            .page_size(page_size)
+            .offload_page_size(page_size * self.offload_block_size_ratio)
+            .engine_page_size(page_size)
             .tensors(vllm_tensors)
             .device_id(device_id)
             .dtype_width_bytes(dtype_width_bytes)

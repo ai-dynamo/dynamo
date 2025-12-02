@@ -6,6 +6,7 @@
 //! This module provides validation functions to ensure block transfers are safe and correct.
 
 use super::PhysicalLayout;
+use smallvec::SmallVec;
 use std::collections::HashSet;
 use thiserror::Error;
 
@@ -14,11 +15,15 @@ use thiserror::Error;
 pub enum BlockValidationError {
     /// Destination block IDs contain duplicates.
     #[error("Destination block IDs are not unique: duplicates = {duplicates:?}")]
-    DuplicateDestinationBlocks { duplicates: Vec<usize> },
+    DuplicateDestinationBlocks {
+        duplicates: Vec<SmallVec<[usize; 1]>>,
+    },
 
     /// Source and destination blocks overlap when using the same layout.
     #[error("Source and destination blocks overlap (same layout): overlapping = {overlapping:?}")]
-    OverlappingBlocks { overlapping: Vec<usize> },
+    OverlappingBlocks {
+        overlapping: Vec<SmallVec<[usize; 1]>>,
+    },
 
     /// Lists have mismatched lengths.
     #[error(
@@ -40,7 +45,9 @@ pub enum BlockValidationError {
 
     /// Bounce block IDs contain duplicates.
     #[error("Bounce block IDs are not unique: duplicates = {duplicates:?}")]
-    DuplicateBounceBlocks { duplicates: Vec<usize> },
+    DuplicateBounceBlocks {
+        duplicates: Vec<SmallVec<[usize; 1]>>,
+    },
 }
 
 /// Validate that destination block IDs are unique (no duplicates).
@@ -50,13 +57,15 @@ pub enum BlockValidationError {
 ///
 /// # Returns
 /// Ok(()) if unique, Err with duplicate IDs otherwise
-pub fn validate_dst_unique(dst_block_ids: &[usize]) -> Result<(), BlockValidationError> {
+pub fn validate_dst_unique(
+    dst_block_ids: &[SmallVec<[usize; 1]>],
+) -> Result<(), BlockValidationError> {
     let mut seen = HashSet::new();
     let mut duplicates = Vec::new();
 
-    for &id in dst_block_ids {
-        if !seen.insert(id) && !duplicates.contains(&id) {
-            duplicates.push(id);
+    for id in dst_block_ids {
+        if !seen.insert(id) && !duplicates.contains(id) {
+            duplicates.push((*id).clone());
         }
     }
 
@@ -68,13 +77,15 @@ pub fn validate_dst_unique(dst_block_ids: &[usize]) -> Result<(), BlockValidatio
 }
 
 /// Validate that bounce block IDs are unique (no duplicates).
-pub fn validate_bounce_unique(bounce_block_ids: &[usize]) -> Result<(), BlockValidationError> {
+pub fn validate_bounce_unique(
+    bounce_block_ids: &[SmallVec<[usize; 1]>],
+) -> Result<(), BlockValidationError> {
     let mut seen = HashSet::new();
     let mut duplicates = Vec::new();
 
-    for &id in bounce_block_ids {
-        if !seen.insert(id) && !duplicates.contains(&id) {
-            duplicates.push(id);
+    for id in bounce_block_ids {
+        if !seen.insert(id) && !duplicates.contains(id) {
+            duplicates.push((*id).clone());
         }
     }
 
@@ -108,8 +119,8 @@ fn are_same_layout(layout1: &PhysicalLayout, layout2: &PhysicalLayout) -> bool {
 /// * `dst_layout` - Destination physical layout
 #[cfg(debug_assertions)]
 pub fn validate_disjoint_same_layout(
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
+    src_block_ids: &[SmallVec<[usize; 1]>],
+    dst_block_ids: &[SmallVec<[usize; 1]>],
     src_layout: &PhysicalLayout,
     dst_layout: &PhysicalLayout,
 ) -> Result<(), BlockValidationError> {
@@ -118,11 +129,11 @@ pub fn validate_disjoint_same_layout(
         return Ok(());
     }
 
-    let src_set: HashSet<_> = src_block_ids.iter().copied().collect();
+    let src_set: HashSet<_> = src_block_ids.iter().cloned().collect();
     let overlapping: Vec<_> = dst_block_ids
         .iter()
-        .filter(|id| src_set.contains(id))
-        .copied()
+        .filter(|id| src_set.contains(*id))
+        .cloned()
         .collect();
 
     if overlapping.is_empty() {
@@ -135,19 +146,22 @@ pub fn validate_disjoint_same_layout(
 /// Validate block IDs are in range for a layout.
 #[cfg(debug_assertions)]
 pub fn validate_block_ids_in_range(
-    block_ids: &[usize],
+    block_ids: &[SmallVec<[usize; 1]>],
     layout: &PhysicalLayout,
     layout_name: &'static str,
 ) -> Result<(), BlockValidationError> {
     let max_blocks = layout.layout().config().num_blocks;
 
-    for &block_id in block_ids {
-        if block_id >= max_blocks {
-            return Err(BlockValidationError::BlockOutOfRange {
-                block_id,
-                layout_name,
-                max: max_blocks,
-            });
+    for block_id_set in block_ids {
+        for block_id in block_id_set {
+            let block_id = *block_id;
+            if block_id >= max_blocks * block_id_set.len() {
+                return Err(BlockValidationError::BlockOutOfRange {
+                    block_id,
+                    layout_name,
+                    max: max_blocks,
+                });
+            }
         }
     }
 
@@ -164,9 +178,9 @@ pub fn validate_block_ids_in_range(
 /// - All block IDs are in range for their respective layouts
 #[cfg(debug_assertions)]
 pub fn validate_block_transfer(
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
-    bounce_block_ids: Option<&[usize]>,
+    src_block_ids: &[SmallVec<[usize; 1]>],
+    dst_block_ids: &[SmallVec<[usize; 1]>],
+    bounce_block_ids: Option<&[SmallVec<[usize; 1]>]>,
     src_layout: &PhysicalLayout,
     dst_layout: &PhysicalLayout,
     bounce_layout: Option<&PhysicalLayout>,
@@ -221,9 +235,9 @@ pub fn validate_block_transfer(
 /// - Destination IDs are unique
 #[cfg(not(debug_assertions))]
 pub fn validate_block_transfer(
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
-    bounce_block_ids: Option<&[usize]>,
+    src_block_ids: &[SmallVec<[usize; 1]>],
+    dst_block_ids: &[SmallVec<[usize; 1]>],
+    bounce_block_ids: Option<&[SmallVec<[usize; 1]>]>,
     _src_layout: &PhysicalLayout,
     _dst_layout: &PhysicalLayout,
     _bounce_layout: Option<&PhysicalLayout>,

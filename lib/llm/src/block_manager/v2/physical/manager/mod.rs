@@ -22,6 +22,7 @@ use crate::block_manager::v2::physical::transfer::context::TransferCompleteNotif
 use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
 use crate::block_manager::v2::physical::transfer::options::TransferOptions;
 use anyhow::{Result, anyhow, bail};
+use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
@@ -156,9 +157,9 @@ impl TransportManager {
     pub fn execute_transfer(
         &self,
         src_handle: LayoutHandle,
-        src_blocks: &[usize],
+        src_blocks: &[SmallVec<[usize; 1]>],
         dst_handle: LayoutHandle,
-        dst_blocks: &[usize],
+        dst_blocks: &[SmallVec<[usize; 1]>],
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
         // Clone layouts inside the lock, then drop lock before transfer

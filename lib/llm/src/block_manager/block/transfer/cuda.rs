@@ -76,6 +76,7 @@ fn collect_kv_addresses<Source, Destination>(
     destinations: &[Destination],
     num_layers: usize,
     num_outer_dims: usize,
+    num_fragments: usize,
 ) -> Result<(Vec<u64>, Vec<u64>), TransferError>
 where
     Source: BlockDataProvider,
@@ -87,7 +88,7 @@ where
         ));
     }
 
-    let total_address_pairs = sources.len() * num_layers * num_outer_dims;
+    let total_address_pairs = sources.len() * num_layers * num_outer_dims * num_fragments;
     let mut src_addresses = Vec::with_capacity(total_address_pairs);
     let mut dst_addresses = Vec::with_capacity(total_address_pairs);
 
@@ -100,12 +101,46 @@ where
     for (src_data, dst_data) in src_block_data.iter().zip(dst_block_data.iter()) {
         for layer_idx in 0..num_layers {
             for outer_idx in 0..num_outer_dims {
-                let src_view = src_data.layer_view(layer_idx, outer_idx)?;
-                let dst_view = dst_data.layer_view(layer_idx, outer_idx)?;
+                if src_data.is_fragmented() {
+                    let dst_view = dst_data.layer_view(layer_idx, outer_idx)?;
+                    let mut dst_ptr = unsafe { dst_view.as_ptr() };
+                    let n = src_data.num_fragments();
 
-                unsafe {
-                    src_addresses.push(src_view.as_ptr() as u64);
-                    dst_addresses.push(dst_view.as_ptr() as u64);
+                    for i in 0..n {
+                        let src_view = src_data.layer_view_fragment(i, layer_idx, outer_idx)?;
+                        debug_assert_eq!(src_view.size() * n, dst_view.size());
+
+                        unsafe {
+                            src_addresses.push(src_view.as_ptr() as u64);
+                            dst_addresses.push(dst_view.as_ptr() as u64);
+
+                            dst_ptr = dst_ptr.add(src_view.size());
+                        }
+                    }
+                } else if dst_data.is_fragmented() {
+                    let src_view = src_data.layer_view(layer_idx, outer_idx)?;
+                    let mut src_ptr = unsafe { src_view.as_ptr() };
+                    let n = dst_data.num_fragments();
+
+                    for i in 0..n {
+                        let dst_view = dst_data.layer_view_fragment(i, layer_idx, outer_idx)?;
+                        debug_assert_eq!(src_view.size(), dst_view.size() * n);
+
+                        unsafe {
+                            src_addresses.push(src_view.as_ptr() as u64);
+                            dst_addresses.push(dst_view.as_ptr() as u64);
+
+                            src_ptr = src_ptr.add(dst_view.size());
+                        }
+                    }
+                } else {
+                    let src_view = src_data.layer_view(layer_idx, outer_idx)?;
+                    let dst_view = dst_data.layer_view(layer_idx, outer_idx)?;
+
+                    unsafe {
+                        src_addresses.push(src_view.as_ptr() as u64);
+                        dst_addresses.push(dst_view.as_ptr() as u64);
+                    }
                 }
             }
         }
@@ -184,31 +219,48 @@ struct CachedBlockDimensions {
     num_layers: usize,
     num_outer_dims: usize,
     layer_size: usize,
+    num_fragments: usize,
 }
 
 static BLOCK_DIMENSIONS_CACHE: OnceLock<CachedBlockDimensions> = OnceLock::new();
 
-fn get_cached_block_dimensions<T: BlockDataProvider>(
-    block: &T,
+fn get_cached_block_dimensions<T: BlockDataProvider, S: BlockDataProvider>(
+    src_block: &T,
+    dst_block: &S,
 ) -> Result<CachedBlockDimensions, TransferError> {
     Ok(*BLOCK_DIMENSIONS_CACHE
-        .get_or_init(|| calculate_block_dimensions_from_layout(block).unwrap()))
+        .get_or_init(|| calculate_block_dimensions_from_layout(src_block, dst_block).unwrap()))
 }
 
-fn calculate_block_dimensions_from_layout<T: BlockDataProvider>(
-    block: &T,
+fn calculate_block_dimensions_from_layout<T: BlockDataProvider, S: BlockDataProvider>(
+    src_block: &T,
+    dst_block: &S,
 ) -> Result<CachedBlockDimensions, TransferError> {
-    let block_data = block.block_data();
+    let src_block_data = src_block.block_data();
+    let dst_block_data = dst_block.block_data();
 
     // Get dimensions directly from layout (pre-computed values)
-    let num_layers = block_data.num_layers();
-    let num_outer_dims = block_data.num_outer_dims();
-    let layer_size = block_data.layer_view(0, 0).map(|v| v.size()).unwrap_or(0);
+    let num_layers = src_block_data.num_layers();
+    let num_outer_dims = src_block_data.num_outer_dims();
+    let num_fragments = src_block_data.num_fragments();
+    let layer_size = if dst_block_data.is_fragmented() {
+        src_block_data
+            .layer_view(0, 0)
+            .map(|v| v.size() / dst_block_data.num_fragments())
+    } else if src_block_data.is_fragmented() {
+        src_block_data
+            .layer_view_fragment(0, 0, 0)
+            .map(|v| v.size())
+    } else {
+        src_block_data.layer_view(0, 0).map(|v| v.size())
+    }
+    .unwrap_or(0);
 
     Ok(CachedBlockDimensions {
         num_layers,
         num_outer_dims,
         layer_size,
+        num_fragments,
     })
 }
 
@@ -224,18 +276,24 @@ where
 {
     let _context_guard = stream.context().bind_to_thread();
     // Get cached dimensions (calculated once per program lifetime!)
-    let dims = get_cached_block_dimensions(&sources[0])?;
+    let dims = get_cached_block_dimensions(&sources[0], &destinations[0])?;
 
     // Use cached dimensions
-    let (src_addresses, dst_addresses) =
-        collect_kv_addresses(sources, destinations, dims.num_layers, dims.num_outer_dims)?;
+    let (src_addresses, dst_addresses) = collect_kv_addresses(
+        sources,
+        destinations,
+        dims.num_layers,
+        dims.num_outer_dims,
+        dims.num_fragments,
+    )?;
 
     tracing::debug!(
-        "Using vectorized_copy for {} blocks [{}L×{}O×{}B], {} address pairs",
+        "Using vectorized_copy for {} blocks [{}L×{}O×{}Bx{}F], {} address pairs",
         sources.len(),
         dims.num_layers,
         dims.num_outer_dims,
         dims.layer_size,
+        dims.num_fragments,
         src_addresses.len()
     );
 
@@ -344,18 +402,50 @@ where
 
     for layer_idx in layer_range {
         for outer_idx in 0..src_data.num_outer_dims() {
-            let src_view = src_data.layer_view(layer_idx, outer_idx)?;
-            let mut dst_view = dst_data.layer_view_mut(layer_idx, outer_idx)?;
+            if src_data.is_fragmented() {
+                let mut dst_view = dst_data.layer_view_mut(layer_idx, outer_idx)?;
+                let mut dst_ptr = unsafe { dst_view.as_mut_ptr() };
+                let n = src_data.num_fragments();
 
-            debug_assert_eq!(src_view.size(), dst_view.size());
+                for i in 0..n {
+                    let src_view = src_data.layer_view_fragment(i, layer_idx, outer_idx)?;
+                    debug_assert_eq!(src_view.size() * n, dst_view.size());
 
-            unsafe {
-                memcpy_fn(
-                    src_view.as_ptr(),
-                    dst_view.as_mut_ptr(),
-                    src_view.size(),
-                    stream,
-                )?;
+                    unsafe {
+                        memcpy_fn(src_view.as_ptr(), dst_ptr, src_view.size(), stream)?;
+
+                        dst_ptr = dst_ptr.add(src_view.size());
+                    }
+                }
+            } else if dst_data.is_fragmented() {
+                let src_view = src_data.layer_view(layer_idx, outer_idx)?;
+                let mut src_ptr = unsafe { src_view.as_ptr() };
+                let n = dst_data.num_fragments();
+
+                for i in 0..n {
+                    let mut dst_view = dst_data.layer_view_fragment_mut(i, layer_idx, outer_idx)?;
+                    debug_assert_eq!(src_view.size(), dst_view.size() * n);
+
+                    unsafe {
+                        memcpy_fn(src_ptr, dst_view.as_mut_ptr(), dst_view.size(), stream)?;
+
+                        src_ptr = src_ptr.add(dst_view.size());
+                    }
+                }
+            } else {
+                let src_view = src_data.layer_view(layer_idx, outer_idx)?;
+                let mut dst_view = dst_data.layer_view_mut(layer_idx, outer_idx)?;
+
+                debug_assert_eq!(src_view.size(), dst_view.size());
+
+                unsafe {
+                    memcpy_fn(
+                        src_view.as_ptr(),
+                        dst_view.as_mut_ptr(),
+                        src_view.size(),
+                        stream,
+                    )?;
+                }
             }
         }
     }

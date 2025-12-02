@@ -202,6 +202,12 @@ pub struct KvBlockManagerConfig {
     #[builder(default)]
     pub block_reset_channel: Option<BlockResetChannel>,
 
+    /// Ratio between offload block size and engine block size
+    /// Offload blocks are larger to enable more efficient I/O operations
+    #[builder(default = "32")]
+    #[validate(range(min = 1))]
+    pub offload_block_size_ratio: usize,
+
     /// Optional KVBM-level metrics for tracking offload/onboard operations
     #[builder(default)]
     pub kvbm_metrics: Option<crate::block_manager::metrics_kvbm::KvbmMetrics>,
