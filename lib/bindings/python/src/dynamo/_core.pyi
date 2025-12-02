@@ -1186,24 +1186,11 @@ async def register_model(
     runtime_config: Optional[ModelRuntimeConfig] = None,
 ) -> None:
     """
-    Register a tensor-based model endpoint without requiring local files or HuggingFace downloads.
+    Attach the model at path to the given endpoint, and advertise it as model_type.
 
-    This is designed for custom backends that handle all preprocessing themselves.
-    Unlike `register_llm`, this function does not download any files from HuggingFace.
-
-    This function only supports Tensor input (not Text or Tokens). For LLM models
-    that require tokenizers and config files, use `register_llm` instead.
-
-    Args:
-        model_input: The input type (must be ModelInput.Tensor)
-        model_type: The model type (e.g., ModelType.TensorBased)
-        endpoint: The endpoint to register the model on
-        model_name: The display name for the model
-        user_data: Optional user data to attach to the model card
-        runtime_config: Optional runtime configuration
-
-    Example:
-        await register_model(ModelInput.Tensor, ModelType.TensorBased, endpoint, "my-custom-model")
+    For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
+    and a minimal model card is registered directly. Use model_path as the display name
+    for these models.
     """
     ...
 
