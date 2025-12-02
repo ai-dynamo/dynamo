@@ -37,7 +37,7 @@ pub struct Nova {
     server: Arc<ActiveMessageServer>,
     handlers: HandlerManager,
     events: Arc<handlers::NovaEvents>,
-    _discovery: Arc<dynamo_discovery::peer::PeerDiscoveryManager>,
+    _discovery: Arc<dynamo_nova_discovery::peer::PeerDiscoveryManager>,
     runtime: tokio::runtime::Handle,
     tracker: tokio_util::task::TaskTracker,
 }
@@ -45,7 +45,7 @@ pub struct Nova {
 /// Builder for Nova system allowing incremental configuration of transports and discovery backends.
 pub struct NovaBuilder {
     transports: Vec<Arc<dyn Transport>>,
-    discovery_backends: Vec<Arc<dyn dynamo_discovery::peer::PeerDiscovery>>,
+    discovery_backends: Vec<Arc<dyn dynamo_nova_discovery::peer::PeerDiscovery>>,
 }
 
 impl NovaBuilder {
@@ -66,7 +66,7 @@ impl NovaBuilder {
     /// Add a peer discovery backend to the Nova system.
     pub fn add_discovery_backend(
         mut self,
-        backend: Arc<dyn dynamo_discovery::peer::PeerDiscovery>,
+        backend: Arc<dyn dynamo_nova_discovery::peer::PeerDiscovery>,
     ) -> Self {
         self.discovery_backends.push(backend);
         self
@@ -120,7 +120,7 @@ impl Nova {
     /// ```
     pub async fn new(
         transports: Vec<Arc<dyn Transport>>,
-        discovery_backends: Vec<Arc<dyn dynamo_discovery::peer::PeerDiscovery>>,
+        discovery_backends: Vec<Arc<dyn dynamo_nova_discovery::peer::PeerDiscovery>>,
     ) -> anyhow::Result<Arc<Self>> {
         // 1. Setup infrastructure
         let (backend, data_streams) = NovaBackend::new(transports).await?;
@@ -134,9 +134,11 @@ impl Nova {
 
         // Create peer discovery manager with local peer info and provided backends
         let peer_info = backend.peer_info();
-        let discovery =
-            dynamo_discovery::peer::PeerDiscoveryManager::new(Some(peer_info), discovery_backends)
-                .await?;
+        let discovery = dynamo_nova_discovery::peer::PeerDiscoveryManager::new(
+            Some(peer_info),
+            discovery_backends,
+        )
+        .await?;
         let discovery = Arc::new(discovery);
 
         let event_manager = handlers::NovaEvents::new(

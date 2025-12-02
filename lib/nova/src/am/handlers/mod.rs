@@ -703,7 +703,7 @@ async fn send_response_ok(
     response_id: ResponseId,
     headers: Option<std::collections::HashMap<String, String>>,
 ) -> Result<()> {
-    let header = encode_response_header(response_id, headers)
+    let header = encode_response_header(response_id, Outcome::Ok, headers)
         .map_err(|e| anyhow::anyhow!("Failed to encode response header: {}", e))?;
 
     backend.send_message_to_worker(
@@ -724,7 +724,7 @@ async fn send_response(
     headers: Option<std::collections::HashMap<String, String>>,
     payload: Bytes,
 ) -> Result<()> {
-    let header = encode_response_header(response_id, headers)
+    let header = encode_response_header(response_id, Outcome::Ok, headers)
         .map_err(|e| anyhow::anyhow!("Failed to encode response header: {}", e))?;
 
     backend.send_message_to_worker(
@@ -745,7 +745,7 @@ async fn send_response_error(
     headers: Option<std::collections::HashMap<String, String>>,
     error_message: String,
 ) -> Result<()> {
-    let header = encode_response_header(response_id, headers)
+    let header = encode_response_header(response_id, Outcome::Error, headers)
         .map_err(|e| anyhow::anyhow!("Failed to encode response header: {}", e))?;
     let payload = Bytes::from(error_message.into_bytes());
 

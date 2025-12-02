@@ -4,8 +4,8 @@
 use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 use dashmap::DashMap;
-use dynamo_discovery::peer::{DiscoveryQueryError, PeerDiscoveryManager};
 use dynamo_identity::{InstanceId, WorkerId};
+use dynamo_nova_discovery::peer::{DiscoveryQueryError, PeerDiscoveryManager};
 use futures::future::Either;
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};

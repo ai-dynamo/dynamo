@@ -22,7 +22,7 @@ nats = ["dynamo-nova-backend/nats"]
 [dependencies]
 dynamo-identity = { workspace = true }
 dynamo-nova-backend = { workspace = true }
-dynamo-discovery = { workspace = true }
+dynamo-nova-discovery = { workspace = true }
 
 anyhow = { workspace = true }
 bs58 = { workspace = true }

@@ -22,7 +22,7 @@ pub(crate) struct ActiveMessageClient {
     backend: Arc<NovaBackend>,
     error_handler: Arc<dyn TransportErrorHandler>,
     peer_registry: Arc<PeerRegistry>,
-    discovery: Arc<dynamo_discovery::peer::PeerDiscoveryManager>,
+    discovery: Arc<dynamo_nova_discovery::peer::PeerDiscoveryManager>,
 }
 
 impl ActiveMessageClient {
@@ -30,7 +30,7 @@ impl ActiveMessageClient {
         response_manager: ResponseManager,
         backend: Arc<NovaBackend>,
         error_handler: Arc<dyn TransportErrorHandler>,
-        discovery: Arc<dynamo_discovery::peer::PeerDiscoveryManager>,
+        discovery: Arc<dynamo_nova_discovery::peer::PeerDiscoveryManager>,
     ) -> Self {
         Self {
             response_manager,

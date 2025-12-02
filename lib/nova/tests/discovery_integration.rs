@@ -8,9 +8,9 @@
 mod common;
 
 use common::MockDiscovery;
-use dynamo_discovery::peer::PeerDiscovery;
 use dynamo_nova::am::Nova;
 use dynamo_nova_backend::tcp::TcpTransportBuilder;
+use dynamo_nova_discovery::peer::PeerDiscovery;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;

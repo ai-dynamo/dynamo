@@ -4,7 +4,7 @@
 //! Mock discovery backend for testing.
 
 use dashmap::DashMap;
-use dynamo_discovery::peer::{
+use dynamo_nova_discovery::peer::{
     AwaitableQueryResult, AwaitableRegisterResult, DiscoveryError, DiscoveryQueryError, InstanceId,
     PeerDiscovery, PeerInfo, WorkerAddress, WorkerId,
 };

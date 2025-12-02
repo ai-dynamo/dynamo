@@ -42,7 +42,7 @@
 //! permanently retired and will not be returned to the free list. This prevents
 //! generation counter wraparound issues.
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use dashmap::DashSet;
 use futures::task::AtomicWaker;
 use parking_lot::Mutex;
@@ -56,6 +56,8 @@ use std::sync::{
 use thiserror::Error;
 use tracing::{debug, warn};
 use uuid::Uuid;
+
+use super::events::Outcome;
 
 type WorkerId = u64;
 type SlotAllocation<T, E> = (usize, u64, Arc<Slot<T, E>>);
@@ -75,21 +77,35 @@ pub(crate) enum DecodeError {
     HeaderDeserializationError(#[from] rmp_serde::decode::Error),
 }
 
-// TODO: implement this
-// - the response header should contain the response id and the message_id its responding to
+/// Decodes a response header into (ResponseId, Outcome, headers).
+///
+/// Wire format (19+ bytes):
+/// - 16 bytes: response_id (u128, little-endian)
+/// - 1 byte: outcome (0 = Ok, 1 = Error)
+/// - 2 bytes: headers_len (u16, little-endian)
+/// - N bytes: headers (MessagePack encoded HashMap, if headers_len > 0)
+#[allow(clippy::type_complexity)]
 pub(crate) fn decode_response_header(
     header: Bytes,
-) -> Result<(ResponseId, Option<HashMap<String, String>>), DecodeError> {
+) -> Result<(ResponseId, Outcome, Option<HashMap<String, String>>), DecodeError> {
     let mut header = header;
 
-    // Validate minimum header length (16 bytes response_id + 2 bytes headers_len)
-    if header.len() < 18 {
+    // Validate minimum header length (16 bytes response_id + 1 byte outcome + 2 bytes headers_len)
+    if header.len() < 19 {
         return Err(DecodeError::HeaderTooShort(header.len()));
     }
 
     // Read response_id (16 bytes / u128)
     let response_id_value = header.get_u128_le();
     let response_id = ResponseId::from_u128(response_id_value);
+
+    // Read outcome (1 byte)
+    let outcome_byte = header.get_u8();
+    let outcome = if outcome_byte == 0 {
+        Outcome::Ok
+    } else {
+        Outcome::Error
+    };
 
     // Read headers
     let headers_len = header.get_u16_le() as usize;
@@ -106,12 +122,20 @@ pub(crate) fn decode_response_header(
         None
     };
 
-    Ok((response_id, headers))
+    Ok((response_id, outcome, headers))
 }
 
+/// Encodes a response header with outcome.
+///
+/// Wire format (19+ bytes):
+/// - 16 bytes: response_id (u128, little-endian)
+/// - 1 byte: outcome (0 = Ok, 1 = Error)
+/// - 2 bytes: headers_len (u16, little-endian)
+/// - N bytes: headers (MessagePack encoded HashMap, if headers_len > 0)
 #[inline]
 pub(crate) fn encode_response_header(
     response_id: ResponseId,
+    outcome: Outcome,
     headers: Option<HashMap<String, String>>,
 ) -> Result<Bytes, rmp_serde::encode::Error> {
     // Encode headers to MessagePack if present
@@ -123,11 +147,19 @@ pub(crate) fn encode_response_header(
     };
 
     let headers_len = headers_bytes.as_ref().map(|b| b.len()).unwrap_or(0);
-    let capacity = size_of::<u128>() + 2 + headers_len; // response_id + headers_len + msgpack
+    // response_id (16) + outcome (1) + headers_len (2) + msgpack
+    let capacity = size_of::<u128>() + 1 + 2 + headers_len;
     let mut bytes = BytesMut::with_capacity(capacity);
 
     // Encode response_id
     bytes.extend_from_slice(&response_id.as_u128().to_le_bytes());
+
+    // Encode outcome
+    let outcome_byte: u8 = match outcome {
+        Outcome::Ok => 0,
+        Outcome::Error => 1,
+    };
+    bytes.put_u8(outcome_byte);
 
     // Encode headers_len and headers
     bytes.extend_from_slice(&(headers_len as u16).to_le_bytes());
@@ -1332,40 +1364,39 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_response_header_exactly_18_bytes() {
-        // Test with exactly 18 bytes (16 response_id + 2 headers_len with no headers)
-        let valid_header = Bytes::from(vec![0u8; 18]);
+    fn test_decode_response_header_exactly_19_bytes() {
+        // Test with exactly 19 bytes (16 response_id + 1 outcome + 2 headers_len with no headers)
+        let valid_header = Bytes::from(vec![0u8; 19]);
         let result = decode_response_header(valid_header);
 
-        assert!(result.is_ok(), "Should succeed with exactly 18 bytes");
-        let (_response_id, headers) = result.unwrap();
+        assert!(result.is_ok(), "Should succeed with exactly 19 bytes");
+        let (_response_id, outcome, headers) = result.unwrap();
+        assert!(matches!(outcome, Outcome::Ok));
         assert!(headers.is_none(), "Should have no headers");
     }
 
     #[test]
-    fn test_decode_response_header_more_than_18_bytes() {
-        // Test with more than 18 bytes (extra bytes should be headers)
-        let mut data = vec![0u8; 18];
+    fn test_decode_response_header_more_than_19_bytes() {
+        // Test with more than 19 bytes (extra bytes should be headers)
+        let mut data = vec![0u8; 19];
         data.extend_from_slice(&[1, 2, 3, 4]); // Extra bytes
         let long_header = Bytes::from(data);
         let result = decode_response_header(long_header);
 
-        // This should fail since headers_len is 0 but there are extra bytes
-        // Or succeed if those bytes happen to be valid empty MessagePack
-        // Let's make this test more explicit
+        // This should succeed - headers_len is 0, extra bytes are ignored
         assert!(result.is_ok(), "Should handle extra bytes");
     }
 
     #[test]
-    fn test_decode_response_header_17_bytes() {
-        // Test with 17 bytes (one byte short)
-        let short_header = Bytes::from(vec![0u8; 17]);
+    fn test_decode_response_header_18_bytes() {
+        // Test with 18 bytes (one byte short - missing headers_len bytes)
+        let short_header = Bytes::from(vec![0u8; 18]);
         let result = decode_response_header(short_header);
 
-        assert!(result.is_err(), "Should error with 17 bytes");
+        assert!(result.is_err(), "Should error with 18 bytes");
         match result {
             Err(DecodeError::HeaderTooShort(len)) => {
-                assert_eq!(len, 17);
+                assert_eq!(len, 18);
             }
             _ => panic!("Expected HeaderTooShort error"),
         }
@@ -1375,17 +1406,32 @@ mod tests {
     fn test_decode_response_header_round_trip() {
         // Test encoding and decoding a response ID (without headers)
         let response_id = ResponseId::from_u128(0x1234_5678_9ABC_DEF0_1234_5678_9ABC_DEF0);
-        let encoded = encode_response_header(response_id, None).unwrap();
+        let encoded = encode_response_header(response_id, Outcome::Ok, None).unwrap();
 
         assert_eq!(
             encoded.len(),
-            18,
-            "Encoded header should be 18 bytes (16 response_id + 2 headers_len)"
+            19,
+            "Encoded header should be 19 bytes (16 response_id + 1 outcome + 2 headers_len)"
         );
 
-        let (decoded_id, decoded_headers) = decode_response_header(encoded).unwrap();
+        let (decoded_id, decoded_outcome, decoded_headers) =
+            decode_response_header(encoded).unwrap();
         assert_eq!(decoded_id.as_u128(), response_id.as_u128());
+        assert!(matches!(decoded_outcome, Outcome::Ok));
         assert!(decoded_headers.is_none(), "Headers should be None");
+    }
+
+    #[test]
+    fn test_decode_response_header_error_outcome_round_trip() {
+        // Test encoding and decoding a response ID with Error outcome
+        let response_id = ResponseId::from_u128(0xABCD_EF01_2345_6789_ABCD_EF01_2345_6789);
+        let encoded = encode_response_header(response_id, Outcome::Error, None).unwrap();
+
+        let (decoded_id, decoded_outcome, decoded_headers) =
+            decode_response_header(encoded).unwrap();
+        assert_eq!(decoded_id.as_u128(), response_id.as_u128());
+        assert!(matches!(decoded_outcome, Outcome::Error));
+        assert!(decoded_headers.is_none());
     }
 
     // ============================================================================
@@ -1400,14 +1446,17 @@ mod tests {
         headers.insert("trace-id".to_string(), "abc123".to_string());
         headers.insert("span-id".to_string(), "def456".to_string());
 
-        let encoded = encode_response_header(response_id, Some(headers.clone())).unwrap();
+        let encoded =
+            encode_response_header(response_id, Outcome::Ok, Some(headers.clone())).unwrap();
 
-        // Should be larger than 18 bytes due to headers
-        assert!(encoded.len() > 18, "Should be larger with headers");
+        // Should be larger than 19 bytes due to headers
+        assert!(encoded.len() > 19, "Should be larger with headers");
 
-        let (decoded_id, decoded_headers) = decode_response_header(encoded).unwrap();
+        let (decoded_id, decoded_outcome, decoded_headers) =
+            decode_response_header(encoded).unwrap();
 
         assert_eq!(decoded_id.as_u128(), response_id.as_u128());
+        assert!(matches!(decoded_outcome, Outcome::Ok));
         assert!(decoded_headers.is_some());
 
         let decoded_headers = decoded_headers.unwrap();
@@ -1422,10 +1471,12 @@ mod tests {
         let response_id = ResponseId::from_u128(12345);
         let headers = HashMap::new();
 
-        let encoded = encode_response_header(response_id, Some(headers)).unwrap();
-        let (decoded_id, decoded_headers) = decode_response_header(encoded).unwrap();
+        let encoded = encode_response_header(response_id, Outcome::Ok, Some(headers)).unwrap();
+        let (decoded_id, decoded_outcome, decoded_headers) =
+            decode_response_header(encoded).unwrap();
 
         assert_eq!(decoded_id.as_u128(), response_id.as_u128());
+        assert!(matches!(decoded_outcome, Outcome::Ok));
         assert!(decoded_headers.is_some());
         assert_eq!(decoded_headers.unwrap().len(), 0);
     }
@@ -1438,10 +1489,13 @@ mod tests {
         headers.insert("emoji".to_string(), "🚀".to_string());
         headers.insert("chinese".to_string(), "你好".to_string());
 
-        let encoded = encode_response_header(response_id, Some(headers.clone())).unwrap();
-        let (decoded_id, decoded_headers) = decode_response_header(encoded).unwrap();
+        let encoded =
+            encode_response_header(response_id, Outcome::Ok, Some(headers.clone())).unwrap();
+        let (decoded_id, decoded_outcome, decoded_headers) =
+            decode_response_header(encoded).unwrap();
 
         assert_eq!(decoded_id.as_u128(), response_id.as_u128());
+        assert!(matches!(decoded_outcome, Outcome::Ok));
         let decoded_headers = decoded_headers.unwrap();
         assert_eq!(decoded_headers.get("emoji").unwrap(), "🚀");
         assert_eq!(decoded_headers.get("chinese").unwrap(), "你好");
@@ -1457,10 +1511,13 @@ mod tests {
             headers.insert(format!("key-{}", i), format!("value-{}", i));
         }
 
-        let encoded = encode_response_header(response_id, Some(headers.clone())).unwrap();
-        let (decoded_id, decoded_headers) = decode_response_header(encoded).unwrap();
+        let encoded =
+            encode_response_header(response_id, Outcome::Ok, Some(headers.clone())).unwrap();
+        let (decoded_id, decoded_outcome, decoded_headers) =
+            decode_response_header(encoded).unwrap();
 
         assert_eq!(decoded_id.as_u128(), response_id.as_u128());
+        assert!(matches!(decoded_outcome, Outcome::Ok));
         let decoded_headers = decoded_headers.unwrap();
         assert_eq!(decoded_headers.len(), 50);
         assert_eq!(decoded_headers.get("key-25").unwrap(), "value-25");
@@ -1472,16 +1529,19 @@ mod tests {
         let response_id = ResponseId::from_u128(12345);
 
         // None case
-        let encoded_none = encode_response_header(response_id, None).unwrap();
+        let encoded_none = encode_response_header(response_id, Outcome::Ok, None).unwrap();
         let none_len = encoded_none.len();
-        let (_, headers_none) = decode_response_header(encoded_none).unwrap();
+        let (_, outcome_none, headers_none) = decode_response_header(encoded_none).unwrap();
+        assert!(matches!(outcome_none, Outcome::Ok));
         assert!(headers_none.is_none());
 
         // Empty map case
         let empty_map = HashMap::new();
-        let encoded_empty = encode_response_header(response_id, Some(empty_map)).unwrap();
+        let encoded_empty =
+            encode_response_header(response_id, Outcome::Ok, Some(empty_map)).unwrap();
         let empty_len = encoded_empty.len();
-        let (_, headers_empty) = decode_response_header(encoded_empty).unwrap();
+        let (_, outcome_empty, headers_empty) = decode_response_header(encoded_empty).unwrap();
+        assert!(matches!(outcome_empty, Outcome::Ok));
         assert!(headers_empty.is_some());
         assert_eq!(headers_empty.unwrap().len(), 0);
 
