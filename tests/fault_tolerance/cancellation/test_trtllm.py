@@ -81,6 +81,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Set debug logging environment
         env = os.environ.copy()
+        env["TRTLLM_USE_UCX_KVCACHE"] = "1"
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
