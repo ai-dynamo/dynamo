@@ -1,6 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""
+TensorRT-LLM KV Event Publisher Module
+
+This module contains the Publisher class that retrieves KV cache events from TensorRT-LLM
+and publishes them either to ZMQ (for consolidator) or NATS (direct to router).
+
+Key Components:
+- ZmqKvEventPublisher: Pure Python ZMQ PUBLISHER that publishes TensorRT-LLM KV events
+  to ZMQ (so the consolidator can subscribe). This is different from the ZmqKvEventPublisher
+  in dynamo.llm, which is a Rust-based ZMQ SUBSCRIBER that subscribes from consolidator
+  and publishes to NATS.
+- Publisher: Main class that coordinates event publishing (ZMQ or NATS) and metrics publishing.
+
+Event Flow:
+- With Consolidator: Engine → ZmqKvEventPublisher (ZMQ PUB) → Consolidator → ZmqKvEventPublisher (dynamo.llm, ZMQ SUB) → NATS → Router
+- Without Consolidator: Engine → KvEventPublisher (NATS PUB) → Router
+"""
+
 import asyncio
 import concurrent.futures
 import logging
@@ -40,10 +58,20 @@ def _to_signed_i64(value: int | None) -> int | None:
 
 class ZmqKvEventPublisher:
     """
-    ZMQ publisher for TensorRT-LLM KV events with KVBM.
+    Pure Python ZMQ PUBLISHER for TensorRT-LLM KV events.
 
-    Publishes events in the format:
-    Format: [timestamp, [events], data_parallel_rank]
+    This class publishes TensorRT-LLM's KV cache events to ZMQ so that the consolidator
+    can subscribe to them. This is different from the ZmqKvEventPublisher in dynamo.llm,
+    which is a Rust-based ZMQ SUBSCRIBER that subscribes from the consolidator's ZMQ
+    output and publishes to NATS.
+
+    Event Format: [timestamp, [events], data_parallel_rank]
+    Message Format: multipart ZMQ message [topic, sequence, payload] where payload is
+    msgpack-serialized batch.
+
+    Usage:
+        Used by Publisher class when consolidator is enabled (zmq_endpoint provided).
+        Publishes events from TensorRT-LLM engine to ZMQ for consolidator to consume.
     """
 
     def __init__(self, zmq_endpoint: str, kv_block_size: int, topic: str = ""):
@@ -224,7 +252,19 @@ class ManagedThread(threading.Thread):
 
 class Publisher:
     """
-    A class to retrieve stats and kv cache events from TRTLLM engine and publish them to the metrics and events publishers.
+    Main publisher class for TensorRT-LLM KV events and metrics.
+
+    Retrieves KV cache events and stats from TensorRT-LLM engine and publishes them:
+    - KV Events: Routes to either ZMQ (if consolidator enabled) or NATS (if no consolidator)
+    - Metrics: Always publishes to NATS via WorkerMetricsPublisher
+
+    Publisher Selection Logic:
+    - If zmq_endpoint provided: Uses ZmqKvEventPublisher (ZMQ PUB) → Consolidator → NATS
+    - If zmq_endpoint None: Uses KvEventPublisher (NATS PUB) → Router directly
+
+    Note: The ZmqKvEventPublisher used here is the pure Python ZMQ publisher defined
+    in this module, not the Rust-based ZmqKvEventPublisher from dynamo.llm (which is
+    used in main.py as the worker-side subscriber from consolidator to NATS).
     """
 
     def __init__(
@@ -294,8 +334,11 @@ class Publisher:
         )
 
         # Setup the kv cache events publisher
-        # If consolidator is enabled (zmq_kv_event_publisher exists), skip NATS publisher
-        # Consolidator will publish to NATS, so we only need ZMQ publishing
+        # Publisher selection based on consolidator configuration:
+        # - With consolidator: Use ZmqKvEventPublisher (this module) → ZMQ → Consolidator → NATS → Router
+        # - Without consolidator: Use KvEventPublisher → NATS → Router (direct)
+        # Note: The worker-side ZmqKvEventPublisher (from dynamo.llm) that subscribes from
+        # consolidator and publishes to NATS is created separately in main.py, not here.
         if self.zmq_kv_event_publisher:
             logging.info(
                 "KV Event Consolidator enabled - using ZMQ publisher only. "

@@ -110,7 +110,7 @@ def get_consolidator_endpoints() -> tuple[str, str, str]:
         )
 
     # Derive consolidator output port deterministically (matching vLLM)
-    # Use 1000 offset to keep ports close together
+    # Use 1000 as the offset. This needs to be aligned with the offset used in the kvbm connector leader.
     consolidator_port_offset = 1000
     output_port = kvbm_pub_port + consolidator_port_offset
 
@@ -124,17 +124,16 @@ def get_consolidator_endpoints() -> tuple[str, str, str]:
     # Build endpoints
     # TRTLLM binds to all interfaces, consolidator connects to 127.0.0.1
     trtllm_bind_endpoint = f"tcp://*:{trtllm_port}"
-    trtllm_connect_endpoint = f"tcp://127.0.0.1:{trtllm_port}"
 
     # Consolidator output: bind to 0.0.0.0 (all interfaces), workers connect to 127.0.0.1
     output_bind_endpoint = f"tcp://0.0.0.0:{output_port}"
     output_connect_endpoint = f"tcp://127.0.0.1:{output_port}"
 
     logger.info(
-        f"Consolidator endpoints: trtllm={trtllm_connect_endpoint}, "
+        f"Consolidator endpoints: trtllm_bind={trtllm_bind_endpoint}, "
         f"output_bind={output_bind_endpoint}, output_connect={output_connect_endpoint} "
         f"(derived from KVBM port {kvbm_pub_port})"
     )
 
-    # Return tuple matching vLLM format: (input_endpoint, output_bind_endpoint, output_connect_endpoint)
+    # Return tuple format: (trtllm_bind_endpoint, output_bind_endpoint, output_connect_endpoint)
     return trtllm_bind_endpoint, output_bind_endpoint, output_connect_endpoint

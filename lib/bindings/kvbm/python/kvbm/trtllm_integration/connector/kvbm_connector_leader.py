@@ -6,6 +6,7 @@ import os
 from typing import List, Optional
 
 from kvbm import KvbmLeader
+from kvbm.trtllm_integration.consolidator_config import is_truthy
 from kvbm.trtllm_integration.rust import KvbmRequest
 from kvbm.trtllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.trtllm_integration.rust import SchedulerOutput as RustSchedulerOutput
@@ -47,8 +48,6 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         leader = KvbmLeader(world_size, drt=self.drt)
 
         # Check if consolidator is enabled first
-        from kvbm.trtllm_integration.consolidator_config import is_truthy
-
         consolidator_enabled = is_truthy(
             os.getenv("DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR", "true")
         )
@@ -70,6 +69,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                         "DYN_KVBM_LEADER_ZMQ_PUB_PORT", "56001"
                     )
                     kvbm_pub_port = int(kvbm_pub_port_str)
+                    # Use 1000 as the offset. This needs to be aligned with the offset used in the consolidator config.
                     consolidator_port_offset = 1000
                     output_port = kvbm_pub_port + consolidator_port_offset
                     consolidator_output_ep = f"tcp://0.0.0.0:{output_port}"

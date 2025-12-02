@@ -27,9 +27,29 @@ import yaml
 from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
 
-# Check if engines are available
-HAS_VLLM = importlib.util.find_spec("vllm") is not None
-HAS_TRTLLM = importlib.util.find_spec("tensorrt_llm") is not None
+
+# Check if engines are available and build list of available engines
+# Use find_spec first (fast check), then verify import works (functional check)
+def _check_engine_available(module_name: str) -> bool:
+    """Check if an engine module is available and importable."""
+    if importlib.util.find_spec(module_name) is None:
+        return False
+    try:
+        importlib.import_module(module_name)
+        return True
+    except ImportError:
+        return False
+
+
+HAS_VLLM = _check_engine_available("vllm")
+HAS_TRTLLM = _check_engine_available("tensorrt_llm")
+
+# Build list of available engines for parameterization
+AVAILABLE_ENGINES = []
+if HAS_VLLM:
+    AVAILABLE_ENGINES.append("vllm")
+if HAS_TRTLLM:
+    AVAILABLE_ENGINES.append("trtllm")
 
 # Test markers
 pytestmark = [
@@ -224,15 +244,10 @@ def frontend_server(test_directory, runtime_services):
     logger.info("Frontend server stopped")
 
 
-@pytest.fixture(params=["vllm", "trtllm"])
+@pytest.fixture(params=AVAILABLE_ENGINES)
 def engine_type(request):
-    """Parameterize test to run with both vLLM and TensorRT-LLM."""
-    engine = request.param
-    if engine == "vllm" and not HAS_VLLM:
-        pytest.skip("vLLM not available")
-    if engine == "trtllm" and not HAS_TRTLLM:
-        pytest.skip("TensorRT-LLM not available")
-    return engine
+    """Parameterize test to run with available engines only."""
+    return request.param
 
 
 @pytest.fixture
@@ -583,7 +598,7 @@ class TestConsolidatorRouterE2E:
 
         logger.info(f"STORE deduplication test passed ({engine.upper()})")
 
-    @pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
+    @pytest.mark.parametrize("engine_type", AVAILABLE_ENGINES)
     def test_remove_deduplication_across_sources(
         self, test_directory, runtime_services, engine_type
     ):
@@ -603,10 +618,6 @@ class TestConsolidatorRouterE2E:
         This verifies: REMOVE is only sent to router when a block is removed from ALL sources.
         Deduplication prevents unnecessary REMOVE events when blocks are still cached in G2/G3.
         """
-        if engine_type == "vllm" and not HAS_VLLM:
-            pytest.skip("vLLM not available")
-        if engine_type == "trtllm" and not HAS_TRTLLM:
-            pytest.skip("TensorRT-LLM not available")
 
         engine = engine_type
         logger.info(f"Starting REMOVE deduplication test ({engine.upper()})")

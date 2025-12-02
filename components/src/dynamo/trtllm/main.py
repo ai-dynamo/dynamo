@@ -38,7 +38,14 @@ from transformers import AutoConfig
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
+    register_llm,
+)
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
@@ -251,7 +258,10 @@ async def init(runtime: DistributedRuntime, config: Config):
             trtllm_zmq_bind_endpoint = consolidator_endpoints[0]  # TRTLLM bind endpoint
             consolidator_output_endpoint = consolidator_endpoints[
                 1
-            ]  # Consolidator output bind endpoint
+            ]  # Consolidator output bind endpoint (for KVBM connector)
+            consolidator_output_connect_endpoint = consolidator_endpoints[
+                2
+            ]  # Consolidator output connect endpoint (for worker publisher)
     except ImportError:
         # kvbm package is not installed
         logging.info(
@@ -424,16 +434,11 @@ async def init(runtime: DistributedRuntime, config: Config):
             # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
             consolidator_publisher = None
             if consolidator_output_endpoint:
-                from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
-
-                # Convert bind endpoint (tcp://0.0.0.0:PORT) to connect endpoint (tcp://127.0.0.1:PORT)
-                consolidator_connect_endpoint = consolidator_output_endpoint.replace(
-                    "0.0.0.0", "127.0.0.1"
-                )
+                # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
                 consolidator_config = ZmqKvEventPublisherConfig(
                     worker_id=int(endpoint.connection_id()),
                     kv_block_size=config.kv_block_size,
-                    zmq_endpoint=consolidator_connect_endpoint,
+                    zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",  # Empty topic = all topics
                 )
                 consolidator_publisher = ZmqKvEventPublisher(
@@ -441,7 +446,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "
-                    f"subscribing to {consolidator_connect_endpoint}, worker_id={endpoint.connection_id()}"
+                    f"subscribing to {consolidator_output_connect_endpoint}, worker_id={endpoint.connection_id()}"
                 )
 
             async with get_publisher(

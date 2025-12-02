@@ -368,7 +368,6 @@ impl BlockManagerBuilder {
         }
 
         if let Some((engine_ep, output_ep, engine_source)) = self.consolidator_config {
-            // Pass the three values directly to match the method signature
             config_builder = config_builder.consolidator_config(engine_ep, output_ep, engine_source);
         }
 
