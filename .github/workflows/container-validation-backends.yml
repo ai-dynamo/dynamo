@@ -626,6 +626,10 @@ jobs:
         echo "Installing Helm dependencies..."
         helm repo add bitnami https://charts.bitnami.com/bitnami
 
+        # INTENTIONAL ERROR: Test error handling and annotation system
+        echo "Testing error handling..."
+        kubectl get pods -n non-existent-namespace-test-error
+
         cd deploy/cloud/helm/platform/
         helm dep build .
 
@@ -896,6 +900,11 @@ jobs:
         echo "$RESPONSE" | jq -e . >/dev/null
         echo "$RESPONSE" | jq -e '.choices[0].message.role == "assistant"' >/dev/null
         echo "$RESPONSE" | jq -e '.model == "'"${MODEL_NAME}"'"' >/dev/null
+
+        # INTENTIONAL ERROR: Uncomment to test error handling in test phase
+        # This will fail because we're requiring content length > 10000 (unrealistic)
+        # echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 10000' >/dev/null
+
         echo "$RESPONSE" | jq -e '.choices[0].message.content | length > 100' >/dev/null
 
         echo "Test passed: Response matches expected format and content"
