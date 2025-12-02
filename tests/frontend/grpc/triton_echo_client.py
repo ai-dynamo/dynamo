@@ -7,6 +7,18 @@ import numpy as np
 import tritonclient.grpc as grpcclient
 
 
+def check_health():
+    server_url = "localhost:8000"
+    try:
+        triton_client = grpcclient.InferenceServerClient(url=server_url)
+    except Exception as e:
+        print("channel creation failed: " + str(e))
+        sys.exit()
+    assert triton_client.is_server_live()
+    assert triton_client.is_server_ready()
+    assert triton_client.is_model_ready("echo")
+
+
 def run_infer():
     server_url = "localhost:8000"
     try:
