@@ -24,7 +24,6 @@ pub enum EngineType {
     Echo = 1,
     Dynamic = 2,
     Mocker = 3,
-    Static = 4,
 }
 
 #[pyclass]
@@ -42,7 +41,8 @@ impl KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, router_replica_sync=false, router_track_active_blocks=true, router_snapshot_threshold=1000000, router_reset_states=false))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, router_replica_sync=false, router_track_active_blocks=true, router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_max_tree_size=1024, router_prune_target_ratio=0.8))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: f64,
         router_temperature: f64,
@@ -51,6 +51,9 @@ impl KvRouterConfig {
         router_track_active_blocks: bool,
         router_snapshot_threshold: Option<u32>,
         router_reset_states: bool,
+        router_ttl_secs: f64,
+        router_max_tree_size: usize,
+        router_prune_target_ratio: f64,
     ) -> Self {
         KvRouterConfig {
             inner: RsKvRouterConfig {
@@ -61,6 +64,9 @@ impl KvRouterConfig {
                 router_track_active_blocks,
                 router_snapshot_threshold,
                 router_reset_states,
+                router_ttl_secs,
+                router_max_tree_size,
+                router_prune_target_ratio,
             },
         }
     }
@@ -72,21 +78,24 @@ pub struct RouterConfig {
     router_mode: RouterMode,
     kv_router_config: KvRouterConfig,
     busy_threshold: Option<f64>,
+    enforce_disagg: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, busy_threshold=None))]
+    #[pyo3(signature = (mode, config=None, busy_threshold=None, enforce_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
         busy_threshold: Option<f64>,
+        enforce_disagg: bool,
     ) -> Self {
         Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
             busy_threshold,
+            enforce_disagg,
         }
     }
 }
@@ -97,6 +106,7 @@ impl From<RouterConfig> for RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
             busy_threshold: rc.busy_threshold,
+            enforce_disagg: rc.enforce_disagg,
         }
     }
 }
@@ -243,14 +253,12 @@ async fn select_engine(
     let inner = match args.engine_type {
         EngineType::Echo => {
             // There is no validation for the echo engine
-            RsEngineConfig::StaticFull {
+            RsEngineConfig::InProcessText {
                 model: Box::new(local_model),
                 engine: dynamo_llm::engines::make_echo_engine(),
-                is_static: false,
             }
         }
         EngineType::Dynamic => RsEngineConfig::Dynamic(Box::new(local_model)),
-        EngineType::Static => RsEngineConfig::StaticRemote(Box::new(local_model)),
         EngineType::Mocker => {
             let mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
                 MockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
@@ -276,10 +284,9 @@ async fn select_engine(
             )
             .await?;
 
-            RsEngineConfig::StaticCore {
+            RsEngineConfig::InProcessTokens {
                 engine,
                 model: Box::new(local_model),
-                is_static: false,
                 is_prefill: args.is_prefill,
             }
         }
@@ -299,7 +306,7 @@ pub fn run_input<'p>(
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         dynamo_llm::entrypoint::input::run_input(
-            either::Either::Right(distributed_runtime.inner.clone()),
+            distributed_runtime.inner.clone(),
             input_enum,
             engine_config.inner,
         )

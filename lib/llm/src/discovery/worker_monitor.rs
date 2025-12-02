@@ -3,15 +3,19 @@
 
 use crate::kv_router::KV_METRICS_SUBJECT;
 use crate::kv_router::scoring::LoadEvent;
-use crate::model_card::{self, ModelDeploymentCard};
+use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::component::Client;
+use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::EventSubscriber;
-use dynamo_runtime::utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio_stream::StreamExt;
+
+/// Scale factor for storing f64 thresholds as u32 (10000 = 4 decimal places)
+const THRESHOLD_SCALE: u32 = 10000;
 
 /// Worker load monitoring state per dp_rank
 #[derive(Clone, Debug, Default)]
@@ -49,21 +53,55 @@ impl WorkerLoadState {
     }
 }
 
-/// Worker monitor for tracking KV cache usage and busy states
+/// Worker monitor for tracking KV cache usage and busy states.
+///
+/// All fields are `Arc`, so cloning shares state. This allows multiple pipelines
+/// (e.g., chat and completions) to share the same monitor instance.
+#[derive(Clone)]
 pub struct KvWorkerMonitor {
     client: Arc<Client>,
     worker_load_states: Arc<RwLock<HashMap<u64, WorkerLoadState>>>,
-    busy_threshold: f64,
+    /// Threshold stored as parts-per-10000 (e.g., 8500 = 0.85)
+    busy_threshold: Arc<AtomicU32>,
+    /// Guard to ensure start_monitoring() only runs once across clones
+    started: Arc<AtomicBool>,
 }
 
 impl KvWorkerMonitor {
-    /// Create a new worker monitor with custom threshold
-    pub fn new(client: Arc<Client>, busy_threshold: f64) -> Self {
+    /// Create a new worker monitor with the given threshold.
+    ///
+    /// The threshold (0.0-1.0) controls when workers are considered busy based on
+    /// KV cache utilization. It can be dynamically updated via `set_threshold()`.
+    pub fn new(client: Arc<Client>, threshold: f64) -> Self {
         Self {
             client,
             worker_load_states: Arc::new(RwLock::new(HashMap::new())),
-            busy_threshold,
+            busy_threshold: Arc::new(AtomicU32::new(Self::threshold_to_scaled(threshold))),
+            started: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Convert a f64 threshold (0.0-1.0) to scaled u32 for atomic storage.
+    #[inline]
+    fn threshold_to_scaled(threshold: f64) -> u32 {
+        (threshold * THRESHOLD_SCALE as f64) as u32
+    }
+
+    /// Convert a scaled u32 back to f64 threshold (0.0-1.0).
+    #[inline]
+    fn scaled_to_threshold(scaled: u32) -> f64 {
+        scaled as f64 / THRESHOLD_SCALE as f64
+    }
+
+    /// Get the current threshold value as f64.
+    pub fn threshold(&self) -> f64 {
+        Self::scaled_to_threshold(self.busy_threshold.load(Ordering::Relaxed))
+    }
+
+    /// Set the threshold value from f64.
+    pub fn set_threshold(&self, threshold: f64) {
+        self.busy_threshold
+            .store(Self::threshold_to_scaled(threshold), Ordering::Relaxed);
     }
 
     /// Get the worker load states for external access
@@ -74,34 +112,38 @@ impl KvWorkerMonitor {
 
 #[async_trait]
 impl WorkerLoadMonitor for KvWorkerMonitor {
-    /// Start background monitoring of worker KV cache usage
+    /// Start background monitoring of worker KV cache usage.
+    ///
+    /// This is safe to call multiple times (e.g., from cloned monitors shared across
+    /// pipelines) - only the first call spawns the background task.
     async fn start_monitoring(&self) -> anyhow::Result<()> {
+        // Guard: only start once across all clones
+        if self.started.swap(true, Ordering::SeqCst) {
+            tracing::debug!("Worker monitoring already started, skipping");
+            return Ok(());
+        }
+
         let endpoint = &self.client.endpoint;
         let component = endpoint.component();
 
-        let Some(etcd_client) = component.drt().etcd_client() else {
-            // Static mode, no monitoring needed
-            return Ok(());
-        };
+        let cancellation_token = component.drt().child_token();
 
-        // Watch for runtime config updates from model deployment cards
-        let runtime_configs_watcher = watch_prefix_with_extraction(
-            etcd_client,
-            model_card::ROOT_PATH,
-            key_extractors::lease_id,
-            |card: ModelDeploymentCard| Some(card.runtime_config),
-            component.drt().child_token(),
-        )
-        .await?;
-        let mut config_events_rx = runtime_configs_watcher.receiver();
+        // Watch for runtime config updates from model deployment cards via discovery interface
+        let discovery = component.drt().discovery();
+        let discovery_stream = discovery
+            .list_and_watch(DiscoveryQuery::AllModels, Some(cancellation_token.clone()))
+            .await?;
+        let mut config_events_rx =
+            watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
+                card.runtime_config
+            });
 
         // Subscribe to KV metrics events
         let mut kv_metrics_rx = component.namespace().subscribe(KV_METRICS_SUBJECT).await?;
 
         let worker_load_states = self.worker_load_states.clone();
         let client = self.client.clone();
-        let cancellation_token = component.drt().child_token();
-        let busy_threshold = self.busy_threshold;
+        let busy_threshold = self.busy_threshold.clone();
 
         // Spawn background monitoring task
         tokio::spawn(async move {
@@ -152,12 +194,16 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             state.kv_active_blocks.insert(dp_rank, active_blocks);
                             drop(states);
 
+                            // Load threshold dynamically - allows runtime updates
+                            let scaled_threshold = busy_threshold.load(Ordering::Relaxed);
+                            let current_threshold = Self::scaled_to_threshold(scaled_threshold);
+
                             // Recalculate all busy instances and update
                             let states = worker_load_states.read().unwrap();
                             let busy_instances: Vec<u64> = states
                                 .iter()
                                 .filter_map(|(&id, state)| {
-                                    state.is_busy(busy_threshold).then_some(id)
+                                    state.is_busy(current_threshold).then_some(id)
                                 })
                                 .collect();
                             drop(states);

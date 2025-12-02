@@ -14,18 +14,43 @@
 //! private; however, for now we are exposing most objects as fully public while the API is maturing.
 
 use super::utils::GracefulShutdownTracker;
-use super::{Result, Runtime, RuntimeType, error};
-use crate::config::{self, RuntimeConfig};
+use crate::{
+    compute,
+    config::{self, RuntimeConfig},
+};
 
 use futures::Future;
 use once_cell::sync::OnceCell;
-use std::sync::{Arc, atomic::Ordering};
+use std::{
+    mem::ManuallyDrop,
+    sync::{Arc, atomic::Ordering},
+};
 use tokio::{signal, sync::Mutex, task::JoinHandle};
 
 pub use tokio_util::sync::CancellationToken;
 
+/// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
+#[derive(Clone, Debug)]
+enum RuntimeType {
+    Shared(Arc<ManuallyDrop<tokio::runtime::Runtime>>),
+    External(tokio::runtime::Handle),
+}
+
+/// Local [Runtime] which provides access to shared resources local to the physical node/machine.
+#[derive(Debug, Clone)]
+pub struct Runtime {
+    id: Arc<String>,
+    primary: RuntimeType,
+    secondary: RuntimeType,
+    cancellation_token: CancellationToken,
+    endpoint_shutdown_token: CancellationToken,
+    graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
+    compute_pool: Option<Arc<compute::ComputePool>>,
+    block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
+}
+
 impl Runtime {
-    fn new(runtime: RuntimeType, secondary: Option<RuntimeType>) -> Result<Runtime> {
+    fn new(runtime: RuntimeType, secondary: Option<RuntimeType>) -> anyhow::Result<Runtime> {
         // worker id
         let id = Arc::new(uuid::Uuid::new_v4().to_string());
 
@@ -40,7 +65,9 @@ impl Runtime {
             Some(secondary) => secondary,
             None => {
                 tracing::debug!("Created secondary runtime with single thread");
-                RuntimeType::Shared(Arc::new(RuntimeConfig::single_threaded().create_runtime()?))
+                RuntimeType::Shared(Arc::new(ManuallyDrop::new(
+                    RuntimeConfig::single_threaded().create_runtime()?,
+                )))
             }
         };
 
@@ -65,7 +92,7 @@ impl Runtime {
         runtime: RuntimeType,
         secondary: Option<RuntimeType>,
         config: &RuntimeConfig,
-    ) -> Result<Runtime> {
+    ) -> anyhow::Result<Runtime> {
         let mut rt = Self::new(runtime, secondary)?;
 
         // Create compute pool from configuration
@@ -123,7 +150,7 @@ impl Runtime {
 
     /// Initialize thread-local compute context on all worker threads using a barrier
     /// This ensures every worker thread has its thread-local context initialized
-    pub async fn initialize_all_thread_locals(&self) -> Result<()> {
+    pub async fn initialize_all_thread_locals(&self) -> anyhow::Result<()> {
         if let (Some(pool), Some(permits)) = (&self.compute_pool, &self.block_in_place_permits) {
             // First, detect how many worker threads we actually have
             let num_workers = self.detect_worker_thread_count().await;
@@ -207,11 +234,11 @@ impl Runtime {
         count
     }
 
-    pub fn from_current() -> Result<Runtime> {
+    pub fn from_current() -> anyhow::Result<Runtime> {
         Runtime::from_handle(tokio::runtime::Handle::current())
     }
 
-    pub fn from_handle(handle: tokio::runtime::Handle) -> Result<Runtime> {
+    pub fn from_handle(handle: tokio::runtime::Handle) -> anyhow::Result<Runtime> {
         let primary = RuntimeType::External(handle.clone());
         let secondary = RuntimeType::External(handle);
         Runtime::new(primary, Some(secondary))
@@ -219,18 +246,18 @@ impl Runtime {
 
     /// Create a [`Runtime`] instance from the settings
     /// See [`config::RuntimeConfig::from_settings`]
-    pub fn from_settings() -> Result<Runtime> {
+    pub fn from_settings() -> anyhow::Result<Runtime> {
         let config = config::RuntimeConfig::from_settings()?;
-        let runtime = Arc::new(config.create_runtime()?);
+        let runtime = Arc::new(ManuallyDrop::new(config.create_runtime()?));
         let primary = RuntimeType::Shared(runtime.clone());
         let secondary = RuntimeType::External(runtime.handle().clone());
         Runtime::new_with_config(primary, Some(secondary), &config)
     }
 
     /// Create a [`Runtime`] with two single-threaded async tokio runtime
-    pub fn single_threaded() -> Result<Runtime> {
+    pub fn single_threaded() -> anyhow::Result<Runtime> {
         let config = config::RuntimeConfig::single_threaded();
-        let owned = RuntimeType::Shared(Arc::new(config.create_runtime()?));
+        let owned = RuntimeType::Shared(Arc::new(ManuallyDrop::new(config.create_runtime()?)));
         Runtime::new(owned, None)
     }
 
@@ -297,9 +324,9 @@ impl Runtime {
                 tracker.wait_for_completion().await;
             }
 
-            // Phase 3: Now connections will be disconnected to NATS/ETCD by cancelling the main token
+            // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
             tracing::info!(
-                "Phase 3: All endpoints ended gracefully. Connections to NATS/ETCD will now be disconnected"
+                "Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected"
             );
             main_token.cancel();
         });
@@ -316,11 +343,42 @@ impl RuntimeType {
     }
 }
 
-impl std::fmt::Debug for RuntimeType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+/// Handle dropping a tokio runtime from an async context.
+///
+/// When used from the Python bindings the runtime will be dropped from (I think) Python's asyncio.
+/// Tokio does not allow this and will panic. That panic prevents logging from printing it's last
+/// messages, which makes knowing what went wrong very difficult.
+///
+/// This is the panic:
+/// > pyo3_runtime.PanicException: Cannot drop a runtime in a context where blocking is not allowed.
+/// > This happens when a runtime is dropped from within an asynchronous context.
+///
+/// Hence we wrap the runtime in a ManuallyDrop and use tokio's alternative shutdown if we detect
+/// that we are inside an async runtime.
+impl Drop for RuntimeType {
+    fn drop(&mut self) {
         match self {
-            RuntimeType::External(_) => write!(f, "RuntimeType::External"),
-            RuntimeType::Shared(_) => write!(f, "RuntimeType::Shared"),
+            RuntimeType::External(_) => {}
+            RuntimeType::Shared(arc) => {
+                let Some(md_runtime) = Arc::get_mut(arc) else {
+                    // Only drop if we are the only owner of the shared pointer, meaning
+                    // one strong count and no weak count.
+                    return;
+                };
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    // We are inside an async runtime.
+                    let tokio_runtime = unsafe { ManuallyDrop::take(md_runtime) };
+                    tokio_runtime.shutdown_background();
+                } else {
+                    // We are not inside an async context, dropping the runtime is safe.
+                    //
+                    // We never reach this case. I'm not sure why, something about the interaction
+                    // with pyo3 and Python lifetimes.
+                    //
+                    // Process is gone so doesn't really matter, but TODO now that we realize it.
+                    unsafe { ManuallyDrop::drop(md_runtime) };
+                }
+            }
         }
     }
 }

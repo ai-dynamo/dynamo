@@ -17,6 +17,7 @@ from tests.utils.payload_builder import (
     chat_payload_default,
     completion_payload_default,
     metric_payload_default,
+    multimodal_payload_default,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ trtllm_configs = {
         name="aggregated",
         directory=trtllm_dir,
         script_name="agg_metrics.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
+        marks=[pytest.mark.gpu_1, pytest.mark.trtllm],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -52,7 +53,7 @@ trtllm_configs = {
         name="disaggregated",
         directory=trtllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm_marker],
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -60,11 +61,25 @@ trtllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "disaggregated_same_gpu": TRTLLMConfig(
+        name="disaggregated_same_gpu",
+        directory=trtllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.trtllm],
+        model="Qwen/Qwen3-0.6B",
+        models_port=8000,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(port=8081, min_num_requests=6, backend="trtllm"),
+            metric_payload_default(port=8082, min_num_requests=6, backend="trtllm"),
+        ],
+    ),
     "aggregated_router": TRTLLMConfig(
         name="aggregated_router",
         directory=trtllm_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
+        marks=[pytest.mark.gpu_1, pytest.mark.trtllm, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -83,13 +98,24 @@ trtllm_configs = {
         name="disaggregated_router",
         directory=trtllm_dir,
         script_name="disagg_router.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm_marker],
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.nightly],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
         ],
+    ),
+    "disaggregated_multimodal": TRTLLMConfig(
+        name="disaggregated_multimodal",
+        directory=trtllm_dir,
+        script_name="disagg_multimodal.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.multimodal],
+        model="Qwen/Qwen2-VL-7B-Instruct",
+        models_port=8000,
+        timeout=900,
+        delayed_start=60,
+        request_payloads=[multimodal_payload_default()],
     ),
 }
 
@@ -100,7 +126,7 @@ def trtllm_config_test(request):
     return trtllm_configs[request.param]
 
 
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
 @pytest.mark.e2e
 def test_deployment(trtllm_config_test, request, runtime_services, predownload_models):
     """
@@ -114,7 +140,7 @@ def test_deployment(trtllm_config_test, request, runtime_services, predownload_m
 # TODO make this a normal guy
 @pytest.mark.e2e
 @pytest.mark.gpu_1
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
 def test_chat_only_aggregated_with_test_logits_processor(
     request, runtime_services, predownload_models, monkeypatch
 ):

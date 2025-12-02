@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use futures::{Stream, TryStreamExt};
+use serde::Deserialize;
+use serde::Serialize;
 
-use super::*;
+use crate::component::Namespace;
 use crate::metrics::{MetricsHierarchy, MetricsRegistry};
+use crate::traits::DistributedRuntimeProvider;
 use crate::traits::events::{EventPublisher, EventSubscriber};
 
 #[async_trait]
@@ -31,10 +35,9 @@ impl EventPublisher for Namespace {
         bytes: Vec<u8>,
     ) -> Result<()> {
         let subject = format!("{}.{}", self.subject(), event_name.as_ref());
-        let Some(nats_client) = self.drt().nats_client() else {
-            anyhow::bail!("KV router's Namespace EventPublisher requires NATS");
-        };
-        nats_client.client().publish(subject, bytes.into()).await?;
+        self.drt()
+            .kv_router_nats_publish(subject, bytes.into())
+            .await?;
         Ok(())
     }
 }
@@ -46,10 +49,7 @@ impl EventSubscriber for Namespace {
         event_name: impl AsRef<str> + Send + Sync,
     ) -> Result<async_nats::Subscriber> {
         let subject = format!("{}.{}", self.subject(), event_name.as_ref());
-        let Some(nats_client) = self.drt().nats_client() else {
-            anyhow::bail!("KV router's Namespace EventSubscriber requires NATS");
-        };
-        Ok(nats_client.client().subscribe(subject).await?)
+        Ok(self.drt().kv_router_nats_subscribe(subject).await?)
     }
 
     async fn subscribe_with_type<T: for<'de> Deserialize<'de> + Send + 'static>(
@@ -99,6 +99,8 @@ impl MetricsHierarchy for Namespace {
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod tests {
+    use crate::{DistributedRuntime, Runtime};
+
     use super::*;
 
     // todo - make a distributed runtime fixture

@@ -16,7 +16,7 @@ from dynamo.llm import EngineType, EntrypointArgs, make_engine, run_input
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .args import create_temp_engine_args_file, parse_args
+from .args import create_temp_engine_args_file, parse_args, resolve_planner_profile_data
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -29,6 +29,10 @@ async def worker():
     while still sharing the same event loop and tokio runtime.
     """
     args = parse_args()
+
+    # Resolve planner-profile-data: convert profile results dir to NPZ if needed
+    profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
+    args.planner_profile_data = profile_data_result.npz_path
 
     # Handle extra_engine_args: either use provided file or create from CLI args
     if args.extra_engine_args:
@@ -54,6 +58,8 @@ async def worker():
             except Exception as e:
                 logger.warning(f"Failed to clean up temporary file: {e}")
 
+        del profile_data_result  # Triggers tmpdir cleanup via __del__
+
 
 async def launch_workers(args, extra_engine_args_path):
     """Launch mocker worker(s) with isolated DistributedRuntime instances.
@@ -72,7 +78,7 @@ async def launch_workers(args, extra_engine_args_path):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
 
         # Create a separate DistributedRuntime for this worker (on same event loop)
-        runtime = DistributedRuntime(loop, False)
+        runtime = DistributedRuntime(loop, args.store_kv, args.request_plane)
         runtimes.append(runtime)
 
         # Create EntrypointArgs for this worker

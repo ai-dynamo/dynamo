@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Memory-optimized config for single GPU deployment (FP16)
+# This is for testing. Do not use this for production.
+# How many models can fit?
+# - RTX 4090 (24GB):      10x 0.6B, 6x 1B, 2x 3B
+# - RTX 6000 Ada (48GB):  20x 0.6B, 8x 1.5B, 4x 3.5B, 2x 7B
+# - A100 (40GB):          16x 0.6B, 4x 2.5B, 2x 6B
+# - A100 (80GB):          32x 0.6B, 8x 3B, 4x 6B, 2x 12B
+# - H100 (80GB):          32x 0.6B, 8x 3B, 4x 6B, 2x 12B
+#
+# For production (85% memory): RTX 6000 can handle 70x 0.6B, 4x 6B, 2x 12B, 1x 25B
+
+tensor_parallel_size: 1
+moe_expert_parallel_size: 1
+enable_attention_dp: false
+max_num_tokens: 1024
+max_batch_size: 4
+trust_remote_code: true
+backend: pytorch
+enable_chunked_prefill: true
+
+kv_cache_config:
+  free_gpu_memory_fraction: 0.24
+
+# NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
+# NOTE: overlap_scheduler enabled by default since this commit and changed
+# config field from 'enable_overlap_scheduler' to 'disable_overlap_scheduler':
+# https://github.com/NVIDIA/TensorRT-LLM/commit/b4e5df0ee0024eda3eeb83a6ba822245a30ab428
+
+
+cuda_graph_config:
+  max_batch_size: 4

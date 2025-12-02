@@ -14,11 +14,14 @@
 # limitations under the License.
 
 import logging
+from collections import defaultdict
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import cm
 from scipy.interpolate import griddata
+
+from benchmarks.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -31,25 +34,27 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def plot_prefill_performance(
-    prefill_num_gpu, prefill_ttft, prefill_thpt_per_gpu, target_ttft, output_dir
-):
+def plot_prefill_performance(prefill_data, target_ttft, output_dir):
     """
-    Plot prefill performance as a 2D scatter plot with GPU count annotations.
+    Plot prefill performance as a 2D scatter plot with GPU count and mapping annotations.
 
     Args:
-        prefill_num_gpu: list of GPU counts
-        prefill_ttft: list of time to first token values
-        prefill_thpt_per_gpu: list of throughput per GPU values
+        prefill_data: PrefillProfileData instance containing profiling results
         target_ttft: target TTFT value for the vertical line
         output_dir: directory to save the plot
     """
     plt.figure(figsize=(10, 6))
-    plt.scatter(prefill_ttft, prefill_thpt_per_gpu, s=100)
-    for i, num_gpu in enumerate(prefill_num_gpu):
+    plt.scatter(prefill_data.ttft, prefill_data.thpt_per_gpu, s=100)
+    for i, num_gpu in enumerate(prefill_data.num_gpus):
+        label_suffix = (
+            f" [{prefill_data.parallel_mapping_labels[i]}]"
+            if prefill_data.parallel_mapping_labels
+            and i < len(prefill_data.parallel_mapping_labels)
+            else ""
+        )
         plt.annotate(
-            f"{num_gpu} GPU(s)",
-            (prefill_ttft[i], prefill_thpt_per_gpu[i]),
+            f"{num_gpu} GPU(s){label_suffix}",
+            (prefill_data.ttft[i], prefill_data.thpt_per_gpu[i]),
             xytext=(10, 0),
             textcoords="offset points",
             fontsize=10,
@@ -71,19 +76,46 @@ def plot_prefill_performance(
     plt.close()
 
 
-def plot_decode_performance(decode_results, target_itl, output_dir):
+def plot_decode_performance(decode_data, target_itl, output_dir):
     """
     Plot decode performance with multiple GPU count lines.
 
     Args:
-        decode_results: list of tuples (num_gpu, itl_list, thpt_per_gpu_list)
+        decode_data: DecodeProfileData instance containing profiling results
         target_itl: target ITL value for the vertical line
         output_dir: directory to save the plot
     """
     plt.figure(figsize=(10, 6))
 
-    for num_gpu, itl_list, thpt_per_gpu_list in decode_results:
-        plt.plot(itl_list, thpt_per_gpu_list, label=f"{num_gpu} GPU(s)")
+    # Group data by (num_gpus, parallel_mapping_label) combination
+    grouped_data: defaultdict[tuple[int, str], dict[str, list[float]]] = defaultdict(
+        lambda: {"itl": [], "thpt": []}
+    )
+
+    for i in range(len(decode_data.num_gpus)):
+        num_gpu = decode_data.num_gpus[i]
+        label = (
+            decode_data.parallel_mapping_labels[i]
+            if decode_data.parallel_mapping_labels
+            else ""
+        )
+        key = (num_gpu, label)
+        grouped_data[key]["itl"].append(decode_data.itl[i])
+        grouped_data[key]["thpt"].append(decode_data.thpt_per_gpu[i])
+
+    # Plot each group as a line
+    for (num_gpu, parallel_mapping_label), data in sorted(grouped_data.items()):
+        if parallel_mapping_label:
+            label = f"{num_gpu} GPU(s) [{parallel_mapping_label}]"
+        else:
+            label = f"{num_gpu} GPU(s)"
+
+        # Sort by ITL for proper line plotting
+        sorted_pairs = sorted(zip(data["itl"], data["thpt"]))
+        itl_sorted = [x[0] for x in sorted_pairs]
+        thpt_sorted = [x[1] for x in sorted_pairs]
+
+        plt.plot(itl_sorted, thpt_sorted, label=label, marker="o")
 
     plt.axvline(
         x=target_itl, color="r", linestyle="--", label=f"Target ITL: {target_itl} ms"
@@ -251,4 +283,54 @@ def plot_decode_3d_surface(
     thpt_plot_path = f"{work_dir}/decode_throughput_interpolation.png"
     logger.info(f"Saving throughput surface plot to {thpt_plot_path}")
     plt.savefig(thpt_plot_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def plot_pd_joint_results(isl, osl, prefill_data, decode_data, output_dir):
+    """
+    Plot joint prefill and decode results showing cost per 1000 requests under different SLA.
+
+    Args:
+        isl: input sequence length
+        osl: output sequence length
+        prefill_data: PrefillProfileData instance containing profiling results
+        decode_data: DecodeProfileData instance containing profiling results
+        output_dir: directory to save the plot
+    """
+    GPU_COST_PER_HOUR = 3.0  # $3/hour
+
+    # compute pareto front for prefill
+    p_ttft, p_thpt = compute_pareto(prefill_data.ttft, prefill_data.thpt_per_gpu)
+
+    # compute pareto front for decode
+    d_itl, d_thpt = compute_pareto(decode_data.itl, decode_data.thpt_per_gpu)
+
+    # convert to cost per thousand requests
+    p_ttft = np.array(p_ttft)
+    p_thpt = np.array(p_thpt)
+    d_itl = np.array(d_itl)
+    d_thpt = np.array(d_thpt)
+
+    tokens_per_user = []
+    cost = []
+    ttft = []
+    for _p_ttft, _p_thpt in zip(p_ttft, p_thpt):
+        ttft.append(_p_ttft)
+        prefill_cost = isl * 1000 / _p_thpt * GPU_COST_PER_HOUR / 3600
+        tokens_per_user.append(1000 / d_itl)
+        cost.append(osl * 1000 / d_thpt * GPU_COST_PER_HOUR / 3600 + prefill_cost)
+
+    # plot
+    plt.figure(figsize=(12, 10))
+    plt.title(
+        f"Cost Per 1000 i{isl}o{osl} requests (GPU/hour = ${GPU_COST_PER_HOUR}) Under Different SLA"
+    )
+    for _tokens_per_user, _cost, _ttft in zip(tokens_per_user, cost, ttft):
+        line = plt.plot(_tokens_per_user, _cost, label=f"TTFT: {_ttft:.2f}ms")[0]
+        plt.scatter(_tokens_per_user, _cost, marker="x", s=100, color=line.get_color())
+    plt.xlabel("Tokens per User")
+    plt.ylabel("Cost ($)")
+    plt.grid(True)
+    plt.legend()
+    plt.savefig(f"{output_dir}/cost_sla.png", dpi=300)
     plt.close()

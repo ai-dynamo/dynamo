@@ -54,7 +54,6 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = "9345"
         env["DYN_KVBM_CPU_CACHE_GB"] = "20"
@@ -144,9 +143,12 @@ def send_completion_request(
 
 # Test markers to align with repository conventions
 # Todo: enable the rest when kvbm is built in the ci
+
+
 @pytest.mark.kvbm
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.slow
 @pytest.mark.gpu_1
 @pytest.mark.skip(
@@ -183,9 +185,10 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
 
 
 @pytest.mark.kvbm
-@pytest.mark.trtllm_marker
+@pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.slow
+@pytest.mark.nightly
 @pytest.mark.gpu_1
 @pytest.mark.skip(
     reason="Enable these tests once dynamo `main` upgrades to TRTLLM 1.2+"

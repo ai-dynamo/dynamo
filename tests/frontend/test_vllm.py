@@ -61,6 +61,10 @@ class DynamoFrontendProcess(ManagedProcess):
     def __init__(self, request):
         command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
 
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
+        env = os.environ.copy()
+        env.pop("DYN_SYSTEM_PORT", None)
+
         log_dir = f"{request.node.name}_frontend"
 
         # Clean up any existing log directory from previous runs
@@ -73,6 +77,7 @@ class DynamoFrontendProcess(ManagedProcess):
 
         super().__init__(
             command=command,
+            env=env,
             display_output=True,
             terminate_existing=True,
             log_dir=log_dir,
@@ -101,7 +106,6 @@ class VllmWorkerProcess(ManagedProcess):
 
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = "8083"
 
@@ -210,6 +214,7 @@ def _validate_chat_response(response: requests.Response) -> Dict[str, Any]:
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.post_merge
 @pytest.mark.model(TEST_MODEL)
 def test_reasoning_effort(request, runtime_services, predownload_models) -> None:
     """High reasoning effort should yield more detailed reasoning than low effort."""
@@ -276,6 +281,7 @@ def test_reasoning_effort(request, runtime_services, predownload_models) -> None
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.post_merge
 @pytest.mark.model(TEST_MODEL)
 def test_tool_calling(request, runtime_services, predownload_models) -> None:
     """Test tool calling functionality with weather and system health tools."""
@@ -318,6 +324,7 @@ def test_tool_calling(request, runtime_services, predownload_models) -> None:
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(TEST_MODEL)
 def test_tool_calling_second_round(
     request, runtime_services, predownload_models
@@ -384,6 +391,7 @@ def test_tool_calling_second_round(
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(TEST_MODEL)
 def test_reasoning(request, runtime_services, predownload_models) -> None:
     """Test reasoning functionality with a mathematical problem."""

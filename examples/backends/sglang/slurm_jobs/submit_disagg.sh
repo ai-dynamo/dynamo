@@ -62,6 +62,7 @@ ISL=$6
 OSL=$7
 CONCURRENCIES=$8
 REQUEST_RATE=$9
+SCRIPT_VARIANT=${10}
 
 RETRIES=1 # defaults to retry the job 1 time to avoid transient errors
 
@@ -74,10 +75,14 @@ if [[ $PREFILL_NODES -eq 6 ]] && [[ $PREFILL_WORKERS -eq 3 ]] && [[ $DECODE_NODE
     USE_INIT_LOCATIONS=(--use-init-location)
 fi
 
+SCRIPT_VARIANT_ARGS=()
+if [[ -n "$SCRIPT_VARIANT" ]]; then
+    SCRIPT_VARIANT_ARGS=(--script-variant "$SCRIPT_VARIANT")
+fi
+
 command=(
     python3 submit_job_script.py
     --account $SLURM_ACCOUNT --partition $SLURM_PARTITION --time-limit $TIME_LIMIT
-    --template job_script_template.j2
     --model-dir $MODEL_PATH --config-dir $CONFIG_DIR
     --container-image $CONTAINER_IMAGE
 
@@ -90,6 +95,9 @@ command=(
     --profiler "${profiler_args}"
 
     --retries $RETRIES
+
+    --run-in-ci
+    ${SCRIPT_VARIANT_ARGS[@]}
 )
 
 "${command[@]}"

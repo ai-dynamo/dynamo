@@ -13,3 +13,4 @@ homepage.workspace = true
 dynamo-runtime = { workspace = true }
 
 # third-party
+anyhow = { workspace = true }

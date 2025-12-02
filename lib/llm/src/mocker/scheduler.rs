@@ -31,6 +31,7 @@
 use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
+use crate::mocker::perf_model::PerfModel;
 use crate::mocker::protocols::{
     DirectRequest, MockEngineArgs, MoveBlock, OutputSignal, PrefillCost, WorkerType,
 };
@@ -112,7 +113,7 @@ impl SchedulerState {
     /// - `prefill_compute`: The compute time in milliseconds for this prefill operation
     /// - `creation_signal`: Optional MoveBlock signal for KV cache block creation
     /// - `is_full_prefill`: true if the entire sequence was prefilled, false if chunked
-    fn try_prefill(&mut self) -> Option<(f64, Option<MoveBlock>, bool)> {
+    fn try_prefill(&mut self, perf_model: &PerfModel) -> Option<(f64, Option<MoveBlock>, bool)> {
         let uuid = self.prefill.pop_front()?;
 
         // Remove and extract prefill_compute from prefill_costs
@@ -134,11 +135,12 @@ impl SchedulerState {
 
         let (prefill_compute, is_full_prefill) = if let Some(prefill_tokens) = maybe_prefill_tokens
         {
-            let prefill_compute = prefill_cost.predict_prefill_compute(Some(prefill_tokens));
+            let prefill_compute =
+                prefill_cost.predict_prefill_compute(Some(prefill_tokens), perf_model);
             prefill_cost.new_tokens -= prefill_tokens;
             assert!(
-                (prefill_cost.new_tokens > 0) && (prefill_compute > 0.0),
-                "Encountered negative prefill tokens or prefill compute cost."
+                prefill_cost.new_tokens > 0,
+                "Encountered negative prefill tokens."
             );
 
             self.prefill.push_front(uuid);
@@ -155,7 +157,7 @@ impl SchedulerState {
             self.active_tokens += new_tokens;
             self.waiting_tokens -= new_tokens;
 
-            (prefill_cost.predict_prefill_compute(None), true)
+            (prefill_cost.predict_prefill_compute(None, perf_model), true)
         };
 
         // NOTE: the current behavior allocates the KV blocks for the entire sequence,
@@ -312,7 +314,7 @@ impl Scheduler {
 
                 // Process prefilling
                 while let Some((prefill_compute, maybe_creation_signal, is_full_prefill)) =
-                    state.try_prefill()
+                    state.try_prefill(&args.perf_model)
                 {
                     // NOTE: Prefill cost/time is always incremented for new blocks, even if they
                     // could be cached by other requests in the same batch. This matches vLLM behavior.
@@ -333,9 +335,24 @@ impl Scheduler {
                     }
                 }
 
-                let active_perc = kv_manager.get_active_perc();
-                // TODO: share the same logic with Planner
-                let decoding_time = -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74;
+                // Compute decode timing
+                let active_kv_tokens = kv_manager.num_active_blocks() * args.block_size;
+                // Compute average context length across all active decode requests
+                let (total_length, count) = state
+                    .decode
+                    .keys()
+                    .filter_map(|uuid| state.requests.get(uuid))
+                    .fold((0usize, 0usize), |(sum, cnt), req| {
+                        if let Request::Active(seq) = req {
+                            (sum + seq.len(), cnt + 1)
+                        } else {
+                            (sum, cnt)
+                        }
+                    });
+                let context_length = if count > 0 { total_length / count } else { 0 };
+                let decoding_time = args
+                    .perf_model
+                    .predict_decode_time(active_kv_tokens, context_length);
                 total_time += Duration::from_secs_f64(decoding_time / 1000.0);
 
                 state.reset_active_tokens();

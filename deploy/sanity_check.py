@@ -86,11 +86,12 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
       └─ ✅ dynamo.vllm      $HOME/dynamo/components/src/dynamo/vllm/__init__.py
 
 Usage:
-    python deploy/sanity_check.py [--thorough-check] [--terse]
+    python deploy/sanity_check.py [--thorough-check] [--terse] [--runtime-check]
 
 Options:
     --thorough-check  Enable thorough checking (file permissions, directory sizes, HuggingFace model details)
     --terse           Enable terse output mode (show only essential info and errors)
+    --runtime-check   Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers
 """
 
 import datetime
@@ -297,9 +298,11 @@ class SystemInfo(NodeInfo):
         hostname: Optional[str] = None,
         thorough_check: bool = False,
         terse: bool = False,
+        runtime_check: bool = False,
     ):
         self.thorough_check = thorough_check
         self.terse = terse
+        self.runtime_check = runtime_check
         if hostname is None:
             hostname = platform.node()
 
@@ -332,16 +335,22 @@ class SystemInfo(NodeInfo):
         # In terse mode, only add other components if they have errors
         if not self.terse:
             # Add file permissions check
-            self.add_child(FilePermissionsInfo(thorough_check=self.thorough_check))
+            self.add_child(
+                FilePermissionsInfo(
+                    thorough_check=self.thorough_check, runtime_check=self.runtime_check
+                )
+            )
 
             # Add HuggingFace cache check
             self.add_child(HuggingFaceInfo(thorough_check=self.thorough_check))
 
-            # Add Cargo (always show, even if not found)
-            self.add_child(CargoInfo(thorough_check=self.thorough_check))
+            # Skip compile-time dependencies in runtime-check mode
+            if not self.runtime_check:
+                # Add Cargo (always show, even if not found)
+                self.add_child(CargoInfo(thorough_check=self.thorough_check))
 
-            # Add Maturin (Python-Rust build tool)
-            self.add_child(MaturinInfo())
+                # Add Maturin (Python-Rust build tool)
+                self.add_child(MaturinInfo())
 
             # Add Python info
             self.add_child(PythonInfo())
@@ -389,11 +398,23 @@ class SystemInfo(NodeInfo):
         """In terse mode, only add components that have errors"""
         # Create components and check their status
         components_to_check = [
-            ("File System", FilePermissionsInfo(thorough_check=self.thorough_check)),
-            ("Cargo", CargoInfo(thorough_check=self.thorough_check)),
-            ("Maturin", MaturinInfo()),
+            (
+                "File System",
+                FilePermissionsInfo(
+                    thorough_check=self.thorough_check, runtime_check=self.runtime_check
+                ),
+            ),
             ("Python", PythonInfo()),
         ]
+
+        # Skip compile-time dependencies in runtime-check mode
+        if not self.runtime_check:
+            components_to_check.extend(
+                [
+                    ("Cargo", CargoInfo(thorough_check=self.thorough_check)),
+                    ("Maturin", MaturinInfo()),
+                ]
+            )
 
         for name, component in components_to_check:
             # Only add if the component has an error status
@@ -721,7 +742,7 @@ class FilePermissionsInfo(NodeInfo):
 
     Checks writability of critical directories needed for:
     - Dynamo development (top-level dynamo directory)
-    - Rust development (Cargo target directory + all files, RUSTUP_HOME, CARGO_HOME)
+    - Rust development (Cargo target directory + all files, RUSTUP_HOME, CARGO_HOME) - skipped in runtime_check mode
     - Python development (site-packages)
 
     In thorough mode, also checks disk space for the dynamo working directory
@@ -729,20 +750,25 @@ class FilePermissionsInfo(NodeInfo):
 
     In fast mode, skips recursive file checking in Cargo target directory
     for improved performance on large target directories.
+
+    In runtime_check mode, skips Rust/Cargo toolchain checks.
     """
 
-    def __init__(self, thorough_check: bool = False):
+    def __init__(self, thorough_check: bool = False, runtime_check: bool = False):
         super().__init__(label="File System", status=NodeStatus.INFO)
         self.thorough_check = thorough_check
+        self.runtime_check = runtime_check
 
         # Check top-level dynamo directory
         self._check_dynamo_directory_permissions()
 
-        # Check Rust toolchain directories (RUSTUP_HOME and CARGO_HOME)
-        self._check_rust_toolchain_permissions()
+        # Skip Rust toolchain checks in runtime-check mode
+        if not self.runtime_check:
+            # Check Rust toolchain directories (RUSTUP_HOME and CARGO_HOME)
+            self._check_rust_toolchain_permissions()
 
-        # Check Cargo target directory (with optional recursive file checking)
-        self._check_cargo_target_permissions()
+            # Check Cargo target directory (with optional recursive file checking)
+            self._check_cargo_target_permissions()
 
         # Check Python site-packages directory
         self._check_site_packages_permissions()
@@ -2485,6 +2511,11 @@ def main():
         action="store_true",
         help="Show only essential information (OS, User, GPU, Framework, Dynamo) and errors",
     )
+    parser.add_argument(
+        "--runtime-check",
+        action="store_true",
+        help="Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers",
+    )
     args = parser.parse_args()
 
     # Validate mutual exclusion
@@ -2492,7 +2523,11 @@ def main():
         parser.error("--thorough-check and --terse cannot be used together")
 
     # Simply create a SystemInfo instance - it collects everything in its constructor
-    tree = SystemInfo(thorough_check=args.thorough_check, terse=args.terse)
+    tree = SystemInfo(
+        thorough_check=args.thorough_check,
+        terse=args.terse,
+        runtime_check=args.runtime_check,
+    )
     tree.print_tree()
 
     # Check if there are framework component errors and show installation recommendation

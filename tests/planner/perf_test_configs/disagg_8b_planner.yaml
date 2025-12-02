@@ -123,8 +123,6 @@ spec:
           memory: "100Gi"
           gpu: "1"
       envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
         - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
           value: "[\"generate\"]"
         - name: DYN_SYSTEM_PORT
@@ -180,8 +178,6 @@ spec:
           memory: "100Gi"
           gpu: "1"
       envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
         - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
           value: "[\"generate\"]"
         - name: DYN_SYSTEM_PORT

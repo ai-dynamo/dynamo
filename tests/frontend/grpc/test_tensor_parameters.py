@@ -22,8 +22,13 @@ class DynamoFrontendProcess(ManagedProcess):
         log_dir = f"{request.node.name}_frontend"
         shutil.rmtree(log_dir, ignore_errors=True)
 
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
+        env = os.environ.copy()
+        env.pop("DYN_SYSTEM_PORT", None)
+
         super().__init__(
             command=command,
+            env=env,
             display_output=True,
             terminate_existing=True,
             log_dir=log_dir,
@@ -39,7 +44,6 @@ class EchoTensorWorkerProcess(ManagedProcess):
 
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = "8083"
 
@@ -88,6 +92,7 @@ def extract_params(param_map) -> dict:
 
 @pytest.mark.e2e
 @pytest.mark.pre_merge
+@pytest.mark.gpu_1
 @pytest.mark.parametrize(
     "request_params",
     [
@@ -97,7 +102,7 @@ def extract_params(param_map) -> dict:
     ],
     ids=["no_params", "numeric_param", "mixed_params"],
 )
-def test_request_parameters(start_services, request_params):
+def test_request_parameters(file_storage_backend, start_services, request_params):
     """Test gRPC request-level parameters are echoed through tensor models.
 
     The worker acts as an identity function: echoes input tensors unchanged and

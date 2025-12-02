@@ -6,9 +6,8 @@
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-0.6B"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-0.6B"}
-export DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"prefill_first"}
-export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/qwen3/trtllm/prefill.yaml"}
-export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/recipes/qwen3/trtllm/decode.yaml"}
+export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/prefill.yaml"}
+export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/decode.yaml"}
 export PREFILL_CUDA_VISIBLE_DEVICES=${PREFILL_CUDA_VISIBLE_DEVICES:-"0"}
 export DECODE_CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-"1"}
 
@@ -22,34 +21,26 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 
-# run frontend
-python3 -m dynamo.frontend --router-mode kv --http-port 8000 &
+# run frontend with KV routing for cache-aware optimization
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python3 -m dynamo.frontend --router-mode kv &
 DYNAMO_PID=$!
 
-
-EXTRA_PREFILL_ARGS=()
-EXTRA_DECODE_ARGS=()
-if [ "$DISAGGREGATION_STRATEGY" == "prefill_first" ]; then
-  EXTRA_PREFILL_ARGS+=(--publish-events-and-metrics)
-else
-  EXTRA_DECODE_ARGS+=(--publish-events-and-metrics)
-fi
-
 # run prefill worker
+# Publishes KV events for router's cache-aware routing
+# No next_endpoint needed - unified frontend handles routing
 CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
   --disaggregation-mode prefill \
-  --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
-  "${EXTRA_PREFILL_ARGS[@]}" &
+  --publish-events-and-metrics &
 PREFILL_PID=$!
 
 # run decode worker
+# No event publishing needed - prefill handles it
 CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$DECODE_ENGINE_ARGS" \
-  --disaggregation-mode decode \
-  --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
-  "${EXTRA_DECODE_ARGS[@]}"
+  --disaggregation-mode decode

@@ -85,7 +85,6 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
 
@@ -151,6 +150,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.sglang
 @pytest.mark.gpu_1
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 @pytest.mark.xfail(strict=False)
 def test_request_cancellation_sglang_aggregated(
     request, runtime_services, predownload_models
@@ -240,13 +240,14 @@ def test_request_cancellation_sglang_aggregated(
 @pytest.mark.sglang
 @pytest.mark.gpu_2
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_request_cancellation_sglang_decode_cancel(
     request, runtime_services, predownload_models
 ):
     """
-    End-to-end test for request cancellation during remote decode phase.
+    End-to-end test for request cancellation during decode phase.
 
-    This test verifies that when a request is cancelled by the client during the remote decode phase,
+    This test verifies that when a request is cancelled by the client during the decode phase,
     the system properly handles the cancellation and cleans up resources
     on both the prefill and decode workers in a disaggregated setup.
 
@@ -268,9 +269,9 @@ def test_request_cancellation_sglang_decode_cancel(
                 # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
                 time.sleep(2)
 
-                # Step 4: Test request cancellation during remote decode phase
+                # Step 4: Test request cancellation during decode phase
                 logger.info(
-                    "Testing chat completion stream request cancellation during remote decode phase..."
+                    "Testing chat completion stream request cancellation during decode phase..."
                 )
 
                 # Send streaming request (non-blocking)

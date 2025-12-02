@@ -21,7 +21,7 @@ The main KV-aware routing arguments:
 
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 
-- `--no-kv-events`: Disables KV event tracking. By default (when this flag is not provided), the router uses `KvIndexer` to monitor block creation and deletion events. When disabled with this flag, uses `ApproxKvIndexer`, which estimates cache hits based on a fixed time window (120s). Use this flag if your backend doesn't support KV events (or you are not confident in the accuracy or responsiveness of the events).
+- `--no-kv-events`: Disables KV event tracking. By default (when this flag is not provided), the router uses KV events to monitor block creation and deletion from workers. When disabled with this flag, the router predicts cache state based on routing decisions with TTL-based expiration (default 120s) and pruning. Use this flag if your backend doesn't support KV events (or you are not confident in the accuracy or responsiveness of the events).
 
 - `--router-replica-sync`:  Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas. When enabled, routers share their active sequence information and local predictions of block usage, improving routing consistency across instances. Note that this does not sync the radix tree or cached KV block states themselves - those are synchronized through JetStream events
 
@@ -31,12 +31,20 @@ The main KV-aware routing arguments:
 
 - `--no-track-active-blocks`: Disables tracking of active blocks (blocks being used for ongoing generation/decode phases). By default, the router tracks active blocks for load balancing. Disable this when routing to workers that only perform prefill (no decode phase), as tracking decode load is not relevant. This reduces router overhead and simplifies state management.
 
-- `--busy-threshold`: Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines emit `ForwardPassMetrics`.
+- `--busy-threshold`: Initial threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines emit `ForwardPassMetrics`. The threshold can be dynamically updated at runtime via the `/busy_threshold` HTTP endpoint (see [Dynamic Threshold Configuration](#dynamic-threshold-configuration)).
+
+- `--router-ttl`: Time-to-live in seconds for blocks in the router's local cache predictions. Blocks older than this duration will be automatically expired and removed from the router's radix tree. Defaults to 120.0 seconds when `--no-kv-events` is used. This helps manage memory usage by removing stale cache predictions that are unlikely to be accurate.
+
+- `--router-max-tree-size`: Maximum tree size (number of blocks) before pruning is triggered. When the total number of blocks in the radix tree exceeds this threshold, the router will prune the least recently used blocks. Defaults to 1048576 (2^20 blocks) when `--no-kv-events` is used. This prevents unbounded memory growth in long-running deployments.
+
+- `--router-prune-target-ratio`: Target size ratio to prune down to when `--router-max-tree-size` is exceeded. For example, with a value of 0.8 (default) and max tree size of 1048576, the router will prune down to approximately 838860 blocks when the threshold is exceeded. Defaults to 0.8 when `--no-kv-events` is used. This creates headroom before the next pruning cycle.
 
 >[!Note]
-> State persistence is only available when KV events are enabled (default). When using `--no-kv-events` with `ApproxKvIndexer`, state persistence is not currently supported.
+> State persistence is only available when KV events are enabled (default). When using `--no-kv-events`, state persistence is not currently supported.
 >
 > When `--kv-overlap-score-weight` is set to 0 or `--no-kv-events` is set, no KvIndexer will be launched to drain and process KV events. It's recommended to disable your backend workers from relaying events through `KvEventPublisher` to avoid event accumulation in JetStream. WIP to enable disabling publishing of KV events completely in these cases.
+>
+> The cli args `--router-ttl`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When KV events are enabled (default), the router relies on worker-side eviction events and these parameters are ignored.
 
 ## Prerequisites and Limitations
 
@@ -65,12 +73,13 @@ The prefill router is automatically created when:
 2. A prefill worker is detected with the same model name and `ModelType.Prefill`
 
 **Key characteristics of the prefill router:**
-- **Always uses KV-aware routing** regardless of the frontend's `--router-mode` setting
 - **Always disables active block tracking** (`track_active_blocks=false`) since prefill workers don't perform decode
 - **Seamlessly integrated** into the request pipeline between preprocessing and decode routing
 - **Falls back gracefully** to decode-only mode if prefill fails or no prefill workers are available
 
 ### Setup Example
+
+When both workers are registered, requests are automatically routed.
 
 ```python
 # Decode worker registration (in your decode worker)
@@ -92,12 +101,8 @@ await register_llm(
 )
 ```
 
-When both workers are registered, requests are automatically routed:
-1. **Prefill phase** → Prefill router selects best prefill worker (KV-aware)
-2. **Decode phase** → Decode router selects decode worker (uses frontend's `--router-mode`)
-
 > [!Note]
-> **WIP**: Currently, the prefill router always uses KV routing. Future updates will provide more fine-grained control over prefill routing behavior to match user-specified frontend router modes.
+> The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh).
 
 ## Overview
 
@@ -577,3 +582,31 @@ This approach gives you complete control over routing decisions, allowing you to
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
 
 See [KV Router Architecture](../router/README.md) for performance tuning details.
+
+## Dynamic Threshold Configuration
+
+The busy threshold can be updated at runtime without restarting the frontend. The frontend exposes HTTP endpoints at `/busy_threshold`:
+
+**Get or set a model's threshold (POST):**
+```bash
+# Set threshold for a model
+curl -X POST http://localhost:8000/busy_threshold \
+  -H "Content-Type: application/json" \
+  -d '{"model": "meta-llama/Llama-2-7b-hf", "threshold": 0.85}'
+# Response: {"model": "meta-llama/Llama-2-7b-hf", "threshold": 0.85}
+
+# Get current threshold (omit threshold field)
+curl -X POST http://localhost:8000/busy_threshold \
+  -H "Content-Type: application/json" \
+  -d '{"model": "meta-llama/Llama-2-7b-hf"}'
+# Response: {"model": "meta-llama/Llama-2-7b-hf", "threshold": 0.85}
+# Or if not configured: {"model": "...", "threshold": null}
+```
+
+**List all configured thresholds (GET):**
+```bash
+curl http://localhost:8000/busy_threshold
+# Response: {"thresholds": [{"model": "meta-llama/Llama-2-7b-hf", "threshold": 0.85}]}
+```
+
+This allows you to tune the busy threshold based on observed system behavior without service interruption.

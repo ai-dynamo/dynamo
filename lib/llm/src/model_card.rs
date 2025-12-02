@@ -21,10 +21,11 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
 use derive_builder::Builder;
-use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned};
+use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 
+use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
 /// Identify model deployment cards in the key-value store
@@ -216,6 +217,14 @@ pub struct ModelDeploymentCard {
 
     #[serde(default)]
     pub runtime_config: ModelRuntimeConfig,
+
+    /// Media decoding configuration
+    #[serde(default)]
+    pub media_decoder: Option<MediaDecoder>,
+
+    /// Media fetching configuration
+    #[serde(default)]
+    pub media_fetcher: Option<MediaFetcher>,
 
     #[serde(skip, default)]
     checksum: OnceLock<String>,
@@ -520,6 +529,8 @@ impl ModelDeploymentCard {
             model_input: Default::default(), // set later
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
+            media_decoder: None,
+            media_fetcher: None,
             checksum: OnceLock::new(),
         })
     }
@@ -532,7 +543,7 @@ impl PartialEq for ModelDeploymentCard {
 }
 
 /// A ModelDeploymentCard is published a single time per instance and never updated.
-impl Versioned for ModelDeploymentCard {
+impl kv::Versioned for ModelDeploymentCard {
     fn revision(&self) -> u64 {
         0
     }
@@ -610,7 +621,8 @@ struct HFTextConfig {
     max_position_embeddings: Option<usize>,
 
     /// number of layers in the model
-    num_hidden_layers: usize,
+    /// Optional because some multimodal models (e.g., LLaVA) don't include this in text_config
+    num_hidden_layers: Option<usize>,
 
     /// number of attention heads in the model
     num_attention_heads: Option<usize>,
@@ -690,11 +702,32 @@ impl HFConfig {
             })
             .or_else(|| {
                 // Maybe it's in generation_config.json
-                crate::file_json_field(&gencfg_path, "eos_token_id")
+                crate::file_json_field::<serde_json::Value>(&gencfg_path, "eos_token_id")
                 .inspect_err(
                     |err| tracing::warn!(%err, "Missing eos_token_id in generation_config.json"),
                 )
                 .ok()
+                .and_then(|v| {
+                    if v.is_number() {
+                        v.as_number()
+                            .and_then(|n| n.as_u64())
+                            .map(|n| vec![n as TokenIdType])
+                    } else if v.is_array() {
+                        let arr = v.as_array().unwrap();
+                        Some(
+                            arr.iter()
+                                .filter_map(|inner_v| {
+                                    inner_v
+                                        .as_number()
+                                        .and_then(|n| n.as_u64())
+                                        .map(|n| n as TokenIdType)
+                                })
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    }
+                })
             })
             .ok_or_else(|| {
                 anyhow::anyhow!(

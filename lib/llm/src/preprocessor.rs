@@ -27,7 +27,8 @@ use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
-use crate::preprocessor::media::MediaLoader;
+#[cfg(feature = "media-nixl")]
+use crate::preprocessor::media::{MediaDecoder, MediaFetcher, MediaLoader};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder,
@@ -114,6 +115,7 @@ pub struct OpenAIPreprocessor {
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
     tool_call_parser: Option<String>,
+    #[cfg(feature = "media-nixl")]
     media_loader: Option<MediaLoader>,
 }
 
@@ -143,7 +145,13 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
-        let media_loader = None; // TODO: enable with decoder config from MDC
+
+        #[cfg(feature = "media-nixl")]
+        let media_loader = match mdc.media_decoder {
+            Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
+            None => None,
+        };
+
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
@@ -151,6 +159,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             runtime_config,
             tool_call_parser,
+            #[cfg(feature = "media-nixl")]
             media_loader,
         }))
     }
@@ -228,9 +237,10 @@ impl OpenAIPreprocessor {
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         builder.estimated_prefix_hit_num_blocks(None);
-        // Extract backend_instance_id from nvext if present
+        // Extract backend_instance_id and extra_fields from nvext if present
         if let Some(nvext) = request.nvext() {
             builder.backend_instance_id(nvext.backend_instance_id);
+            builder.extra_fields(nvext.extra_fields.clone());
         }
 
         Ok(builder)
@@ -279,7 +289,9 @@ impl OpenAIPreprocessor {
         let messages = request.messages();
         let message_count = messages.len().unwrap_or(0);
         let mut media_map: MultimodalDataMap = HashMap::new();
-        let mut fetch_tasks = Vec::new();
+        #[cfg(feature = "media-nixl")]
+        let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
+            Vec::new();
 
         for idx in 0..message_count {
             let msg = messages
@@ -312,33 +324,51 @@ impl OpenAIPreprocessor {
                     _ => continue,
                 };
 
+                #[cfg(feature = "media-nixl")]
                 if self.media_loader.is_some() {
                     fetch_tasks.push((type_str, content_part.clone()));
-                } else {
-                    // No loader, just pass the URL through
-                    media_map
-                        .entry(type_str)
-                        .or_default()
-                        .push(MultimodalData::Url(url));
+                    continue;
                 }
+
+                //Fallback: ust pass the URL through
+                media_map
+                    .entry(type_str)
+                    .or_default()
+                    .push(MultimodalData::Url(url));
             }
         }
 
         // Execute all fetch tasks
+        #[cfg(feature = "media-nixl")]
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
-            let _results = futures::future::join_all(
+            let results = futures::future::join_all(
                 fetch_tasks
                     .iter()
-                    .map(|(_, content_part)| loader.fetch_media_part(content_part)),
+                    .map(|(_, content_part)| loader.fetch_and_decode_media_part(content_part)),
             )
             .await;
 
-            // TODO: decode and pass NIXL descriptors to the media map
+            for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {
+                // if one item fails, errors the whole request, other items will be cleaned up by Drop
+                let rdma_descriptor = result?;
+                media_map
+                    .entry(type_str)
+                    .or_default()
+                    .push(MultimodalData::Decoded(rdma_descriptor));
+            }
         }
 
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
+
+            // Preserve original messages in extra_args for multimodal workers that need them
+            // (e.g., TRT-LLM multimodal processor needs raw messages for proper tokenization)
+            let messages_json = serde_json::to_value(&messages)?;
+            let extra_args = serde_json::json!({
+                "messages": messages_json
+            });
+            builder.extra_args(Some(extra_args));
         }
 
         Ok(())
@@ -655,13 +685,14 @@ impl OpenAIPreprocessor {
                         let annotated_usage = Annotated::<Resp> {
                             id: None,
                             data: Some(usage_chunk),
-                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
+                            event: None,
                             comment: None,
                         };
 
                         tracing::trace!(
                             request_id = inner.context.id(),
-                            "Sending final usage chunk for OpenAI compliance"
+                            "Sending final usage chunk for OpenAI compliance, annotated_usage: {:?}",
+                            annotated_usage
                         );
 
                         Some((annotated_usage, inner))
@@ -764,7 +795,7 @@ impl OpenAIPreprocessor {
         let jail = JailedStream::builder()
             .tool_call_parser(tool_call_parser)
             .build();
-        jail.apply(stream)
+        jail.apply_with_finish_reason(stream)
     }
 
     // Motivation: Each transformation on the stream should be a separate step to allow for more flexibility
@@ -846,7 +877,7 @@ impl
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
 
-        // Build audit handle (None if DYN_AUDIT_ENABLED=0)
+        // Build audit handle (None if no DYN_AUDIT_SINKS)
         let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);
 
         if let Some(ref mut h) = audit_handle {

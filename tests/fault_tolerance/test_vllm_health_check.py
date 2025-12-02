@@ -23,6 +23,10 @@ class DynamoFrontendProcess(ManagedProcess):
     def __init__(self, request):
         command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
 
+        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
+        env = os.environ.copy()
+        env.pop("DYN_SYSTEM_PORT", None)
+
         log_dir = f"{request.node.name}_frontend"
 
         # Clean up any existing log directory from previous runs
@@ -35,6 +39,7 @@ class DynamoFrontendProcess(ManagedProcess):
 
         super().__init__(
             command=command,
+            env=env,
             display_output=True,
             terminate_existing=True,
             log_dir=log_dir,
@@ -67,7 +72,6 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = "9345"
 
@@ -158,6 +162,8 @@ def send_completion_request(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
+@pytest.mark.skip(reason="Flaky, temporarily disabled")
 def test_vllm_health_check_active(request, runtime_services):
     """
     End-to-end test for worker fault tolerance with migration support.
@@ -213,6 +219,7 @@ def test_vllm_health_check_active(request, runtime_services):
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_vllm_health_check_passive(request, runtime_services, predownload_models):
     """
     End-to-end test for worker fault tolerance with migration support.

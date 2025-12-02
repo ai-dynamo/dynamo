@@ -47,8 +47,10 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Set debug logging environment
         env = os.environ.copy()
+        env["DYN_VLLM_KV_EVENT_PORT"] = f"2008{worker_id[-1]}"
+        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = f"560{worker_id[-1]}"
+
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = f"808{worker_id[-1]}"
 
@@ -102,6 +104,7 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_request_migration_vllm_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -152,6 +155,7 @@ def test_request_migration_vllm_worker_failure(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_request_migration_vllm_graceful_shutdown(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -203,6 +207,7 @@ def test_request_migration_vllm_graceful_shutdown(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_no_request_migration_vllm_worker_failure(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):
@@ -267,6 +272,7 @@ def test_no_request_migration_vllm_worker_failure(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
 def test_no_request_migration_vllm_graceful_shutdown(
     request, runtime_services, predownload_models, set_ucx_tls_no_mm
 ):

@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{CancellationToken, ErrorContext, Result, Runtime, error};
+use crate::runtime::Runtime;
+use anyhow::{Context, Result};
 
 use async_nats::jetstream::kv;
 use derive_builder::Builder;
@@ -15,22 +16,22 @@ use validator::Validate;
 use etcd_client::{
     Certificate, Compare, CompareOp, DeleteOptions, GetOptions, Identity, LockClient, LockOptions,
     LockResponse, PutOptions, PutResponse, TlsOptions, Txn, TxnOp, TxnOpResponse, WatchOptions,
-    Watcher,
+    WatchStream, Watcher,
 };
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
 use tokio::time::{Duration, interval};
+use tokio_util::sync::CancellationToken;
 
 mod connector;
 mod lease;
 mod lock;
-mod path;
 
 use connector::Connector;
 use lease::*;
 pub use lock::*;
-pub use path::*;
 
 use super::utils::build_in_runtime;
+use crate::config::environment_names::etcd as env_etcd;
 
 /// ETCD Client
 #[derive(Clone)]
@@ -38,6 +39,9 @@ pub struct Client {
     connector: Arc<Connector>,
     primary_lease: u64,
     runtime: Runtime,
+    // Exclusive runtime for etcd lease keep-alive and watch tasks
+    // Avoid those tasks from being starved when the main runtime is busy
+    // WARNING: Do not await on main runtime from this runtime or deadlocks may occur
     rt: Arc<tokio::runtime::Runtime>,
 }
 
@@ -107,7 +111,7 @@ impl Client {
 
     /// Get a clone of the underlying [`etcd_client::Client`] instance.
     /// This returns a clone since the client is behind an RwLock.
-    pub fn etcd_client(&self) -> etcd_client::Client {
+    fn etcd_client(&self) -> etcd_client::Client {
         self.connector.get_client()
     }
 
@@ -116,28 +120,48 @@ impl Client {
         self.primary_lease
     }
 
-    pub async fn kv_create(&self, key: &str, value: Vec<u8>, lease_id: Option<u64>) -> Result<()> {
+    /// Returns Ok(None) if value was created, Ok(Some(revision)) if the value already exists.
+    pub async fn kv_create(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        lease_id: Option<u64>,
+    ) -> Result<Option<u64>> {
         let id = lease_id.unwrap_or(self.lease_id());
         let put_options = PutOptions::new().with_lease(id as i64);
 
-        // Build the transaction
+        // Build transaction that creates key only if it doesn't exist
         let txn = Txn::new()
             .when(vec![Compare::version(key, CompareOp::Equal, 0)]) // Ensure the lock does not exist
             .and_then(vec![
                 TxnOp::put(key, value, Some(put_options)), // Create the object
+            ])
+            .or_else(vec![
+                TxnOp::get(key, None), // Key exists, get its info
             ]);
 
         // Execute the transaction
         let result = self.connector.get_client().kv_client().txn(txn).await?;
 
+        // Created
         if result.succeeded() {
-            Ok(())
-        } else {
-            for resp in result.op_responses() {
-                tracing::warn!(response = ?resp, "kv_create etcd op response");
-            }
-            Err(error!("Unable to create key. Check etcd server status"))
+            return Ok(None);
         }
+
+        // Already exists
+        if let Some(etcd_client::TxnOpResponse::Get(get_resp)) =
+            result.op_responses().into_iter().next()
+            && let Some(kv) = get_resp.kvs().first()
+        {
+            let version = kv.version() as u64;
+            return Ok(Some(version));
+        }
+
+        // Error
+        for resp in result.op_responses() {
+            tracing::warn!(response = ?resp, "kv_create etcd op response");
+        }
+        anyhow::bail!("Unable to create key. Check etcd server status")
     }
 
     /// Atomically create a key if it does not exist, or validate the values are identical if the key exists.
@@ -177,17 +201,15 @@ impl Client {
                 Some(response) => match response {
                     TxnOpResponse::Txn(response) => match response.succeeded() {
                         true => Ok(()),
-                        false => Err(error!(
+                        false => anyhow::bail!(
                             "Unable to create or validate key. Check etcd server status"
-                        )),
+                        ),
                     },
-                    _ => Err(error!(
-                        "Unable to validate key operation. Check etcd server status"
-                    )),
+                    _ => {
+                        anyhow::bail!("Unable to validate key operation. Check etcd server status")
+                    }
                 },
-                None => Err(error!(
-                    "Unable to create or validate key. Check etcd server status"
-                )),
+                None => anyhow::bail!("Unable to create or validate key. Check etcd server status"),
             }
         }
     }
@@ -306,110 +328,216 @@ impl Client {
         self.watch_internal(prefix, true).await
     }
 
+    /// Core watch implementation that sets up a resilient watcher for a key prefix.
+    ///
+    /// Creates a background task that maintains a watch stream with automatic reconnection
+    /// on recoverable errors. If `include_existing` is true, existing keys are included
+    /// in the initial watch events.
     async fn watch_internal(
         &self,
         prefix: impl AsRef<str> + std::fmt::Display,
         include_existing: bool,
     ) -> Result<PrefixWatcher> {
-        let client = self.connector.get_client();
-        let mut kv_client = client.kv_client();
-        let mut watch_client = client.watch_client();
+        let (tx, rx) = mpsc::channel(32);
 
+        // Get start revision and send existing KVs
+        let mut start_revision = self
+            .get_start_revision(
+                prefix.as_ref(),
+                if include_existing { Some(&tx) } else { None },
+            )
+            .await?;
+
+        // Resilience watch stream in background
+        let connector = self.connector.clone();
+        let prefix_str = prefix.as_ref().to_string();
+        self.rt.spawn(async move {
+            let mut reconnect = true;
+            while reconnect {
+                // Start a new watch stream
+                let watch_stream =
+                    match Self::new_watch_stream(&connector, &prefix_str, start_revision).await {
+                        Ok(stream) => stream,
+                        Err(_) => return,
+                    };
+
+                // Watch the stream
+                reconnect =
+                    Self::monitor_watch_stream(watch_stream, &prefix_str, &mut start_revision, &tx)
+                        .await;
+            }
+        });
+
+        Ok(PrefixWatcher {
+            prefix: prefix.as_ref().to_string(),
+            rx,
+        })
+    }
+
+    /// Fetch the initial revision for watching and optionally send existing key-values.
+    ///
+    /// Returns the next revision to watch from. If `existing_kvs_tx` is provided,
+    /// all existing keys with the prefix are sent through the channel first.
+    async fn get_start_revision(
+        &self,
+        prefix: impl AsRef<str> + std::fmt::Display,
+        existing_kvs_tx: Option<&mpsc::Sender<WatchEvent>>,
+    ) -> Result<i64> {
+        let mut kv_client = self.connector.get_client().kv_client();
         let mut get_response = kv_client
             .get(prefix.as_ref(), Some(GetOptions::new().with_prefix()))
             .await?;
 
-        let start_revision = get_response
+        // Get the start revision
+        let mut start_revision = get_response
             .header()
-            .ok_or(error!("missing header; unable to get revision"))?
+            .ok_or(anyhow::anyhow!("missing header; unable to get revision"))?
             .revision();
-
         tracing::trace!("{prefix}: start_revision: {start_revision}");
-        let start_revision = start_revision + 1;
+        start_revision += 1;
 
-        let (watcher, mut watch_stream) = watch_client
-            .watch(
-                prefix.as_ref(),
-                Some(
-                    WatchOptions::new()
-                        .with_prefix()
-                        .with_start_revision(start_revision)
-                        .with_prev_key(),
-                ),
-            )
-            .await?;
-
-        let kvs = if include_existing {
+        // Send existing KVs from response if requested
+        if let Some(tx) = existing_kvs_tx {
             let kvs = get_response.take_kvs();
             tracing::trace!("initial kv count: {:?}", kvs.len());
-            kvs
-        } else {
-            vec![]
-        };
+            for kv in kvs.into_iter() {
+                tx.send(WatchEvent::Put(kv)).await?;
+            }
+        }
 
-        let (tx, rx) = mpsc::channel(32);
+        Ok(start_revision)
+    }
 
-        self.rt.spawn(async move {
-            if include_existing {
-                for kv in kvs {
-                    if tx.send(WatchEvent::Put(kv)).await.is_err() {
-                        // receiver is already closed
-                        return;
+    /// Establish a new watch stream with automatic retry and reconnection.
+    ///
+    /// Attempts to create a watch stream, reconnecting to ETCD if necessary.
+    /// Uses a 10-second timeout for reconnection attempts before giving up.
+    async fn new_watch_stream(
+        connector: &Arc<Connector>,
+        prefix: &String,
+        start_revision: i64,
+    ) -> Result<WatchStream> {
+        loop {
+            match connector
+                .get_client()
+                .watch_client()
+                .watch(
+                    prefix.as_str(),
+                    Some(
+                        WatchOptions::new()
+                            .with_prefix()
+                            .with_start_revision(start_revision)
+                            .with_prev_key(),
+                    ),
+                )
+                .await
+            {
+                Ok((_, watch_stream)) => {
+                    tracing::debug!("Watch stream established for prefix '{}'", prefix);
+                    return Ok(watch_stream);
+                }
+                Err(err) => {
+                    tracing::debug!(error = %err, "Failed to establish watch stream for prefix '{}'", prefix);
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    if let Err(err) = connector.reconnect(deadline).await {
+                        tracing::error!(
+                            "Failed to reconnect to ETCD within 10 secs for watching prefix '{}': {}",
+                            prefix,
+                            err
+                        );
+                        return Err(err);
                     }
+                    // continue - retry establishing the watch stream
                 }
             }
+        }
+    }
 
-            loop {
-                tokio::select! {
-                    maybe_resp = watch_stream.next() => {
-                        // Early return for None or Err cases
-                        let Some(Ok(response)) = maybe_resp else {
-                            tracing::info!("kv watch stream closed");
-                            return;
-                        };
-
-                        // Process events
-                        for event in response.events() {
-                            // Extract the KeyValue if it exists
-                            let Some(kv) = event.kv() else {
-                                continue; // Skip events with no KV
-                            };
-
-                            // Handle based on event type
-                            match event.event_type() {
-                                etcd_client::EventType::Put => {
-                                    if let Err(err) = tx.send(WatchEvent::Put(kv.clone())).await {
-                                        tracing::error!("kv watcher error forwarding WatchEvent::Put: {err}");
-                                        return;
-                                    }
-                                }
-                                etcd_client::EventType::Delete => {
-                                    if tx.send(WatchEvent::Delete(kv.clone())).await.is_err() {
-                                        return;
-                                    }
-                                }
-                            }
+    /// Monitor a watch stream and forward events to receivers.
+    ///
+    /// Returns `true` for recoverable errors (network issues, stream closure) that warrant
+    /// reconnection attempts. Returns `false` for permanent failures (protocol violations,
+    /// channel errors, no receivers) where watching should stop.
+    async fn monitor_watch_stream(
+        mut watch_stream: WatchStream,
+        prefix: &String,
+        start_revision: &mut i64,
+        tx: &mpsc::Sender<WatchEvent>,
+    ) -> bool {
+        loop {
+            tokio::select! {
+                maybe_resp = watch_stream.next() => {
+                    // Handle the watch response
+                    let response = match maybe_resp {
+                        Some(Ok(res)) => res,
+                        Some(Err(err)) => {
+                            tracing::warn!(error = %err, "Error watching stream for prefix '{}'", prefix);
+                            return true; // Exit to reconnect
                         }
+                        None => {
+                            tracing::warn!("Watch stream unexpectedly closed for prefix '{}'", prefix);
+                            return true; // Exit to reconnect
+                        }
+                    };
+
+                    // Update revision for reconnect
+                    *start_revision = match response.header() {
+                        Some(header) => header.revision() + 1,
+                        None => {
+                            tracing::error!("Missing header in watch response for prefix '{}'", prefix);
+                            return false;
+                        }
+                    };
+
+                    // Process events
+                    if Self::process_watch_events(response.events(), tx).await.is_err() {
+                        return false;
+                    };
+                }
+                _ = tx.closed() => {
+                    tracing::debug!("no more receivers, stopping watcher");
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Process etcd events and forward them as Put/Delete watch events.
+    ///
+    /// Filters out events without key-values and transforms etcd events into
+    /// appropriate WatchEvent types for channel transmission.
+    async fn process_watch_events(
+        events: &[etcd_client::Event],
+        tx: &mpsc::Sender<WatchEvent>,
+    ) -> Result<()> {
+        for event in events {
+            // Extract the KeyValue if it exists
+            let Some(kv) = event.kv() else {
+                continue; // Skip events with no KV
+            };
+
+            // Handle based on event type
+            match event.event_type() {
+                etcd_client::EventType::Put => {
+                    if let Err(err) = tx.send(WatchEvent::Put(kv.clone())).await {
+                        tracing::error!("kv watcher error forwarding WatchEvent::Put: {err}");
+                        return Err(err.into());
                     }
-                    _ = tx.closed() => {
-                        tracing::debug!("no more receivers, stopping watcher");
-                        return;
+                }
+                etcd_client::EventType::Delete => {
+                    if tx.send(WatchEvent::Delete(kv.clone())).await.is_err() {
+                        return Err(anyhow::anyhow!("failed to send WatchEvent::Delete"));
                     }
                 }
             }
-        });
-        Ok(PrefixWatcher {
-            prefix: prefix.as_ref().to_string(),
-            watcher,
-            rx,
-        })
+        }
+        Ok(())
     }
 }
 
 #[derive(Dissolve)]
 pub struct PrefixWatcher {
     prefix: String,
-    watcher: Watcher,
     rx: mpsc::Receiver<WatchEvent>,
 }
 
@@ -438,15 +566,15 @@ impl Default for ClientOptions {
         let mut connect_options = None;
 
         if let (Ok(username), Ok(password)) = (
-            std::env::var("ETCD_AUTH_USERNAME"),
-            std::env::var("ETCD_AUTH_PASSWORD"),
+            std::env::var(env_etcd::auth::ETCD_AUTH_USERNAME),
+            std::env::var(env_etcd::auth::ETCD_AUTH_PASSWORD),
         ) {
             // username and password are set
             connect_options = Some(ConnectOptions::new().with_user(username, password));
         } else if let (Ok(ca), Ok(cert), Ok(key)) = (
-            std::env::var("ETCD_AUTH_CA"),
-            std::env::var("ETCD_AUTH_CLIENT_CERT"),
-            std::env::var("ETCD_AUTH_CLIENT_KEY"),
+            std::env::var(env_etcd::auth::ETCD_AUTH_CA),
+            std::env::var(env_etcd::auth::ETCD_AUTH_CLIENT_CERT),
+            std::env::var(env_etcd::auth::ETCD_AUTH_CLIENT_KEY),
         ) {
             // TLS is set
             connect_options = Some(
@@ -467,7 +595,7 @@ impl Default for ClientOptions {
 }
 
 fn default_servers() -> Vec<String> {
-    match std::env::var("ETCD_ENDPOINTS") {
+    match std::env::var(env_etcd::ETCD_ENDPOINTS) {
         Ok(possible_list_of_urls) => possible_list_of_urls
             .split(',')
             .map(|s| s.to_string())
@@ -622,7 +750,7 @@ mod tests {
     fn test_ectd_client() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings(false);
+        let config = DistributedConfig::from_settings();
 
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();
@@ -634,7 +762,9 @@ mod tests {
         let key = "__integration_test_key";
         let value = b"test_value";
 
-        let client = drt.etcd_client().expect("etcd client should be available");
+        let client = Client::new(ClientOptions::default(), drt.runtime().clone())
+            .await
+            .expect("etcd client should be available");
         let lease_id = drt.connection_id();
 
         // Create the key
@@ -665,7 +795,7 @@ mod tests {
     fn test_kv_cache() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings(false);
+        let config = DistributedConfig::from_settings();
 
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();
@@ -674,8 +804,10 @@ mod tests {
     }
 
     async fn test_kv_cache_operations(drt: DistributedRuntime) -> Result<()> {
-        // Get the client and unwrap it
-        let client = drt.etcd_client().expect("etcd client should be available");
+        // Make the client and unwrap it
+        let client = Client::new(ClientOptions::default(), drt.runtime().clone())
+            .await
+            .expect("etcd client should be available");
 
         // Create a unique test prefix to avoid conflicts with other tests
         let test_id = uuid::Uuid::new_v4().to_string();

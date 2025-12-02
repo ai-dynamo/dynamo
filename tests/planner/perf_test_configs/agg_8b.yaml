@@ -74,8 +74,6 @@ spec:
           memory: "100Gi"
           gpu: "1"
       envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
         - name: DYN_SYSTEM_PORT
           value: "9090"
         - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
