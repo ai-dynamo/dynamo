@@ -214,7 +214,7 @@ jobs:
           role-to-assume: ${{ secrets.DOCS_AWS_IAM_STS_ROLE }}
           aws-access-key-id: ${{ secrets.DOCS_AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.DOCS_AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.DOCS_AWS_REGION || 'us-east-1' }}
+          aws-region: ${{ secrets.DOCS_AWS_REGION }}
 
       - name: Verify AWS identity
         run: |
