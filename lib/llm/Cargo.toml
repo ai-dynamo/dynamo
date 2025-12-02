@@ -90,6 +90,9 @@ rayon = "1"
 dashmap = { version = "5.5.3" }
 bincode = { version = "2.0.1", features = ["serde", "derive"] }
 
+# lora
+object_store = { version = "0.12.4", features = ["aws", "gcp", "azure", "http"] }
+
 # input/text
 dialoguer = { version = "0.11", default-features = false, features = [
   "editor",
