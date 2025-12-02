@@ -39,8 +39,8 @@ Run the setup script to start MinIO and download/upload a LoRA adapter from Hugg
 
 This script will:
 - Start MinIO in a Docker container
-- Download a LoRA adapter from Hugging Face Hub (default: `BoostedJonP/Qwen3-0.6B-finance-reddit-sft`)
-- Upload the LoRA to MinIO at `s3://my-loras/BoostedJonP/Qwen3-0.6B-finance-reddit-sft`
+- Download a LoRA adapter from Hugging Face Hub (default: `Neural-Hacker/Qwen3-Math-Reasoning-LoRA`)
+- Upload the LoRA to MinIO at `s3://my-loras/Neural-Hacker/Qwen3-Math-Reasoning-LoRA`
 
 #### Script Options
 
@@ -103,9 +103,9 @@ Load a LoRA from S3-compatible storage backend (e.g. MinIO):
 curl -X POST http://localhost:8081/v1/loras \
   -H "Content-Type: application/json" \
   -d '{
-    "lora_name": "BoostedJonP/Qwen3-0.6B-finance-reddit-sft",
+    "lora_name": "Neural-Hacker/Qwen3-Math-Reasoning-LoRA",
     "source": {
-      "uri": "s3://my-loras/BoostedJonP/Qwen3-0.6B-finance-reddit-sft"
+      "uri": "s3://my-loras/Neural-Hacker/Qwen3-Math-Reasoning-LoRA"
     }
   }' | jq .
 ```
@@ -114,8 +114,8 @@ Expected response:
 ```json
 {
   "status": "success",
-  "message": "LoRA adapter 'BoostedJonP/Qwen3-0.6B-finance-reddit-sft' loaded successfully",
-  "lora_name": "BoostedJonP/Qwen3-0.6B-finance-reddit-sft",
+  "message": "LoRA adapter 'Neural-Hacker/Qwen3-Math-Reasoning-LoRA' loaded successfully",
+  "lora_name": "Neural-Hacker/Qwen3-Math-Reasoning-LoRA",
   "lora_id": 1207343256
 }
 ```
@@ -146,7 +146,7 @@ You should see both the base model and the LoRA adapter listed.
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "BoostedJonP/Qwen3-0.6B-finance-reddit-sft",
+    "model": "Neural-Hacker/Qwen3-Math-Reasoning-LoRA",
     "messages": [{
       "role": "user",
       "content": "What is good low risk investment strategy?"
@@ -176,7 +176,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 When you no longer need a LoRA, unload it to free up resources:
 
 ```bash
-curl -X DELETE http://localhost:8081/v1/loras/BoostedJonP/Qwen3-0.6B-finance-reddit-sft | jq .
+curl -X DELETE http://localhost:8081/v1/loras/Neural-Hacker/Qwen3-Math-Reasoning-LoRA | jq .
 ```
 
 Expected response:

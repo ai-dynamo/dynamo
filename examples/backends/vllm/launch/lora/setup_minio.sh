@@ -20,8 +20,8 @@ MINIO_SECRET_KEY="minioadmin"
 BUCKET_NAME="my-loras"
 
 # Default LoRA to download (can be overridden)
-HF_LORA_REPO="${HF_LORA_REPO:-BoostedJonP/Qwen3-0.6B-finance-reddit-sft}"
-LORA_NAME="${LORA_NAME:-BoostedJonP/Qwen3-0.6B-finance-reddit-sft}"
+HF_LORA_REPO="${HF_LORA_REPO:-Neural-Hacker/Qwen3-Math-Reasoning-LoRA}"
+LORA_NAME="${LORA_NAME:-Neural-Hacker/Qwen3-Math-Reasoning-LoRA}"
 # TEMP_DIR will be created using mktemp when needed
 TEMP_DIR=""
 
@@ -63,8 +63,8 @@ show_help() {
     echo "  --help, -h    Show this help message"
     echo ""
     echo "Environment Variables:"
-    echo "  HF_LORA_REPO  Hugging Face repository (default: ${HF_LORA_REPO:-BoostedJonP/Qwen3-0.6B-finance-reddit-sft})"
-    echo "  LORA_NAME     Local name for the LoRA (default: ${LORA_NAME:-BoostedJonP/Qwen3-0.6B-finance-reddit-sft})"
+    echo "  HF_LORA_REPO  Hugging Face repository (default: ${HF_LORA_REPO:-Neural-Hacker/Qwen3-Math-Reasoning-LoRA})"
+    echo "  LORA_NAME     Local name for the LoRA (default: ${LORA_NAME:-Neural-Hacker/Qwen3-Math-Reasoning-LoRA})"
     echo ""
     echo "Examples:"
     echo "  $0                                    # Full setup"
