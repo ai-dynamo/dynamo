@@ -43,6 +43,9 @@ PyYAML==6.0.3
 scikit-learn==1.7.2
 scipy<1.14.0  # Upper bound for pmdarima compatibility
 sentencepiece==0.2.1
+# Required by kr8s
+# https://github.com/kr8s-org/kr8s/blob/750022c3ebbb7988cddb5a979aca2ee8074a1069/examples/kubectl-ng/uv.lock#L988
+sniffio==1.3.1
 tensorboard==2.19.0
 tensorboardX==2.6.2.2
 # Transformers version constraint for container builds

@@ -65,7 +65,7 @@ jobs:
           docker compose down
       - name: Run pytest (parallel tests with xdist)
         env:
-          PYTEST_MARKS: "pre_merge and parallel and not (vllm or trtllm or sglang or k8s)"
+          PYTEST_MARKS: "pre_merge and parallel"
         run: |
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest_parallel \
@@ -77,7 +77,7 @@ jobs:
           docker cp ${{ env.CONTAINER_ID }}_pytest_parallel:/workspace/${{ env.PYTEST_PARALLEL_XML_FILE }} . || echo "No parallel test report found"
       - name: Run pytest (sequential tests)
         env:
-          PYTEST_MARKS: "(pre_merge and not parallel and not (vllm or trtllm or sglang or k8s)) or mypy"
+          PYTEST_MARKS: "(pre_merge and not parallel) or mypy"
         run: |
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
