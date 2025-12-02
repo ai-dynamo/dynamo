@@ -5,6 +5,7 @@ import base64
 import logging
 import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 import pytest
 
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 class ToolCallingChatPayload(ChatPayload):
     """Custom ChatPayload that validates tool calls in the response."""
 
-    def __init__(self, *args, expected_tool_name: str = None, **kwargs):
+    def __init__(self, *args, expected_tool_name: Optional[str] = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.expected_tool_name = expected_tool_name
 
