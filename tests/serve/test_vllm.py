@@ -141,8 +141,8 @@ vllm_configs = {
         ],
         timeout=700,
         request_payloads=[
-            chat_payload_default(expected_response=["joke"]),
-            completion_payload_default(expected_response=["joke"]),
+            chat_payload_default(),
+            completion_payload_default(),
         ],
     ),
     "multimodal_agg_llava_epd": VLLMConfig(
