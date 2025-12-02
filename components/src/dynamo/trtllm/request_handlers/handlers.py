@@ -146,9 +146,7 @@ class PrefillHandler(HandlerBase):
                 _,
                 image_urls,
                 embedding_paths,
-            ) = self.multimodal_processor.extract_prompt_and_media(
-                messages
-            )
+            ) = self.multimodal_processor.extract_prompt_and_media(messages)
             # Handle embedding paths (NIXL transfer of pre-computed embeddings)
             if embedding_paths:
                 if self.encode_client and self.connector:
@@ -187,7 +185,9 @@ class PrefillHandler(HandlerBase):
                                 ]
         # Normal flow: Generate the prefill response locally with embeddings
         response_count = 0
-        async for res in self.generate_locally(request, context, embeddings_tensor, ep_disaggregated_params):
+        async for res in self.generate_locally(
+            request, context, embeddings_tensor, ep_disaggregated_params
+        ):
             response_count += 1
             if response_count > 1:
                 raise ValueError("Prefill response should be generated only once.")
