@@ -77,6 +77,8 @@ class TestProfileSlaAiconfigurator:
         return Args()
 
     @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    @pytest.mark.performance
     @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.parametrize("missing_arg", ["aic_system", "aic_hf_id"])
@@ -88,6 +90,8 @@ class TestProfileSlaAiconfigurator:
             await run_profile(trtllm_args)
 
     @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    @pytest.mark.performance
     @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -108,12 +112,17 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.pre_merge
     @pytest.mark.parallel
     @pytest.mark.asyncio
+    @pytest.mark.gpu_1
+    @pytest.mark.performance
     async def test_trtllm_aiconfigurator_single_model(self, trtllm_args):
         # Test that profile_sla works with the model & backend in the trtllm_args fixture.
         await run_profile(trtllm_args)
 
     @pytest.mark.parallel
     @pytest.mark.asyncio
+    @pytest.mark.gpu_1
+    @pytest.mark.nightly
+    @pytest.mark.performance
     @pytest.mark.parametrize(
         "backend, aic_backend_version",
         [

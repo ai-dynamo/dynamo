@@ -39,7 +39,7 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         default=SLAPlannerDefaults.backend,
-        choices=["vllm", "sglang", "trtllm"],
+        choices=["vllm", "sglang", "trtllm", "mocker"],
         help="Backend type",
     )
     parser.add_argument(

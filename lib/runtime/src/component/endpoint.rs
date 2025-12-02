@@ -63,6 +63,22 @@ impl EndpointConfigBuilder {
         self._stats_handler(Some(Box::new(handler)))
     }
 
+    /// Register an async engine in the local endpoint registry for direct in-process calls
+    pub fn register_local_engine(
+        self,
+        engine: crate::local_endpoint_registry::LocalAsyncEngine,
+    ) -> Result<Self> {
+        if let Some(endpoint) = &self.endpoint {
+            let registry = endpoint.drt().local_endpoint_registry();
+            registry.register(endpoint.name.clone(), engine);
+            tracing::debug!(
+                "Registered engine for endpoint '{}' in local registry",
+                endpoint.name
+            );
+        }
+        Ok(self)
+    }
+
     pub async fn start(self) -> Result<()> {
         let (
             endpoint,

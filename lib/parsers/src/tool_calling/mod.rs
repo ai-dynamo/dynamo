@@ -13,7 +13,7 @@ pub mod tools;
 pub mod xml;
 
 // Re-export main types and functions for convenience
-pub use config::{JsonParserConfig, ToolCallConfig, ToolCallParserType};
+pub use config::{JsonParserConfig, ParserConfig, ToolCallConfig, XmlParserConfig};
 pub use harmony::parse_tool_calls_harmony_complete;
 pub use json::try_tool_call_parse_json;
 pub use parsers::{
