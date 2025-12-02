@@ -188,6 +188,22 @@ sglang_configs = {
             ),
         ],
     ),
+    "completions_only": SGLangConfig(
+        name="completions_only",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1],
+        model="deepseek-ai/deepseek-llm-7b-base",
+        script_args=[
+            "--model-path",
+            "deepseek-ai/deepseek-llm-7b-base",
+            "--dyn-endpoint-types",
+            "completions",
+        ],
+        request_payloads=[
+            completion_payload_default(),
+        ],
+    ),
 }
 
 

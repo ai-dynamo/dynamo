@@ -15,6 +15,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -519,9 +520,22 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        # Parse endpoint types from --dyn-endpoint-types flag
+        model_type = parse_endpoint_types(config.dyn_endpoint_types)
+        logger.info(
+            f"Registering model with endpoint types: {config.dyn_endpoint_types}"
+        )
+
+        # Warn if custom template provided but chat endpoint not enabled
+        if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
+            logger.warning(
+                "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
+                "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
+            )
+
         await register_vllm_model(
             ModelInput.Tokens,
-            ModelType.Chat | ModelType.Completions,
+            model_type,
             generate_endpoint,
             config,
             engine_client,
