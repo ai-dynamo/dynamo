@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{ModelManager, ModelWatcher},
+    discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     kv_router::{KvPushRouter, KvRouter, PrefillRouter},
@@ -166,7 +166,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
     router_mode: RouterMode,
-    busy_threshold: Option<f64>,
+    worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
@@ -189,7 +189,7 @@ where
         card,
         client,
         router_mode,
-        busy_threshold,
+        worker_monitor,
         chooser,
         preprocessor,
         hf_tokenizer,
@@ -204,7 +204,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
     router_mode: RouterMode,
-    busy_threshold: Option<f64>,
+    worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     preprocessor: Arc<OpenAIPreprocessor>,
     hf_tokenizer: tokenizers::Tokenizer,
@@ -236,20 +236,17 @@ where
         client.clone()
     };
 
-    // Create worker monitor only if busy_threshold is set
-    let worker_monitor = busy_threshold.map(|threshold| {
-        Arc::new(crate::discovery::KvWorkerMonitor::new(
-            Arc::new(router_client.clone()),
-            threshold,
-        )) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>
-    });
+    // Get threshold value and wrap monitor for PushRouter
+    let threshold_value = worker_monitor.as_ref().map(|m| m.threshold());
+    let monitor_arc =
+        worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
     let router =
         PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
             router_client,
             router_mode,
-            busy_threshold,
-            worker_monitor,
+            threshold_value,
+            monitor_arc,
         )
         .await?;
 

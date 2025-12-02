@@ -37,6 +37,7 @@ from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.config_dump import dump_config
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime
@@ -250,7 +251,17 @@ async def init(runtime: DistributedRuntime, config: Config):
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
         model_type = ModelType.Prefill
     else:
-        model_type = ModelType.Chat | ModelType.Completions
+        model_type = parse_endpoint_types(config.dyn_endpoint_types)
+        logging.info(
+            f"Registering model with endpoint types: {config.dyn_endpoint_types}"
+        )
+
+        # Warn if custom template provided but chat endpoint not enabled
+        if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
+            logging.warning(
+                "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
+                "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
+            )
 
     multimodal_processor = None
 

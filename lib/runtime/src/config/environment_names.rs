@@ -225,6 +225,9 @@ pub mod llm {
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
+    /// Enable LoRA adapter support (set to "true" to enable)
+    pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
+
     /// LoRA cache directory path
     pub const DYN_LORA_PATH: &str = "DYN_LORA_PATH";
 
@@ -356,6 +359,7 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::metrics::DYN_METRICS_PREFIX,
             // Model
