@@ -11,6 +11,7 @@ from tensorrt_llm.inputs import default_multimodal_input_loader
 import dynamo.nixl_connect as nixl_connect
 from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
 
+
 class EncodeHelper:
     """Utility class for encoding and serialization operations."""
 
@@ -194,7 +195,7 @@ class EncodeHelper:
         tokenizer=None,
         model_dir=None,
         model_type=None,
-        engine=None,        
+        engine=None,
     ):
         """
         Process embedding request by loading embeddings and creating NIXL readable operation.
