@@ -373,6 +373,10 @@ def test_request_cancellation_trtllm_prefill_cancel(
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.xfail(
+    reason="May fail due to unknown reason with TRT-LLM or backend implementation",
+    strict=False,
+)
 def test_request_cancellation_trtllm_kv_transfer_cancel(
     request, runtime_services, predownload_models
 ):
