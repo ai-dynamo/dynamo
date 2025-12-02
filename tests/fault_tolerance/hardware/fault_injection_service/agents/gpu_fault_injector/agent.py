@@ -43,8 +43,8 @@ logger = logging.getLogger(__name__)
 # Import kernel-level XID injector (for XID 79 via nsenter+kmsg)
 GPUXIDInjectorKernel: Optional[Type[Any]] = None
 try:
-    from gpu_xid_injector import (
-        GPUXIDInjectorKernel,  # type: ignore[no-redef, assignment]
+    from gpu_xid_injector import (  # type: ignore[no-redef, assignment]
+        GPUXIDInjectorKernel,
     )
 
     KERNEL_XID_AVAILABLE = True
