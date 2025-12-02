@@ -55,9 +55,7 @@ class DynamoWorkerProcess(ManagedProcess):
         ]
         if mode != "prefill_and_decode":
             with open("test_request_cancellation_trtllm_config.yaml", "w") as f:
-                f.write(
-                    "cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer: 16384\n"
-                )
+                f.write("cache_transceiver_config:\n  backend: DEFAULT\n")
                 f.write("disable_overlap_scheduler: true\n")
             command += [
                 "--extra-engine-args",
