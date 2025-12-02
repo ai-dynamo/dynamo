@@ -21,7 +21,11 @@ from tests.router.common import (  # utilities
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.integration,
+]
 
 
 logger = logging.getLogger(__name__)
@@ -282,6 +286,8 @@ class DisaggMockerProcess:
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
 def test_mocker_kv_router(request, runtime_services_session, predownload_tokenizers):
@@ -324,6 +330,8 @@ def test_mocker_kv_router(request, runtime_services_session, predownload_tokeniz
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
@@ -382,6 +390,8 @@ def test_mocker_two_kv_router(
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
@@ -423,6 +433,8 @@ def test_mocker_kv_router_overload_503(
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
 def test_kv_push_router_bindings(
@@ -462,6 +474,8 @@ def test_kv_push_router_bindings(
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
@@ -514,6 +528,8 @@ def test_indexers_sync(
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
 def test_query_instance_id_returns_worker_and_tokens(
@@ -551,6 +567,8 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 
 @pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.integration
 @pytest.mark.parallel
 @pytest.mark.model(MODEL_NAME)
 def test_router_decisions(request, runtime_services_session, predownload_tokenizers):
