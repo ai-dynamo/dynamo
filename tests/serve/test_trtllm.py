@@ -40,7 +40,7 @@ trtllm_configs = {
         name="aggregated",
         directory=trtllm_dir,
         script_name="agg_metrics.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.trtllm, pytest.mark.pre_merge],
+        marks=[pytest.mark.gpu_1, pytest.mark.trtllm],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -140,7 +140,6 @@ def test_deployment(trtllm_config_test, request, runtime_services, predownload_m
 # TODO make this a normal guy
 @pytest.mark.e2e
 @pytest.mark.gpu_1
-@pytest.mark.pre_merge
 @pytest.mark.trtllm
 def test_chat_only_aggregated_with_test_logits_processor(
     request, runtime_services, predownload_models, monkeypatch
