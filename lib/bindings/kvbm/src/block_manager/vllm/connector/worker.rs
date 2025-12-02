@@ -434,6 +434,9 @@ impl Worker for KvConnectorWorker {
             }
         }
 
+        println!("is_finished_offloading: {is_finished_offloading:?}");
+        println!("is_finished_onboarding: {is_finished_onboarding:?}");
+
         (is_finished_offloading, is_finished_onboarding)
     }
 }
