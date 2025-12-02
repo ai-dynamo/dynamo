@@ -16,8 +16,8 @@
 import asyncio
 import logging
 import re
-from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Dict, List, Optional, Pattern
 
@@ -213,7 +213,7 @@ class RollingUpgradeFailure(Failure):
         )  # have some requests processed after the rolling upgrade has completed
 
         return await deployment.get_pod_names(self.service_names)
-    
+
     def get_failure_key(self) -> str:
         """Get the failure key for the rolling upgrade failure."""
         return f"rolling_upgrade:{','.join(self.service_names)}"
@@ -236,6 +236,8 @@ class DeletePodFailure(Failure):
                 )
                 pod.delete(force=True)  # force means no graceful termination
                 pod_names.append(pod.name)
+
+        return pod_names
 
     def get_failure_key(self) -> str:
         """Get the failure key for the delete pod failure."""
@@ -288,8 +290,9 @@ class TerminateProcessFailure(Failure):
                         )
                         process.kill(self.signal)
                 pod_names.append(pod.name)
+
         return pod_names
-    
+
     def get_failure_key(self) -> str:
         """Get the failure key for the terminate process failure."""
         return f"terminate_process:{','.join(self.service_names)}:{self.process_name}:{self.signal}"
