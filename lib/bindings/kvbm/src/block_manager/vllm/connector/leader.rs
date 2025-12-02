@@ -527,18 +527,15 @@ impl Leader for KvConnectorLeader {
         // otherwise, we return true, which means there are still outstanding operations on gpu blocks which
         // must be awaited before the gpu blocks can be reused. if we return true, then it is the worker side
         // of the connector api which will be used to inform vllm that the request is finished.
+        
+        // TODO(jthomson04): This is a temporary fix to ensure vLLM 0.11.2 compatibility. 
         if let SlotState::Finished = slot.state() {
-            // All operations complete - safe to remove slot and tell vLLM blocks are free
             self.slot_manager().remove_slot(&request_id)?;
-            Ok(false)
         } else {
             debug_assert!(matches!(slot.state(), SlotState::Finishing));
-            // Still has pending operations - keep slot alive for worker to process
-            // Don't remove slot here. Worker needs it to process the finish event.
-            // Worker will remove it after verifying all operations are complete.
-            // The lock on the slot prevents new operations from being created in offload_blocks()
-            Ok(true)
         }
+
+        Ok(true)
     }
 
     fn has_slot(&self, request_id: String) -> bool {
