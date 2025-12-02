@@ -1077,6 +1077,10 @@ async def register_llm(
         Providing only one of these parameters will raise a ValueError.
         - `lora_name`: The served model name for the LoRA model
         - `base_model_path`: Path to the base model that the LoRA extends
+
+    For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
+    and a minimal model card is registered directly. Use model_path as the display name
+    for these models.
     """
     ...
 
@@ -1093,23 +1097,6 @@ async def unregister_llm(
 
 def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
-    ...
-
-async def register_model(
-    model_input: ModelInput,
-    model_type: ModelType,
-    endpoint: Endpoint,
-    model_name: str,
-    user_data: Optional[Dict[str, Any]] = None,
-    runtime_config: Optional[ModelRuntimeConfig] = None,
-) -> None:
-    """
-    Attach the model at path to the given endpoint, and advertise it as model_type.
-
-    For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
-    and a minimal model card is registered directly. Use model_path as the display name
-    for these models.
-    """
     ...
 
 async def fetch_llm(remote_name: str) -> str:
