@@ -1332,21 +1332,92 @@ impl LocalKvIndexer {
         buffer.iter().cloned().collect()
     }
 
-    /// TODO implement method which returns all events
-    /// starting and/or ending in a given event id
+    /// Returns events in [start_id, end_id)
     pub fn get_events_in_id_range(
         &self,
-        _start_id: u64,
-        _end_id: u64,
+        start_id: u64,
+        end_id: u64,
     ) -> Vec<(WorkerId, KvCacheEvent)> {
-        todo!(
-            "Implement method which returns all events starting and/or ending in a given event id"
-        )
+        let buffer = self.event_buffer.lock().unwrap();
+        if buffer.is_empty() {
+            tracing::warn!("No events in buffer yet; returning empty result.");
+            return Vec::new();
+        }
+        if start_id >= end_id {
+            tracing::warn!(
+                start_id,
+                end_id,
+                "Requested start id is greater than or equal to end id; returning empty result."
+            );
+            return Vec::new();
+        }
+
+        let first_id = buffer.front().map(|(_, event)| event.event_id).unwrap();
+        let last_id = buffer.back().map(|(_, event)| event.event_id).unwrap();
+
+        let start_idx = match buffer.binary_search_by_key(&start_id, |(_, event)| event.event_id) {
+            Ok(idx) => idx,
+            Err(_) if start_id < first_id => {
+                tracing::warn!(
+                    start_id,
+                    first_id,
+                    "Requested start id precedes buffered range; clamping to oldest. TODO: implement logic to pull older events into buffer."
+                );
+                0
+            }
+            Err(_) if start_id > last_id => {
+                tracing::error!(
+                    start_id,
+                    last_id,
+                    "Requested start id is newer than any buffered event; returning empty result."
+                );
+                return Vec::new();
+            }
+            Err(insertion_point) => insertion_point,
+        };
+
+        let end_idx = match buffer.binary_search_by_key(&end_id, |(_, event)| event.event_id) {
+            Ok(idx) => idx,
+            Err(_) if end_id < first_id => {
+                return Vec::new();
+            }
+            Err(_) if end_id > last_id => {
+                tracing::warn!(
+                    end_id,
+                    last_id,
+                    "Requested end id exceeds buffered range; clamping to newest. TODO: maybe just error if requesting events which do not exist yet."
+                );
+                buffer.len()
+            }
+            Err(insertion_point) => insertion_point,
+        };
+
+        buffer
+            .iter()
+            .skip(start_idx)
+            .take(end_idx.saturating_sub(start_idx))
+            .cloned()
+            .collect()
     }
 
     /// Record an event in the buffer
     fn record_event(&self, worker_id: WorkerId, event: KvCacheEvent) {
         let mut buffer = self.event_buffer.lock().unwrap();
+
+        // Check that event id is consecutive to last one
+        if let Some((_, last_event)) = buffer.back()
+            && event.event_id != last_event.event_id + 1
+        {
+            let expected = last_event.event_id + 1;
+            tracing::warn!(
+                worker_id,
+                expected,
+                got = event.event_id,
+                "Non-consecutive KV event id; buffer may have gaps"
+            );
+            // panics in debug mode. TODO do we want it to abort in production too?
+            debug_assert_eq!(expected, event.event_id, "KV events should be consecutive");
+        }
 
         // Add to back
         buffer.push_back((worker_id, event));
@@ -1411,6 +1482,54 @@ impl LocalKvIndexer {
     /// Get the KV block size.
     pub fn block_size(&self) -> u32 {
         self.indexer.block_size()
+    }
+}
+
+#[cfg(test)]
+mod local_kv_indexer_tests {
+    use super::*;
+
+    fn make_indexer_with_events(ids: &[u64]) -> LocalKvIndexer {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            32,
+        );
+        {
+            let mut buffer = indexer.event_buffer.lock().unwrap();
+            for &id in ids {
+                buffer.push_back((
+                    0,
+                    KvCacheEvent {
+                        event_id: id,
+                        data: KvCacheEventData::Cleared,
+                        dp_rank: 0,
+                    },
+                ));
+            }
+        }
+        indexer
+    }
+
+    #[test]
+    fn returns_slice_within_range() {
+        let indexer = make_indexer_with_events(&[1, 2, 3, 4, 5]);
+        let mut result = indexer.get_events_in_id_range(2, 4);
+        let mut ids: Vec<u64> = result.iter().map(|(_, event)| event.event_id).collect();
+        assert_eq!(ids, vec![2, 3]); // return slice within range
+
+        result = indexer.get_events_in_id_range(2, 6);
+        ids = result.iter().map(|(_, event)| event.event_id).collect();
+        assert_eq!(ids, vec![2, 3, 4, 5]); // clamp max (TODO error instead?)
+
+        result = indexer.get_events_in_id_range(0, 4);
+        ids = result.iter().map(|(_, event)| event.event_id).collect();
+        assert_eq!(ids, vec![1, 2, 3]); // clamp min (TODO error instead?)
+
+        result = indexer.get_events_in_id_range(0, 0);
+        ids = result.iter().map(|(_, event)| event.event_id).collect();
+        assert!(ids.is_empty()); // return empty when start is before buffer
     }
 }
 
