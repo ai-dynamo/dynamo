@@ -6,16 +6,14 @@
 ########## Build Arguments ########
 ##################################
 
-# Base image configuration
-ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-# TODO OPS-612: NCCL will hang with 25.03, so use 25.01 for now
-# Please check https://github.com/ai-dynamo/dynamo/pull/1065
-# for details and reproducer to manually test if the image
-# can be updated to later versions.
-ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+# This section contains build arguments that are common and shared across various
+# Dockerfile.<frameworks>, so they should NOT have a default. The source of truth is from build.sh.
 
-# Build configuration
-ARG ENABLE_KVBM=false
+ARG BASE_IMAGE
+ARG BASE_IMAGE_TAG
+
+ARG PYTHON_VERSION
+ARG ENABLE_KVBM
 ARG CARGO_BUILD_JOBS
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -40,9 +38,6 @@ ARG SCCACHE_REGION=""
 ARG NIXL_UCX_REF=v1.19.0
 ARG NIXL_REF=0.7.1
 ARG NIXL_GDRCOPY_REF=v2.5.1
-
-# Python configuration
-ARG PYTHON_VERSION=3.12
 
 ##################################
 ########## Base Image ############

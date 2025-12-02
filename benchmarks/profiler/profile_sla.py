@@ -135,19 +135,6 @@ async def run_profile(args):
         args.aic_backend = args.backend
 
     try:
-        # Log MoE model support
-        if args.model_info.is_moe:
-            logger.info(
-                "MoE (Mixture of Experts) model profiling, sweeping TEP/DEP size for prefill and decode"
-            )
-            assert args.backend in [
-                "sglang"
-            ], "MoE model support is only available for SGLang"
-        else:
-            logger.info(
-                "Dense model profiling, sweeping TP size for prefill and decode"
-            )
-
         config_modifier = CONFIG_MODIFIERS[args.backend]
 
         with open(args.config, "r") as f:
@@ -162,11 +149,7 @@ async def run_profile(args):
             for i in range(int(math.log2(args.max_num_gpus_per_engine)) + 1)
             if args.min_num_gpus_per_engine <= 2**i <= args.max_num_gpus_per_engine
         ]
-        if args.model_info.is_moe:
-            logger.info(f"Profiling MoE GPU counts (TEP/DEP): {profile_num_gpus}")
-        else:
-            logger.info(f"Profiling dense model GPU counts (TP): {profile_num_gpus}")
-
+        logger.info(f"Profiling GPU counts: {profile_num_gpus}")
         os.makedirs(args.output_dir, exist_ok=True)
 
         model_name = config_modifier.get_model_name(config)
@@ -722,11 +705,10 @@ async def run_profile(args):
         config = generate_dgd_config_with_planner(
             config_path=args.config,
             config_modifier=config_modifier,
-            best_prefill_gpus=best_prefill_gpus,
-            best_decode_gpus=best_decode_gpus,
             output_dir=args.output_dir,
             args=args,
-            is_moe_model=args.model_info.is_moe,
+            best_prefill_mapping=best_prefill_mapping,
+            best_decode_mapping=best_decode_mapping,
             num_gpus_per_node=args.num_gpus_per_node,
         )
         logger.debug(f"Final DGD config with planner: {config}")

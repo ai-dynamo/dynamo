@@ -2,14 +2,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG CUDA_VERSION=12.9.1
+# This section contains build arguments that are common and shared with
+# the plain Dockerfile, so they should NOT have a default. The source of truth is from build.sh.
 
-# Runtime image and build-time configuration (aligned with other backends)
-# TODO: OPS-<number>: Use the same runtime image as the other backends
-ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.9.1-cudnn-runtime-ubuntu24.04"
+ARG BASE_IMAGE
+ARG BASE_IMAGE_TAG
 
-ARG PYTHON_VERSION=3.10
+ARG FRAMEWORK_IMAGE
+ARG FRAMEWORK_IMAGE_TAG
+ARG PYTHON_VERSION
+ARG CUDA_VERSION
+
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 ARG CARGO_BUILD_JOBS
@@ -39,7 +42,8 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 # - Develop or debug framework-level components
 # - Create custom builds with specific optimization flags
 #
-FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS framework
+#FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS framework
+FROM ${FRAMEWORK_IMAGE}:${FRAMEWORK_IMAGE_TAG} AS framework
 
 # Declare all ARGs
 ARG BUILD_TYPE=all
