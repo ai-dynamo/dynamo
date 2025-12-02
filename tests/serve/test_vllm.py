@@ -337,7 +337,6 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.gpu_1
 @pytest.mark.nightly
 def test_serve_deployment(
     vllm_config_test, request, runtime_services, predownload_models, image_server
