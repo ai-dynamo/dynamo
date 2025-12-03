@@ -68,12 +68,38 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
+      - name: Determine docs version
+        id: version
+        shell: bash
+        run: |
+          VERSION="dev"
+
+          # Option 1: Tag push (e.g., v0.3.0 -> 0.3.0)
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+            if [[ "${TAG}" =~ ^v([0-9]+(\.[0-9]+){1,2}([._-](post|rc|dev)[0-9]+)?)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+              echo "::notice::Detected version from tag: ${VERSION}"
+            fi
+          # Option 2: Manual dispatch with version input
+          elif [[ -n "${{ inputs.version || '' }}" ]]; then
+            VERSION="${{ inputs.version }}"
+            echo "::notice::Using version from manual input: ${VERSION}"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building docs for version: ${VERSION}"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Generate documentation
+        env:
+          DOCS_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          docker build -t docs-builder -f container/Dockerfile.docs .
+          docker build -t docs-builder \
+            --build-arg DYNAMO_DOCS_VERSION="${DOCS_VERSION}" \
+            -f container/Dockerfile.docs .
 
       - name: Copy documentation out of container
         run: |
