@@ -4,16 +4,13 @@
 use dynamo_async_openai::types::{
     ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionNamedToolChoice,
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionStreamResponseDelta,
-    ChatCompletionToolChoiceOption, ChatCompletionToolType, CreateChatCompletionRequest,
-    CreateChatCompletionStreamResponse, FunctionCallStream, FunctionName,
+    ChatCompletionRequestUserMessageContent, ChatCompletionToolChoiceOption,
+    ChatCompletionToolType, CreateChatCompletionRequest, FunctionCallStream, FunctionName,
 };
 use dynamo_llm::protocols::common;
 use dynamo_llm::protocols::common::llm_backend::BackendOutput;
 use dynamo_llm::protocols::openai::DeltaGeneratorExt;
-use dynamo_llm::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-};
+use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
 fn create_test_request() -> NvCreateChatCompletionRequest {
     let messages = vec![ChatCompletionRequestMessage::User(
@@ -82,7 +79,7 @@ fn test_named_tool_choice_parses_json() {
 
     // In streaming mode, we emit 2 chunks: first with id/name, second with arguments
     assert!(
-        tool_calls.len() >= 1,
+        !tool_calls.is_empty(),
         "Should have at least 1 tool call chunk"
     );
 
@@ -215,7 +212,7 @@ fn test_streaming_named_tool_incremental() {
 
     // Simulate streaming chunks
     // For simplicity in testing, send complete JSON in final chunk
-    let chunks = vec![r#"{"location":"Paris","unit":"celsius"}"#];
+    let chunks = [r#"{"location":"Paris","unit":"celsius"}"#];
 
     let mut all_responses = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
@@ -264,7 +261,7 @@ fn test_streaming_required_tool_parallel() {
     let mut generator = request.response_generator("req-stream-2".to_string());
 
     // Simulate streaming array of tool calls
-    let chunks = vec![
+    let chunks = [
         r#"[{"name":"search","parameters":{"query":"rust"}},"#,
         r#"{"name":"summarize","parameters":{"topic":"memory"}}]"#,
     ];
@@ -307,14 +304,14 @@ fn test_streaming_required_tool_parallel() {
     for resp in &all_responses {
         if let Some(tool_calls) = &resp.choices[0].delta.tool_calls {
             for tc in tool_calls {
-                if let Some(func) = &tc.function {
-                    if let Some(name) = &func.name {
-                        if name == "search" {
-                            found_search = true;
-                        }
-                        if name == "summarize" {
-                            found_summarize = true;
-                        }
+                if let Some(func) = &tc.function
+                    && let Some(name) = &func.name
+                {
+                    if name == "search" {
+                        found_search = true;
+                    }
+                    if name == "summarize" {
+                        found_summarize = true;
                     }
                 }
             }
@@ -493,7 +490,7 @@ fn test_true_incremental_streaming_parallel() {
     let mut generator = request.response_generator("req-stream-inc-2".to_string());
 
     // Simulate streaming: array with two tool calls
-    let chunks = vec![
+    let chunks = [
         r#"["#,
         r#"{"name":"search","#,
         r#""parameters":{"query":"rust"}"#,
@@ -533,10 +530,10 @@ fn test_true_incremental_streaming_parallel() {
     for resp in &responses {
         if let Some(tool_calls) = &resp.choices[0].delta.tool_calls {
             for tc in tool_calls {
-                if let Some(func) = &tc.function {
-                    if let Some(name) = &func.name {
-                        tool_names_seen.insert(name.clone());
-                    }
+                if let Some(func) = &tc.function
+                    && let Some(name) = &func.name
+                {
+                    tool_names_seen.insert(name.clone());
                 }
             }
         }
