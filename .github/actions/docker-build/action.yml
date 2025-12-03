@@ -132,6 +132,7 @@ runs:
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
           --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
 
+        echo "$?"
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)

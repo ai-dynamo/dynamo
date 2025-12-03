@@ -19,7 +19,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
     exit 1
 fi
 
-set -e
+set -ex
 
 TAG=
 RUN_PREFIX=
