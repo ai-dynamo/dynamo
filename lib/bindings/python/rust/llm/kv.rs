@@ -25,12 +25,32 @@ use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
 #[pyfunction]
-pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> PyResult<Vec<u64>> {
+#[pyo3(signature = (tokens, kv_block_size, block_mm_infos=None))]
+pub fn compute_block_hash_for_seq_py(
+    _py: Python,
+    tokens: Vec<u32>,
+    kv_block_size: usize,
+    block_mm_infos: Option<Bound<PyAny>>,
+) -> PyResult<Vec<u64>> {
     if kv_block_size == 0 {
         return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
     }
 
-    let hashes = compute_block_hash_for_seq(&tokens, kv_block_size as u32, None);
+    // Convert Python block_mm_infos to Rust Vec<Option<BlockExtraInfo>>
+    let mm_infos_rust: Option<Vec<Option<BlockExtraInfo>>> = block_mm_infos
+        .as_ref()
+        .map(|infos_py| {
+            depythonize::<Vec<Option<BlockExtraInfo>>>(infos_py).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Failed to convert block_mm_infos: {}",
+                    e
+                ))
+            })
+        })
+        .transpose()?;
+
+    let hashes =
+        compute_block_hash_for_seq(&tokens, kv_block_size as u32, mm_infos_rust.as_deref());
     Ok(hashes.into_iter().map(|h| h.0).collect())
 }
 
@@ -288,8 +308,9 @@ impl KvEventPublisher {
 
         // Convert Python block_mm_infos to Rust Vec<Option<BlockExtraInfo>>
         let mm_infos_rust: Option<Vec<Option<BlockExtraInfo>>> = block_mm_infos
+            .as_ref()
             .map(|infos_py| {
-                pythonize::depythonize_bound::<Vec<Option<BlockExtraInfo>>>(infos_py).map_err(|e| {
+                depythonize::<Vec<Option<BlockExtraInfo>>>(infos_py).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "Failed to convert block_mm_infos: {}",
                         e

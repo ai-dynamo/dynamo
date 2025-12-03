@@ -423,7 +423,11 @@ pub fn create_stored_block_from_parts(
     _lora_id: u64,
     mm_extra_info: Option<BlockExtraInfo>,
 ) -> KvCacheStoredBlockData {
-    let tokens_hash = compute_block_hash_for_seq(token_ids, kv_block_size, None)[0];
+    // Compute tokens_hash including MM info if present
+    let block_mm_infos = mm_extra_info.as_ref().map(|info| vec![Some(info.clone())]);
+    let tokens_hash =
+        compute_block_hash_for_seq(token_ids, kv_block_size, block_mm_infos.as_deref())[0];
+
     tracing::trace!(
         "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}, mm_extra_info={:?}",
         block_hash,
