@@ -4,7 +4,8 @@
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
-use futures::StreamExt;
+use futures::{stream, StreamExt};
+use serde_json::json;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -12,7 +13,7 @@ use dynamo_runtime::{
     component::Endpoint,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter,
-        RouterMode, ServerStreamingEngine, SingleIn, async_trait,
+        ResponseStream, RouterMode, ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -255,6 +256,120 @@ impl PrefillRouter {
             prefill_worker_id,
         ))
     }
+
+    /// Handle the prefill stage of disaggregated serving: do prefill and return routing info + preprocessed request.
+    /// This allows the frontend to receive all necessary data to later dispatch the decode stage directly to decode.
+    async fn handle_prefill_stage_request(
+        &self,
+        req: PreprocessedRequest,
+        context: Context<()>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        let request_id = context.id().to_string();
+        let engine_ctx = context.context();
+
+        // Save original max_tokens for the stage 2 request
+        let original_max_tokens = req.stop_conditions.max_tokens;
+
+        // Prepare prefill request with max_tokens = 1
+        let mut prefill_req = req.clone();
+        prefill_req.stop_conditions.max_tokens = Some(1);
+        let prefill_context = Context::with_id(prefill_req, request_id.clone());
+
+        // Link the prefill context as a child so that kill signals propagate
+        engine_ctx.link_child(prefill_context.context());
+
+        // Attempt prefill to get disaggregated_params
+        let prefill_result = self.call_prefill(prefill_context).await;
+
+        // Abort if cancelled during prefill
+        if engine_ctx.is_stopped() || engine_ctx.is_killed() {
+            tracing::debug!("Abort prefill stage after context is stopped or killed");
+            return Err(anyhow::anyhow!(
+                "Context id {} is stopped or killed",
+                engine_ctx.id()
+            ));
+        }
+
+        match prefill_result {
+            Ok((prefill_result, prefill_worker_id)) => {
+                tracing::debug!("Prefill stage: Prefill succeeded, returning routing info");
+
+                // Build the preprocessed request ready for decode stage
+                let mut decode_stage_request = req;
+                decode_stage_request.prefill_result = Some(prefill_result.clone());
+                decode_stage_request.stop_conditions.max_tokens = original_max_tokens;
+
+                // Query the decode router to get the best decode worker
+                // We add query_instance_id annotation to get worker info without actually routing
+                let mut query_req = decode_stage_request.clone();
+                query_req.annotations.push("query_instance_id".to_string());
+                let query_context = Context::with_id(query_req, request_id.clone());
+                engine_ctx.link_child(query_context.context());
+
+                // Call next to get decode worker selection
+                let mut decode_query_response = next.generate(query_context).await?;
+
+                // Extract worker_instance_id and decode worker info from response annotations
+                // Annotations are stored as: event = key, comment = [value_json_string]
+                let mut decode_worker_id: Option<u64> = None;
+                let mut token_data: Option<Vec<u32>> = None;
+
+                while let Some(item) = decode_query_response.next().await {
+                    if let Some(event) = item.event.as_ref()
+                        && let Some(comments) = item.comment.as_ref()
+                        && let Some(first_comment) = comments.first()
+                    {
+                        if event == "worker_instance_id" {
+                            // The value is a JSON-serialized string, parse the inner string
+                            if let Ok(id_str) = serde_json::from_str::<String>(first_comment) {
+                                decode_worker_id = id_str.parse().ok();
+                            }
+                        } else if event == "token_data" {
+                            token_data = serde_json::from_str(first_comment).ok();
+                        }
+                    }
+                }
+
+                // Build prefill stage response with all info needed for decode stage
+                let prefill_stage_response = LLMEngineOutput {
+                    token_ids: vec![],
+                    tokens: None,
+                    text: None,
+                    cum_log_probs: None,
+                    log_probs: None,
+                    top_logprobs: None,
+                    finish_reason: None, // No finish reason - this is just prefill stage
+                    index: None,
+                    disaggregated_params: Some(json!({
+                        "prefill_stage_complete": true,
+                        "prefill_worker_id": prefill_worker_id,
+                        "decode_worker_id": decode_worker_id,
+                        "preprocessed_request": serde_json::to_value(&decode_stage_request)
+                            .unwrap_or_else(|_| json!(null)),
+                        "token_ids": token_data.unwrap_or_else(|| decode_stage_request.token_ids.clone()),
+                    })),
+                    extra_args: None,
+                    completion_usage: prefill_result.prompt_tokens_details.map(|d| {
+                        dynamo_async_openai::types::CompletionUsage {
+                            prompt_tokens: 0,
+                            completion_tokens: 0,
+                            total_tokens: 0,
+                            prompt_tokens_details: Some(d),
+                            completion_tokens_details: None,
+                        }
+                    }),
+                };
+
+                let response_stream = stream::once(async { Annotated::from_data(prefill_stage_response) });
+                Ok(ResponseStream::new(Box::pin(response_stream), engine_ctx))
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Prefill stage failed");
+                Err(anyhow::anyhow!(e))
+            }
+        }
+    }
 }
 
 impl Drop for PrefillRouter {
@@ -283,6 +398,30 @@ impl
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
+        // ===== Decode Stage Detection =====
+        // If prefill_result and backend_instance_id are already set, this is a decode stage request.
+        // Skip prefill entirely and route directly to the specified decode worker.
+        if req.prefill_result.is_some() && req.backend_instance_id.is_some() {
+            tracing::debug!(
+                request_id = %request_id,
+                backend_instance_id = ?req.backend_instance_id,
+                "Disaggregated decode stage: prefill_result present, routing directly to decode worker"
+            );
+            return next.generate(context.map(|_| req)).await;
+        }
+
+        // ===== Prefill Stage Detection =====
+        // If the request has the "disagg_prefill_stage" annotation, perform prefill and return
+        // routing info + preprocessed request without proceeding to decode.
+        if req.has_annotation("disagg_prefill_stage") {
+            tracing::debug!(
+                request_id = %request_id,
+                "Disaggregated prefill stage: performing prefill and returning routing info"
+            );
+            return self.handle_prefill_stage_request(req, context, next).await;
+        }
+
+        // ===== Normal disaggregated flow (prefill + decode in one pass) =====
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
