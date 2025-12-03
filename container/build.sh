@@ -873,9 +873,9 @@ fi
 if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
     # Follow 2-step build process for all frameworks
     if [[ $FRAMEWORK != "NONE" ]]; then
-        # Check if a pre-built base image was provided
+        # Check if a pre-built base image was provided for use
         if [[ -n "${DYNAMO_BASE_IMAGE_INPUT:-}" ]]; then
-            # Use the pre-built base image
+            # Use the pre-built base image provided via DYNAMO_BASE_IMAGE_INPUT, skipping base build
             DYNAMO_BASE_IMAGE="${DYNAMO_BASE_IMAGE_INPUT}"
             echo "======================================"
             echo "Using Pre-built Base Image: ${DYNAMO_BASE_IMAGE}"
@@ -898,13 +898,14 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
             mkdir -p "${BUILD_LOG_DIR}"
             BASE_BUILD_LOG="${BUILD_LOG_DIR}/base-image-build.log"
 
-            # Use BuildKit for enhanced metadata
+            # Use BuildKit for enhanced metadata; fallback to legacy docker if buildx absent
             if [ -z "$RUN_PREFIX" ]; then
                 if docker buildx version &>/dev/null; then
-                    docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                    # Build with BuildKit and explicit 'runtime' target
+                    docker buildx build --progress=plain --load -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
                     BUILD_EXIT_CODE=${PIPESTATUS[0]}
                 else
-                    DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
+                    DOCKER_BUILDKIT=1 docker build --progress=plain -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${BASE_BUILD_LOG}"
                     BUILD_EXIT_CODE=${PIPESTATUS[0]}
                 fi
 
@@ -912,17 +913,9 @@ if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
                     exit ${BUILD_EXIT_CODE}
                 fi
             else
-                $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+                $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target runtime $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
             fi
         fi
-        # Start framework build
-        echo "======================================"
-        echo "Starting Build 2: Framework Image"
-        echo "======================================"
-        BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-    else
-        $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     fi
 fi
 
