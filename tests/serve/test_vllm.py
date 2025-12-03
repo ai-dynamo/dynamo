@@ -346,9 +346,7 @@ vllm_configs = {
                                 },
                                 {
                                     "type": "image_url",
-                                    "image_url": {
-                                        "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                                    },
+                                    "image_url": {"url": MULTIMODAL_IMG_URL},
                                 },
                             ],
                         }
@@ -381,7 +379,7 @@ vllm_configs = {
                     "max_tokens": 1024,
                 },
                 repeat_count=1,
-                expected_response=["bus"],  # Validate image understanding
+                expected_response=["purple"],  # Validate image understanding
                 expected_log=[],
                 expected_tool_name="describe_image",  # Validate tool call happened
             )
