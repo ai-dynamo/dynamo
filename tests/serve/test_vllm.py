@@ -5,7 +5,6 @@ import base64
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 import pytest
 
