@@ -172,6 +172,115 @@ pub(crate) fn build_single_descriptor_transfer(
     Ok(())
 }
 
+/// Build per-block transfer with offsets.
+///
+/// Creates one descriptor per block, preserving byte offsets from the source layout.
+/// Used for reading from different offsets within a shared resource (e.g., disk file, RDMA buffer, object storage).
+///
+/// # Arguments
+/// * `get_device_id` - Optional closure to extract per-block device IDs (e.g., object keys).
+///                     If None, uses the default device IDs for all blocks.
+pub(crate) fn build_per_block_offset_transfer(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    src_block_ids: &[usize],
+    dst_block_ids: &[usize],
+    layers: &Range<usize>,
+    src_device_id: u64,
+    dst_device_id: u64,
+    src_dl: &mut XferDescList,
+    dst_dl: &mut XferDescList,
+    get_device_id: Option<&dyn Fn(&PhysicalLayout, usize, u64) -> u64>,
+) -> Result<()> {
+    let src_layout = src.layout();
+
+    tracing::debug!("Per-block offset transfer: {} blocks", src_block_ids.len());
+
+    for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
+        let src_region = src.memory_region(src_block_id, layers.start, 0)?;
+        let dst_region = dst.memory_region(dst_block_id, layers.start, 0)?;
+        let total_size = layers.len() * src_layout.outer_dim() * src_region.size();
+
+        // Get device IDs (per-block for object storage, default for others)
+        let src_key = get_device_id
+            .map(|f| f(src, src_block_id, src_device_id))
+            .unwrap_or(src_device_id);
+        let dst_key = get_device_id
+            .map(|f| f(dst, dst_block_id, dst_device_id))
+            .unwrap_or(dst_device_id);
+
+        src_dl.add_desc(src_region.addr(), total_size, src_key);
+        dst_dl.add_desc(dst_region.addr(), total_size, dst_key);
+
+        tracing::trace!(
+            "  src[{}] (key={}) offset={} → dst[{}] (key={}) offset={}: {} bytes",
+            src_block_id, src_key, src_region.addr(),
+            dst_block_id, dst_key, dst_region.addr(),
+            total_size
+        );
+    }
+
+    Ok(())
+}
+
+/// Build per-block transfer to unique targets.
+///
+/// Creates one descriptor per block. For object storage writes, each block writes
+/// to offset 0 of its unique target. For other backends, preserves offsets.
+///
+/// # Arguments
+/// * `get_device_id` - Optional closure to extract per-block device IDs (e.g., object keys).
+///                     If None, uses the default device IDs for all blocks.
+/// * `force_zero_offset` - If true, destination offset is always 0 (for object storage writes).
+pub(crate) fn build_per_block_unique_target_transfer(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    src_block_ids: &[usize],
+    dst_block_ids: &[usize],
+    layers: &Range<usize>,
+    src_device_id: u64,
+    dst_device_id: u64,
+    src_dl: &mut XferDescList,
+    dst_dl: &mut XferDescList,
+    get_device_id: Option<&dyn Fn(&PhysicalLayout, usize, u64) -> u64>,
+    force_zero_offset: bool,
+) -> Result<()> {
+    let src_layout = src.layout();
+
+    tracing::debug!(
+        "Per-block unique target transfer: {} blocks, force_zero_offset={}",
+        src_block_ids.len(),
+        force_zero_offset
+    );
+
+    for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
+        let src_region = src.memory_region(src_block_id, layers.start, 0)?;
+        let dst_region = dst.memory_region(dst_block_id, layers.start, 0)?;
+        let total_size = layers.len() * src_layout.outer_dim() * src_region.size();
+
+        // Get device IDs (per-block for object storage, default for others)
+        let src_key = get_device_id
+            .map(|f| f(src, src_block_id, src_device_id))
+            .unwrap_or(src_device_id);
+        let dst_key = get_device_id
+            .map(|f| f(dst, dst_block_id, dst_device_id))
+            .unwrap_or(dst_device_id);
+
+        // Destination offset: 0 for object storage writes, actual offset otherwise
+        let dst_offset = if force_zero_offset { 0 } else { dst_region.addr() };
+
+        src_dl.add_desc(src_region.addr(), total_size, src_key);
+        dst_dl.add_desc(dst_offset, total_size, dst_key);
+
+        tracing::trace!(
+            "  src[{}] (key={}) → dst[{}] (key={}) offset={}: {} bytes",
+            src_block_id, src_key, dst_block_id, dst_key, dst_offset, total_size
+        );
+    }
+
+    Ok(())
+}
+
 /// Build multi-descriptor transfer with per-block device_id support.
 ///
 /// Standard mode: one descriptor per (block, layer, outer) tuple.
