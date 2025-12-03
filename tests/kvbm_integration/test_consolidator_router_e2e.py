@@ -456,46 +456,76 @@ class TestConsolidatorRouterE2E:
         vllm_log = vllm_worker["log_file"]
         log_content = vllm_log.read_text()
 
-        # Count STORE events received from vLLM (first source = will publish)
-        vllm_stores = len(
+        # Count blocks where vLLM was the first source (will publish)
+        vllm_first = len(
             re.findall(
                 r"stored in first source Vllm.*will publish STORE event", log_content
             )
         )
 
-        # Count STORE events received from KVBM (they appear as DEDUP messages)
-        kvbm_stores = len(
+        # Count blocks where KVBM was the first source (will publish)
+        kvbm_first = len(
+            re.findall(
+                r"stored in first source Kvbm.*will publish STORE event", log_content
+            )
+        )
+
+        # Count blocks where vLLM was second (DEDUP - KVBM was first)
+        vllm_dedup = len(
+            re.findall(
+                r"DEDUP: Block \d+ \(seq_hash=\d+\) added to source Vllm", log_content
+            )
+        )
+
+        # Count blocks where KVBM was second (DEDUP - vLLM was first)
+        kvbm_dedup = len(
             re.findall(
                 r"DEDUP: Block \d+ \(seq_hash=\d+\) added to source Kvbm", log_content
             )
         )
 
-        # Count total STORE events received (from both sources)
-        total_stores_received = vllm_stores + kvbm_stores
-
         # Count STORE events actually published to router
         published_stores = len(re.findall(r"will publish STORE event", log_content))
 
-        logger.info(f"STORE events received from vLLM: {vllm_stores}")
-        logger.info(f"STORE events received from KVBM: {kvbm_stores}")
-        logger.info(f"Total STORE events received: {total_stores_received}")
+        # Total blocks seen by each source
+        total_vllm = vllm_first + vllm_dedup
+        total_kvbm = kvbm_first + kvbm_dedup
+
+        logger.info(f"vLLM first (published): {vllm_first}")
+        logger.info(f"KVBM first (published): {kvbm_first}")
+        logger.info(f"vLLM dedup (KVBM was first): {vllm_dedup}")
+        logger.info(f"KVBM dedup (vLLM was first): {kvbm_dedup}")
+        logger.info(f"Total blocks seen by vLLM: {total_vllm}")
+        logger.info(f"Total blocks seen by KVBM: {total_kvbm}")
         logger.info(f"STORE events published to router: {published_stores}")
 
         # Assertions:
-        # 1. We should receive STORE events from both vLLM and KVBM
-        assert vllm_stores > 0, "Expected STORE events from vLLM"
-        assert kvbm_stores > 0, "Expected STORE events from KVBM (replication to G2/G3)"
+        # 1. Both sources should report blocks
+        assert total_vllm > 0, "Expected blocks from vLLM"
+        assert total_kvbm > 0, "Expected blocks from KVBM"
 
-        # 2. Published stores should approximately equal vLLM stores
-        #    (each unique block is published once when first stored in vLLM)
+        # 2. Published stores = vLLM first + KVBM first (each unique block published once)
         assert (
-            published_stores == vllm_stores
-        ), f"Expected published events ({published_stores}) to equal vLLM stores ({vllm_stores})"
+            published_stores == vllm_first + kvbm_first
+        ), f"Published ({published_stores}) should equal vLLM first ({vllm_first}) + KVBM first ({kvbm_first})"
 
-        # 3. Total stores should be vLLM + KVBM (each block stored in both)
+        # 3. Deduplication is symmetric for overlapping blocks:
+        #    When KVBM reports first, vLLM should report as dedup (and vice versa)
+        #    Note: Not all vLLM blocks are offloaded to KVBM, so total_vllm >= total_kvbm
         assert (
-            total_stores_received == vllm_stores + kvbm_stores
-        ), f"Total should be vLLM ({vllm_stores}) + KVBM ({kvbm_stores})"
+            kvbm_first == vllm_dedup
+        ), f"KVBM first ({kvbm_first}) should equal vLLM dedup ({vllm_dedup})"
+
+        # 4. KVBM dedup count should not exceed vLLM first count
+        #    (KVBM can only dedup blocks that vLLM reported first)
+        assert (
+            kvbm_dedup <= vllm_first
+        ), f"KVBM dedup ({kvbm_dedup}) should be <= vLLM first ({vllm_first})"
+
+        # 5. Total KVBM blocks = kvbm_first + kvbm_dedup (consistency check)
+        assert (
+            total_kvbm == kvbm_first + kvbm_dedup
+        ), f"Total KVBM ({total_kvbm}) should equal kvbm_first ({kvbm_first}) + kvbm_dedup ({kvbm_dedup})"
 
         # 4. Check for errors in logs
         self.assert_no_errors_in_logs(vllm_log, frontend_server["log_file"])

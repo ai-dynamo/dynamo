@@ -98,13 +98,19 @@ class DynamoConnector(KVConnectorBase_V1):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         self._worker.register_kv_caches(kv_caches)
 
+    @override
     def bind_connector_metadata(
         self, connector_metadata: DynamoConnectorMetadata
     ) -> None:
+        # Must call super() to set _connector_metadata so has_connector_metadata() returns True
+        # This is required for save_kv_layer to be called during the forward pass
+        super().bind_connector_metadata(connector_metadata)
         assert isinstance(connector_metadata.metadata, bytes)
         self._worker.bind_connector_metadata(connector_metadata.metadata)
 
+    @override
     def clear_connector_metadata(self) -> None:
+        super().clear_connector_metadata()
         self._worker.clear_connector_metadata()
 
     @override
