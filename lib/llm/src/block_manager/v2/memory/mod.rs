@@ -13,6 +13,7 @@ pub mod actions;
 
 mod device;
 mod disk;
+mod object;
 mod pinned;
 mod registered;
 mod system;
@@ -23,6 +24,7 @@ mod tests;
 
 pub use device::DeviceStorage;
 pub use disk::DiskStorage;
+pub use object::ObjectStorage;
 pub use pinned::PinnedStorage;
 pub use registered::{
     NixlCompatible, NixlDescriptor, NixlRegistered, RegisteredView, register_with_nixl,
@@ -81,6 +83,9 @@ pub enum StorageKind {
 
     /// Disk-backed memory (mmap)
     Disk(u64),
+
+    /// Object Storage
+    Object(u64),
 }
 
 /// Core trait for memory regions that can be type-erased.

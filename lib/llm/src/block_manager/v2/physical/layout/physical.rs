@@ -4,7 +4,7 @@
 //! Physical layout types that combine abstract layouts with storage location metadata.
 
 use super::{
-    FullyContiguousLayout, LayerSeparateLayout, Layout, MemoryDescriptor,
+    FullyContiguousLayout, LayerSeparateLayout, Layout, MemoryDescriptor, ObjectLayout,
     builder::{PhysicalLayoutBuilder, PhysicalLayoutBuilderDefault},
     serialize::{LayoutDescriptor, LayoutTypeDetails},
 };
@@ -246,6 +246,20 @@ impl PhysicalLayout {
                     serialized.layout_config.clone(),
                     remote_regions,
                     details.block_dim,
+                )?;
+                Arc::new(layout)
+            }
+            LayoutTypeDetails::ObjectLayout(details) => {
+                if remote_regions.len() != details.num_objects {
+                    return Err(anyhow!(
+                        "ObjectLayout requires {} memory regions (one per object), got {}",
+                        details.num_objects,
+                        remote_regions.len()
+                    ));
+                }
+                let layout = ObjectLayout::new(
+                    serialized.layout_config.clone(),
+                    remote_regions,
                 )?;
                 Arc::new(layout)
             }

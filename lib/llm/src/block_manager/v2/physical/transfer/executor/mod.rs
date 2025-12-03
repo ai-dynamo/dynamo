@@ -3,13 +3,18 @@
 
 //! Transfer executors for different copy strategies.
 
+mod contiguous_transfer;
 pub(super) mod cuda;
 mod memcpy;
 mod nixl;
+mod object_transfer;
 
 use super::strategy::select_strategy;
 use super::validation::validate_block_transfer;
-use super::{PhysicalLayout, TransferContext, TransferOptions, TransferPlan, TransferStrategy};
+use super::{
+    DescriptorHint, PhysicalLayout, TransferContext, TransferOptions, TransferPlan,
+    TransferStrategy,
+};
 use crate::block_manager::v2::physical::transfer::{
     StorageKind, context::TransferCompleteNotification,
 };
@@ -55,6 +60,7 @@ pub fn execute_transfer(
             src_block_ids,
             dst_block_ids,
             options.layer_range,
+            options.descriptor_hint,
             strategy,
             ctx,
         ),
@@ -83,6 +89,7 @@ fn execute_direct_transfer(
     src_block_ids: &[usize],
     dst_block_ids: &[usize],
     layer_range: Option<Range<usize>>,
+    descriptor_hint: DescriptorHint,
     strategy: TransferStrategy,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
@@ -112,7 +119,8 @@ fn execute_direct_transfer(
                 .dst(dst)
                 .src_blocks(src_block_ids)
                 .dst_blocks(dst_block_ids)
-                .strategy(strategy);
+                .strategy(strategy)
+                .descriptor_hint(descriptor_hint);
 
             if let Some(range) = layer_range {
                 builder = builder.layer_range(range);
@@ -139,27 +147,32 @@ async fn execute_two_hop_transfer_chunk(
     first_strategy: TransferStrategy,
     second_strategy: TransferStrategy,
     layer_range: &Option<Range<usize>>,
+    descriptor_hint: DescriptorHint,
     ctx: &TransferContext,
 ) -> Result<()> {
     let bounce_ids_to_use = &bounce_block_ids[..src_block_ids.len()];
 
+    // First hop: src → bounce (use Auto, bounce is always host memory)
     execute_direct_transfer(
         src,
         bounce_layout,
         src_block_ids,
         bounce_ids_to_use,
         layer_range.clone(),
+        DescriptorHint::Auto,
         first_strategy,
         ctx,
     )?
     .await?;
 
+    // Second hop: bounce → dst (use the original hint for object storage)
     execute_direct_transfer(
         bounce_layout,
         dst,
         bounce_ids_to_use,
         dst_block_ids,
         layer_range.clone(),
+        descriptor_hint,
         second_strategy,
         ctx,
     )?
@@ -242,6 +255,7 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
                     first_strategy,
                     second_strategy,
                     &options_clone.layer_range,
+                    options_clone.descriptor_hint,
                     &ctx_clone,
                 )
                 .await
@@ -263,6 +277,7 @@ fn execute_two_hop_transfer(params: TwoHopTransferParams) -> Result<TransferComp
                 first_strategy,
                 second_strategy,
                 &options_clone.layer_range,
+                options_clone.descriptor_hint,
                 &ctx_clone,
             )
             .await;

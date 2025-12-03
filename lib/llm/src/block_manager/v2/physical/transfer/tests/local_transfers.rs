@@ -112,6 +112,7 @@ pub fn create_fc_layout(
         StorageKind::Pinned => builder.allocate_pinned(false).build().unwrap(),
         StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
+        StorageKind::Object(_) => panic!("Object storage not supported in local transfer tests"),
     }
 }
 
@@ -131,6 +132,7 @@ pub fn create_lw_layout(
         StorageKind::Pinned => builder.allocate_pinned(false).build().unwrap(),
         StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
+        StorageKind::Object(_) => panic!("Object storage not supported in local transfer tests"),
     }
 }
 
@@ -373,6 +375,9 @@ fn build_agent_for_kinds(src_kind: StorageKind, dst_kind: StorageKind) -> Result
             }
             StorageKind::Disk(_) => {
                 backends.insert("POSIX"); // Required for disk I/O
+            }
+            StorageKind::Object(_) => {
+                panic!("Object storage not supported in local transfer tests")
             }
         }
     }
