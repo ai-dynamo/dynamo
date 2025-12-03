@@ -25,6 +25,7 @@ kr8s==0.20.13
 kubernetes==32.0.1
 kubernetes_asyncio<=32.1.1  # May vary by platform
 matplotlib==3.10.7
+msgpack==1.1.2
 msgspec==0.19.0
 mypy==1.18.2
 nvidia-ml-py<=13.580.65  # NVIDIA/CUDA related, may vary by driver version

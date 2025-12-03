@@ -13,6 +13,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
     pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
     pytest.mark.post_merge,
 ]
 
@@ -58,7 +59,7 @@ sglang:cache_hit_rate{model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0075
         """Test SGLang use case: filter to sglang: metrics and exclude python_/process_."""
         result = get_prometheus_expfmt(
             sglang_registry,
-            metric_prefix_filter="sglang:",
+            metric_prefix_filters=["sglang:"],
             exclude_prefixes=["python_", "process_"],
         )
 

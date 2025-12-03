@@ -28,9 +28,43 @@ from tests.utils.managed_process import ManagedProcess
 
 
 def pytest_configure(config):
-    # Defining model morker to avoid `'model' not found in `markers` configuration option`
-    # error when pyproject.toml is not available in the container
-    config.addinivalue_line("markers", "model: model id used by a test or parameter")
+    # Defining markers to avoid `<marker> not found in 'markers' configuration option`
+    # errors when pyproject.toml is not available in the container (e.g. some CI jobs).
+    # IMPORTANT: Keep this marker list in sync with [tool.pytest.ini_options].markers
+    # in pyproject.toml. If you add or remove markers there, mirror the change here.
+    markers = [
+        "pre_merge: marks tests to run before merging",
+        "post_merge: marks tests to run after merge",
+        "parallel: marks tests that can run in parallel with pytest-xdist",
+        "nightly: marks tests to run nightly",
+        "weekly: marks tests to run weekly",
+        "gpu_0: marks tests that don't require GPU",
+        "gpu_1: marks tests to run on GPU",
+        "gpu_2: marks tests to run on 2GPUs",
+        "gpu_4: marks tests to run on 4GPUs",
+        "gpu_8: marks tests to run on 8GPUs",
+        "e2e: marks tests as end-to-end tests",
+        "integration: marks tests as integration tests",
+        "unit: marks tests as unit tests",
+        "stress: marks tests as stress tests",
+        "performance: marks tests as performance tests",
+        "vllm: marks tests as requiring vllm",
+        "trtllm: marks tests as requiring trtllm",
+        "sglang: marks tests as requiring sglang",
+        "multimodal: marks tests as multimodal (image/video) tests",
+        "slow: marks tests as known to be slow",
+        "h100: marks tests to run on H100",
+        "router: marks tests for router component",
+        "planner: marks tests for planner component",
+        "kvbm: marks tests for KV behavior and model determinism",
+        "kvbm_v2: marks tests using KVBM V2",
+        "model: model id used by a test or parameter",
+        "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
+        "k8s: marks tests as requiring Kubernetes",
+        "fault_tolerance: marks tests as fault tolerance tests",
+    ]
+    for marker in markers:
+        config.addinivalue_line("markers", marker)
 
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
