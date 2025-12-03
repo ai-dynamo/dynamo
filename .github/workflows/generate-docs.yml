@@ -13,18 +13,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Generate Documentation
+# Dynamo docs build and publish workflow
+# Build:
+# - Builds documentation using Docker container
+# - Creates artifact for downstream use
+# - Runs on: main, release/*, tags, PRs (docs changes only)
+#
+# Publish:
+# - Main branch: publish to S3 under 'dev' (development docs)
+# - Tagged commits: publish to S3 under 'archive/vX.Y[.Z][suffix]' AND update 'latest' to match the release
+# - PRs: no S3 publish (only internal preview deployment if targeting release branch)
+# - Akamai: always flushes cache for the target path after publish
+#
+# Required Configuration:
+# - Repository variable: DOCS_PUBLISH_S3_TARGET_PATH (prefix under S3 bucket)
+# - Secrets: AWS credentials (DOCS_AWS_ACCESS_KEY_ID, DOCS_AWS_SECRET_ACCESS_KEY, DOCS_AWS_S3_BUCKET)
+# - Secrets (optional): DOCS_AKAMAI_* EdgeGrid credentials for cache flush
+#
+# Commit message flags:
+# - '/skip-dev': skip publishing 'dev' on main branch
+# - '/not-latest': publish version to archive but don't update 'latest'
 
+name: Generate and Publish Documentation
 on:
   push:
     branches:
       - main
       - release/*
+    tags:
+      - '*'
   pull_request:
     paths:
       - 'docs/**'
       - 'container/Dockerfile.docs'
       - '.github/workflows/generate-docs.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Optional: Version to publish (e.g., 1.2.3). If not provided, publishes as dev.'
+        required: false
+        type: string
 
 jobs:
   build-docs:
@@ -159,3 +187,352 @@ jobs:
                 body: comment
               });
             }
+
+  publish-s3:
+    name: Publish docs to S3 and flush Akamai
+    needs: [build-docs]
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' }}
+
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+
+    env:
+      S3_BUCKET: ${{ secrets.DOCS_AWS_S3_BUCKET }}
+      DOCS_DIR: dynamo-docs
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Use OIDC (role assumption) if available, otherwise use IAM keys
+          role-to-assume: ${{ secrets.DOCS_AWS_IAM_STS_ROLE }}
+          aws-access-key-id: ${{ secrets.DOCS_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.DOCS_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.DOCS_AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity >/dev/null || {
+            echo "::error::Failed to authenticate with AWS. Check credentials configuration."
+            exit 1
+          }
+
+      - name: Download documentation artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dynamo-docs-*
+          path: ${{ env.DOCS_DIR }}
+
+      - name: Validate documentation artifacts
+        run: |
+          # The artifact is downloaded into a subdirectory, move contents up one level
+          ARTIFACT_DIR=$(find "${{ env.DOCS_DIR }}" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          if [[ -z "${ARTIFACT_DIR}" ]]; then
+            echo "::error::No artifact directory found"
+            exit 1
+          fi
+
+          echo "::notice::Moving contents from ${ARTIFACT_DIR} to ${{ env.DOCS_DIR }}"
+          mv "${ARTIFACT_DIR}"/* "${{ env.DOCS_DIR }}/"
+          rmdir "${ARTIFACT_DIR}"
+
+          # Validate extraction
+          if [[ ! -d "${{ env.DOCS_DIR }}" ]] || [[ -z "$(ls -A ${{ env.DOCS_DIR }})" ]]; then
+            echo "::error::Documentation directory is empty after extraction"
+            exit 1
+          fi
+
+          echo "::notice::Documentation size: $(du -sh ${{ env.DOCS_DIR }} | cut -f1)"
+
+      - name: Determine version and validate inputs
+        id: vars
+        env:
+          ARTIFACTS_PATH: dynamo-docs
+          TARGET_PATH: ${{ vars.DOCS_PUBLISH_S3_TARGET_PATH }}
+          COMMIT_MSG: ${{ github.event.head_commit.message || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TARGET_PATH}" ]]; then
+            echo "::error::target-path was not provided. Set repository variable DOCS_PUBLISH_S3_TARGET_PATH."
+            exit 1
+          fi
+
+          if [[ ! -d "${ARTIFACTS_PATH}" ]]; then
+            echo "::error::Failed to find documentation artifacts at ${ARTIFACTS_PATH}"
+            exit 1
+          fi
+
+          # Determine version from various sources
+          VERSION=""
+          PUBLISH_TO_LATEST="false"
+
+          # Option 1: Direct tag push
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+            if [[ "${TAG}" =~ ^v([0-9]+(\.[0-9]+){1,2}([._-](post|rc|dev)[0-9]+)?)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+              echo "Detected version from tag: ${VERSION}"
+              PUBLISH_TO_LATEST="true"
+            fi
+
+            # Check for /not-latest flag in commit message
+            if [[ "${COMMIT_MSG}" =~ /not-latest ]]; then
+              PUBLISH_TO_LATEST="false"
+              echo "Detected /not-latest flag in commit message"
+            fi
+
+          # Option 2: Manual dispatch with version input
+          elif [[ -n "${{ inputs.version || '' }}" ]]; then
+            VERSION="${{ inputs.version }}"
+            echo "Using version from manual input: ${VERSION}"
+
+            # Don't publish to latest on manual dispatch
+            PUBLISH_TO_LATEST="false"
+            echo "Manual dispatch detected - will not publish to latest"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "artifacts_path=${ARTIFACTS_PATH}" >> "$GITHUB_OUTPUT"
+          echo "publish_to_latest=${PUBLISH_TO_LATEST}" >> "$GITHUB_OUTPUT"
+
+          if [[ -n "${VERSION}" ]]; then
+            echo "::notice::Publishing version: ${VERSION}"
+            if [[ "${PUBLISH_TO_LATEST}" == "true" ]]; then
+              echo "::notice::Will also publish to 'latest'"
+            else
+              echo "::notice::Will NOT publish to 'latest'"
+            fi
+          else
+            echo "::notice::Publishing as dev (no version detected)"
+          fi
+
+      - name: Normalize S3 path
+        id: paths
+        env:
+          S3_TARGET_ROOT: ${{ env.S3_BUCKET }}
+          TARGET_PATH: ${{ vars.DOCS_PUBLISH_S3_TARGET_PATH }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          S3_ROOT="${S3_TARGET_ROOT%/}"
+          S3_PATH="${TARGET_PATH#/}"
+          S3_PATH="${S3_PATH%/}"
+          echo "S3_TARGET_PATH...${S3_PATH}"
+          echo "s3_root=${S3_ROOT}" >> "$GITHUB_OUTPUT"
+          echo "s3_path=${S3_PATH}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish version
+        if: ${{ steps.vars.outputs.version != '' }}
+        working-directory: ${{ env.DOCS_DIR }}
+        id: publish_version
+        env:
+          S3_ROOT: ${{ steps.paths.outputs.s3_root }}
+          S3_PATH: ${{ steps.paths.outputs.s3_path }}
+          VERSION: ${{ steps.vars.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Publishing version ${VERSION} to ${S3_ROOT}/${S3_PATH}/archive/${VERSION}"
+          aws s3 sync . "${S3_ROOT}/${S3_PATH}/archive/${VERSION}" --exclude .buildinfo --exclude .doctrees --delete
+
+          # Copy version manifest files if they exist
+          for file in versions.json versions1.json; do
+            if [[ -f "${file}" ]]; then
+              echo "Copying ${file} to ${S3_ROOT}/${S3_PATH}/"
+              aws s3 cp "${file}" "${S3_ROOT}/${S3_PATH}/" || {
+                echo "::warning::Failed to copy ${file} to S3"
+              }
+            fi
+          done
+
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+      # - name: Publish latest
+      #   if: ${{ steps.publish_version.outputs.published == 'true' && steps.vars.outputs.publish_to_latest == 'true' }}
+      #   working-directory: ${{ env.DOCS_DIR }}
+      #   id: publish_latest
+      #   env:
+      #     S3_ROOT: ${{ steps.paths.outputs.s3_root }}
+      #     S3_PATH: ${{ steps.paths.outputs.s3_path }}
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     echo "Publishing latest to ${S3_ROOT}/${S3_PATH}/latest"
+      #     aws s3 sync . "${S3_ROOT}/${S3_PATH}/latest" --exclude .buildinfo --exclude .doctrees --delete
+      #     echo "published_latest=true" >> "$GITHUB_OUTPUT"
+
+      # - name: Publish dev (main branch)
+      #   # Publish main branch to 'dev' directory for development docs
+      #   # Skip if commit message contains '/skip-dev' anywhere
+      #   if: ${{ github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '/skip-dev') }}
+      #   working-directory: ${{ env.DOCS_DIR }}
+      #   id: publish_dev
+      #   env:
+      #     S3_ROOT: ${{ steps.paths.outputs.s3_root }}
+      #     S3_PATH: ${{ steps.paths.outputs.s3_path }}
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     echo "Publishing development docs to ${S3_ROOT}/${S3_PATH}/dev"
+      #     aws s3 sync . "${S3_ROOT}/${S3_PATH}/dev" --exclude .buildinfo --exclude .doctrees --delete
+      #     echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - name: Update versions manifest in all archive directories
+        # Update versions*.json in ALL archive directories so old docs show current version list
+        # Only run when publishing a version (not for dev builds)
+        if: ${{ steps.vars.outputs.version != '' }}
+        working-directory: ${{ env.DOCS_DIR }}
+        env:
+          S3_ROOT: ${{ steps.paths.outputs.s3_root }}
+          S3_PATH: ${{ steps.paths.outputs.s3_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Get list of all archive directories
+          echo "Updating version manifests in all archive directories..."
+          ARCHIVE_DIRS=$(aws s3 ls "${S3_ROOT}/${S3_PATH}/archive/" | grep "PRE" | awk '{print $2}' | tr -d '/')
+
+          for file in versions.json versions1.json; do
+            if [[ -f "${file}" ]]; then
+              for dir in ${ARCHIVE_DIRS}; do
+                echo "Updating ${file} in archive/${dir}/"
+                aws s3 cp "${file}" "${S3_ROOT}/${S3_PATH}/archive/${dir}/${file}" || {
+                  echo "::warning::Failed to update ${file} in archive/${dir}"
+                }
+              done
+            fi
+          done
+
+          echo "✅ Version manifests updated in all archive directories"
+
+      - name: Collect publish outputs
+        id: publish
+        env:
+          S3_PATH: ${{ steps.paths.outputs.s3_path }}
+          VERSION: ${{ steps.vars.outputs.version }}
+          PUBLISHED_VERSION: ${{ steps.publish_version.outputs.published || 'false' }}
+          # PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "s3_target_path=${S3_PATH}" >> "$GITHUB_OUTPUT"
+          echo "request_name=Publish docs from ${GITHUB_REPOSITORY}@${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
+
+          # Only flush cache if we actually published something
+          # if [[ "${PUBLISHED_VERSION}" == "true" ]] || [[ "${PUBLISHED_DEV}" == "true" ]]; then
+          if [[ "${PUBLISHED_VERSION}" == "true" ]]; then
+            echo "perform_flush=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "perform_flush=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Flush Akamai cache
+        # Only run if cache flush is needed AND Akamai is enabled
+        if: ${{ steps.publish.outputs.perform_flush == 'true' && vars.AKAMAI_ENABLED == 'true' }}
+        env:
+          S3_PATH: ${{ steps.publish.outputs.s3_target_path }}
+          REQUEST_NAME: ${{ steps.publish.outputs.request_name }}
+          # Use repository variable or secret for notification emails
+          # Format: JSON array of email addresses, e.g., '["email1@example.com", "email2@example.com"]'
+          EMAILS_JSON: ${{ secrets.DOCS_AKAMAI_NOTIFICATION_EMAILS }}
+          AKAMAI_CLIENT_SECRET: ${{ secrets.DOCS_AKAMAI_CLIENT_SECRET }}
+          AKAMAI_HOST: ${{ secrets.DOCS_AKAMAI_HOST }}
+          AKAMAI_ACCESS_TOKEN: ${{ secrets.DOCS_AKAMAI_ACCESS_TOKEN }}
+          AKAMAI_CLIENT_TOKEN: ${{ secrets.DOCS_AKAMAI_CLIENT_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Install required tools for Akamai
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq xsltproc
+          pip install -q httpie httpie-edgegrid
+
+          # Generate Akamai ECCU request XML using the XSLT template
+          XSLT_TEMPLATE="${GITHUB_WORKSPACE}/.github/workflows/templates/akamai-eccu-flush.xslt"
+
+          if [[ ! -f "${XSLT_TEMPLATE}" ]]; then
+            echo "::error::XSLT template file not found at ${XSLT_TEMPLATE}"
+            exit 1
+          fi
+
+          # Process XSLT to generate ECCU request XML
+          xsltproc --stringparam target-path "${S3_PATH}" "${XSLT_TEMPLATE}" "${XSLT_TEMPLATE}" | \
+            sed 's/xmlns:match="x" //' > /tmp/flush.xml
+
+          # Prepare Akamai EdgeGrid credentials
+          echo "[default]"                                > ~/.edgerc
+          echo "client_secret = ${AKAMAI_CLIENT_SECRET}" >> ~/.edgerc
+          echo "host = ${AKAMAI_HOST}"                   >> ~/.edgerc
+          echo "access_token = ${AKAMAI_ACCESS_TOKEN}"   >> ~/.edgerc
+          echo "client_token = ${AKAMAI_CLIENT_TOKEN}"   >> ~/.edgerc
+
+          # Validate and prepare email list JSON
+          if [[ -n "${EMAILS_JSON}" ]]; then
+            echo "${EMAILS_JSON}" | jq -c . > /tmp/email-addresses.json || {
+              echo "::error::Invalid JSON format for AKAMAI_NOTIFICATION_EMAILS"
+              exit 1
+            }
+          else
+            echo '[]' > /tmp/email-addresses.json
+          fi
+
+          # Submit ECCU request to Akamai
+          http --ignore-stdin --auth-type edgegrid -a default: POST :/eccu-api/v1/requests \
+            metadata=@"/tmp/flush.xml" \
+            propertyName=docs.nvidia.com \
+            propertyNameExactMatch=true \
+            propertyType=HOST_HEADER \
+            requestName="${REQUEST_NAME}" \
+            statusUpdateEmails:=@/tmp/email-addresses.json || {
+              echo "::warning::Failed to flush Akamai cache, but continuing workflow"
+              # Don't fail the workflow if cache flush fails
+            }
+
+      - name: Summary
+        if: always()
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+          S3_PATH: ${{ steps.paths.outputs.s3_path }}
+          PUBLISHED_VERSION: ${{ steps.publish_version.outputs.published || 'false' }}
+          # PUBLISHED_LATEST: ${{ steps.publish_latest.outputs.published || 'false' }}
+          # PUBLISHED_DEV: ${{ steps.publish_dev.outputs.published || 'false' }}
+          CACHE_FLUSHED: ${{ steps.publish.outputs.perform_flush }}
+        run: |
+          echo "## 📚 Documentation Publishing Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Source" >> $GITHUB_STEP_SUMMARY
+          echo "- **Workflow Run:** [#${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Published To" >> $GITHUB_STEP_SUMMARY
+          if [[ "${PUBLISHED_VERSION}" == "true" ]]; then
+            echo "- ✅ **Version:** \`${VERSION}\` → \`s3://.../${S3_PATH}/archive/${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+            # if [[ "${PUBLISHED_LATEST}" == "true" ]]; then
+            #   echo "- ✅ **Latest:** \`${VERSION}\` → \`s3://.../${S3_PATH}/latest\` (updated to match release)" >> $GITHUB_STEP_SUMMARY
+            # else
+            #   echo "- ⏭️ **Latest:** not updated (manual dispatch or /not-latest flag)" >> $GITHUB_STEP_SUMMARY
+            # fi
+          fi
+          # if [[ "${PUBLISHED_DEV}" == "true" ]]; then
+          #   echo "- ✅ **Dev:** \`s3://.../${S3_PATH}/dev\` (main branch)" >> $GITHUB_STEP_SUMMARY
+          # fi
+          # if [[ "${PUBLISHED_VERSION}" != "true" ]] && [[ "${PUBLISHED_DEV}" != "true" ]]; then
+          if [[ "${PUBLISHED_VERSION}" != "true" ]]; then
+            echo "- ⚠️ No documentation was published" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Cache" >> $GITHUB_STEP_SUMMARY
+          if [[ "${CACHE_FLUSHED}" == "true" ]]; then
+            echo "- ✅ Akamai cache flush requested" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⏭️ Cache flush skipped (nothing published or Akamai disabled)" >> $GITHUB_STEP_SUMMARY
+          fi
