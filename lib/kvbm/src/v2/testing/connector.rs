@@ -1186,6 +1186,7 @@ impl TestConnectorInstanceBuilder {
         // 3. Build WORKER runtimes FIRST (so they can respond to leader RPCs)
         let worker_config = self.test_config.build_worker_config()?;
         let mut workers = Vec::with_capacity(self.num_workers);
+        let block_size = self.layout_config.page_size;
 
         for (rank, worker_nova) in worker_novas.into_iter().enumerate() {
             let worker_runtime = {
@@ -1262,7 +1263,7 @@ impl TestConnectorInstanceBuilder {
             builder.build_leader().await?
         };
 
-        let leader = Arc::new(ConnectorLeader::new(leader_runtime));
+        let leader = Arc::new(ConnectorLeader::new(leader_runtime, block_size));
 
         Ok(TestConnectorInstance {
             leader,

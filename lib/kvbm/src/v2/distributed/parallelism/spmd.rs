@@ -99,8 +99,8 @@ impl WorkerTransfers for ReplicatedWorker {
     fn execute_remote_offload(
         &self,
         src: LogicalLayoutHandle,
-        dst: RemoteDescriptor,
         src_block_ids: Arc<[BlockId]>,
+        dst: RemoteDescriptor,
         options: crate::physical::transfer::TransferOptions,
     ) -> Result<TransferCompleteNotification> {
         let notifications = self
@@ -109,8 +109,8 @@ impl WorkerTransfers for ReplicatedWorker {
             .map(|worker| {
                 worker.execute_remote_offload(
                     src,
-                    dst.clone(),
                     src_block_ids.clone(),
+                    dst.clone(),
                     options.clone(),
                 )
             })

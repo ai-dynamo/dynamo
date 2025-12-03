@@ -145,8 +145,8 @@ impl NovaWorkerService {
 
                 let notification = worker.execute_remote_offload(
                     message.src,
-                    message.dst,
                     Arc::from(message.src_block_ids),
+                    message.dst,
                     options,
                 )?;
 

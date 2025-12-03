@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod request;
+mod slot;
+
 use super::worker::ConnectorWorkerClient;
 use crate::distributed::leader::Leader;
 use crate::distributed::worker::{NovaWorkerClient, Worker};
@@ -13,17 +16,25 @@ use crate::{G2, G3, InstanceId, KvbmRuntime};
 use dynamo_nova_backend::{PeerInfo, WorkerAddress};
 
 use anyhow::{Context, Result, anyhow, bail};
+use dashmap::DashMap;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
+
+use slot::RequestSlot;
+
+pub use request::Request;
+pub use slot::FinishedStatus;
 
 pub trait ConnectorLeaderInterface: Send + Sync {}
 
 pub struct ConnectorLeader {
     pub(crate) runtime: KvbmRuntime,
+    block_size: usize,
     state: Arc<Mutex<ConnectorLeaderState>>,
     instance_leader: OnceLock<InstanceLeader>,
+    slots: DashMap<String, Arc<Mutex<RequestSlot>>>,
 }
 
 #[derive(Default)]
@@ -35,16 +46,18 @@ struct ConnectorLeaderState {
 }
 
 impl ConnectorLeader {
-    pub fn new(runtime: KvbmRuntime) -> Self {
+    pub fn new(runtime: KvbmRuntime, block_size: usize) -> Self {
         Self {
             runtime,
+            block_size,
             state: Arc::new(Mutex::new(ConnectorLeaderState::default())),
             instance_leader: OnceLock::new(),
+            slots: DashMap::new(),
         }
     }
 
     /// Access the InstanceLeader (available after initialize_workers()).
-    pub fn instance_leader(&self) -> Option<&InstanceLeader> {
+    pub(crate) fn instance_leader(&self) -> Option<&InstanceLeader> {
         self.instance_leader.get()
     }
 
@@ -52,10 +65,136 @@ impl ConnectorLeader {
     ///
     /// This is typically called by ConnectorInstance after workers are initialized
     /// and we have access to their DirectWorker instances.
-    pub fn set_instance_leader(&self, leader: InstanceLeader) -> Result<()> {
+    pub(crate) fn set_instance_leader(&self, leader: InstanceLeader) -> Result<()> {
         self.instance_leader
             .set(leader)
             .map_err(|_| anyhow!("InstanceLeader already set"))
+    }
+
+    /// Check if a slot exists for the given request ID.
+    pub fn has_slot(&self, request_id: &str) -> bool {
+        self.slots.contains_key(request_id)
+    }
+
+    /// Get a slot for the given request ID.
+    pub fn get_slot(&self, request_id: &str) -> Result<Arc<Mutex<RequestSlot>>> {
+        self.slots
+            .get(request_id)
+            .map(|slot| slot.clone())
+            .ok_or_else(|| anyhow!("Slot not found for request ID: {}", request_id))
+    }
+
+    /// Create a new slot for the given request ID, tokens and salt hash.
+    pub fn create_slot(&self, request: Request) -> Result<()> {
+        let request_id = request.request_id.clone();
+        if self.has_slot(&request_id) {
+            bail!("Slot already exists for request ID: {}", request_id);
+        }
+        let slot = RequestSlot::new(request, self.block_size)?;
+        self.slots.insert(request_id, Arc::new(Mutex::new(slot)));
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), fields(?request_id))]
+    pub fn get_num_new_matched_tokens(
+        &self,
+        request_id: &str,
+        num_computed_tokens: usize,
+    ) -> (Option<usize>, bool) {
+        let instance_leader = self
+            .instance_leader
+            .get()
+            .expect("called before initialized");
+        match self.slots.get(request_id).map(|slot| slot.clone()) {
+            Some(slot) => {
+                todo!()
+            }
+            None => {
+                tracing::warn!("Slot not found for request ID: {}", request_id);
+                (None, false)
+            }
+        }
+    }
+
+    /// If the slot
+    pub fn request_finished(&self, request_id: &str) -> FinishedStatus {
+        if let Some(slot) = self.slots.get(request_id).map(|slot| slot.clone()) {
+            let mut guard = slot.lock();
+            match guard.marked_as_finished() {
+                FinishedStatus::Finished => {
+                    self.slots.remove(guard.request_id());
+                    return FinishedStatus::Finished;
+                }
+                FinishedStatus::Pending => return FinishedStatus::Pending,
+                FinishedStatus::UntrackedRequest => unreachable!(),
+            }
+        }
+        FinishedStatus::UntrackedRequest
+    }
+
+    pub fn update_connector_output(
+        &self,
+        finished_sending: HashSet<String>,
+        finished_recving: HashSet<String>,
+    ) -> Result<()> {
+        // Process the requests that have finished onboarding
+        // recving ==> remote kv storage -> worker g1 memory
+        for request_id in finished_recving {
+            if let Some(slot) = self.slots.get(&request_id) {
+                let status = slot.lock().mark_finished_onboarding();
+                match status {
+                    Ok(session_id) => {
+                        self.instance_leader
+                            .get()
+                            .unwrap()
+                            .release_session(session_id);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to mark finished onboarding for request ID: {}: {}",
+                            request_id,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Process the requests that have finished offloading
+        // These requests should be marked for deletion but are waiting for the outstanding operations
+        // to be complete. This is that signal.
+        for request_id in finished_sending {
+            // note: we are removing the slot from the map here so that it can be deleted
+            match self.slots.remove(&request_id) {
+                Some((request_id, slot)) => {
+                    let mut guard = slot.lock();
+
+                    match guard.mark_finished_offloading() {
+                        Ok(session_id) => {
+                            self.instance_leader
+                                .get()
+                                .unwrap()
+                                .release_session(session_id);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to mark finished offloading for request ID: {}: {}",
+                                request_id,
+                                e
+                            );
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        "Request ID: {} was marked as finished sending, but was not found in slots",
+                        request_id
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// This is called by the Scheduler-side of the ConnectorAPI during the call to set_xfer_handshake_metadata.
@@ -110,7 +249,7 @@ impl ConnectorLeader {
 
     /// Initialize all workers via leader-driven deferred init flow (async version).
     /// This is primarily used for use and testing outside of the ConnectorAPI.
-    pub async fn initialize_async(&self) -> Result<()> {
+    pub(crate) async fn initialize_async(&self) -> Result<()> {
         // Step 1: Gather layout config futures while holding the lock
         let layout_config_futures = {
             let state = self.state.lock();

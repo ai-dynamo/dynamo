@@ -1164,8 +1164,7 @@ impl Leader for InstanceLeader {
         // Search G2 (host memory) for matches
         // Use scan_matches instead of match_blocks to find all matching blocks
         // without stopping on first miss (supports partial sequence matching)
-        let g2_matches_map = self.g2_manager.scan_matches(sequence_hashes, true);
-        let g2_matches: Vec<_> = g2_matches_map.into_values().collect();
+        let g2_matches = self.g2_manager.match_blocks(sequence_hashes);
 
         // Search G3 (disk) for remaining hashes if G3 is available
         let remaining_hashes: Vec<_> = sequence_hashes
@@ -1177,8 +1176,8 @@ impl Leader for InstanceLeader {
         let g3_matches = if let Some(ref g3_manager) = self.g3_manager {
             // Use scan_matches instead of match_blocks to find all matching blocks
             // without stopping on first miss (supports partial sequence matching)
-            let g3_matches_map = g3_manager.scan_matches(&remaining_hashes, true);
-            g3_matches_map.into_values().collect()
+            let g3_matches_map = g3_manager.match_blocks(&remaining_hashes);
+            g3_matches_map
         } else {
             Vec::new()
         };

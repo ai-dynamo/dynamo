@@ -21,6 +21,7 @@ from kvbm._core import v2 as _v2
 
 KvbmRuntime = _v2.KvbmRuntime
 ConnectorLeader = _v2.ConnectorLeader
+KvbmRequest = _v2.KvbmRequest
 
 # TODO: Re-enable when v2 connector bindings are updated
 # These classes need to be updated for v2 API changes in kvbm crate
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheConfig
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.request import Request
+    from vllm.v1.outputs import KVConnectorOutput
 
 
 class SchedulerConnectorLeader:
@@ -85,20 +87,16 @@ class SchedulerConnectorLeader:
         request: Request,
         num_computed_tokens: int,
     ) -> tuple[Optional[int], bool]:
-        """
-        Always returns (0, False) indicating no external tokens available.
+        self._create_slot(request.request_id)
+        return self.leader.get_num_new_matched_tokens(request.request_id, num_computed_tokens)
 
-        Returns:
-            (0, False): No external tokens, no async loading
-        """
-        self._ensure_slot(request.request_id)
-        # No external tokens available - return (0, False)
-        matched_tokens = 0
-        print(
-            f"[KVBM] get_num_new_matched_tokens: request={request.request_id}, "
-            f"computed={num_computed_tokens}, matched={matched_tokens} (cache_hits=0)"
-        )
-        return (matched_tokens, False)
+        # # No external tokens available - return (0, False)
+        # matched_tokens = 0
+        # print(
+        #     f"[KVBM] get_num_new_matched_tokens: request={request.request_id}, "
+        #     f"computed={num_computed_tokens}, matched={matched_tokens} (cache_hits=0)"
+        # )
+        # return (matched_tokens, False)
 
         # TODO: Re-enable when v2 connector bindings are updated
         # total_tokens = getattr(request, "num_tokens", 0)
@@ -195,7 +193,7 @@ class SchedulerConnectorLeader:
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        _block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Never delays block freeing.
@@ -203,25 +201,11 @@ class SchedulerConnectorLeader:
         Returns:
             (False, None): Don't delay block freeing, no KV transfer params
         """
-        # Remove slot tracking
-        self._slots.pop(request.request_id, None)
-        print(
-            f"[KVBM] request_finished: request={request.request_id}, "
-            f"blocks={len(block_ids)}, pending=False"
-        )
-        # Don't delay block freeing
-        return (False, None)
+        delay = self.leader.request_finished(request.request_id)
+        return (delay, None)
 
-        # TODO: Re-enable when v2 connector bindings are updated
-        # assert self._connector.has_slot(
-        #     request.request_id
-        # ), f"Slot not found for request {request.request_id}"
-        # delay = self._connector.request_finished(request.request_id)
-        # return (delay, None)
-
-    def update_connector_output(self, connector_output) -> None:
-        """No-op for Phase 1."""
-        pass
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        self.leader.update_connector_output(connector_output.finished_sending, connector_output.finished_recving)
 
     def get_finished_count(self) -> Optional[int]:
         """No finished count tracking for Phase 1."""
@@ -277,28 +261,29 @@ class SchedulerConnectorLeader:
         if request_id not in self._slots:
             self._slots[request_id] = True
 
-    # TODO: Re-enable when v2 connector bindings are updated
-    # def _create_slot(self, request: "Request") -> None:
-    #     if self._connector.has_slot(request.request_id):
-    #         return
-    #
-    #     if bool(getattr(request, "mm_features", None)) or bool(
-    #         getattr(request, "mm_positions", None)
-    #     ):
-    #         raise ValueError("Unsupported request - requires mm extra keys")
-    #
-    #     all_token_ids = [
-    #         [int(token) for token in tokens] for tokens in request.all_token_ids
-    #     ]
-    #
-    #     kv_request = KvbmRequest(
-    #         request_id=request.request_id,
-    #         lora_name=request.lora_request.lora_name()
-    #         if request.lora_request
-    #         else None,
-    #         salt_hash=str(getattr(request, "cache_salt", None))
-    #         if getattr(request, "cache_salt", None) is not None
-    #         else None,
-    #     )
-    #
-    #     self._connector.create_slot(kv_request, all_token_ids)
+    # note: creates a request slot for tracking state
+    def _create_slot(self, request: "Request") -> None:
+        if self.leader.has_slot(request.request_id):
+            return
+    
+        if bool(getattr(request, "mm_features", None)) or bool(
+            getattr(request, "mm_positions", None)
+        ):
+            raise ValueError("Unsupported request - requires mm extra keys")
+    
+        all_token_ids = [
+            [int(token) for token in tokens] for tokens in request.all_token_ids
+        ]
+    
+        kv_request = KvbmRequest(
+            request_id=request.request_id,
+            tokens=all_token_ids,
+            lora_name=request.lora_request.lora_name()
+            if request.lora_request
+            else None,
+            salt_hash=str(getattr(request, "cache_salt", None))
+            if getattr(request, "cache_salt", None) is not None
+            else None,
+        )
+    
+        self.leader.create_slot(kv_request)
