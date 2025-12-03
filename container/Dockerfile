@@ -287,7 +287,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 ENV NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64  \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins \
     NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda-12.8/compat/lib.real:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
 
 RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
@@ -396,7 +396,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
-ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/compat/lib.real:${LD_LIBRARY_PATH}
 
 # Copy ucx and nixl libs
 COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
