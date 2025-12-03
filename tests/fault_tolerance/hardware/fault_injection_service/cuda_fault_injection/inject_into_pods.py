@@ -590,11 +590,13 @@ def patch_deployment_env(
 
         if enable:
             # Add new env vars
+            # Set CUDA_FAULT_INJECTION_ENABLED based on passthrough_mode
+            fault_enabled_value = "0" if passthrough_mode else "1"
             container.env.append(
                 client.V1EnvVar(name="LD_PRELOAD", value="/tmp/cuda_intercept.so")
             )
             container.env.append(
-                client.V1EnvVar(name="CUDA_FAULT_INJECTION_ENABLED", value="1")
+                client.V1EnvVar(name="CUDA_FAULT_INJECTION_ENABLED", value=fault_enabled_value)
             )
             container.env.append(
                 client.V1EnvVar(name="CUDA_XID_TYPE", value=str(xid_type))

@@ -165,14 +165,12 @@ class CUDAFaultInjector:
         - Node affinity (if target_node specified)
 
         Args:
-            passthrough_mode: If True, set CUDA_FAULT_INJECTION_ENABLED=0
-                            (library loaded but faults disabled for baseline)
-
-        Args:
             deployment_name: Name of the deployment
             namespace: Kubernetes namespace
             target_node: Node to pin pods to (simulates real XID behavior)
             xid_type: XID error type to simulate (79, 48, 94, 95, 43, 74). Default: 79
+            passthrough_mode: If True, set CUDA_FAULT_INJECTION_ENABLED=0
+                            (library loaded but faults disabled for baseline)
 
         Returns:
             True if patch succeeded
@@ -391,7 +389,7 @@ class CUDAFaultInjector:
             return False
 
     def enable_cuda_faults_via_toggle(
-        self, pods: List, namespace: str, enable: bool = True
+        self, pods: List[client.V1Pod], namespace: str, enable: bool = True
     ) -> bool:
         """
         Enable or disable CUDA faults on running pods via environment variable toggle.
