@@ -596,7 +596,9 @@ def patch_deployment_env(
                 client.V1EnvVar(name="LD_PRELOAD", value="/tmp/cuda_intercept.so")
             )
             container.env.append(
-                client.V1EnvVar(name="CUDA_FAULT_INJECTION_ENABLED", value=fault_enabled_value)
+                client.V1EnvVar(
+                    name="CUDA_FAULT_INJECTION_ENABLED", value=fault_enabled_value
+                )
             )
             container.env.append(
                 client.V1EnvVar(name="CUDA_XID_TYPE", value=str(xid_type))
