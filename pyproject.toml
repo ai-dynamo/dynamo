@@ -50,7 +50,15 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.2.0rc4",
+ 
+    # tensorrt_llm has a dependency on etcd3 as git url which uv honors only when trtllm itself is installed from URL
+    # Linux x86_64
+    "tensorrt-llm @ https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc4-cp312-cp312-linux_x86_64.whl ; \
+    platform_system == 'Linux' and platform_machine == 'x86_64'",
+
+    # Linux aarch64
+    "tensorrt-llm @ https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-1.2.0rc4-cp312-cp312-linux_aarch64.whl ; \
+    platform_system == 'Linux' and platform_machine == 'aarch64'",
 ]
 
 vllm = [
