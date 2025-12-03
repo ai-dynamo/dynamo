@@ -15,6 +15,7 @@ routing decisions.
 import argparse
 import asyncio
 import logging
+import os
 from typing import Optional
 
 import uvloop
@@ -239,6 +240,12 @@ def parse_args():
         help="KV Router: Target size ratio after pruning (0.0-1.0). Only used when --no-kv-events is set. Determines how aggressively to prune the tree (default: 0.8)",
     )
 
+    parser.add_argument(
+        "--enable-local-kvindexers",
+        action="store_true",
+        default=False,
+        help="KV Router: Enable worker-local kvindexers for worker-specific event storage (default disabled).",
+    )
     return parser.parse_args()
 
 
@@ -257,6 +264,12 @@ async def worker(runtime: DistributedRuntime):
         )
     namespace = endpoint_parts[0]
 
+    if args.enable_local_kvindexers:
+        # set env var which propagates to worker-side publisher
+        os.environ["DYN_ENABLE_LOCAL_KVINDEXERS"] = "1"
+    else:
+        os.environ.pop("DYN_ENABLE_LOCAL_KVINDEXERS", None)
+
     logger.info("Starting Standalone Router Service")
     logger.debug(
         f"Configuration: endpoint={args.endpoint}, block_size={args.block_size}, "
@@ -268,7 +281,8 @@ async def worker(runtime: DistributedRuntime):
         f"router_track_active_blocks={args.router_track_active_blocks}, "
         f"router_ttl_secs={args.router_ttl_secs}, "
         f"router_max_tree_size={args.router_max_tree_size}, "
-        f"router_prune_target_ratio={args.router_prune_target_ratio}"
+        f"router_prune_target_ratio={args.router_prune_target_ratio}, "
+        f"enable_local_kvindexers={args.enable_local_kvindexers}"
     )
 
     # Create KvRouter configuration
@@ -283,6 +297,7 @@ async def worker(runtime: DistributedRuntime):
         router_ttl_secs=args.router_ttl_secs,
         router_max_tree_size=args.router_max_tree_size,
         router_prune_target_ratio=args.router_prune_target_ratio,
+        enable_local_kvindexers=args.enable_local_kvindexers,
     )
 
     # Create service component - use "router" as component name

@@ -150,6 +150,9 @@ pub struct KvRouterConfig {
 
     /// Target size ratio after pruning (only used when use_kv_events is false, default: 0.8)
     pub router_prune_target_ratio: f64,
+
+    /// Whether to use worker-local kvindexers for worker-specific event storage
+    pub enable_local_kvindexers: bool,
 }
 
 impl Default for KvRouterConfig {
@@ -165,6 +168,7 @@ impl Default for KvRouterConfig {
             router_ttl_secs: 120.0,
             router_max_tree_size: 1024,
             router_prune_target_ratio: 0.8,
+            enable_local_kvindexers: false,
         }
     }
 }
@@ -184,6 +188,7 @@ impl KvRouterConfig {
         router_ttl_secs: Option<f64>,
         router_max_tree_size: Option<usize>,
         router_prune_target_ratio: Option<f64>,
+        enable_local_kvindexers: Option<bool>,
     ) -> Self {
         let default = Self::default();
         Self {
@@ -200,6 +205,8 @@ impl KvRouterConfig {
             router_max_tree_size: router_max_tree_size.unwrap_or(default.router_max_tree_size),
             router_prune_target_ratio: router_prune_target_ratio
                 .unwrap_or(default.router_prune_target_ratio),
+            enable_local_kvindexers: enable_local_kvindexers
+                .unwrap_or(default.enable_local_kvindexers),
         }
     }
 }
