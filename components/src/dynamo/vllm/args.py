@@ -464,7 +464,7 @@ def overwrite_args(config):
         # skip tokenizer initialisation.  Setting this to **False** avoids
         # a NoneType error when the processor accesses the tokenizer.
         "skip_tokenizer_init": False,
-        "disable_log_requests": True,
+        "enable_log_requests": False,
         "disable_log_stats": False,
     }
 

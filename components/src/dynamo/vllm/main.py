@@ -296,7 +296,7 @@ def setup_vllm_engine(config, stat_logger=None):
         vllm_config=vllm_config,
         usage_context=usage_context,
         stat_loggers=factory,
-        disable_log_requests=engine_args.disable_log_requests,
+        enable_log_requests=engine_args.enable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
 
