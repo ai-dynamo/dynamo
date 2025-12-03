@@ -2,15 +2,6 @@
 
 For high-performance multimodal inference with large embeddings, Dynamo supports a specialized **Encode-Prefill-Decode (EPD)** flow using **NIXL (RDMA)** for zero-copy tensor transfer.
 
-## Enabling the Feature
-
-This is an experimental feature that requires using a specific TensorRT-LLM commit.
-To enable it build the dynamo container with the `--tensorrtllm-commit` flag, followed by the commit hash:
-
-```bash
-./container/build.sh --framework trtllm --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git --tensorrtllm-commit v1.2.0rc2
-```
-
 ## Key Features
 
 - **High Performance**: Zero-copy RDMA transfer for embeddings
