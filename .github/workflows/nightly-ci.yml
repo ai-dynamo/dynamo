@@ -220,21 +220,20 @@ jobs:
 ############################## TEST JOBS ##############################
 
   unit-tests:
-    name: ${{ matrix.framework }}-${{ matrix.arch }}-unit
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-unit
     needs: [build-amd64, build-arm64]
     if: always()
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { framework: vllm, arch: amd64, runner: gpu-l40-amd64 }
-          - { framework: vllm, arch: arm64, runner: cpu-arm-r8g-4xlarge }
-          - { framework: trtllm, arch: amd64, runner: gpu-l40-amd64 }
-          - { framework: trtllm, arch: arm64, runner: cpu-arm-r8g-4xlarge }
-          - { framework: sglang, arch: amd64, runner: gpu-l40-amd64 }
-          - { framework: sglang, arch: arm64, runner: cpu-arm-r8g-4xlarge }
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
@@ -243,37 +242,30 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +x
-          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch }})"
-
+          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch.arch }})"
           # Determine which build job to check
-          if [ "${{ matrix.arch }}" = "amd64" ]; then
+          if [ "${{ matrix.arch.arch }}" = "amd64" ]; then
             BUILD_JOB_NAME="Build ${{ matrix.framework }} (amd64)"
           else
             BUILD_JOB_NAME="Build ${{ matrix.framework }} (arm64)"
           fi
-
           # Query GitHub API for job status using curl (token from env to avoid log exposure)
           JOBS=$(curl -s -S -L --fail-with-body \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
-
           if [ $? -ne 0 ]; then
             echo "Error: Failed to query GitHub API"
             exit 1
           fi
-
           # Find the specific build job and check its conclusion
           BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
-
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
-
           if [ "$BUILD_STATUS" != "success" ]; then
             echo "Build failed or did not complete successfully. Skipping tests."
             echo "skip=true" >> $GITHUB_OUTPUT
             exit 0
           fi
-
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
         uses: ./.github/actions/docker-login
@@ -284,37 +276,38 @@ jobs:
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
         run: |
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "unit and (nightly or post_merge or pre_merge)"  # Old: "${{ matrix.framework }} and unit and (nightly or post_merge or pre_merge)"
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: "unit and (nightly or post_merge or pre_merge)"
           framework: ${{ matrix.framework }}
           test_type: unit
-          platform_arch: ${{ matrix.arch }}
+          platform_arch: ${{ matrix.arch.arch }}
           cpu_limit: '8'
-          dry_run: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
 
   integration-tests:
-    name: ${{ matrix.framework }}-${{ matrix.arch }}-integ
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
     needs: [build-amd64, build-arm64]
     if: always()
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout }}
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { framework: vllm, arch: amd64, runner: gpu-l40-amd64, timeout: 90 }
-          - { framework: vllm, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 90 }
-          - { framework: trtllm, arch: amd64, runner: gpu-l40-amd64, timeout: 90 }
-          - { framework: trtllm, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 90 }
-          - { framework: sglang, arch: amd64, runner: gpu-l40-amd64, timeout: 90 }
-          - { framework: sglang, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 90 }
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 90
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 90
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
@@ -323,28 +316,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +x
-          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch }})"
-          BUILD_JOB_NAME="Build ${{ matrix.framework }} (${{ matrix.arch }})"
-
+          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_NAME="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
           JOBS=$(curl -s -S -L --fail-with-body \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
-
           if [ $? -ne 0 ]; then
             echo "Error: Failed to query GitHub API"
             exit 1
           fi
-
           BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
-
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
-
           if [ "$BUILD_STATUS" != "success" ]; then
             echo "Build failed or did not complete successfully. Marking tests as failed."
             exit 1
           fi
-
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
         uses: ./.github/actions/docker-login
@@ -355,36 +342,37 @@ jobs:
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
         run: |
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "integration and (nightly or post_merge or pre_merge)"  # Old: "${{ matrix.framework }} and integration and (nightly or post_merge or pre_merge)"
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: "integration and (nightly or post_merge or pre_merge)"
           framework: ${{ matrix.framework }}
           test_type: integration
-          platform_arch: ${{ matrix.arch }}
-          dry_run: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
 
   e2e-single-gpu-tests:
-    name: ${{ matrix.framework }}-${{ matrix.arch }}-1gpu-e2e
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
     needs: [build-amd64, build-arm64]
     if: always()
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout }}
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { framework: vllm, arch: amd64, runner: gpu-l40-amd64, timeout: 120 }
-          - { framework: vllm, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 120 }
-          - { framework: trtllm, arch: amd64, runner: gpu-l40-amd64, timeout: 120 }
-          - { framework: trtllm, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 120 }
-          - { framework: sglang, arch: amd64, runner: gpu-l40-amd64, timeout: 120 }
-          - { framework: sglang, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 120 }
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 120
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 120
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
@@ -393,29 +381,24 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +x
-          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch }})"
-          BUILD_JOB_NAME="Build ${{ matrix.framework }} (${{ matrix.arch }})"
-
+          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_NAME="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
           JOBS=$(curl -s -S -L --fail-with-body \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
-
           if [ $? -ne 0 ]; then
             echo "Error: Failed to query GitHub API"
-            exit 1
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
           fi
-
           BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
-
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
-
           if [ "$BUILD_STATUS" != "success" ]; then
             echo "Build failed or did not complete successfully. Skipping tests."
             echo "skip=true" >> $GITHUB_OUTPUT
             exit 0
           fi
-
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
         uses: ./.github/actions/docker-login
@@ -426,36 +409,37 @@ jobs:
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
         run: |
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "${{ matrix.framework }} and e2e and gpu_1"  # Old: "(nightly or post_merge or pre_merge) and ${{ matrix.framework }} and e2e and gpu_1"
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: "${{ matrix.framework }} and e2e and gpu_1"
           framework: ${{ matrix.framework }}
           test_type: e2e-single-gpu
-          platform_arch: ${{ matrix.arch }}
-          dry_run: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
 
   e2e-multi-gpu-tests:
-    name: ${{ matrix.framework }}-${{ matrix.arch }}-2gpu-e2e
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
     needs: [build-amd64, build-arm64]
     if: always()
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout }}
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { framework: vllm, arch: amd64, runner: gpu-l40-amd64, timeout: 150 }
-          - { framework: vllm, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 150 }
-          - { framework: trtllm, arch: amd64, runner: gpu-l40-amd64, timeout: 150 }
-          - { framework: trtllm, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 150 }
-          - { framework: sglang, arch: amd64, runner: gpu-l40-amd64, timeout: 150 }
-          - { framework: sglang, arch: arm64, runner: cpu-arm-r8g-4xlarge, timeout: 150 }
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 150
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 150
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
@@ -464,29 +448,23 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +x
-          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch }})"
-          BUILD_JOB_NAME="Build ${{ matrix.framework }} (${{ matrix.arch }})"
-
+          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          BUILD_JOB_NAME="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
           JOBS=$(curl -s -S -L --fail-with-body \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" 2>&1)
-
           if [ $? -ne 0 ]; then
             echo "Error: Failed to query GitHub API"
             echo "skip=true" >> $GITHUB_OUTPUT
             exit 0
           fi
-
           BUILD_STATUS=$(echo "$JOBS" | jq -r --arg job_name "$BUILD_JOB_NAME" '.jobs[] | select(.name == $job_name) | .conclusion')
-
           echo "Build status for '$BUILD_JOB_NAME': $BUILD_STATUS"
-
           if [ "$BUILD_STATUS" != "success" ]; then
             echo "Build failed or did not complete successfully. Marking tests as failed."
             exit 1
           fi
-
           echo "Build succeeded. Proceeding with tests."
       - name: Login to Container Registries
         uses: ./.github/actions/docker-login
@@ -497,48 +475,121 @@ jobs:
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
         run: |
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run E2E Tests (gpu_2)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
-          pytest_marks: "(nightly or post_merge or pre_merge) and e2e and gpu_2"  # Old: "(nightly or post_merge or pre_merge) and ${{ matrix.framework }} and e2e and gpu_2"
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: "(nightly or post_merge or pre_merge) and e2e and gpu_2"
           framework: ${{ matrix.framework }}
           test_type: e2e-multi-gpu
-          platform_arch: ${{ matrix.arch }}
+          platform_arch: ${{ matrix.arch.arch }}
           dry_run: 'true'
 
   component-tests:
-    name: ${{ matrix.framework }}-${{ matrix.arch }}-${{ matrix.component }}
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-${{ matrix.component }}
     needs: [build-amd64, build-arm64]
     if: always()
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout }}
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { framework: vllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
-          - { framework: vllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
-          - { framework: vllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 150, marks: "nightly and (kvbm or kvbm_v2)" }
-          - { framework: vllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
-          - { framework: vllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
-          - { framework: vllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 150, marks: "nightly and (kvbm or kvbm_v2)" }
-          - { framework: trtllm, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
-          - { framework: trtllm, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
-          - { framework: trtllm, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 150, marks: "nightly and (kvbm or kvbm_v2)" }
-          - { framework: trtllm, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
-          - { framework: trtllm, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
-          - { framework: trtllm, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 150, marks: "nightly and (kvbm or kvbm_v2)" }
-          - { framework: sglang, arch: amd64, component: router, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and router" }
-          - { framework: sglang, arch: amd64, component: planner, runner: gpu-l40-amd64, timeout: 90, marks: "nightly and planner" }
-          - { framework: sglang, arch: amd64, component: kvbm, runner: gpu-l40-amd64, timeout: 150, marks: "nightly and (kvbm or kvbm_v2)" }
-          - { framework: sglang, arch: arm64, component: router, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and router" }
-          - { framework: sglang, arch: arm64, component: planner, runner: cpu-arm-r8g-4xlarge, timeout: 60, marks: "nightly and planner" }
-          - { framework: sglang, arch: arm64, component: kvbm, runner: cpu-arm-r8g-4xlarge, timeout: 150, marks: "nightly and (kvbm or kvbm_v2)" }
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 90
+            component: router
+            marks: "nightly and router"
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 90
+            component: planner
+            marks: "nightly and planner"
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 150
+            component: kvbm
+            marks: "nightly and (kvbm or kvbm_v2)"
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 60
+            component: router
+            marks: "nightly and router"
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 60
+            component: planner
+            marks: "nightly and planner"
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 150
+            component: kvbm
+            marks: "nightly and (kvbm or kvbm_v2)"
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 90
+            component: router
+            marks: "nightly and router"
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 90
+            component: planner
+            marks: "nightly and planner"
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 150
+            component: kvbm
+            marks: "nightly and (kvbm or kvbm_v2)"
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 60
+            component: router
+            marks: "nightly and router"
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 60
+            component: planner
+            marks: "nightly and planner"
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 150
+            component: kvbm
+            marks: "nightly and (kvbm or kvbm_v2)"
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 90
+            component: router
+            marks: "nightly and router"
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 90
+            component: planner
+            marks: "nightly and planner"
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 150
+            component: kvbm
+            marks: "nightly and (kvbm or kvbm_v2)"
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 60
+            component: router
+            marks: "nightly and router"
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 60
+            component: planner
+            marks: "nightly and planner"
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 150
+            component: kvbm
+            marks: "nightly and (kvbm or kvbm_v2)"
 
     steps:
       - uses: actions/checkout@v4
@@ -548,9 +599,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +x
-          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch }})"
+          echo "Checking build status for ${{ matrix.framework }} (${{ matrix.arch.arch }})"
 
-          if [ "${{ matrix.arch }}" = "amd64" ]; then
+          if [ "${{ matrix.arch.arch }}" = "amd64" ]; then
             BUILD_JOB_NAME="Build ${{ matrix.framework }} (amd64)"
           else
             BUILD_JOB_NAME="Build ${{ matrix.framework }} (arm64)"
@@ -586,18 +637,18 @@ jobs:
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
+          IMAGE_TAG: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
         run: |
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Component Tests (${{ matrix.component }})
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch }}
+          image_tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
           pytest_marks: "${{ matrix.marks }}"
           framework: ${{ matrix.framework }}
           test_type: component-${{ matrix.component }}
-          platform_arch: ${{ matrix.arch }}
+          platform_arch: ${{ matrix.arch.arch }}
 
   ############################## RESULTS SUMMARY ##############################
   results-summary:
