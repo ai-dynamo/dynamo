@@ -297,9 +297,6 @@ get_options() {
         --enable-kvbm)
             ENABLE_KVBM=true
             ;;
-        --enable-media-nixl)
-            ENABLE_MEDIA_NIXL=true
-            ;;
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
             ;;
@@ -472,7 +469,6 @@ show_help() {
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
-    echo "  [--enable-media-nixl Enables media processing with NIXL support]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
@@ -816,22 +812,9 @@ fi
 
 # ENABLE_MEDIA_NIXL: Enable media processing with NIXL support
 # Used in base Dockerfile for maturin build feature flag.
-# Not needed in Dockerfile.{vllm,trtllm,sglang} - they use pre-built wheels.
-# Auto-enabled for frameworks that have NIXL support (VLLM, TRTLLM, SGLANG)
-if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
-    if [[ -z "${ENABLE_MEDIA_NIXL}" ]]; then
-        echo "Auto-enabling media-nixl for ${FRAMEWORK} image build"
-        ENABLE_MEDIA_NIXL=true
-    fi
-elif [[ $FRAMEWORK == "NONE" ]]; then
-    # For NONE framework, can be explicitly enabled via --enable-media-nixl
-    ENABLE_MEDIA_NIXL=${ENABLE_MEDIA_NIXL:-false}
-fi
-
-if [ ! -z ${ENABLE_MEDIA_NIXL} ] && [ "${ENABLE_MEDIA_NIXL}" = "true" ]; then
-    echo "Enabling media-nixl feature in the dynamo image"
-    BUILD_ARGS+=" --build-arg ENABLE_MEDIA_NIXL=${ENABLE_MEDIA_NIXL} "
-fi
+# Always enabled for all frameworks.
+ENABLE_MEDIA_NIXL=true
+BUILD_ARGS+=" --build-arg ENABLE_MEDIA_NIXL=${ENABLE_MEDIA_NIXL} "
 
 # NIXL_UCX_REF: Used in base Dockerfile only.
 #               Passed to framework Dockerfile.{vllm,sglang,...} where it's NOT used.
