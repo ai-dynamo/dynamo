@@ -17,7 +17,7 @@ from dynamo.planner import (
     TargetReplica,
     VirtualConnector,
 )
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SLAPlannerDefaults
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
     DecodeInterpolator,
@@ -90,7 +90,7 @@ class Planner:
                     raise ValueError(f"Invalid environment: {args.environment}")
 
             self.prometheus_api_client = PrometheusAPIClient(
-                SLAPlannerDefaults.prometheus_endpoint,
+                args.metric_pulling_prometheus_endpoint,
                 args.namespace,
             )
 
@@ -150,7 +150,7 @@ class Planner:
             self.last_adjustment_time = time.time()
             self.last_metrics = Metrics()
 
-            self.prometheus_port = args.prometheus_port
+            self.prometheus_port = args.metric_reporting_prometheus_port
 
             # Initialize Prometheus metrics
             # TODO: use proper naming

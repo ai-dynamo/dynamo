@@ -65,11 +65,10 @@ class PrefillInterpolator:
                         self.prefill_ttft = np.array(data["prefill_ttft"])  # type: ignore[index]
                         self.prefill_thpt_per_gpu = np.array(data["prefill_thpt_per_gpu"])  # type: ignore[index]
                 except FileNotFoundError:
-                    logger.error(
+                    raise FileNotFoundError(
                         f"Prefill interpolation files not found: {prefill_npz_fn} and {json_fn}\n"
                         f"{MISSING_PROFILING_DATA_ERROR_MESSAGE}"
                     )
-                    exit(1)
 
         elif raw_data:
             self.prefill_isl = raw_data["prefill_isl"]
@@ -133,11 +132,10 @@ class DecodeInterpolator:
                         self.z_thpt_per_gpu = np.array(data["z_thpt_per_gpu"])  # type: ignore[index]
                         self.max_kv_tokens = int(data["max_kv_tokens"])  # type: ignore[index]
                 except FileNotFoundError:
-                    logger.error(
+                    raise FileNotFoundError(
                         f"Decode interpolation files not found: {decode_npz_fn} and {json_fn}\n"
                         f"{MISSING_PROFILING_DATA_ERROR_MESSAGE}"
                     )
-                    exit(1)
         elif raw_data:
             self.x_kv_usage = raw_data["x_kv_usage"]
             self.y_context_length = raw_data["y_context_length"]

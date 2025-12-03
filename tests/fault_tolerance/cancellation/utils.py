@@ -253,14 +253,14 @@ def send_cancellable_request(
     """
     prompt = "Tell me a very long and detailed story about the history of artificial intelligence, including all major milestones, researchers, and breakthroughs?"
     if use_long_prompt:
-        prompt += " Make sure it is" + " long" * 8000 + "!"
+        prompt += " Make sure it is" + " long" * 16000 + "!"
 
     if request_type == "completion":
-        return send_completion_request(prompt, 8192)
+        return send_completion_request(prompt, 16384)
     elif request_type == "chat_completion":
-        return send_chat_completion_request(prompt, 8192, stream=False)
+        return send_chat_completion_request(prompt, 16384, stream=False)
     elif request_type == "chat_completion_stream":
-        return send_chat_completion_request(prompt, 8192, stream=True)
+        return send_chat_completion_request(prompt, 16384, stream=True)
     else:
         raise ValueError(f"Unknown request type: {request_type}")
 

@@ -42,12 +42,13 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # run ingress
-python3 -m dynamo.frontend --http-port=8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python3 -m dynamo.frontend &
 DYNAMO_PID=$!
 
 # run decode worker with metrics on port 8081
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
-DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 CUDA_VISIBLE_DEVICES=0 \
 python3 -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
@@ -65,7 +66,7 @@ echo "Waiting for decode worker to initialize..."
 sleep 10
 
 # run prefill worker with metrics on port 8082 (foreground)
-DYN_SYSTEM_PORT=8082 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_PREFILL:-8082} \
 DYN_VLLM_KV_EVENT_PORT=20081 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=0 \

@@ -19,11 +19,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Run frontend
-python3 -m dynamo.frontend --http-port 8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python3 -m dynamo.frontend &
 DYNAMO_PID=$!
 
 # Run worker
-DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \

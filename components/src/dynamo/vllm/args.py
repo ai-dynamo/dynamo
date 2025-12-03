@@ -26,9 +26,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
 
-# Global LMCache configuration - initialize once on module import
-ENABLE_LMCACHE = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
-
 
 class Config:
     """Command line parameters or defaults"""
@@ -58,11 +55,15 @@ class Config:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
 
+    # endpoint types to enable
+    dyn_endpoint_types: str = "chat,completions"
+
     # multimodal options
     multimodal_processor: bool = False
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
     multimodal_decode_worker: bool = False
+    enable_multimodal: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
     # dump config to file
@@ -138,6 +139,12 @@ def parse_args() -> Config:
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
     parser.add_argument(
+        "--dyn-endpoint-types",
+        type=str,
+        default="chat,completions",
+        help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
+    )
+    parser.add_argument(
         "--multimodal-processor",
         action="store_true",
         help="Run as multimodal processor component for handling multimodal requests",
@@ -161,6 +168,11 @@ def parse_args() -> Config:
         "--multimodal-encode-prefill-worker",
         action="store_true",
         help="Run as unified encode+prefill+decode worker for models requiring integrated image encoding (e.g., Llama 4)",
+    )
+    parser.add_argument(
+        "--enable-multimodal",
+        action="store_true",
+        help="Enable multimodal processing. If not set, none of the multimodal components can be used.",
     )
     parser.add_argument(
         "--mm-prompt-template",
@@ -227,6 +239,9 @@ def parse_args() -> Config:
             "Use only one of --multimodal-processor, --multimodal-encode-worker, --multimodal-worker, --multimodal-decode-worker, or --multimodal-encode-prefill-worker"
         )
 
+    if mm_flags == 1 and not args.enable_multimodal:
+        raise ValueError("Use --enable-multimodal to enable multimodal processing")
+
     # Set component and endpoint based on worker type
     if args.multimodal_processor:
         config.component = "processor"
@@ -260,11 +275,13 @@ def parse_args() -> Config:
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
+    config.dyn_endpoint_types = args.dyn_endpoint_types
     config.multimodal_processor = args.multimodal_processor
     config.multimodal_encode_worker = args.multimodal_encode_worker
     config.multimodal_worker = args.multimodal_worker
     config.multimodal_decode_worker = args.multimodal_decode_worker
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
+    config.enable_multimodal = args.enable_multimodal
     config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
