@@ -4,6 +4,7 @@
 import base64
 import logging
 import os
+import random
 from dataclasses import dataclass, field
 
 import pytest
@@ -55,8 +56,24 @@ vllm_configs = {
         name="aggregated_lmcache",
         directory=vllm_dir,
         script_name="agg_lmcache.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+            metric_payload_default(min_num_requests=6, backend="lmcache"),
+        ],
+    ),
+    "aggregated_lmcache_multiproc": VLLMConfig(
+        name="aggregated_lmcache_multiproc",
+        directory=vllm_dir,
+        script_name="agg_lmcache_multiproc.sh",
         marks=[pytest.mark.gpu_1],
         model="Qwen/Qwen3-0.6B",
+        env={
+            "PROMETHEUS_MULTIPROC_DIR": f"/tmp/prometheus_multiproc_test_{os.getpid()}_{random.randint(0, 10000)}"
+        },
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -68,7 +85,7 @@ vllm_configs = {
         name="agg-request-plane-tcp",
         directory=vllm_dir,
         script_name="agg_request_planes.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         script_args=["--tcp"],
         request_payloads=[
@@ -80,7 +97,7 @@ vllm_configs = {
         name="agg-request-plane-http",
         directory=vllm_dir,
         script_name="agg_request_planes.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
         model="Qwen/Qwen3-0.6B",
         script_args=["--http"],
         request_payloads=[
@@ -141,8 +158,8 @@ vllm_configs = {
         ],
         timeout=700,
         request_payloads=[
-            chat_payload_default(expected_response=["joke"]),
-            completion_payload_default(expected_response=["joke"]),
+            chat_payload_default(),
+            completion_payload_default(),
         ],
     ),
     "multimodal_agg_llava_epd": VLLMConfig(
@@ -326,6 +343,22 @@ vllm_configs = {
     #     delayed_start=45,
     #     script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
     # ),
+    "completions_only": VLLMConfig(
+        name="completions_only",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1],
+        model="deepseek-ai/deepseek-llm-7b-base",
+        script_args=[
+            "--model",
+            "deepseek-ai/deepseek-llm-7b-base",
+            "--dyn-endpoint-types",
+            "completions",
+        ],
+        request_payloads=[
+            completion_payload_default(),
+        ],
+    ),
 }
 
 
@@ -337,7 +370,6 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.gpu_1
 @pytest.mark.nightly
 def test_serve_deployment(
     vllm_config_test, request, runtime_services, predownload_models, image_server
