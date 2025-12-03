@@ -207,6 +207,24 @@ def parse_args() -> Config:
     args = parser.parse_args()
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
+    # Workaround for vLLM GIL contention bug with NIXL connector when using UniProcExecutor.
+    # With TP=1, vLLM defaults to UniProcExecutor which runs scheduler and worker in the same
+    # process. This causes a hot loop in _process_engine_step that doesn't release the GIL,
+    # blocking NIXL's add_remote_agent from completing. Using "mp" backend forces separate
+    # processes, avoiding the GIL contention.
+    # Note: Only apply for NIXL - other connectors (kvbm, lmcache) work fine with UniProcExecutor
+    # and forcing mp can expose race conditions in vLLM's scheduler.
+    # See: https://github.com/vllm-project/vllm/issues/29369
+    connector_list = [c.lower() for c in args.connector] if args.connector else []
+    uses_nixl = "nixl" in connector_list
+    tp_size = getattr(engine_args, "tensor_parallel_size", None) or 1
+    if uses_nixl and tp_size == 1 and engine_args.distributed_executor_backend is None:
+        logger.info(
+            "Setting --distributed-executor-backend=mp for TP=1 to avoid "
+            "UniProcExecutor GIL contention with NIXL connector"
+        )
+        engine_args.distributed_executor_backend = "mp"
+
     if engine_args.enable_prefix_caching is None:
         logger.debug(
             "--enable-prefix-caching or --no-enable-prefix-caching not specified. Defaulting to True (vLLM v1 default behavior)"
